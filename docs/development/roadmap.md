@@ -42,18 +42,19 @@
 
 **Acceptance**: live `http://example.com/` round-trip returns 200 end-to-end (`cyrius run programs/http-probe.cyr`). 173 tcyr unit assertions green across headers / URL / response / client / redirect / DNS groups. `sandhi_http_post("https://...")` pending stdlib TLS-init fix; the same code works clean over plain HTTP so the surface is validated, just not the specific TLS transport.
 
-### M3 — `sandhi::rpc` WebDriver + Appium dialects (v0.4.0)
+### M3 — `sandhi::rpc` WebDriver + Appium + MCP (v0.4.0) — ✅ shipped 2026-04-24
 
-*Unblocks yantra M2 (Firefox + WebKit WebDriver + Android UiAutomator2 + iOS XCUITest backends).*
+*Unblocks yantra M2 (Firefox + WebKit WebDriver + Android UiAutomator2 + iOS XCUITest backends) and daimon MCP-over-HTTP dispatch.*
 
-- `sandhi::rpc::call(endpoint, method, params_json)` generic dispatch
-- `sandhi::rpc::webdriver` — W3C WebDriver wire format (Firefox / WebKit)
-- `sandhi::rpc::appium` — Appium extensions (Android / iOS)
-- `sandhi::rpc::mcp` — MCP-over-HTTP (transport only; bote / t-ron own protocol semantics)
-- Streaming response support (SSE / chunked)
-- Dialect-aware error envelopes
+- `sandhi::rpc::call(url, http_method, body_json, dialect)` generic dispatch ✅
+- `sandhi::rpc::webdriver` — W3C WebDriver wire format ✅ (session lifecycle, navigation, element interaction, `execute/sync`)
+- `sandhi::rpc::appium` — Appium extensions ✅ (context switching, app lifecycle, `mobile_exec`, screenshot, source)
+- `sandhi::rpc::mcp` — MCP-over-HTTP (transport only — protocol semantics stay in bote / t-ron per ADR 0001) ✅
+- **Dialect-aware error envelopes** — WebDriver `value.error` / `value.message`; JSON-RPC `error.code` / `error.message`; generic no-envelope passthrough ✅
+- **rpc/json** — nested JSON builder + dotted-path extractor ✅ (stdlib json.cyr is flat-only; sandhi owns this for RPC)
+- **Streaming (SSE / chunked)** — deferred to M3.5. Chunked framing is solved in `src/http/response.cyr`; SSE-as-iterator awaits a consumer ask.
 
-**Acceptance**: yantra M2 runs `yantra_web_open("firefox")` end-to-end against a headless Firefox via sandhi::rpc::webdriver. Same for Android emulator via Appium dialect.
+**Acceptance**: all four dialect modules compile clean and unit tests verify URL shape + envelope shape + error extraction. Live `yantra_web_open("firefox")` needs yantra M2 work + a running geckodriver — sandhi side is complete, consumer-side integration happens in the yantra repo.
 
 ### M4 — `sandhi::discovery` (v0.5.0)
 

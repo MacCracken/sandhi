@@ -1,0 +1,104 @@
+# sandhi/rpc/mcp — MCP-over-HTTP transport dialect.
+#
+# MCP (Model Context Protocol) wire format is JSON-RPC 2.0 over HTTP
+# POST. sandhi owns the transport: envelope construction, request-ID
+# counter, error extraction. **Protocol semantics — tool discovery,
+# prompt schemas, sampling responses — stay in bote + t-ron** per
+# ADR 0001. Consumers of this module get "sent a JSON-RPC call; got
+# a response"; the payload-shape negotiation is above sandhi's layer.
+#
+# Reference: https://modelcontextprotocol.io/specification/basic/transports#http
+
+# ================================================================
+# Request-ID counter — one per process. JSON-RPC 2.0 requires a
+# unique ID per outstanding request; for the HTTP-one-shot case
+# (sync request/response), monotonic counter is sufficient.
+# ================================================================
+
+var _sandhi_mcp_next_id = 1;
+
+fn _sandhi_mcp_alloc_id() {
+    var id = _sandhi_mcp_next_id;
+    _sandhi_mcp_next_id = _sandhi_mcp_next_id + 1;
+    return id;
+}
+
+# ================================================================
+# Envelope build — JSON-RPC 2.0 request.
+# ================================================================
+#
+# Shape:  {"jsonrpc":"2.0","id":N,"method":"<name>","params":{...}}
+# `params_json` is a pre-built cstr including braces (or 0 for none).
+# Return value: wire-ready request body (cstr).
+
+fn _sandhi_mcp_build_request(method, params_json) {
+    var id = _sandhi_mcp_alloc_id();
+    var o = sandhi_json_obj_new();
+    sandhi_json_add_string(o, "jsonrpc", "2.0");
+    sandhi_json_add_int(o, "id", id);
+    sandhi_json_add_string(o, "method", method);
+    if (params_json != 0) {
+        sandhi_json_add_raw(o, "params", params_json);
+    }
+    return sandhi_json_build(o);
+}
+
+# ================================================================
+# Call — POST the envelope, return rpc-response.
+# ================================================================
+
+# sandhi_rpc_mcp_call(endpoint_url, method_name, params_json)
+#   - endpoint_url: full URL of the MCP endpoint (e.g.
+#     "http://daimon.local:9000/mcp")
+#   - method_name: JSON-RPC method name ("tools/list", "resources/read", …)
+#   - params_json: cstr of pre-built params object (including braces),
+#     or 0 if the method takes no params.
+#
+# Returns an rpc-response struct. sandhi_rpc_ok(r) == 1 on success.
+# The response body is the full JSON-RPC response — caller navigates
+# `result.<field>` or `error.<field>` per protocol spec.
+fn sandhi_rpc_mcp_call(endpoint_url, method_name, params_json) {
+    var body = _sandhi_mcp_build_request(method_name, params_json);
+    return sandhi_rpc_call(endpoint_url, "POST", body, SANDHI_RPC_DIALECT_JSONRPC);
+}
+
+# Variant accepting caller-supplied headers (auth tokens etc.).
+fn sandhi_rpc_mcp_call_with_headers(endpoint_url, method_name, params_json, user_headers) {
+    var body = _sandhi_mcp_build_request(method_name, params_json);
+    return sandhi_rpc_call_with_headers(endpoint_url, "POST", body, user_headers, SANDHI_RPC_DIALECT_JSONRPC);
+}
+
+# ================================================================
+# Response helpers — transport-level only.
+# ================================================================
+
+# Extract the `result` value as a raw JSON cstr (may be an object).
+# Returns 0 if the response didn't contain a result (e.g. was an error).
+# Callers doing protocol-level work (bote / t-ron) re-parse this into
+# the typed shape they want.
+fn sandhi_rpc_mcp_result_raw(resp) {
+    var body = sandhi_rpc_body(resp);
+    if (body == 0) { return 0; }
+    return sandhi_json_get_string(body, "result");
+}
+
+# Extract the JSON-RPC error code. Returns 0 on success (no error).
+# (A legitimate error code of 0 is not defined by JSON-RPC 2.0 —
+# standard codes are -32600/-32601/-32602/-32603/-32700 plus
+# -32000..-32099 for implementation-defined.)
+fn sandhi_rpc_mcp_error_code(resp) {
+    var body = sandhi_rpc_body(resp);
+    if (body == 0) { return 0; }
+    return sandhi_json_get_int(body, "error.code");
+}
+
+# Extract the JSON-RPC error message. Returns 0 if no error envelope.
+fn sandhi_rpc_mcp_error_message(resp) {
+    var body = sandhi_rpc_body(resp);
+    if (body == 0) { return 0; }
+    return sandhi_json_get_string(body, "error.message");
+}
+
+fn sandhi_rpc_mcp_version() {
+    return "0.4.0";
+}

@@ -1,0 +1,365 @@
+# sandhi/rpc/json — minimal nested JSON build + extract for RPC use.
+#
+# Stdlib `lib/json.cyr` is flat-only and always quotes values, which
+# doesn't fit real WebDriver / MCP / Appium wire formats (nested
+# objects, numeric fields, booleans). This module adds just what
+# sandhi::rpc needs — builder with typed values + nested-object
+# support, plus a dotted-path extractor for pulling fields out of
+# responses.
+#
+# Deliberately small. Not a full JSON library; consumers that need
+# full parsing are still free to use stdlib json.cyr or their own
+# layer. Fold-into-stdlib wants the sandhi public surface tight.
+
+# ================================================================
+# Builder
+# ================================================================
+#
+# Usage:
+#   var o = sandhi_json_obj_new();
+#   sandhi_json_add_string(o, "browserName", "firefox");
+#   sandhi_json_add_int(o, "w3c", 1);
+#   var nested = sandhi_json_obj_new();
+#   sandhi_json_add_string(nested, "platform", "linux");
+#   sandhi_json_add_object(o, "capabilities", nested);
+#   var wire = sandhi_json_build(o);  # cstr
+
+# Entry is {key_cstr, value_cstr, kind} — 24 bytes.
+# kind: 0=string (quote+escape), 1=raw (already JSON — ints, objects, booleans, null).
+enum SandhiJsonKind {
+    SANDHI_JSON_STRING = 0;
+    SANDHI_JSON_RAW    = 1;
+}
+
+fn _sandhi_json_entry_new(key, value, kind) {
+    var e = alloc(24);
+    store64(e, key);
+    store64(e + 8, value);
+    store64(e + 16, kind);
+    return e;
+}
+
+# Object = vec of entries (reuses stdlib vec).
+fn sandhi_json_obj_new() {
+    return vec_new();
+}
+
+# Copy a cstr into a fresh alloc (builder owns its own copies).
+fn _sandhi_json_dup(s) {
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    var out = alloc(n + 1);
+    memcpy(out, s, n);
+    store8(out + n, 0);
+    return out;
+}
+
+fn sandhi_json_add_string(o, key, value) {
+    vec_push(o, _sandhi_json_entry_new(
+        _sandhi_json_dup(key),
+        _sandhi_json_dup(value),
+        SANDHI_JSON_STRING));
+    return 0;
+}
+
+fn sandhi_json_add_int(o, key, value) {
+    var tmp[24];
+    var n = fmt_int_buf(value, &tmp);
+    var out = alloc(n + 1);
+    memcpy(out, &tmp, n);
+    store8(out + n, 0);
+    vec_push(o, _sandhi_json_entry_new(
+        _sandhi_json_dup(key),
+        out,
+        SANDHI_JSON_RAW));
+    return 0;
+}
+
+fn sandhi_json_add_bool(o, key, value) {
+    var raw = "false";
+    if (value == 1) { raw = "true"; }
+    vec_push(o, _sandhi_json_entry_new(
+        _sandhi_json_dup(key),
+        _sandhi_json_dup(raw),
+        SANDHI_JSON_RAW));
+    return 0;
+}
+
+fn sandhi_json_add_null(o, key) {
+    vec_push(o, _sandhi_json_entry_new(
+        _sandhi_json_dup(key),
+        _sandhi_json_dup("null"),
+        SANDHI_JSON_RAW));
+    return 0;
+}
+
+# Embed a child object as a nested value. The child is serialized in
+# place — caller keeps the child handle valid until build returns.
+fn sandhi_json_add_object(o, key, child) {
+    var rendered = sandhi_json_build(child);
+    vec_push(o, _sandhi_json_entry_new(
+        _sandhi_json_dup(key),
+        rendered,
+        SANDHI_JSON_RAW));
+    return 0;
+}
+
+# Embed a pre-built raw JSON fragment (for arrays or externally-built
+# structures). No escaping — caller vouches for the syntax.
+fn sandhi_json_add_raw(o, key, raw_cstr) {
+    vec_push(o, _sandhi_json_entry_new(
+        _sandhi_json_dup(key),
+        _sandhi_json_dup(raw_cstr),
+        SANDHI_JSON_RAW));
+    return 0;
+}
+
+# Escape a string for JSON: wraps in quotes, escapes \" \\ and control
+# bytes per RFC 8259. Writes into a fresh alloc. The quotes are part
+# of the output.
+fn sandhi_json_escape(s) {
+    if (s == 0) {
+        var nul = alloc(5);
+        memcpy(nul, "\"\"", 2);
+        store8(nul + 2, 0);
+        return nul;
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\"");
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c == 34) { str_builder_add_cstr(sb, "\\\""); }
+        elif (c == 92) { str_builder_add_cstr(sb, "\\\\"); }
+        elif (c == 8)  { str_builder_add_cstr(sb, "\\b"); }
+        elif (c == 9)  { str_builder_add_cstr(sb, "\\t"); }
+        elif (c == 10) { str_builder_add_cstr(sb, "\\n"); }
+        elif (c == 12) { str_builder_add_cstr(sb, "\\f"); }
+        elif (c == 13) { str_builder_add_cstr(sb, "\\r"); }
+        elif (c < 32) {
+            # Generic \u00XX escape for other control bytes (RFC 8259).
+            str_builder_add_cstr(sb, "\\u00");
+            var hi = (c >> 4) & 0xF;
+            var lo = c & 0xF;
+            var h1 = 48 + hi;
+            if (hi >= 10) { h1 = 87 + hi; }
+            var h2 = 48 + lo;
+            if (lo >= 10) { h2 = 87 + lo; }
+            str_builder_add_byte(sb, h1);
+            str_builder_add_byte(sb, h2);
+        }
+        else { str_builder_add_byte(sb, c); }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "\"");
+    return str_data(str_builder_build(sb));
+}
+
+# Render the object as a cstr: {"k":"v","k2":raw}. No whitespace for
+# minimum on-wire cost. Caller owns the returned alloc.
+fn sandhi_json_build(o) {
+    if (o == 0) { return _sandhi_json_dup("{}"); }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{");
+    var n = vec_len(o);
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        var e = vec_get(o, i);
+        var ekey = load64(e);
+        var eval = load64(e + 8);
+        var ekind = load64(e + 16);
+        var escaped_key = sandhi_json_escape(ekey);
+        str_builder_add_cstr(sb, escaped_key);
+        str_builder_add_cstr(sb, ":");
+        if (ekind == SANDHI_JSON_STRING) {
+            var escaped_val = sandhi_json_escape(eval);
+            str_builder_add_cstr(sb, escaped_val);
+        } else {
+            str_builder_add_cstr(sb, eval);
+        }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# Extract — dotted-path navigation.
+# ================================================================
+#
+# Usage: sandhi_json_get_string(body, "value.sessionId") → cstr or 0.
+#
+# Supports nested object paths only — arrays and escape-sequences in
+# values are handled by the caller if needed. Good enough for the
+# WebDriver / MCP response shapes we actually see.
+
+# Internal: find the next "key":"... after `start` and return offset
+# of the value's opening quote or opening brace. Matches key as
+# substring, relies on proper JSON lack-of-colons-in-keys. `key_len`
+# is strlen(key).
+fn _sandhi_json_find_key(body, blen, start, key, key_len) {
+    var i = start;
+    while (i + key_len + 3 < blen) {
+        if (load8(body + i) == 34) {
+            # At a quote — check if it starts the target key.
+            if (memeq(body + i + 1, key, key_len) == 1
+             && load8(body + i + 1 + key_len) == 34) {
+                # Skip "key"
+                var p = i + 2 + key_len;
+                # Skip whitespace + colon.
+                while (p < blen && load8(body + p) == 32) { p = p + 1; }
+                if (p < blen && load8(body + p) == 58) {
+                    p = p + 1;
+                    while (p < blen && load8(body + p) == 32) { p = p + 1; }
+                    return p;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Skip past balanced braces starting at `start` (buf[start] == '{').
+# Returns the offset just past the matching '}'.
+fn _sandhi_json_skip_object(body, blen, start) {
+    if (start >= blen || load8(body + start) != 123) { return 0 - 1; }
+    var depth = 1;
+    var p = start + 1;
+    var in_string = 0;
+    var prev_backslash = 0;
+    while (p < blen && depth > 0) {
+        var c = load8(body + p);
+        if (in_string == 1) {
+            if (c == 92 && prev_backslash == 0) { prev_backslash = 1; }
+            else {
+                if (c == 34 && prev_backslash == 0) { in_string = 0; }
+                prev_backslash = 0;
+            }
+        } else {
+            if (c == 34) { in_string = 1; }
+            elif (c == 123) { depth = depth + 1; }
+            elif (c == 125) { depth = depth - 1; }
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+# Extract the raw value at a dotted path. Returns (offset, length)
+# encoded as (off << 32) | len — or (0 - 1) if not found. Private;
+# higher-level verbs decode into cstr.
+fn _sandhi_json_path_range(body, blen, path) {
+    var scope_start = 0;
+    var scope_end = blen;
+    var pi = 0;
+    var plen = strlen(path);
+    # Walk segments separated by '.'.
+    while (pi < plen) {
+        # Extract next segment [pi, seg_end).
+        var seg_end = pi;
+        while (seg_end < plen && load8(path + seg_end) != 46) { seg_end = seg_end + 1; }
+        var seg_len = seg_end - pi;
+        if (seg_len == 0) { return 0 - 1; }
+        var seg = alloc(seg_len + 1);
+        memcpy(seg, path + pi, seg_len);
+        store8(seg + seg_len, 0);
+
+        var vpos = _sandhi_json_find_key(body, scope_end, scope_start, seg, seg_len);
+        if (vpos < 0) { return 0 - 1; }
+
+        if (seg_end >= plen) {
+            # Terminal segment — find the value range.
+            return _sandhi_json_value_range(body, blen, vpos);
+        }
+        # Non-terminal — must be an object we descend into.
+        if (load8(body + vpos) != 123) { return 0 - 1; }
+        scope_start = vpos + 1;
+        scope_end = _sandhi_json_skip_object(body, blen, vpos);
+        if (scope_end < 0) { return 0 - 1; }
+        pi = seg_end + 1;
+    }
+    return 0 - 1;
+}
+
+# Given an offset at the start of a JSON value (quote, brace, digit,
+# or literal), return (off << 32) | len covering the value bytes.
+# For strings the range excludes the surrounding quotes.
+fn _sandhi_json_value_range(body, blen, start) {
+    if (start >= blen) { return 0 - 1; }
+    var c = load8(body + start);
+    if (c == 34) {
+        # String — scan until unescaped closing quote.
+        var p = start + 1;
+        var prev = 0;
+        while (p < blen) {
+            var cc = load8(body + p);
+            if (cc == 34 && prev != 92) {
+                var off = start + 1;
+                var len = p - off;
+                return (off << 32) | len;
+            }
+            if (cc == 92 && prev == 92) { prev = 0; }
+            else { prev = cc; }
+            p = p + 1;
+        }
+        return 0 - 1;
+    }
+    if (c == 123) {
+        # Object — include the braces.
+        var endp = _sandhi_json_skip_object(body, blen, start);
+        if (endp < 0) { return 0 - 1; }
+        var lenO = endp - start;
+        return (start << 32) | lenO;
+    }
+    # Numeric / true / false / null — until ',' '}' ']' or whitespace.
+    var ps = start;
+    var pe = start;
+    while (pe < blen) {
+        var ce = load8(body + pe);
+        if (ce == 44 || ce == 125 || ce == 93 || ce == 32 || ce == 10 || ce == 13 || ce == 9) {
+            var lenN = pe - ps;
+            return (ps << 32) | lenN;
+        }
+        pe = pe + 1;
+    }
+    var lenT = pe - ps;
+    return (ps << 32) | lenT;
+}
+
+# Extract a string value at a dotted path. Returns an alloc'd cstr
+# without the surrounding quotes, or 0 if not found.
+fn sandhi_json_get_string(body, path) {
+    if (body == 0 || path == 0) { return 0; }
+    var blen = strlen(body);
+    var r = _sandhi_json_path_range(body, blen, path);
+    if (r == 0 - 1) { return 0; }
+    var off = r >> 32;
+    var len = r & 0xFFFFFFFF;
+    var out = alloc(len + 1);
+    memcpy(out, body + off, len);
+    store8(out + len, 0);
+    return out;
+}
+
+# Extract an integer value at a dotted path. Returns 0 if absent or
+# non-numeric; caller should pre-check with sandhi_json_has_path if
+# zero vs absent needs to be distinguished.
+fn sandhi_json_get_int(body, path) {
+    var v = sandhi_json_get_string(body, path);
+    if (v == 0) { return 0; }
+    return atoi(v);
+}
+
+# 1 if the path exists (any value), 0 otherwise.
+fn sandhi_json_has_path(body, path) {
+    if (body == 0 || path == 0) { return 0; }
+    var blen = strlen(body);
+    if (_sandhi_json_path_range(body, blen, path) == 0 - 1) { return 0; }
+    return 1;
+}
+
+fn sandhi_json_version() {
+    return "0.4.0";
+}

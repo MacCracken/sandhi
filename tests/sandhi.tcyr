@@ -8,6 +8,11 @@ include "src/http/conn.cyr"
 include "src/http/response.cyr"
 include "src/net/resolve.cyr"
 include "src/http/client.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
 include "src/server/mod.cyr"
 
 fn test_url_decode() {
@@ -588,6 +593,178 @@ fn test_resolve_parse_no_answer() {
     return 0;
 }
 
+fn test_json_build_flat() {
+    var o = sandhi_json_obj_new();
+    sandhi_json_add_string(o, "name", "firefox");
+    sandhi_json_add_int(o, "w3c", 1);
+    assert_streq(sandhi_json_build(o), "{\"name\":\"firefox\",\"w3c\":1}", "json build: flat string + int");
+    return 0;
+}
+
+fn test_json_build_nested() {
+    var caps = sandhi_json_obj_new();
+    sandhi_json_add_string(caps, "browserName", "firefox");
+    sandhi_json_add_bool(caps, "acceptInsecureCerts", 1);
+    var outer = sandhi_json_obj_new();
+    sandhi_json_add_object(outer, "capabilities", caps);
+    assert_streq(sandhi_json_build(outer), "{\"capabilities\":{\"browserName\":\"firefox\",\"acceptInsecureCerts\":true}}", "json build: nested");
+    return 0;
+}
+
+fn test_json_build_null() {
+    var o = sandhi_json_obj_new();
+    sandhi_json_add_null(o, "parent");
+    assert_streq(sandhi_json_build(o), "{\"parent\":null}", "json build: null");
+    return 0;
+}
+
+fn test_json_escape_basic() {
+    assert_streq(sandhi_json_escape("hello"), "\"hello\"", "escape: plain");
+    assert_streq(sandhi_json_escape("say \"hi\""), "\"say \\\"hi\\\"\"", "escape: quotes");
+    assert_streq(sandhi_json_escape("line\nbreak"), "\"line\\nbreak\"", "escape: newline");
+    assert_streq(sandhi_json_escape("tab\there"), "\"tab\\there\"", "escape: tab");
+    assert_streq(sandhi_json_escape("back\\slash"), "\"back\\\\slash\"", "escape: backslash");
+    return 0;
+}
+
+fn test_json_extract_flat_string() {
+    var body = "{\"sessionId\":\"abc-123\",\"other\":42}";
+    assert_streq(sandhi_json_get_string(body, "sessionId"), "abc-123", "extract: flat string");
+    assert_eq(sandhi_json_get_int(body, "other"), 42, "extract: flat int");
+    return 0;
+}
+
+fn test_json_extract_nested_string() {
+    var body = "{\"value\":{\"sessionId\":\"sess-42\",\"capabilities\":{\"browserName\":\"firefox\"}}}";
+    assert_streq(sandhi_json_get_string(body, "value.sessionId"), "sess-42", "extract: one-level nested");
+    assert_streq(sandhi_json_get_string(body, "value.capabilities.browserName"), "firefox", "extract: two-level nested");
+    return 0;
+}
+
+fn test_json_extract_webdriver_error_shape() {
+    # Real-shaped W3C WebDriver error envelope.
+    var body = "{\"value\":{\"error\":\"no such element\",\"message\":\"not found\",\"stacktrace\":\"\"}}";
+    assert_streq(sandhi_json_get_string(body, "value.error"), "no such element", "extract: WebDriver error code");
+    assert_streq(sandhi_json_get_string(body, "value.message"), "not found", "extract: WebDriver error message");
+    return 0;
+}
+
+fn test_json_extract_jsonrpc_error_shape() {
+    var body = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Invalid Request\"},\"id\":1}";
+    assert_eq(sandhi_json_get_int(body, "error.code"), 0 - 32600, "extract: JSON-RPC error code");
+    assert_streq(sandhi_json_get_string(body, "error.message"), "Invalid Request", "extract: JSON-RPC error message");
+    return 0;
+}
+
+fn test_json_extract_missing_path() {
+    var body = "{\"a\":{\"b\":\"c\"}}";
+    assert_eq(sandhi_json_get_string(body, "a.missing"), 0, "extract: missing nested → 0");
+    assert_eq(sandhi_json_get_string(body, "x"), 0, "extract: missing top → 0");
+    assert_eq(sandhi_json_has_path(body, "a.b"), 1, "has_path: present");
+    assert_eq(sandhi_json_has_path(body, "a.missing"), 0, "has_path: absent");
+    return 0;
+}
+
+fn test_json_extract_with_spaces() {
+    var body = "{ \"key\" : \"value\" , \"num\" : 7 }";
+    assert_streq(sandhi_json_get_string(body, "key"), "value", "extract: tolerates whitespace");
+    assert_eq(sandhi_json_get_int(body, "num"), 7, "extract: int with whitespace");
+    return 0;
+}
+
+fn test_dispatch_err_extract_webdriver() {
+    var body_ok = "{\"value\":{\"sessionId\":\"abc\"}}";
+    assert_eq(_sandhi_rpc_err_extract(body_ok, SANDHI_RPC_DIALECT_WEBDRIVER), 0, "dispatch: WD success → 0");
+
+    var body_err = "{\"value\":{\"error\":\"no such element\",\"message\":\"not found\"}}";
+    var msg = _sandhi_rpc_err_extract(body_err, SANDHI_RPC_DIALECT_WEBDRIVER);
+    assert_streq(msg, "not found", "dispatch: WD error extracts message");
+    return 0;
+}
+
+fn test_dispatch_err_extract_jsonrpc() {
+    var body_ok = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"x\":1}}";
+    assert_eq(_sandhi_rpc_err_extract(body_ok, SANDHI_RPC_DIALECT_JSONRPC), 0, "dispatch: JSON-RPC success → 0");
+
+    var body_err = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,\"message\":\"Invalid Request\"}}";
+    var msg = _sandhi_rpc_err_extract(body_err, SANDHI_RPC_DIALECT_JSONRPC);
+    assert_streq(msg, "Invalid Request", "dispatch: JSON-RPC error extracts message");
+    return 0;
+}
+
+fn test_dispatch_err_generic_no_envelope() {
+    var body = "{\"value\":{\"error\":\"ignored\"}}";
+    # Generic dialect shouldn't extract — only WebDriver / JSON-RPC do.
+    assert_eq(_sandhi_rpc_err_extract(body, SANDHI_RPC_DIALECT_GENERIC), 0, "dispatch: generic → no envelope");
+    return 0;
+}
+
+fn test_webdriver_url_join() {
+    # Various trailing-slash combinations all produce the same shape.
+    assert_streq(_sandhi_wd_join("http://127.0.0.1:4444", "/session"), "http://127.0.0.1:4444/session", "wd: no trailing slash on base");
+    assert_streq(_sandhi_wd_join("http://127.0.0.1:4444/", "/session"), "http://127.0.0.1:4444/session", "wd: trailing slash absorbed");
+    return 0;
+}
+
+fn test_webdriver_session_url() {
+    assert_streq(_sandhi_wd_session_url("http://127.0.0.1:4444", "sess-1", "/url"), "http://127.0.0.1:4444/session/sess-1/url", "wd: /session/<id>/url");
+    assert_streq(_sandhi_wd_session_url("http://127.0.0.1:4444", "sess-1", ""), "http://127.0.0.1:4444/session/sess-1", "wd: session-root");
+    # With trailing slash on base.
+    assert_streq(_sandhi_wd_session_url("http://x/", "A", "/title"), "http://x/session/A/title", "wd: trailing-slash base trimmed");
+    return 0;
+}
+
+fn test_webdriver_extract_session_id() {
+    # W3C-shaped response.
+    var hr_body = "{\"value\":{\"sessionId\":\"abc-w3c\",\"capabilities\":{\"browserName\":\"firefox\"}}}";
+    var resp = _sandhi_rpc_resp_new(200, hr_body, strlen(hr_body), SANDHI_OK, 0);
+    assert_streq(sandhi_wd_extract_session_id(resp), "abc-w3c", "wd: W3C session id");
+
+    # Pre-W3C fallback.
+    var pre_body = "{\"sessionId\":\"old-pre\"}";
+    var resp2 = _sandhi_rpc_resp_new(200, pre_body, strlen(pre_body), SANDHI_OK, 0);
+    assert_streq(sandhi_wd_extract_session_id(resp2), "old-pre", "wd: pre-W3C fallback");
+    return 0;
+}
+
+fn test_webdriver_extract_element_id() {
+    var body = "{\"value\":{\"element-6066-11e4-a52e-4f735466cecf\":\"elem-uuid-123\"}}";
+    var resp = _sandhi_rpc_resp_new(200, body, strlen(body), SANDHI_OK, 0);
+    assert_streq(sandhi_wd_extract_element_id(resp), "elem-uuid-123", "wd: W3C element ID");
+    return 0;
+}
+
+fn test_mcp_envelope_shape() {
+    # The envelope should include jsonrpc: "2.0", id: N, method, params.
+    # Request-ID counter increments, so we verify shape but not specific id.
+    var body = _sandhi_mcp_build_request("tools/list", 0);
+    # Just spot-check the structural bits.
+    assert_eq(sandhi_json_has_path(body, "jsonrpc"), 1, "mcp: has jsonrpc");
+    assert_streq(sandhi_json_get_string(body, "jsonrpc"), "2.0", "mcp: jsonrpc 2.0");
+    assert_streq(sandhi_json_get_string(body, "method"), "tools/list", "mcp: method");
+    return 0;
+}
+
+fn test_mcp_envelope_with_params() {
+    var params = "{\"cursor\":\"abc\"}";
+    var body = _sandhi_mcp_build_request("resources/list", params);
+    assert_streq(sandhi_json_get_string(body, "method"), "resources/list", "mcp: method with params");
+    assert_streq(sandhi_json_get_string(body, "params.cursor"), "abc", "mcp: nested param roundtrip");
+    return 0;
+}
+
+fn test_mcp_id_is_monotonic() {
+    var b1 = _sandhi_mcp_build_request("a", 0);
+    var b2 = _sandhi_mcp_build_request("b", 0);
+    var b3 = _sandhi_mcp_build_request("c", 0);
+    var id1 = sandhi_json_get_int(b1, "id");
+    var id2 = sandhi_json_get_int(b2, "id");
+    var id3 = sandhi_json_get_int(b3, "id");
+    assert_eq(id2, id1 + 1, "mcp: id monotonic +1");
+    assert_eq(id3, id1 + 2, "mcp: id monotonic +2");
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -750,6 +927,66 @@ fn main() {
 
     test_group("net/resolve/parse_no_answer");
     test_resolve_parse_no_answer();
+
+    test_group("rpc/json/build_flat");
+    test_json_build_flat();
+
+    test_group("rpc/json/build_nested");
+    test_json_build_nested();
+
+    test_group("rpc/json/build_null");
+    test_json_build_null();
+
+    test_group("rpc/json/escape");
+    test_json_escape_basic();
+
+    test_group("rpc/json/extract_flat");
+    test_json_extract_flat_string();
+
+    test_group("rpc/json/extract_nested");
+    test_json_extract_nested_string();
+
+    test_group("rpc/json/webdriver_error");
+    test_json_extract_webdriver_error_shape();
+
+    test_group("rpc/json/jsonrpc_error");
+    test_json_extract_jsonrpc_error_shape();
+
+    test_group("rpc/json/missing_path");
+    test_json_extract_missing_path();
+
+    test_group("rpc/json/whitespace");
+    test_json_extract_with_spaces();
+
+    test_group("rpc/dispatch/err_webdriver");
+    test_dispatch_err_extract_webdriver();
+
+    test_group("rpc/dispatch/err_jsonrpc");
+    test_dispatch_err_extract_jsonrpc();
+
+    test_group("rpc/dispatch/generic_no_envelope");
+    test_dispatch_err_generic_no_envelope();
+
+    test_group("rpc/webdriver/url_join");
+    test_webdriver_url_join();
+
+    test_group("rpc/webdriver/session_url");
+    test_webdriver_session_url();
+
+    test_group("rpc/webdriver/extract_session");
+    test_webdriver_extract_session_id();
+
+    test_group("rpc/webdriver/extract_element");
+    test_webdriver_extract_element_id();
+
+    test_group("rpc/mcp/envelope");
+    test_mcp_envelope_shape();
+
+    test_group("rpc/mcp/envelope_params");
+    test_mcp_envelope_with_params();
+
+    test_group("rpc/mcp/id_monotonic");
+    test_mcp_id_is_monotonic();
 
     return assert_summary();
 }

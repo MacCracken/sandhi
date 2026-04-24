@@ -1,25 +1,17 @@
-# sandhi/rpc — JSON-RPC patterns (WebDriver wire, Appium dialect, MCP-over-HTTP).
+# sandhi/rpc — JSON-RPC dialect index.
 #
-# Absorbs the JSON-RPC-grade side of the v5.7.x `lib/json.cyr depth`
-# roadmap item. Stdlib json.cyr keeps baseline parse/build for config
-# and data files; sandhi::rpc wraps it for the network-RPC use cases
-# that need nested objects, arrays, streaming responses, and
-# dialect-aware error shapes.
+# Composes:
+#   rpc/json     — nested JSON build + dotted-path extract
+#   rpc/dispatch — JSON-over-HTTP transport + dialect-aware error envelopes
 #
-# Planned verbs (scaffold stubs):
-#   sandhi_rpc_call(endpoint, method, params_json)
-#   sandhi_rpc_response_result(resp)
-#   sandhi_rpc_response_error(resp)
-#   sandhi_rpc_stream(endpoint, method, params_json, callback)  — SSE / chunked
+# Dialects (one file each per CLAUDE.md "one dialect per file"):
+#   rpc/webdriver — W3C WebDriver wire (Firefox, WebKit via geckodriver)
+#   rpc/appium    — Appium UiAutomator2 / XCUITest extensions on top of WebDriver
+#   rpc/mcp       — MCP-over-HTTP transport; protocol semantics stay in bote/t-ron per ADR 0001
 #
-# Dialects:
-#   sandhi_rpc_webdriver — W3C WebDriver JSON wire (yantra consumer)
-#   sandhi_rpc_appium    — Appium JSON-RPC extensions (yantra consumer)
-#   sandhi_rpc_mcp       — MCP over HTTP (daimon / bote-adjacent consumer)
-#
-# Each dialect is a thin wrapper around the generic call path +
-# dialect-specific header + error-envelope handling.
+# Adding a new dialect is a new file + a cyrius.cyml entry; don't grow
+# an existing dialect file.
 
 fn sandhi_rpc_version() {
-    return "0.1.0-scaffold";
+    return "0.4.0";
 }

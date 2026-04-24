@@ -4,6 +4,8 @@
 
 ## Version
 
+**0.4.0** — M3 closed 2026-04-24. JSON-RPC dialect layer: nested JSON builder + dotted-path extractor, JSON-over-HTTP transport with dialect-aware error envelopes, W3C WebDriver surface (sessions + navigation + element interaction + script execution), Appium extensions (context switching + app lifecycle + mobile exec), MCP-over-HTTP transport (envelope only; protocol semantics stay in bote/t-ron per ADR 0001). 215 test assertions green.
+
 **0.3.0** — M2 closed 2026-04-24. Full HTTP client (POST/PUT/DELETE/PATCH/HEAD/GET), response parser (Content-Length + chunked + close-delimited), opt-in bounded redirect following, native UDP DNS resolver (RFC 1035 A-record queries, `/etc/resolv.conf` + 8.8.8.8 fallback). 173 test assertions green; live `programs/http-probe.cyr http://example.com/` returns 200. HTTPS runtime flagged as known-issue (see `docs/issues/2026-04-24-fdlopen...`).
 
 **0.2.0** — M1 closed 2026-04-24. `lib/http_server.cyr` lift-and-shift into `src/server/mod.cyr` done verbatim (478 lines, no behavior change). sandhi's `cyrius.cyml` dropped `http_server` from `[deps.stdlib]`; smoke exercises the migrated symbols; pure-helper unit tests added (28 assertions green).
@@ -34,7 +36,12 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | `src/http/response.cyr` | 282 | **M2 done** — Content-Length + chunked + close-delimited body framing |
 | `src/net/resolve.cyr` | 290 | **M2 done** — native UDP DNS (RFC 1035), /etc/resolv.conf + 8.8.8.8 fallback |
 | `src/http/client.cyr` | 333 | **M2 done** — POST/PUT/DELETE/PATCH/HEAD/GET, redirect following, options struct |
-| `src/rpc/mod.cyr` | 25 | scaffold — dialect plan documented (M3) |
+| `src/rpc/json.cyr` | 365 | **M3 done** — nested JSON build + dotted-path extract |
+| `src/rpc/dispatch.cyr` | 169 | **M3 done** — JSON-over-HTTP + dialect-aware error envelopes |
+| `src/rpc/webdriver.cyr` | 231 | **M3 done** — W3C WebDriver surface (sessions, navigation, elements, exec) |
+| `src/rpc/appium.cyr` | 139 | **M3 done** — Appium extensions (contexts, app lifecycle, mobile exec) |
+| `src/rpc/mcp.cyr` | 104 | **M3 done** — MCP-over-HTTP transport (JSON-RPC 2.0 envelope) |
+| `src/rpc/mod.cyr` | 17 | dialect-index module |
 | `src/discovery/mod.cyr` | 22 | scaffold — verb stubs (M4) |
 | `src/tls_policy/mod.cyr` | 15 | scaffold — verb stubs (M5) |
 | `src/server/mod.cyr` | 478 | **M1 done** — verbatim lift from `lib/http_server.cyr` |
@@ -48,7 +55,7 @@ Planned `dist/sandhi.cyr` bundle via `cyrius distlib` — can now be produced an
 
 ## Tests
 
-- `tests/sandhi.tcyr` — **173 assertions green** across 38 test groups: smoke, server helpers (url-decode / path / param / parse / identity), http/headers (basic / set / add / remove / serialize / parse), http/url (scheme / port / query / no-path / case / malformed / CRLF), http/response (Content-Length / chunked / hex / extension / close-delimited / status / malformed / empty), http/client (ipv4-parse / full-path / host-header / build-get / build-post / empty-body / user-headers / bad-url / unresolvable-hostname), http/redirect (is-redirect / absolute / relative / bad-location / options), net/resolve (label-encode / parse-synthetic / NXDOMAIN / no-answer).
+- `tests/sandhi.tcyr` — **215 assertions green** across 48 test groups: smoke + server helpers + http/headers + http/url + http/response + http/client + http/redirect + net/resolve + **rpc/json (build-flat / build-nested / build-null / escape / extract-flat / extract-nested / webdriver-error / jsonrpc-error / missing-path / whitespace), rpc/dispatch (err-webdriver / err-jsonrpc / generic-no-envelope), rpc/webdriver (url-join / session-url / extract-session / extract-element), rpc/mcp (envelope / envelope-params / id-monotonic)**.
 - `tests/integration/` — cross-submodule integration not yet a separate file; loopback client+server round-trip deferred until the HTTPS TLS-init issue resolves.
 
 ## Dependencies
@@ -90,8 +97,8 @@ No external git deps. sandhi is pure-stdlib-composition.
 All M2–M5 must land before the Cyrius v5.7.0 fold event (public surface freezes at fold per ADR 0002).
 
 1. ~~**M1 — `lib/http_server.cyr` lift-and-shift.**~~ ✅ landed 2026-04-24 (v0.2.0).
-2. ~~**M2 — `sandhi::http::client` real implementation.**~~ ✅ landed 2026-04-24 (v0.3.0). HTTPS runtime still blocked on stdlib TLS-init (see issue doc); compiles clean, runs fine over plain HTTP. Unblocks M3 once tls-init is resolved or sidestepped.
-3. **M3 — `sandhi::rpc` WebDriver + Appium dialects.** Unblocks yantra M2. JSON-RPC dispatch layer, streaming responses, dialect-aware error envelopes. Ride on the working HTTP client; TLS is not on the critical path for CDP/WebDriver localhost use.
+2. ~~**M2 — `sandhi::http::client` real implementation.**~~ ✅ landed 2026-04-24 (v0.3.0). HTTPS runtime still blocked on stdlib TLS-init (see issue doc); compiles clean, runs fine over plain HTTP.
+3. ~~**M3 — `sandhi::rpc` WebDriver + Appium + MCP.**~~ ✅ landed 2026-04-24 (v0.4.0). JSON-RPC dispatch, dialect-aware errors, W3C WebDriver / Appium / MCP envelopes. SSE streaming deferred to M3.5 (no consumer asking today).
 4. **M4 — `sandhi::discovery` chain resolver + daimon integration.** The genuinely new surface. DNS is solved (see `src/net/resolve.cyr`); mDNS + daimon-registered resolvers stack on top.
 5. **M5 — `sandhi::tls_policy` cert pinning + mTLS.** Wraps `lib/tls.cyr` today; transitions to native when Cyrius v5.9.x TLS ships. **Partially gated on the tls-init fix** — the policy surface can land before runtime works, but integration tests are stuck until it does.
 6. **Fold-into-stdlib at v5.7.0** — one event: stdlib deletes `lib/http_server.cyr`, adds `lib/sandhi.cyr`, consumers migrate their includes in the same release. 5.6.YY releases carry the deprecation warning. Checked at the Cyrius release gate, not in this repo.

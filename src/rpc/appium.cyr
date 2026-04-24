@@ -1,0 +1,139 @@
+# sandhi/rpc/appium — Appium dialect on top of W3C WebDriver.
+#
+# Reference: https://appium.io/docs/en/commands/
+#
+# Appium extends the WebDriver wire protocol with mobile-platform
+# commands (UiAutomator2 on Android, XCUITest on iOS). The base
+# session / navigation / element-interaction verbs from webdriver.cyr
+# apply directly; this file adds the mobile-only extensions that
+# yantra's Android + iOS backends need.
+#
+# Kept small per CLAUDE.md "one dialect per file" guidance. When a
+# consumer needs more surface, add verbs here rather than splitting.
+
+# ================================================================
+# Mobile session setup
+# ================================================================
+
+# Start a new Appium session. `platform_name` is "Android" or "iOS".
+# `automation_name` is "UiAutomator2" / "XCUITest" / etc. Extra caps
+# may be passed via `extra_caps_json` (a pre-built JSON object fragment
+# including its braces, or 0 for none).
+#
+# The body shape is the W3C-compatible one Appium 2.x expects:
+#   {"capabilities":{"alwaysMatch":{"platformName":"Android",
+#    "appium:automationName":"UiAutomator2", ...}}}
+fn sandhi_ap_new_session(base_url, platform_name, automation_name, extra_caps_json) {
+    var always = sandhi_json_obj_new();
+    sandhi_json_add_string(always, "platformName", platform_name);
+    sandhi_json_add_string(always, "appium:automationName", automation_name);
+    if (extra_caps_json != 0) {
+        sandhi_json_add_raw(always, "appium:extras", extra_caps_json);
+    }
+    var caps = sandhi_json_obj_new();
+    sandhi_json_add_object(caps, "alwaysMatch", always);
+    var root = sandhi_json_obj_new();
+    sandhi_json_add_object(root, "capabilities", caps);
+    return sandhi_wd_new_session(base_url, sandhi_json_build(root));
+}
+
+# ================================================================
+# Context switching — native vs webview
+# ================================================================
+
+# GET /session/{id}/contexts — list available contexts.
+fn sandhi_ap_get_contexts(base_url, session_id) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/contexts");
+    return sandhi_rpc_call(url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# POST /session/{id}/context — switch to `context_name` (e.g.
+# "NATIVE_APP" or "WEBVIEW_com.example.app").
+fn sandhi_ap_set_context(base_url, session_id, context_name) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/context");
+    var body_obj = sandhi_json_obj_new();
+    sandhi_json_add_string(body_obj, "name", context_name);
+    return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# GET /session/{id}/context — current context name.
+fn sandhi_ap_current_context(base_url, session_id) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/context");
+    return sandhi_rpc_call(url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# ================================================================
+# App lifecycle
+# ================================================================
+
+# POST /session/{id}/appium/device/install_app — install an APK / IPA.
+# `app_path` is a filesystem path the Appium server can read.
+fn sandhi_ap_install_app(base_url, session_id, app_path) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/appium/device/install_app");
+    var body_obj = sandhi_json_obj_new();
+    sandhi_json_add_string(body_obj, "appPath", app_path);
+    return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# POST /session/{id}/appium/device/remove_app — uninstall a package/bundle.
+fn sandhi_ap_remove_app(base_url, session_id, bundle_id) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/appium/device/remove_app");
+    var body_obj = sandhi_json_obj_new();
+    sandhi_json_add_string(body_obj, "bundleId", bundle_id);
+    return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# POST /session/{id}/appium/device/activate_app — foreground an installed app.
+fn sandhi_ap_activate_app(base_url, session_id, bundle_id) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/appium/device/activate_app");
+    var body_obj = sandhi_json_obj_new();
+    sandhi_json_add_string(body_obj, "appId", bundle_id);
+    return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# POST /session/{id}/appium/device/terminate_app — stop an app.
+fn sandhi_ap_terminate_app(base_url, session_id, bundle_id) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/appium/device/terminate_app");
+    var body_obj = sandhi_json_obj_new();
+    sandhi_json_add_string(body_obj, "bundleId", bundle_id);
+    return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# ================================================================
+# Mobile-specific commands
+# ================================================================
+
+# POST /session/{id}/execute — run mobile: command. `command` is e.g.
+# "mobile: shell" for ADB shell on UiAutomator2, or "mobile: scroll"
+# for gestures. `args_json` is a JSON object (cstr with braces).
+fn sandhi_ap_mobile_exec(base_url, session_id, command, args_json) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/execute");
+    var body_obj = sandhi_json_obj_new();
+    sandhi_json_add_string(body_obj, "script", command);
+    if (args_json != 0) {
+        var arr = str_builder_new();
+        str_builder_add_cstr(arr, "[");
+        str_builder_add_cstr(arr, args_json);
+        str_builder_add_cstr(arr, "]");
+        sandhi_json_add_raw(body_obj, "args", str_data(str_builder_build(arr)));
+    } else {
+        sandhi_json_add_raw(body_obj, "args", "[]");
+    }
+    return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# GET /session/{id}/source — page / view hierarchy XML.
+fn sandhi_ap_source(base_url, session_id) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/source");
+    return sandhi_rpc_call(url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# GET /session/{id}/screenshot — base64 PNG.
+fn sandhi_ap_screenshot(base_url, session_id) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/screenshot");
+    return sandhi_rpc_call(url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+fn sandhi_ap_version() {
+    return "0.4.0";
+}

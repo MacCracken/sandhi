@@ -1,0 +1,169 @@
+# sandhi/rpc/dispatch — JSON-over-HTTP request/response core.
+#
+# Takes a URL + HTTP method + JSON body, sends via sandhi_http_*,
+# parses the response body for a dialect-specific error envelope,
+# and returns a unified rpc-response struct.
+#
+# The dialect enum picks the error extractor. Adding a new dialect
+# is a two-line change to `_sandhi_rpc_err_extract`.
+
+enum SandhiRpcDialect {
+    SANDHI_RPC_DIALECT_GENERIC   = 0;  # plain JSON; error = non-2xx status
+    SANDHI_RPC_DIALECT_WEBDRIVER = 1;  # W3C: {"value":{"error":"...","message":"..."}}
+    SANDHI_RPC_DIALECT_JSONRPC   = 2;  # JSON-RPC 2.0: {"error":{"code":N,"message":"..."}}
+}
+
+# Response struct (40 bytes):
+#   +0   http_status  (int: 0 on network error, 100..599 otherwise)
+#   +8   body_ptr     (ptr: cstr of response body, 0 on network error)
+#   +16  body_len     (int)
+#   +24  err_kind     (int: SandhiErrorKind — 0 on success, REMOTE on dialect err, etc.)
+#   +32  err_message  (ptr: cstr, 0 if no error or network error)
+enum SandhiRpcRespOff {
+    SANDHI_RPC_OFF_STATUS  = 0;
+    SANDHI_RPC_OFF_BODY    = 8;
+    SANDHI_RPC_OFF_BLEN    = 16;
+    SANDHI_RPC_OFF_ERR     = 24;
+    SANDHI_RPC_OFF_ERR_MSG = 32;
+}
+
+var SANDHI_RPC_RESP_SIZE = 40;
+
+fn sandhi_rpc_http_status(r) { return load64(r + SANDHI_RPC_OFF_STATUS); }
+fn sandhi_rpc_body(r)        { return load64(r + SANDHI_RPC_OFF_BODY); }
+fn sandhi_rpc_body_len(r)    { return load64(r + SANDHI_RPC_OFF_BLEN); }
+fn sandhi_rpc_err_kind(r)    { return load64(r + SANDHI_RPC_OFF_ERR); }
+fn sandhi_rpc_err_message(r) { return load64(r + SANDHI_RPC_OFF_ERR_MSG); }
+
+# 1 if the rpc call succeeded at the dialect level (no error envelope
+# extracted and HTTP 2xx). Handy for early returns.
+fn sandhi_rpc_ok(r) {
+    if (sandhi_rpc_err_kind(r) != SANDHI_OK) { return 0; }
+    var s = sandhi_rpc_http_status(r);
+    if (s < 200 || s >= 300) { return 0; }
+    return 1;
+}
+
+fn _sandhi_rpc_resp_new(status, body, blen, err_kind, err_msg) {
+    var r = alloc(SANDHI_RPC_RESP_SIZE);
+    store64(r + SANDHI_RPC_OFF_STATUS, status);
+    store64(r + SANDHI_RPC_OFF_BODY, body);
+    store64(r + SANDHI_RPC_OFF_BLEN, blen);
+    store64(r + SANDHI_RPC_OFF_ERR, err_kind);
+    store64(r + SANDHI_RPC_OFF_ERR_MSG, err_msg);
+    return r;
+}
+
+# Extract the dialect-specific error envelope. Returns the message
+# cstr if an error envelope was present, or 0 otherwise. Leaves the
+# caller to set err_kind based on context.
+fn _sandhi_rpc_err_extract(body, dialect) {
+    if (body == 0) { return 0; }
+    if (dialect == SANDHI_RPC_DIALECT_WEBDRIVER) {
+        # W3C WebDriver: {"value":{"error":"<tag>","message":"...","stacktrace":"..."}}
+        # Only treat as error if value.error is present.
+        if (sandhi_json_has_path(body, "value.error") == 1) {
+            var m = sandhi_json_get_string(body, "value.message");
+            if (m == 0) { m = sandhi_json_get_string(body, "value.error"); }
+            return m;
+        }
+        return 0;
+    }
+    if (dialect == SANDHI_RPC_DIALECT_JSONRPC) {
+        # JSON-RPC 2.0: {"jsonrpc":"2.0","error":{"code":N,"message":"..."},"id":...}
+        if (sandhi_json_has_path(body, "error.code") == 1) {
+            var m2 = sandhi_json_get_string(body, "error.message");
+            if (m2 == 0) { m2 = _sandhi_rpc_dup("rpc error"); }
+            return m2;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+fn _sandhi_rpc_dup(s) {
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    var out = alloc(n + 1);
+    memcpy(out, s, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Pick the HTTP verb for the request shape. WebDriver / MCP / Appium
+# all use POST or GET or DELETE; the dispatcher stays method-agnostic.
+# `http_method` is a cstr: "GET" / "POST" / "DELETE" / "PUT" / "PATCH".
+fn _sandhi_rpc_http_send(url, http_method, body_json, headers) {
+    var body_len = 0;
+    if (body_json != 0) { body_len = strlen(body_json); }
+    if (streq(http_method, "GET") == 1) {
+        return sandhi_http_get(url, headers);
+    }
+    if (streq(http_method, "DELETE") == 1) {
+        return sandhi_http_delete(url, headers);
+    }
+    if (streq(http_method, "PUT") == 1) {
+        return sandhi_http_put(url, headers, body_json, body_len);
+    }
+    if (streq(http_method, "PATCH") == 1) {
+        return sandhi_http_patch(url, headers, body_json, body_len);
+    }
+    # Default to POST.
+    return sandhi_http_post(url, headers, body_json, body_len);
+}
+
+# Core RPC call. Sends a JSON body, extracts dialect-specific errors
+# from the response. Returns an rpc-response struct — check
+# sandhi_rpc_ok() or err_kind for failure modes.
+fn sandhi_rpc_call(url, http_method, body_json, dialect) {
+    var headers = sandhi_headers_new();
+    if (body_json != 0) {
+        sandhi_headers_set(headers, "Content-Type", "application/json");
+    }
+    sandhi_headers_set(headers, "Accept", "application/json");
+    var hr = _sandhi_rpc_http_send(url, http_method, body_json, headers);
+    return _sandhi_rpc_wrap(hr, dialect);
+}
+
+# Variant that accepts caller-supplied headers (for auth, session
+# cookies, etc.). Content-Type / Accept still auto-injected when absent.
+fn sandhi_rpc_call_with_headers(url, http_method, body_json, user_headers, dialect) {
+    var headers = user_headers;
+    if (headers == 0) { headers = sandhi_headers_new(); }
+    if (body_json != 0 && sandhi_headers_has(headers, "Content-Type") == 0) {
+        sandhi_headers_set(headers, "Content-Type", "application/json");
+    }
+    if (sandhi_headers_has(headers, "Accept") == 0) {
+        sandhi_headers_set(headers, "Accept", "application/json");
+    }
+    var hr = _sandhi_rpc_http_send(url, http_method, body_json, headers);
+    return _sandhi_rpc_wrap(hr, dialect);
+}
+
+# Take a sandhi HTTP response (from response.cyr), extract the
+# dialect-specific error envelope, build an rpc-response struct.
+# Extracted so both dispatch entrypoints share the same tail.
+fn _sandhi_rpc_wrap(hr, dialect) {
+    var ek = sandhi_http_err_kind(hr);
+    if (ek != SANDHI_OK) {
+        # Transport failure — propagate through.
+        return _sandhi_rpc_resp_new(0, 0, 0, ek, 0);
+    }
+    var status = sandhi_http_status(hr);
+    var body = sandhi_http_body(hr);
+    var blen = sandhi_http_body_len(hr);
+
+    var env_msg = _sandhi_rpc_err_extract(body, dialect);
+    if (env_msg != 0) {
+        return _sandhi_rpc_resp_new(status, body, blen, SANDHI_ERR_REMOTE, env_msg);
+    }
+    if (status >= 400) {
+        # Non-dialect HTTP error — still surface as REMOTE.
+        return _sandhi_rpc_resp_new(status, body, blen, SANDHI_ERR_REMOTE, 0);
+    }
+    return _sandhi_rpc_resp_new(status, body, blen, SANDHI_OK, 0);
+}
+
+fn sandhi_rpc_dispatch_version() {
+    return "0.4.0";
+}

@@ -1,0 +1,231 @@
+# sandhi/rpc/webdriver — W3C WebDriver dialect.
+#
+# Reference: https://www.w3.org/TR/webdriver2/
+#
+# WebDriver is REST-like, not JSON-RPC 2.0. Requests are HTTP
+# method+path against a base URL (typically http://127.0.0.1:PORT).
+# Responses envelope the result in {"value": ...}; errors envelope
+# in {"value": {"error": "<tag>", "message": "..."}}.
+#
+# Scope: the verb set yantra M2 needs to drive a session end-to-end.
+# Extensions can land as separate patches when additional consumers
+# ask; one dialect file stays small per CLAUDE.md.
+
+# ================================================================
+# URL building helpers
+# ================================================================
+
+# Join base URL and a path. Handles trailing-slash presence or absence
+# on base. Path must start with '/'.
+fn _sandhi_wd_join(base, path) {
+    var blen = strlen(base);
+    var plen = strlen(path);
+    var has_trailing = 0;
+    if (blen > 0 && load8(base + blen - 1) == 47) { has_trailing = 1; }
+    var total = blen + plen;
+    if (has_trailing == 1) { total = blen + plen - 1; }
+    var out = alloc(total + 1);
+    memcpy(out, base, blen);
+    var at = blen;
+    if (has_trailing == 1) { at = blen - 1; }
+    memcpy(out + at, path, plen);
+    store8(out + at + plen, 0);
+    return out;
+}
+
+# base + "/session/{id}" + suffix  → full URL. suffix may be "" for
+# session-root endpoints.
+fn _sandhi_wd_session_url(base, session_id, suffix) {
+    var sb = str_builder_new();
+    var blen = strlen(base);
+    var has_trailing = 0;
+    if (blen > 0 && load8(base + blen - 1) == 47) { has_trailing = 1; }
+    if (has_trailing == 1) {
+        # Trim the slash.
+        var trimmed = alloc(blen);
+        memcpy(trimmed, base, blen - 1);
+        store8(trimmed + blen - 1, 0);
+        str_builder_add_cstr(sb, trimmed);
+    } else {
+        str_builder_add_cstr(sb, base);
+    }
+    str_builder_add_cstr(sb, "/session/");
+    str_builder_add_cstr(sb, session_id);
+    if (suffix != 0 && strlen(suffix) > 0) {
+        str_builder_add_cstr(sb, suffix);
+    }
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# Session lifecycle
+# ================================================================
+
+# POST /session — start a new WebDriver session against `base_url`.
+# `capabilities_json` is a cstr of the full request body (not just the
+# `capabilities` subtree — caller can build nested via rpc/json).
+# If caller passes 0, a minimal `{"capabilities":{"alwaysMatch":{}}}`
+# is used, letting the driver pick defaults.
+#
+# Returns an rpc-response. Session ID is available via
+# sandhi_wd_extract_session_id on success.
+fn sandhi_wd_new_session(base_url, capabilities_json) {
+    var url = _sandhi_wd_join(base_url, "/session");
+    var body = capabilities_json;
+    if (body == 0) {
+        body = "{\"capabilities\":{\"alwaysMatch\":{}}}";
+    }
+    return sandhi_rpc_call(url, "POST", body, SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# Pull the session ID out of a new_session response body.
+# W3C: {"value":{"sessionId":"<id>","capabilities":{...}}}.
+# Returns alloc'd cstr or 0 if absent.
+fn sandhi_wd_extract_session_id(resp) {
+    var body = sandhi_rpc_body(resp);
+    if (body == 0) { return 0; }
+    # Try W3C shape first, then pre-W3C fallback for older drivers.
+    var sid = sandhi_json_get_string(body, "value.sessionId");
+    if (sid != 0) { return sid; }
+    return sandhi_json_get_string(body, "sessionId");
+}
+
+# DELETE /session/{id} — end session.
+fn sandhi_wd_delete_session(base_url, session_id) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "");
+    return sandhi_rpc_call(url, "DELETE", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# ================================================================
+# Navigation
+# ================================================================
+
+# POST /session/{id}/url — navigate the session to `target_url`.
+fn sandhi_wd_navigate_to(base_url, session_id, target_url) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/url");
+    var body_obj = sandhi_json_obj_new();
+    sandhi_json_add_string(body_obj, "url", target_url);
+    return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# GET /session/{id}/url — current URL. Extract via `value` path.
+fn sandhi_wd_get_url(base_url, session_id) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/url");
+    return sandhi_rpc_call(url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# GET /session/{id}/title — page title.
+fn sandhi_wd_get_title(base_url, session_id) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/title");
+    return sandhi_rpc_call(url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# ================================================================
+# Element interaction
+# ================================================================
+#
+# W3C WebDriver locator strategies (using: "<strategy>"):
+#   "css selector", "link text", "partial link text", "tag name", "xpath"
+# Locator value: the selector itself. W3C responses return element
+# references as {"element-6066-11e4-a52e-4f735466cecf":"<uuid>"}.
+
+# POST /session/{id}/element — find first element.
+fn sandhi_wd_find_element(base_url, session_id, strategy, selector) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/element");
+    var body_obj = sandhi_json_obj_new();
+    sandhi_json_add_string(body_obj, "using", strategy);
+    sandhi_json_add_string(body_obj, "value", selector);
+    return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# W3C element reference key — same constant for every implementation.
+var _SANDHI_WD_ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
+
+# Pull the element ID out of a find_element response. Returns alloc'd cstr or 0.
+fn sandhi_wd_extract_element_id(resp) {
+    var body = sandhi_rpc_body(resp);
+    if (body == 0) { return 0; }
+    var path = _sandhi_wd_build_path("value.", _SANDHI_WD_ELEMENT_KEY);
+    var eid = sandhi_json_get_string(body, path);
+    if (eid != 0) { return eid; }
+    # Pre-W3C fallback.
+    return sandhi_json_get_string(body, "value.ELEMENT");
+}
+
+fn _sandhi_wd_build_path(prefix, tail) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_cstr(sb, tail);
+    return str_data(str_builder_build(sb));
+}
+
+# POST /session/{id}/element/{eid}/click
+fn sandhi_wd_element_click(base_url, session_id, element_id) {
+    var suffix = _sandhi_wd_build_element_suffix(element_id, "/click");
+    var url = _sandhi_wd_session_url(base_url, session_id, suffix);
+    return sandhi_rpc_call(url, "POST", "{}", SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# GET /session/{id}/element/{eid}/text
+fn sandhi_wd_element_text(base_url, session_id, element_id) {
+    var suffix = _sandhi_wd_build_element_suffix(element_id, "/text");
+    var url = _sandhi_wd_session_url(base_url, session_id, suffix);
+    return sandhi_rpc_call(url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# GET /session/{id}/element/{eid}/attribute/{name}
+fn sandhi_wd_element_attribute(base_url, session_id, element_id, attr_name) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/element/");
+    str_builder_add_cstr(sb, element_id);
+    str_builder_add_cstr(sb, "/attribute/");
+    str_builder_add_cstr(sb, attr_name);
+    var suffix = str_data(str_builder_build(sb));
+    var url = _sandhi_wd_session_url(base_url, session_id, suffix);
+    return sandhi_rpc_call(url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# POST /session/{id}/element/{eid}/value — type text into an element.
+fn sandhi_wd_element_send_keys(base_url, session_id, element_id, text) {
+    var suffix = _sandhi_wd_build_element_suffix(element_id, "/value");
+    var url = _sandhi_wd_session_url(base_url, session_id, suffix);
+    var body_obj = sandhi_json_obj_new();
+    sandhi_json_add_string(body_obj, "text", text);
+    return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+fn _sandhi_wd_build_element_suffix(element_id, tail) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/element/");
+    str_builder_add_cstr(sb, element_id);
+    str_builder_add_cstr(sb, tail);
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# Session-level helpers
+# ================================================================
+
+# GET /status — driver readiness. Doesn't need a session ID.
+fn sandhi_wd_status(base_url) {
+    var url = _sandhi_wd_join(base_url, "/status");
+    return sandhi_rpc_call(url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+# POST /session/{id}/execute/sync — run JS synchronously. `args_json`
+# is a pre-built JSON array cstr (may be "[]"). `script` is the JS src.
+fn sandhi_wd_execute_script(base_url, session_id, script, args_json) {
+    var url = _sandhi_wd_session_url(base_url, session_id, "/execute/sync");
+    var body_obj = sandhi_json_obj_new();
+    sandhi_json_add_string(body_obj, "script", script);
+    if (args_json != 0) {
+        sandhi_json_add_raw(body_obj, "args", args_json);
+    } else {
+        sandhi_json_add_raw(body_obj, "args", "[]");
+    }
+    return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
+}
+
+fn sandhi_wd_version() {
+    return "0.4.0";
+}
