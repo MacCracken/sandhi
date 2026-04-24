@@ -1,11 +1,130 @@
 # sandhi test suite
-# Stdlib auto-included via cyrius.toml
+# Stdlib auto-included via cyrius.cyml; sandhi modules included below.
+
+include "src/error.cyr"
+include "src/server/mod.cyr"
+
+fn test_url_decode() {
+    var a = http_url_decode("hello%20world");
+    assert_streq(a, "hello world", "url_decode: %20 → space");
+
+    var b = http_url_decode("a+b+c");
+    assert_streq(b, "a b c", "url_decode: + → space");
+
+    var c = http_url_decode("%2Fusr%2Flocal");
+    assert_streq(c, "/usr/local", "url_decode: uppercase hex");
+
+    var d = http_url_decode("%2fusr%2flocal");
+    assert_streq(d, "/usr/local", "url_decode: lowercase hex");
+
+    var e = http_url_decode("noescape");
+    assert_streq(e, "noescape", "url_decode: passthrough");
+    return 0;
+}
+
+fn test_path_only() {
+    var a = http_path_only("/foo?bar=baz");
+    assert_streq(a, "/foo", "path_only: strips query");
+
+    var b = http_path_only("/no/query/here");
+    assert_streq(b, "/no/query/here", "path_only: no query passthrough");
+    return 0;
+}
+
+fn test_path_segment() {
+    var a = http_path_segment("/a/b/c", 0);
+    assert_streq(a, "a", "path_segment[0]");
+
+    var b = http_path_segment("/a/b/c", 1);
+    assert_streq(b, "b", "path_segment[1]");
+
+    var c = http_path_segment("/a/b/c", 2);
+    assert_streq(c, "c", "path_segment[2]");
+
+    var d = http_path_segment("/a/b/c", 3);
+    assert_eq(d, 0, "path_segment out-of-range → 0");
+
+    # Segment indexing ignores the query string.
+    var e = http_path_segment("/users/42?ref=1", 1);
+    assert_streq(e, "42", "path_segment: query stripped first");
+    return 0;
+}
+
+fn test_get_param() {
+    var a = http_get_param("/a?foo=1&bar=hello%20world", "bar");
+    assert_streq(a, "hello world", "get_param: decoded value");
+
+    var b = http_get_param("/a?foo=1&bar=baz", "foo");
+    assert_streq(b, "1", "get_param: first key");
+
+    var c = http_get_param("/a?foo=1", "missing");
+    assert_eq(c, 0, "get_param: missing → 0");
+
+    var d = http_get_param("/no-query", "anything");
+    assert_eq(d, 0, "get_param: no query → 0");
+    return 0;
+}
+
+fn test_request_parse() {
+    var req = "GET /hello?name=sandhi HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello";
+    var rlen = strlen(req);
+
+    var method = http_get_method(req, rlen);
+    assert_streq(method, "GET", "get_method");
+
+    var path = http_get_path(req, rlen);
+    assert_streq(path, "/hello?name=sandhi", "get_path");
+
+    var host = http_find_header(req, rlen, "Host");
+    assert_streq(host, "example.com", "find_header: Host");
+
+    # Case-insensitive lookup.
+    var host_lc = http_find_header(req, rlen, "host");
+    assert_streq(host_lc, "example.com", "find_header: case-insensitive");
+
+    var clen = http_content_length(req, rlen);
+    assert_eq(clen, 5, "content_length");
+
+    var bo = http_body_offset(req, rlen);
+    assert_eq(bo, rlen - 5, "body_offset: points at body");
+
+    var missing = http_find_header(req, rlen, "X-Nope");
+    assert_eq(missing, 0, "find_header: absent → 0");
+    return 0;
+}
+
+fn test_sandhi_identity() {
+    assert_streq(sandhi_server_version(), "0.2.0", "server version string");
+    assert_eq(SANDHI_OK, 0, "error enum: OK is 0");
+    assert_streq(sandhi_err_kind_name(SANDHI_ERR_TLS), "TLS", "error kind name");
+    return 0;
+}
 
 fn main() {
     alloc_init();
+
     test_group("smoke");
     assert(1, "true is true");
     assert_eq(1 + 1, 2, "math works");
+
+    test_group("server/url_decode");
+    test_url_decode();
+
+    test_group("server/path_only");
+    test_path_only();
+
+    test_group("server/path_segment");
+    test_path_segment();
+
+    test_group("server/get_param");
+    test_get_param();
+
+    test_group("server/request_parse");
+    test_request_parse();
+
+    test_group("sandhi/identity");
+    test_sandhi_identity();
+
     return assert_summary();
 }
 

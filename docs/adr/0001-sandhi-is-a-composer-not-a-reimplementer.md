@@ -1,6 +1,6 @@
 # 0001 — sandhi is a composer, not a reimplementer
 
-**Status**: Accepted
+**Status**: Accepted (fold-timing clause superseded in part by [ADR 0002](0002-clean-break-fold-at-cyrius-v5-7-0.md))
 **Date**: 2026-04-24
 
 > **Thesis**: stdlib owns the thin network primitives (`http.cyr`, `ws.cyr`, `tls.cyr`, `json.cyr`, `net.cyr`, `base64.cyr`, `http_server.cyr`). sandhi composes those primitives into the full-featured client patterns + service discovery that multiple AGNOS consumers need. Same relationship sakshi has to logging, mabda to GPU primitives, sankoch to compression. See also [agnosticos `design-patterns.md` §9 *Reference Don't Mimic*](https://github.com/MacCracken/agnosticos/blob/main/docs/design-patterns.md#9-reference-dont-mimic) — sandhi is not "Cyrius's gRPC" or "Cyrius's nghttp2"; it's the shape AGNOS consumers actually need, at the scale AGNOS actually operates.
@@ -25,7 +25,7 @@ Two structural questions were open on 2026-04-24:
 
 ## Decision
 
-**sandhi** (Sanskrit सन्धि — *junction, connection, joining*) is scaffolded as a sibling crate that composes stdlib network primitives into service-boundary patterns. Target fold-into-stdlib: **before v5.6.x closeout**, pulled in from the original "after v5.6.x, before v6.0.0" plan per the 2026-04-24 scope decision.
+**sandhi** (Sanskrit सन्धि — *junction, connection, joining*) is scaffolded as a sibling crate that composes stdlib network primitives into service-boundary patterns. Target fold-into-stdlib: ~~before v5.6.x closeout~~ **at Cyrius v5.7.0** as a clean-break fold (see [ADR 0002](0002-clean-break-fold-at-cyrius-v5-7-0.md)) — revised from the original "before v5.6.x closeout" target after reconsidering the alias-window migration model.
 
 Scope of what sandhi owns:
 

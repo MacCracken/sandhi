@@ -10,9 +10,9 @@ The linguistic sense of sandhi (rules at the boundary where two morphemes or wor
 
 ## Status
 
-**0.1.0 — scaffold** (2026-04-24). Module skeletons + ADR 0001 (naming + thesis) landed first. Real implementation fills in next.
+**0.2.0** (2026-04-24). M1 closed: `lib/http_server.cyr` lift-and-shift into `src/server/mod.cyr` landed verbatim; smoke + 28 unit-test assertions green. M2–M5 fill in during the 5.6.x window.
 
-**Target window**: fold-into-Cyrius-stdlib before v5.6.x closeout, same pattern as sakshi / mabda / sankoch / sigil. See [`docs/development/roadmap.md`](docs/development/roadmap.md) for the milestone sequence.
+**Target window**: fold-into-Cyrius-stdlib at v5.7.0 as a clean-break fold — stdlib deletes `lib/http_server.cyr` and gains `lib/sandhi.cyr` in one event; 5.6.YY releases emit a deprecation warning. Follows the sakshi / mabda / sankoch / sigil sibling-then-fold pattern. See [ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md) for the clean-break decision and [`docs/development/roadmap.md`](docs/development/roadmap.md) for the milestone sequence.
 
 ## Modules
 
@@ -23,7 +23,7 @@ The linguistic sense of sandhi (rules at the boundary where two morphemes or wor
 | `src/rpc/mod.cyr` | JSON-RPC dialects (WebDriver wire, Appium, MCP-over-HTTP) | `lib/json.cyr`, sandhi::http |
 | `src/discovery/mod.cyr` | Service discovery — mDNS, daimon-registered, fallback chains | `lib/net.cyr`, bote |
 | `src/tls_policy/mod.cyr` | Cert pinning, mTLS, trust-store management | `lib/tls.cyr` (→ native v5.9.x) |
-| `src/server/mod.cyr` | HTTP server surface — absorbs `lib/http_server.cyr` per cyrius roadmap | stdlib `http_server.cyr` (during migration) |
+| `src/server/mod.cyr` | HTTP server surface — canonical home of the former `lib/http_server.cyr` | stdlib primitives (`alloc`, `net`, `str`, `string`) |
 | `src/error.cyr` | Unified error kinds across submodules | — |
 
 ## Consumers

@@ -75,7 +75,9 @@ stdlib = [
     "assert",
     "net",
     "http",
-    "http_server",
+    # http_server dropped at M1 — lifted into src/server/mod.cyr; stdlib
+    # side retains an alias for downstream consumers during the migration
+    # window (see docs/development/roadmap.md M1 / M6).
     "tls",
     "ws",
     "json",

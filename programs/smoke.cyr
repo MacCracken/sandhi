@@ -23,6 +23,15 @@ fn main() {
     alloc_init();
     var banner = "sandhi smoke: all modules linked clean\n";
     syscall(1, 1, banner, strlen(banner));
+
+    # M1 acceptance — exercise a symbol from the lifted server module
+    # so the linker actually pulls it in (DCE would otherwise elide
+    # everything the smoke doesn't reference). http_url_decode is pure,
+    # side-effect-free, and touches _hsv_* helpers transitively.
+    var decoded = http_url_decode("hello%20sandhi");
+    var migrated = "sandhi smoke: server lift-and-shift linked\n";
+    syscall(1, 1, migrated, strlen(migrated));
+    if (strlen(decoded) != 12) { return 1; }
     return 0;
 }
 

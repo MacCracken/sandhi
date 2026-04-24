@@ -57,12 +57,12 @@ Module responsibilities (file list in `state.md`):
 - **`src/rpc/mod.cyr`** — JSON-RPC dialects (WebDriver, Appium, MCP). Absorbs the RPC-grade side of the `lib/json.cyr depth` item.
 - **`src/discovery/mod.cyr`** — service discovery (mDNS, daimon-registered, chained fallback). The genuinely new surface.
 - **`src/tls_policy/mod.cyr`** — cert pinning, mTLS, trust store. Wraps `lib/tls.cyr` (FFI-to-libssl now; transitions to native when Cyrius v5.9.x TLS lands).
-- **`src/server/mod.cyr`** — future home of `lib/http_server.cyr` (currently interim stdlib; extraction planned before v5.6.x closeout).
+- **`src/server/mod.cyr`** — canonical home of the HTTP server surface (lifted from `lib/http_server.cyr` at M1). Stdlib deletes its copy at Cyrius v5.7.0 per [ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md); until then, stdlib 5.6.YY emits a deprecation warning on include.
 
 ## Key Constraints
 
 - **Compose, don't reimplement.** Stdlib primitives (`http.cyr`, `ws.cyr`, `tls.cyr`, `json.cyr`, `net.cyr`) already exist; sandhi wraps them with policy + dialect + pooling + discovery layers. Do not fork the primitives into sandhi — if a primitive needs work, that's a stdlib patch, not a sandhi feature.
-- **`lib/http_server.cyr` migration is lift-and-shift first, enhance second.** Move the interim-stdlib file into `src/server/mod.cyr` verbatim, keep an alias in stdlib during the migration window, then add routing / middleware on top. No architectural rework mid-migration.
+- **`lib/http_server.cyr` migration is lift-and-shift first, enhance second.** The verbatim lift into `src/server/mod.cyr` landed at M1 (v0.2.0). Routing / middleware layer on top in later milestones. No stdlib-side alias — stdlib deletes its copy in the v5.7.0 clean-break fold per [ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md). No architectural rework mid-migration.
 - **No FFI.** All transport is first-party Cyrius-stdlib today; native TLS replaces the current `lib/tls.cyr` FFI when v5.9.x lands.
 - **Dialect code stays in `src/rpc/`.** When a consumer (yantra, daimon, etc.) needs a new JSON-RPC dialect, the dialect wrapper lives here, not in the consumer. One dialect = one small file. Keeps the public surface of consumer crates clean.
 - **Discovery is pluggable, not load-bearing on any single backend.** `sandhi_discover_chain` lets consumers fall back gracefully; no resolver is a hard dependency.
@@ -99,7 +99,7 @@ When the public API stabilizes and consumer pins are all green:
 
 - **Compose stdlib primitives; don't fork them.** The network primitives in stdlib are the single source of truth for their layer; sandhi sits above them.
 - **Pluggable discovery, opinionated policy.** Discovery is chain-based (multiple backends, fallback-ordered); TLS and auth policy are opinionated defaults with explicit override paths.
-- **Small public surface.** Fold-into-stdlib wants this. Every new verb earns its spot.
+- **Small public surface.** Fold-into-stdlib wants this, and the v5.7.0 clean-break fold ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)) freezes the surface at fold time. Every new verb earns its spot; speculative surface is doubly discouraged since it ships permanently with stdlib.
 - **One dialect per file.** RPC dialects (WebDriver, Appium, MCP) each live in `src/rpc/<dialect>.cyr`. When a consumer needs a new one, add a file, don't grow an existing one.
 - **Reference don't mimic.** sandhi isn't "Cyrius's gRPC" or "Cyrius's nghttp2." It's the service-boundary layer AGNOS needs, shaped by AGNOS consumers. Incumbent shapes inform, don't dictate.
 

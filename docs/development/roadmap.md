@@ -4,7 +4,7 @@
 
 ## Guiding objective
 
-**Fold into Cyrius stdlib before v5.6.x closeout** (per the cyrius roadmap `sandhi repo extraction` item). Every M-level decision is made against *"is this what stdlib wants to carry long-term?"* — speculative surface area doesn't survive that filter and shouldn't land pre-fold.
+**Fold into Cyrius stdlib at v5.7.0** via a clean-break fold (see [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)) — revised from the original "before v5.6.x closeout" target. At v5.7.0 stdlib deletes `lib/http_server.cyr` and gains `lib/sandhi.cyr` in one event; 5.6.YY releases emit a deprecation warning on any include of `lib/http_server.cyr`. Every M-level decision is made against *"is this what stdlib wants to carry long-term?"* — speculative surface area doesn't survive that filter, and with a clean-break fold it also can't land post-5.7.0 without a stdlib release.
 
 ## Milestones
 
@@ -16,16 +16,17 @@
 - Docs scaffolded per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
 - Registration with agnosticos shared-crates awaits greenlight per current discipline (tag-time bumps only)
 
-### M1 — `lib/http_server.cyr` lift-and-shift (v0.2.0)
+### M1 — `lib/http_server.cyr` lift-and-shift (v0.2.0) — ✅ shipped 2026-04-24
 
-*The migration item from the cyrius roadmap. Does the structural move before the feature work.*
+*The migration item from the cyrius roadmap. Does the structural move before the feature work. No stdlib-side alias — stdlib keeps its own copy unchanged through 5.6.x and deletes it in the v5.7.0 clean-break fold per [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md).*
 
-- Copy `lib/http_server.cyr` contents verbatim into `src/server/mod.cyr`
-- Add alias in stdlib: `lib/http_server.cyr` becomes a thin passthrough to `src/server/mod.cyr` symbols (preserves downstream compat)
-- `dist/sandhi.cyr` bundle starts being produced by `cyrius distlib`
-- Retire the stdlib alias at fold-into-stdlib (M6)
+- Copy `lib/http_server.cyr` contents verbatim into `src/server/mod.cyr` ✅
+- `cyrius.cyml` drops `http_server` from `[deps.stdlib]`; sandhi's build pulls the local copy ✅
+- Smoke program references a migrated symbol so DCE doesn't elide the module ✅
+- Pure-helper unit tests exercising the lifted surface ✅
+- `dist/sandhi.cyr` producible by `cyrius distlib` (first formal bundle pairs with M6 fold prep)
 
-**Acceptance**: existing `lib/http_server.cyr` consumers build green against the aliased stdlib; sandhi's own smoke program exercises the migrated symbols.
+**Acceptance**: sandhi's smoke program exercises the migrated symbols; `cyrius test tests/sandhi.tcyr` green (28 assertions); stdlib `lib/http_server.cyr` remains untouched through the 5.6.x window. Coordination for the 5.6.YY deprecation warning and the 5.7.0 delete is on the cyrius agent's side, not sandhi's.
 
 ### M2 — `sandhi::http::client` real implementation (v0.3.0)
 
@@ -75,18 +76,26 @@
 
 **Acceptance**: pinned-cert tcyr test rejects a cert with wrong fingerprint; mTLS tcyr test authenticates with a client cert; trust-store override works.
 
-### M6 — Fold into Cyrius stdlib (v1.0.0)
+### M6 — Fold into Cyrius stdlib (v1.0.0) — clean-break at v5.7.0
 
-*Target: before v5.6.x closeout.*
+*Per [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md): one event at the Cyrius v5.7.0 release gate, not a separate sandhi milestone. The 5.6.YY window is the notice period; 5.7.0 is the cutover.*
 
-- Coordinate with cyrius agent for the stdlib-side change
-- `cyrius distlib` produces a clean self-contained `dist/sandhi.cyr`
-- Cyrius stdlib adds `lib/sandhi.cyr` vendored from the bundle
-- Downstream consumers switch from `[deps.sandhi]` to plain stdlib include
-- Interim `lib/http_server.cyr` alias retires — now handled by `lib/sandhi.cyr`'s server module
+**5.6.YY window (before fold)**
+- sandhi lands M2–M5 as a sibling crate; consumers pin via `[deps.sandhi]` for the non-server features
+- Cyrius 5.6.YY releases emit a deprecation warning on `include "lib/http_server.cyr"` — names `lib/sandhi.cyr` as the replacement and v5.7.0 as the cutover
+- `cyrius distlib` produces a clean self-contained `dist/sandhi.cyr` ready for upstream vendor
+- sandhi freezes the public surface once M5 is green (no speculative verbs past that point)
+
+**v5.7.0 (the fold event)**
+- Cyrius stdlib adds `lib/sandhi.cyr` vendored from `dist/sandhi.cyr`
+- Cyrius stdlib deletes `lib/http_server.cyr` — no alias, no passthrough, no empty stub
+- Downstream consumers' 5.7.0-compatible tags switch `include "lib/http_server.cyr"` → `include "lib/sandhi.cyr"`, and any `[deps.sandhi]` pin is dropped
 - sandhi repo enters maintenance mode; subsequent patches land via the Cyrius release cycle
 
-**Acceptance**: consumer repos (yantra, hoosh, ifran, daimon, mela, vidya, sit-remote, ark-remote) all build against stdlib-folded sandhi without pins. `dist/sandhi.cyr` is byte-identical to `lib/sandhi.cyr` at the fold commit.
+**Acceptance** (checked at the 5.7.0 release gate, not in this repo):
+- Consumer repos (yantra, hoosh, ifran, daimon, mela, vidya, sit-remote, ark-remote) build against 5.7.0 stdlib without `[deps.sandhi]` pins
+- `dist/sandhi.cyr` is byte-identical to `lib/sandhi.cyr` at the fold commit
+- No include of `lib/http_server.cyr` survives anywhere in AGNOS
 
 ## What sandhi does NOT plan to do
 
@@ -100,6 +109,6 @@ Explicit non-goals (to survive the fold-into-stdlib filter):
 
 ## Why this roadmap exists
 
-The fold-into-stdlib target is aggressive (weeks, not months). That constraint forces scope discipline — the roadmap's shape is "minimum viable + what existing consumers actually need + nothing speculative." M6's acceptance criteria are checked by existing repos continuing to build, not by new features landing.
+The fold-into-stdlib target is aggressive — sandhi's sibling-crate phase is the 5.6.x window, with the fold happening in one event at the v5.7.0 release gate. That constraint forces scope discipline: the roadmap's shape is "minimum viable + what existing consumers actually need + nothing speculative." M6's acceptance criteria are checked at the 5.7.0 release gate by existing repos continuing to build, not by new features landing in this repo.
 
-See [ADR 0001](../adr/0001-sandhi-is-a-composer-not-a-reimplementer.md) for the naming + thesis; [`state.md`](state.md) for live progress.
+See [ADR 0001](../adr/0001-sandhi-is-a-composer-not-a-reimplementer.md) for the naming + thesis, [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md) for the clean-break fold decision, and [`state.md`](state.md) for live progress.
