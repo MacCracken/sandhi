@@ -2,12 +2,14 @@
 # Stdlib auto-included via cyrius.cyml; sandhi modules included below.
 
 include "src/error.cyr"
+include "src/obs/trace.cyr"
 include "src/http/headers.cyr"
 include "src/http/url.cyr"
 include "src/http/conn.cyr"
 include "src/http/response.cyr"
 include "src/net/resolve.cyr"
 include "src/http/client.cyr"
+include "src/http/retry.cyr"
 include "src/http/sse.cyr"
 include "src/http/stream.cyr"
 include "src/rpc/json.cyr"
@@ -433,14 +435,14 @@ fn test_client_host_header() {
 
 fn test_client_build_request_get() {
     var req = _sandhi_client_build_request("GET", "/path", "example.com", 0, 0);
-    var expected = "GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: sandhi/0.7.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: sandhi/0.7.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: GET no body no user headers");
     return 0;
 }
 
 fn test_client_build_request_post() {
     var req = _sandhi_client_build_request("POST", "/api", "api.example.com", 0, 42);
-    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nUser-Agent: sandhi/0.7.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nUser-Agent: sandhi/0.7.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: POST emits Content-Length");
     return 0;
 }
@@ -448,7 +450,7 @@ fn test_client_build_request_post() {
 fn test_client_build_request_post_empty_body() {
     # POST with body_len 0 should still emit Content-Length: 0.
     var req = _sandhi_client_build_request("POST", "/ping", "example.com", 0, 0);
-    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nUser-Agent: sandhi/0.7.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nUser-Agent: sandhi/0.7.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: POST empty body");
     return 0;
 }
@@ -460,7 +462,7 @@ fn test_client_build_request_user_headers() {
     var req = _sandhi_client_build_request("GET", "/me", "api.example.com", h, 0);
     # User-supplied Accept != Accept-Encoding, so both defaults still inject.
     # User hasn't supplied User-Agent either, so the default lands.
-    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: sandhi/0.7.1\r\nAccept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
+    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: sandhi/0.7.2\r\nAccept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: user headers serialized");
     return 0;
 }
@@ -534,8 +536,14 @@ fn test_http_options_defaults() {
     var o = sandhi_http_options_new();
     assert_eq(sandhi_http_options_follow(o), 0, "opts: follow default off");
     assert_eq(sandhi_http_options_hops(o), 5, "opts: max_hops default 5");
-    assert_eq(sandhi_http_options_follow(0), 0, "opts: null → default off");
-    assert_eq(sandhi_http_options_hops(0), 5, "opts: null → default 5");
+    assert_eq(sandhi_http_options_bytes(o), 262144, "opts: max_bytes default 256K");
+    assert_eq(sandhi_http_options_get_read_ms(o), 0, "opts: read_ms default 0");
+    assert_eq(sandhi_http_options_get_write_ms(o), 0, "opts: write_ms default 0");
+    assert_eq(sandhi_http_options_follow(0), 0, "opts: null → follow off");
+    assert_eq(sandhi_http_options_hops(0), 5, "opts: null → hops 5");
+    assert_eq(sandhi_http_options_bytes(0), 262144, "opts: null → bytes 256K");
+    assert_eq(sandhi_http_options_get_read_ms(0), 0, "opts: null → read_ms 0");
+    assert_eq(sandhi_http_options_get_write_ms(0), 0, "opts: null → write_ms 0");
     return 0;
 }
 
@@ -543,8 +551,140 @@ fn test_http_options_mutators() {
     var o = sandhi_http_options_new();
     sandhi_http_options_follow_redirects(o, 1);
     sandhi_http_options_max_hops(o, 10);
+    sandhi_http_options_max_response_bytes(o, 65536);
+    sandhi_http_options_read_ms(o, 5000);
+    sandhi_http_options_write_ms(o, 2500);
     assert_eq(sandhi_http_options_follow(o), 1, "opts: follow=1 sticks");
     assert_eq(sandhi_http_options_hops(o), 10, "opts: max_hops=10 sticks");
+    assert_eq(sandhi_http_options_bytes(o), 65536, "opts: max_bytes=64K sticks");
+    assert_eq(sandhi_http_options_get_read_ms(o), 5000, "opts: read_ms=5000 sticks");
+    assert_eq(sandhi_http_options_get_write_ms(o), 2500, "opts: write_ms=2500 sticks");
+    return 0;
+}
+
+fn test_retry_defaults() {
+    var r = sandhi_retry_new();
+    assert_eq(_sandhi_retry_attempts(r), 3, "retry: default 3 attempts");
+    assert_eq(_sandhi_retry_initial(r), 50, "retry: default initial 50ms");
+    assert_eq(_sandhi_retry_max(r), 2000, "retry: default max 2000ms");
+    assert_eq(_sandhi_retry_attempts(0), 3, "retry: null → 3 attempts");
+    assert_eq(_sandhi_retry_initial(0), 50, "retry: null → initial 50");
+    assert_eq(_sandhi_retry_max(0), 2000, "retry: null → max 2000");
+    return 0;
+}
+
+fn test_retry_mutators() {
+    var r = sandhi_retry_new();
+    sandhi_retry_max_attempts(r, 5);
+    sandhi_retry_initial_backoff_ms(r, 100);
+    sandhi_retry_max_backoff_ms(r, 30000);
+    assert_eq(_sandhi_retry_attempts(r), 5, "retry: attempts sticks");
+    assert_eq(_sandhi_retry_initial(r), 100, "retry: initial sticks");
+    assert_eq(_sandhi_retry_max(r), 30000, "retry: max sticks");
+    return 0;
+}
+
+fn test_retry_should_retry_on_transient_err() {
+    # Synthesize responses via _sandhi_resp_err so we don't need a
+    # live peer. Transient → should retry.
+    var r_connect = _sandhi_resp_err(SANDHI_ERR_CONNECT);
+    assert_eq(_sandhi_retry_should_retry(r_connect), 1, "retry: CONNECT → retry");
+
+    var r_timeout = _sandhi_resp_err(SANDHI_ERR_TIMEOUT);
+    assert_eq(_sandhi_retry_should_retry(r_timeout), 1, "retry: TIMEOUT → retry");
+
+    var r_disc = _sandhi_resp_err(SANDHI_ERR_DISCOVERY);
+    assert_eq(_sandhi_retry_should_retry(r_disc), 1, "retry: DISCOVERY → retry");
+    return 0;
+}
+
+fn test_retry_should_not_retry_on_4xx_or_permanent_err() {
+    # A real 4xx response — parseable, non-5xx status.
+    var raw = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+    var r_404 = sandhi_http_response_parse(raw, strlen(raw));
+    assert_eq(_sandhi_retry_should_retry(r_404), 0, "retry: 404 → no retry");
+
+    # 401 AUTH-ish — caller's credential problem, not transient.
+    var raw2 = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
+    var r_401 = sandhi_http_response_parse(raw2, strlen(raw2));
+    assert_eq(_sandhi_retry_should_retry(r_401), 0, "retry: 401 → no retry");
+
+    # PARSE err — sandhi gave us bad input; retry won't help.
+    var r_parse = _sandhi_resp_err(SANDHI_ERR_PARSE);
+    assert_eq(_sandhi_retry_should_retry(r_parse), 0, "retry: PARSE → no retry");
+
+    # TLS err — cert problem; retrying won't fix it.
+    var r_tls = _sandhi_resp_err(SANDHI_ERR_TLS);
+    assert_eq(_sandhi_retry_should_retry(r_tls), 0, "retry: TLS → no retry");
+    return 0;
+}
+
+fn test_server_options_defaults() {
+    var o = sandhi_server_options_new();
+    assert_eq(sandhi_server_options_get_idle_ms(o), 30000, "server opts: idle_ms default 30s");
+    assert_eq(sandhi_server_options_get_max_conns(o), 128, "server opts: max_conns default 128");
+    assert_eq(sandhi_server_options_get_idle_ms(0), 30000, "server opts: null → idle_ms 30s");
+    assert_eq(sandhi_server_options_get_max_conns(0), 128, "server opts: null → max_conns 128");
+    return 0;
+}
+
+fn test_server_options_mutators() {
+    var o = sandhi_server_options_new();
+    sandhi_server_options_idle_ms(o, 5000);
+    sandhi_server_options_max_conns(o, 64);
+    assert_eq(sandhi_server_options_get_idle_ms(o), 5000, "server opts: idle_ms=5000 sticks");
+    assert_eq(sandhi_server_options_get_max_conns(o), 64, "server opts: max_conns=64 sticks");
+    return 0;
+}
+
+fn test_trace_default_disabled() {
+    # Default off — calling begin/end is a no-op (depth stays 0).
+    assert_eq(sandhi_trace_enabled(), 0, "trace: default disabled");
+    var d0 = sandhi_trace_depth();
+    sandhi_trace_begin("sandhi.test");
+    assert_eq(sandhi_trace_depth(), d0, "trace: disabled begin is no-op");
+    sandhi_trace_end();
+    return 0;
+}
+
+fn test_trace_enable_affects_depth() {
+    # With tracing enabled, begin/end moves depth up and back.
+    # Redirect sakshi to the ring buffer so we don't spam stderr
+    # during the test run.
+    sakshi_set_output(SK_OUT_BUFFER);
+    sandhi_trace_enable(1);
+    assert_eq(sandhi_trace_enabled(), 1, "trace: enabled sticks");
+    var d0 = sandhi_trace_depth();
+    sandhi_trace_begin("sandhi.test.outer");
+    assert_eq(sandhi_trace_depth(), d0 + 1, "trace: depth +1 after begin");
+    sandhi_trace_begin("sandhi.test.inner");
+    assert_eq(sandhi_trace_depth(), d0 + 2, "trace: depth +2 after nested begin");
+    sandhi_trace_end();
+    assert_eq(sandhi_trace_depth(), d0 + 1, "trace: depth back to +1 after inner end");
+    sandhi_trace_end();
+    assert_eq(sandhi_trace_depth(), d0, "trace: depth back to baseline");
+    # Restore default state for subsequent tests.
+    sandhi_trace_enable(0);
+    sakshi_set_output(SK_OUT_STDERR);
+    return 0;
+}
+
+fn test_retry_should_retry_on_5xx() {
+    var raw500 = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+    var r500 = sandhi_http_response_parse(raw500, strlen(raw500));
+    assert_eq(_sandhi_retry_should_retry(r500), 1, "retry: 500 → retry");
+
+    var raw502 = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
+    var r502 = sandhi_http_response_parse(raw502, strlen(raw502));
+    assert_eq(_sandhi_retry_should_retry(r502), 1, "retry: 502 → retry");
+
+    var raw503 = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+    var r503 = sandhi_http_response_parse(raw503, strlen(raw503));
+    assert_eq(_sandhi_retry_should_retry(r503), 1, "retry: 503 → retry");
+
+    var raw200 = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    var r200 = sandhi_http_response_parse(raw200, strlen(raw200));
+    assert_eq(_sandhi_retry_should_retry(r200), 0, "retry: 200 → no retry");
     return 0;
 }
 
@@ -598,7 +738,7 @@ fn test_resolve_parse_response_synthetic() {
     store8(&pkt + 32, 60);  # TTL low byte
     store8(&pkt + 34, 4);  # RDLENGTH
     store8(&pkt + 35, 10); store8(&pkt + 36, 0); store8(&pkt + 37, 0); store8(&pkt + 38, 1);  # 10.0.0.1
-    var ip = _sandhi_resolve_parse_response(&pkt, 39);
+    var ip = _sandhi_resolve_parse_response(&pkt, 39, 0x1234);
     # 10.0.0.1 → bytes 10,0,0,1 → LE uint32 = 0x0100000A
     assert_eq(ip, 0x0100000A, "dns parse: A record extracted");
     return 0;
@@ -608,9 +748,10 @@ fn test_resolve_parse_nxdomain() {
     # Response with RCODE=3 (NXDOMAIN) should be rejected.
     var pkt[16];
     memset(&pkt, 0, 16);
+    store8(&pkt + 0, 0x12); store8(&pkt + 1, 0x34);  # ID
     store8(&pkt + 2, 0x81); store8(&pkt + 3, 0x83);  # RCODE=3
     store8(&pkt + 7, 0);  # ANCOUNT=0
-    assert_eq(_sandhi_resolve_parse_response(&pkt, 12), 0 - 1, "dns parse: NXDOMAIN → -1");
+    assert_eq(_sandhi_resolve_parse_response(&pkt, 12, 0x1234), 0 - 1, "dns parse: NXDOMAIN → -1");
     return 0;
 }
 
@@ -618,8 +759,180 @@ fn test_resolve_parse_no_answer() {
     # Well-formed header but ANCOUNT=0.
     var pkt[12];
     memset(&pkt, 0, 12);
+    store8(&pkt + 0, 0x12); store8(&pkt + 1, 0x34);  # ID
     store8(&pkt + 2, 0x81); store8(&pkt + 3, 0x80);
-    assert_eq(_sandhi_resolve_parse_response(&pkt, 12), 0 - 1, "dns parse: no answers → -1");
+    assert_eq(_sandhi_resolve_parse_response(&pkt, 12, 0x1234), 0 - 1, "dns parse: no answers → -1");
+    return 0;
+}
+
+fn test_resolve_parse_txid_mismatch_rejected() {
+    # Same minimal packet as the synthetic test but we pass a DIFFERENT
+    # expected_id — simulates an off-path poisoning packet arriving
+    # with the wrong TXID. Must be rejected.
+    var pkt[64];
+    memset(&pkt, 0, 64);
+    store8(&pkt + 0, 0x12); store8(&pkt + 1, 0x34);  # ID
+    store8(&pkt + 2, 0x81); store8(&pkt + 3, 0x80);
+    store8(&pkt + 5, 1); store8(&pkt + 7, 1);
+    store8(&pkt + 12, 1); store8(&pkt + 13, 97);
+    store8(&pkt + 14, 3); store8(&pkt + 15, 99); store8(&pkt + 16, 111); store8(&pkt + 17, 109);
+    store8(&pkt + 18, 0);
+    store8(&pkt + 20, 1); store8(&pkt + 22, 1);
+    store8(&pkt + 23, 0xC0); store8(&pkt + 24, 0x0C);
+    store8(&pkt + 26, 1); store8(&pkt + 28, 1);
+    store8(&pkt + 32, 60); store8(&pkt + 34, 4);
+    store8(&pkt + 35, 10); store8(&pkt + 38, 1);
+    # Pass wrong expected_id (0xDEAD) — must reject.
+    assert_eq(_sandhi_resolve_parse_response(&pkt, 39, 0xDEAD), 0 - 1, "dns parse: TXID mismatch → rejected");
+    # Sanity: correct id → accepted.
+    assert_eq(_sandhi_resolve_parse_response(&pkt, 39, 0x1234), 0x0100000A, "dns parse: correct TXID accepted");
+    return 0;
+}
+
+fn test_resolve_parse_wrong_answer_name_skipped() {
+    # Pkt where question is "a.com" but the answer RR's owner name is
+    # "b.com" (not a compression pointer to the question). Must NOT
+    # return the A value — should scan past it and fail.
+    var pkt[64];
+    memset(&pkt, 0, 64);
+    store8(&pkt + 0, 0x12); store8(&pkt + 1, 0x34);  # ID
+    store8(&pkt + 2, 0x81); store8(&pkt + 3, 0x80);
+    store8(&pkt + 5, 1);  # QDCOUNT=1
+    store8(&pkt + 7, 1);  # ANCOUNT=1
+    # Question "a.com"
+    store8(&pkt + 12, 1); store8(&pkt + 13, 97);
+    store8(&pkt + 14, 3); store8(&pkt + 15, 99); store8(&pkt + 16, 111); store8(&pkt + 17, 109);
+    store8(&pkt + 18, 0);
+    store8(&pkt + 20, 1); store8(&pkt + 22, 1);
+    # Answer owner = "b.com" (inline, not pointer)
+    store8(&pkt + 23, 1); store8(&pkt + 24, 98);     # "b"
+    store8(&pkt + 25, 3); store8(&pkt + 26, 99); store8(&pkt + 27, 111); store8(&pkt + 28, 109);  # "com"
+    store8(&pkt + 29, 0);  # root
+    store8(&pkt + 31, 1);  # QTYPE=A
+    store8(&pkt + 33, 1);  # QCLASS=IN
+    store8(&pkt + 37, 60); # TTL low
+    store8(&pkt + 39, 4);  # RDLENGTH
+    store8(&pkt + 40, 9); store8(&pkt + 43, 1);  # 9.0.0.1 — not what we asked for
+    assert_eq(_sandhi_resolve_parse_response(&pkt, 44, 0x1234), 0 - 1, "dns parse: wrong answer-name rejected");
+    return 0;
+}
+
+fn test_resolve_name_eq_with_compression() {
+    # Verify _sandhi_resolve_name_eq follows compression pointers.
+    var pkt[32];
+    memset(&pkt, 0, 32);
+    # At offset 0: "a.com"
+    store8(&pkt + 0, 1); store8(&pkt + 1, 97);
+    store8(&pkt + 2, 3); store8(&pkt + 3, 99); store8(&pkt + 4, 111); store8(&pkt + 5, 109);
+    store8(&pkt + 6, 0);
+    # At offset 7: pointer back to offset 0 (0xC000).
+    store8(&pkt + 7, 0xC0); store8(&pkt + 8, 0);
+    # Should match itself at offsets 0 and 7.
+    assert_eq(_sandhi_resolve_name_eq(&pkt, 32, 0, 7), 1, "name_eq: inline vs pointer to same");
+    assert_eq(_sandhi_resolve_name_eq(&pkt, 32, 0, 0), 1, "name_eq: identical offsets");
+    return 0;
+}
+
+fn test_resolve_name_eq_case_insensitive() {
+    var pkt[24];
+    memset(&pkt, 0, 24);
+    # "A.CoM" at offset 0, "a.com" at offset 7 — must match per RFC.
+    store8(&pkt + 0, 1); store8(&pkt + 1, 65);  # "A"
+    store8(&pkt + 2, 3); store8(&pkt + 3, 67); store8(&pkt + 4, 111); store8(&pkt + 5, 77);  # "CoM"
+    store8(&pkt + 6, 0);
+    store8(&pkt + 7, 1); store8(&pkt + 8, 97);  # "a"
+    store8(&pkt + 9, 3); store8(&pkt + 10, 99); store8(&pkt + 11, 111); store8(&pkt + 12, 109);  # "com"
+    store8(&pkt + 13, 0);
+    assert_eq(_sandhi_resolve_name_eq(&pkt, 24, 0, 7), 1, "name_eq: case-insensitive");
+    return 0;
+}
+
+fn test_resolve_name_eq_different_names() {
+    var pkt[24];
+    memset(&pkt, 0, 24);
+    # "a.com" at offset 0, "b.com" at offset 7 — must differ.
+    store8(&pkt + 0, 1); store8(&pkt + 1, 97);
+    store8(&pkt + 2, 3); store8(&pkt + 3, 99); store8(&pkt + 4, 111); store8(&pkt + 5, 109);
+    store8(&pkt + 6, 0);
+    store8(&pkt + 7, 1); store8(&pkt + 8, 98);
+    store8(&pkt + 9, 3); store8(&pkt + 10, 99); store8(&pkt + 11, 111); store8(&pkt + 12, 109);
+    store8(&pkt + 13, 0);
+    assert_eq(_sandhi_resolve_name_eq(&pkt, 24, 0, 7), 0, "name_eq: different names");
+    return 0;
+}
+
+fn test_resolve_parse_aaaa_synthetic() {
+    # Synthetic AAAA response: header + "a.com" question + 1 AAAA answer.
+    # Answer IPv6 = 2001:db8::1 (bytes: 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 01)
+    var pkt[80];
+    memset(&pkt, 0, 80);
+    store8(&pkt + 0, 0x12); store8(&pkt + 1, 0x34);  # TXID
+    store8(&pkt + 2, 0x81); store8(&pkt + 3, 0x80);  # QR=1 RD=1 RA=1
+    store8(&pkt + 5, 1);  # QDCOUNT=1
+    store8(&pkt + 7, 1);  # ANCOUNT=1
+    # Question "a.com"
+    store8(&pkt + 12, 1); store8(&pkt + 13, 97);
+    store8(&pkt + 14, 3); store8(&pkt + 15, 99); store8(&pkt + 16, 111); store8(&pkt + 17, 109);
+    store8(&pkt + 18, 0);
+    store8(&pkt + 20, 0x1C);  # QTYPE=AAAA (28) — low byte
+    store8(&pkt + 22, 1);     # QCLASS=IN
+    # Answer
+    store8(&pkt + 23, 0xC0); store8(&pkt + 24, 0x0C);  # name ptr → offset 12
+    store8(&pkt + 26, 0x1C);  # TYPE=AAAA
+    store8(&pkt + 28, 1);     # CLASS=IN
+    store8(&pkt + 32, 60);    # TTL low
+    store8(&pkt + 34, 16);    # RDLENGTH=16
+    # 2001:db8::1
+    store8(&pkt + 35, 0x20); store8(&pkt + 36, 0x01);
+    store8(&pkt + 37, 0x0d); store8(&pkt + 38, 0xb8);
+    # bytes 39..49 stay zero
+    store8(&pkt + 50, 0x01);
+    var out = _sandhi_resolve_parse_response_aaaa(&pkt, 51, 0x1234);
+    assert_neq(out, 0, "aaaa parse: returned a buffer");
+    assert_eq(load8(out + 0), 0x20, "aaaa parse: byte 0");
+    assert_eq(load8(out + 1), 0x01, "aaaa parse: byte 1");
+    assert_eq(load8(out + 2), 0x0d, "aaaa parse: byte 2");
+    assert_eq(load8(out + 3), 0xb8, "aaaa parse: byte 3");
+    assert_eq(load8(out + 15), 0x01, "aaaa parse: last byte");
+    assert_eq(load8(out + 14), 0x00, "aaaa parse: zero-run preserved");
+    return 0;
+}
+
+fn test_resolve_parse_aaaa_txid_mismatch() {
+    # Same AAAA packet, wrong expected_id → must reject with null.
+    var pkt[80];
+    memset(&pkt, 0, 80);
+    store8(&pkt + 0, 0x12); store8(&pkt + 1, 0x34);
+    store8(&pkt + 2, 0x81); store8(&pkt + 3, 0x80);
+    store8(&pkt + 5, 1); store8(&pkt + 7, 1);
+    store8(&pkt + 12, 1); store8(&pkt + 13, 97);
+    store8(&pkt + 14, 3); store8(&pkt + 15, 99); store8(&pkt + 16, 111); store8(&pkt + 17, 109);
+    store8(&pkt + 18, 0);
+    store8(&pkt + 20, 0x1C); store8(&pkt + 22, 1);
+    store8(&pkt + 23, 0xC0); store8(&pkt + 24, 0x0C);
+    store8(&pkt + 26, 0x1C); store8(&pkt + 28, 1);
+    store8(&pkt + 32, 60); store8(&pkt + 34, 16);
+    store8(&pkt + 50, 0x01);
+    assert_eq(_sandhi_resolve_parse_response_aaaa(&pkt, 51, 0xBEEF), 0, "aaaa parse: TXID mismatch → null");
+    return 0;
+}
+
+fn test_resolve_random_u16_is_random() {
+    # Pull two samples; probability of collision is 1/65536. Three
+    # pulls makes it ~(1/65536)^2 ≈ 2e-10 — call it "effectively
+    # zero" for CI purposes. If all three match a previously-seen
+    # constant like 0x1234, we'd flag the PRNG path.
+    var r1 = _sandhi_resolve_random_u16();
+    var r2 = _sandhi_resolve_random_u16();
+    var r3 = _sandhi_resolve_random_u16();
+    # Bounds check.
+    assert_eq(r1 >= 0 && r1 < 65536, 1, "random_u16: in range");
+    assert_eq(r2 >= 0 && r2 < 65536, 1, "random_u16: in range");
+    assert_eq(r3 >= 0 && r3 < 65536, 1, "random_u16: in range");
+    # Anti-constant: not all three the same (or same as the old fixed TXID).
+    var all_same = 0;
+    if (r1 == r2 && r2 == r3) { all_same = 1; }
+    assert_eq(all_same, 0, "random_u16: not constant (3-sample heuristic)");
     return 0;
 }
 
@@ -1365,6 +1678,33 @@ fn main() {
     test_group("http/options/mutators");
     test_http_options_mutators();
 
+    test_group("http/retry/defaults");
+    test_retry_defaults();
+
+    test_group("http/retry/mutators");
+    test_retry_mutators();
+
+    test_group("http/retry/should_retry_transient");
+    test_retry_should_retry_on_transient_err();
+
+    test_group("http/retry/should_not_retry_permanent");
+    test_retry_should_not_retry_on_4xx_or_permanent_err();
+
+    test_group("http/retry/should_retry_5xx");
+    test_retry_should_retry_on_5xx();
+
+    test_group("obs/trace/default_disabled");
+    test_trace_default_disabled();
+
+    test_group("obs/trace/enable_depth");
+    test_trace_enable_affects_depth();
+
+    test_group("server/options/defaults");
+    test_server_options_defaults();
+
+    test_group("server/options/mutators");
+    test_server_options_mutators();
+
     test_group("net/resolve/label_encode");
     test_resolve_label_encode();
 
@@ -1379,6 +1719,30 @@ fn main() {
 
     test_group("net/resolve/parse_no_answer");
     test_resolve_parse_no_answer();
+
+    test_group("net/resolve/txid_mismatch");
+    test_resolve_parse_txid_mismatch_rejected();
+
+    test_group("net/resolve/wrong_answer_name");
+    test_resolve_parse_wrong_answer_name_skipped();
+
+    test_group("net/resolve/name_eq_compression");
+    test_resolve_name_eq_with_compression();
+
+    test_group("net/resolve/name_eq_case");
+    test_resolve_name_eq_case_insensitive();
+
+    test_group("net/resolve/name_eq_diff");
+    test_resolve_name_eq_different_names();
+
+    test_group("net/resolve/random_u16");
+    test_resolve_random_u16_is_random();
+
+    test_group("net/resolve/aaaa_synthetic");
+    test_resolve_parse_aaaa_synthetic();
+
+    test_group("net/resolve/aaaa_txid_mismatch");
+    test_resolve_parse_aaaa_txid_mismatch();
 
     test_group("rpc/json/build_flat");
     test_json_build_flat();

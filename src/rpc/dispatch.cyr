@@ -115,7 +115,17 @@ fn _sandhi_rpc_http_send(url, http_method, body_json, headers) {
 # Core RPC call. Sends a JSON body, extracts dialect-specific errors
 # from the response. Returns an rpc-response struct — check
 # sandhi_rpc_ok() or err_kind for failure modes.
+#
+# Outer trace wrapper — opt-in via `sandhi_trace_enable(1)`. The
+# span is the RPC round-trip; the nested HTTP span fires inside it.
 fn sandhi_rpc_call(url, http_method, body_json, dialect) {
+    sandhi_trace_begin("sandhi.rpc");
+    var r = _sandhi_rpc_call_impl(url, http_method, body_json, dialect);
+    sandhi_trace_end();
+    return r;
+}
+
+fn _sandhi_rpc_call_impl(url, http_method, body_json, dialect) {
     var headers = sandhi_headers_new();
     if (body_json != 0) {
         sandhi_headers_set(headers, "Content-Type", "application/json");
@@ -128,6 +138,13 @@ fn sandhi_rpc_call(url, http_method, body_json, dialect) {
 # Variant that accepts caller-supplied headers (for auth, session
 # cookies, etc.). Content-Type / Accept still auto-injected when absent.
 fn sandhi_rpc_call_with_headers(url, http_method, body_json, user_headers, dialect) {
+    sandhi_trace_begin("sandhi.rpc");
+    var r = _sandhi_rpc_call_with_headers_impl(url, http_method, body_json, user_headers, dialect);
+    sandhi_trace_end();
+    return r;
+}
+
+fn _sandhi_rpc_call_with_headers_impl(url, http_method, body_json, user_headers, dialect) {
     var headers = user_headers;
     if (headers == 0) { headers = sandhi_headers_new(); }
     if (body_json != 0 && sandhi_headers_has(headers, "Content-Type") == 0) {

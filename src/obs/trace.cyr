@@ -1,0 +1,57 @@
+# sandhi/obs/trace — thin wrapper around stdlib sakshi's span API.
+#
+# sandhi wraps `sakshi_span_enter` / `_exit` so that all sandhi-emitted
+# spans share a naming convention ("sandhi.<subsystem>.<verb>") and
+# so that the call-site code reads at the sandhi layer, not as stdlib
+# internals. Keeps the fold-into-stdlib public surface clean of direct
+# sakshi coupling beyond the one `lib/sakshi.cyr` include.
+#
+# Span model:
+#   sandhi_trace_begin(name) — pushes a span onto sakshi's stack
+#   sandhi_trace_end()       — pops + emits elapsed-ns on exit
+#
+# Stack max-depth = 16 (per sakshi). sandhi's nesting is shallow
+# (HTTP call → DNS resolve + RPC dispatch → HTTP call), so the 16-
+# slot budget is comfortable.
+#
+# Attribute support deferred: sakshi's public API is span-only today
+# (no `sakshi_span_attr` surfaced). When sakshi grows attrs, sandhi
+# threads them through here. Until then, the span name carries enough
+# context (method + host) for the common consumer needs.
+
+# Opt-in flag. Default 0 = every span call is a no-op; sandhi stays
+# silent. Consumers that want spans call sandhi_trace_enable(1) once
+# at process start (typically right after configuring sakshi's output
+# target). We default off rather than inherit from sakshi so an
+# application that uses sakshi for its own app-level events isn't
+# flooded with sandhi-internal ENTER/EXIT noise it didn't ask for.
+var _sandhi_trace_enabled = 0;
+
+fn sandhi_trace_enable(on) {
+    _sandhi_trace_enabled = on;
+    return 0;
+}
+
+fn sandhi_trace_enabled() {
+    return _sandhi_trace_enabled;
+}
+
+fn sandhi_trace_begin(name) {
+    if (_sandhi_trace_enabled == 0) { return 0; }
+    sakshi_span_enter(name, strlen(name));
+    return 0;
+}
+
+fn sandhi_trace_end() {
+    if (_sandhi_trace_enabled == 0) { return 0; }
+    sakshi_span_exit();
+    return 0;
+}
+
+fn sandhi_trace_depth() {
+    return sakshi_span_depth();
+}
+
+fn sandhi_trace_version() {
+    return "0.7.2";
+}

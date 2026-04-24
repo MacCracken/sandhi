@@ -432,6 +432,58 @@ fn http_recv_request(cfd, buf, max) {
 var _hsv_req_buf = 0;
 var HSV_REQ_BUF_SIZE = 65536;
 
+# ================================================================
+# Server options (added 0.7.2)
+# ================================================================
+#
+# Struct layout (16 bytes):
+#   +0   idle_ms    (int: per-connection recv timeout; 0 = blocking.
+#                    Default 30000 = 30 s; matches Go `net/http.Server.
+#                    IdleTimeout`. Slowloris guard — a peer that sends
+#                    a partial request then stalls gets dropped.)
+#   +8   max_conns  (int: reserved for 0.8.0+. Server today is single-
+#                    threaded accept/serve; honoring this requires a
+#                    thread-pool or epoll-based accept model, which is
+#                    bigger than 0.7.2 budget. Getter/setter exist
+#                    so the option survey-surface stays stable across
+#                    0.7.2 → 0.8.0.)
+
+enum SandhiServerOptOff {
+    SANDHI_SERVER_OPT_OFF_IDLE_MS   = 0;
+    SANDHI_SERVER_OPT_OFF_MAX_CONNS = 8;
+}
+
+var SANDHI_SERVER_OPT_STRUCT_SIZE = 16;
+var SANDHI_SERVER_DEFAULT_IDLE_MS = 30000;
+var SANDHI_SERVER_DEFAULT_MAX_CONNS = 128;
+
+fn sandhi_server_options_new() {
+    var o = alloc(SANDHI_SERVER_OPT_STRUCT_SIZE);
+    store64(o + SANDHI_SERVER_OPT_OFF_IDLE_MS, SANDHI_SERVER_DEFAULT_IDLE_MS);
+    store64(o + SANDHI_SERVER_OPT_OFF_MAX_CONNS, SANDHI_SERVER_DEFAULT_MAX_CONNS);
+    return o;
+}
+
+fn sandhi_server_options_idle_ms(opts, ms) {
+    store64(opts + SANDHI_SERVER_OPT_OFF_IDLE_MS, ms);
+    return 0;
+}
+
+fn sandhi_server_options_max_conns(opts, n) {
+    store64(opts + SANDHI_SERVER_OPT_OFF_MAX_CONNS, n);
+    return 0;
+}
+
+fn sandhi_server_options_get_idle_ms(opts) {
+    if (opts == 0) { return SANDHI_SERVER_DEFAULT_IDLE_MS; }
+    return load64(opts + SANDHI_SERVER_OPT_OFF_IDLE_MS);
+}
+
+fn sandhi_server_options_get_max_conns(opts) {
+    if (opts == 0) { return SANDHI_SERVER_DEFAULT_MAX_CONNS; }
+    return load64(opts + SANDHI_SERVER_OPT_OFF_MAX_CONNS);
+}
+
 # Bind addr:port, listen, accept-loop. For each connection:
 #   read full request → call handler_fp(ctx, cfd, buf, bytes) → close cfd.
 #
@@ -441,7 +493,16 @@ var HSV_REQ_BUF_SIZE = 65536;
 #
 # Returns 1 on bind/listen failure; never returns on success (loops forever).
 fn http_server_run(addr, port, handler_fp, ctx) {
+    return http_server_run_opts(addr, port, handler_fp, ctx, 0);
+}
+
+# Opts-aware variant. Applies SO_RCVTIMEO on each accepted connection
+# to bound slow/idle peers (slowloris guard). max_conns is accepted
+# but not honored today — server stays single-threaded until 0.8.0.
+fn http_server_run_opts(addr, port, handler_fp, ctx, opts) {
     if (_hsv_req_buf == 0) { _hsv_req_buf = alloc(HSV_REQ_BUF_SIZE); }
+
+    var idle_ms = sandhi_server_options_get_idle_ms(opts);
 
     var sfd_r = tcp_socket();
     if (is_err_result(sfd_r) == 1) { return 1; }
@@ -458,6 +519,13 @@ fn http_server_run(addr, port, handler_fp, ctx) {
         var cr = sock_accept(sfd);
         if (is_err_result(cr) == 0) {
             var cfd = payload(cr);
+            # Apply per-connection idle timeout (slowloris guard).
+            # _sandhi_conn_set_timeout_ms is sandhi/http/conn.cyr's
+            # setsockopt helper — works on any socket fd, not just
+            # client-side ones.
+            if (idle_ms > 0) {
+                _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO);
+            }
             var n = http_recv_request(cfd, _hsv_req_buf, HSV_REQ_BUF_SIZE - 1);
             if (n > 0) {
                 fncall4(handler_fp, ctx, cfd, _hsv_req_buf, n);

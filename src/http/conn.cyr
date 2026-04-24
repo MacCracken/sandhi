@@ -27,9 +27,32 @@ enum SandhiConnOff {
 
 var SANDHI_CONN_STRUCT_SIZE = 24;
 
+# Linux socket option constants. stdlib `lib/net.cyr` exposes
+# `SYS_SETSOCKOPT=54` + `SOL_SOCKET=1` + `SO_REUSEADDR=2`; we add the
+# receive/send timeout values locally (Linux x86_64/arm64 parity —
+# values are stable across both per include/uapi/asm-generic/socket.h).
+var _SANDHI_SO_RCVTIMEO = 20;
+var _SANDHI_SO_SNDTIMEO = 21;
+
+# Linux errno for "would block / timed out on socket with SO_RCVTIMEO".
+var _SANDHI_EAGAIN = 11;
+
 fn sandhi_conn_kind(c)    { return load64(c + SANDHI_CONN_OFF_KIND); }
 fn sandhi_conn_fd(c)      { return load64(c + SANDHI_CONN_OFF_FD); }
 fn sandhi_conn_tls_ctx(c) { return load64(c + SANDHI_CONN_OFF_TLS_CTX); }
+
+# Set SO_RCVTIMEO or SO_SNDTIMEO to `ms` milliseconds. Value is a
+# `struct timeval { tv_sec: i64, tv_usec: i64 }` = 16 bytes on
+# x86_64 / aarch64 Linux. ms<=0 is a no-op.
+fn _sandhi_conn_set_timeout_ms(fd, ms, opt) {
+    if (ms <= 0) { return 0; }
+    var tv = alloc(16);
+    var sec = ms / 1000;
+    var usec = (ms - sec * 1000) * 1000;
+    store64(tv, sec);
+    store64(tv + 8, usec);
+    return syscall(SYS_SETSOCKOPT, fd, SOL_SOCKET, opt, tv, 16);
+}
 
 # Open a connection to the given IPv4 address (network-byte-order
 # uint32 from sandhi_resolve_ipv4 or a hand-built literal) and port.
@@ -41,6 +64,18 @@ fn sandhi_conn_tls_ctx(c) { return load64(c + SANDHI_CONN_OFF_TLS_CTX); }
 # address packed as an int (e.g. 127.0.0.1 → 0x0100007F on little-
 # endian hosts per INADDR_LOOPBACK).
 fn sandhi_conn_open(addr, port, use_tls, sni_host) {
+    return sandhi_conn_open_timed(addr, port, use_tls, sni_host, 0, 0);
+}
+
+# Open a connection with per-operation timeouts. read_ms and write_ms
+# apply to subsequent recv/send via SO_RCVTIMEO/SO_SNDTIMEO; 0 means
+# blocking (kernel default). connect() itself is NOT timed here —
+# that's a 0.7.3 item awaiting non-blocking connect primitives.
+#
+# On a timeout during recv/send, the underlying syscall returns
+# EAGAIN (-11). sandhi_conn_recv/send convert that to -_SANDHI_EAGAIN
+# so callers can distinguish "connection broke" from "deadline fired".
+fn sandhi_conn_open_timed(addr, port, use_tls, sni_host, read_ms, write_ms) {
     var sfd_r = tcp_socket();
     if (is_err_result(sfd_r) == 1) { return 0; }
     var fd = payload(sfd_r);
@@ -50,6 +85,12 @@ fn sandhi_conn_open(addr, port, use_tls, sni_host) {
         sock_close(fd);
         return 0;
     }
+
+    # Apply recv/send timeouts post-connect. A failure to set either
+    # isn't fatal — fall through as an untimed connection; the caller
+    # gets legacy blocking semantics rather than a mystery 0.
+    if (read_ms > 0)  { _sandhi_conn_set_timeout_ms(fd, read_ms,  _SANDHI_SO_RCVTIMEO); }
+    if (write_ms > 0) { _sandhi_conn_set_timeout_ms(fd, write_ms, _SANDHI_SO_SNDTIMEO); }
 
     var tls_ctx = 0;
     var kind = SANDHI_CONN_PLAIN;
@@ -73,30 +114,40 @@ fn sandhi_conn_open(addr, port, use_tls, sni_host) {
     return conn;
 }
 
-# Send `len` bytes through the connection. Returns bytes sent, or
-# (0 - 1) on error. Full write not guaranteed — caller loops on partial.
+# Send `len` bytes through the connection. Returns bytes sent, 0 on
+# peer-close, or a negative errno on error. Specifically returns
+# `0 - _SANDHI_EAGAIN` when SO_SNDTIMEO fires — callers map to
+# SANDHI_ERR_TIMEOUT. Any other negative is a CONNECT-class error.
+# Full write not guaranteed — caller loops on partial.
 fn sandhi_conn_send(conn, buf, len) {
     if (conn == 0) { return 0 - 1; }
     if (sandhi_conn_kind(conn) == SANDHI_CONN_TLS) {
+        # tls_write returns negative on error (pre-libssl-pthread-fix
+        # we can't reach here anyway); passthrough keeps contract.
         return tls_write(sandhi_conn_tls_ctx(conn), buf, len);
     }
     var r = sock_send(sandhi_conn_fd(conn), buf, len);
-    if (is_err_result(r) == 1) { return 0 - 1; }
+    if (is_err_result(r) == 1) { return 0 - payload(r); }
     return payload(r);
 }
 
-# Send a full cstr. Loops on partial writes. Returns 0 on success, -1 on failure.
+# Send a full cstr. Loops on partial writes. Returns 0 on success,
+# `0 - _SANDHI_EAGAIN` on send-timeout, -1 on any other failure.
 fn sandhi_conn_send_all(conn, buf, len) {
     var sent = 0;
     while (sent < len) {
         var n = sandhi_conn_send(conn, buf + sent, len - sent);
+        if (n == 0 - _SANDHI_EAGAIN) { return 0 - _SANDHI_EAGAIN; }
         if (n <= 0) { return 0 - 1; }
         sent = sent + n;
     }
     return 0;
 }
 
-# Receive up to `max` bytes. Returns bytes read (0 at EOF), or (0 - 1) on error.
+# Receive up to `max` bytes. Returns bytes read, 0 at EOF, or a
+# negative errno on error. `0 - _SANDHI_EAGAIN` signals a read
+# timeout (SO_RCVTIMEO fired); callers treat other negatives as
+# CONNECT-class.
 fn sandhi_conn_recv(conn, buf, max) {
     if (conn == 0) { return 0 - 1; }
     if (sandhi_conn_kind(conn) == SANDHI_CONN_TLS) {
@@ -105,18 +156,20 @@ fn sandhi_conn_recv(conn, buf, max) {
         return tr;
     }
     var r = sock_recv(sandhi_conn_fd(conn), buf, max);
-    if (is_err_result(r) == 1) { return 0 - 1; }
+    if (is_err_result(r) == 1) { return 0 - payload(r); }
     return payload(r);
 }
 
 # Drain the connection into `buf` up to `max` bytes. Reads until EOF or
-# max reached. Returns total bytes read, or (0 - 1) on error. Always
-# null-terminates buf at the returned length (buf must have room for max+1).
+# max reached. Returns total bytes read on success; `0 - _SANDHI_EAGAIN`
+# if read-timeout fires; `0 - 1` for any other error. Always null-
+# terminates buf at the returned length (buf must have room for max+1).
 fn sandhi_conn_recv_all(conn, buf, max) {
     var have = 0;
     var going = 1;
     while (going == 1 && have < max) {
         var n = sandhi_conn_recv(conn, buf + have, max - have);
+        if (n == 0 - _SANDHI_EAGAIN) { return 0 - _SANDHI_EAGAIN; }
         if (n < 0) { return 0 - 1; }
         if (n == 0) { going = 0; }
         else { have = have + n; }
@@ -136,5 +189,5 @@ fn sandhi_conn_close(conn) {
 }
 
 fn sandhi_conn_version() {
-    return "0.3.0";
+    return "0.7.2";
 }

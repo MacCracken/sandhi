@@ -235,7 +235,9 @@ fn sandhi_http_stream_opts(url, method, user_headers, body, body_len, cb, ctx, o
 
     var use_tls = 0;
     if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { use_tls = 1; }
-    var conn = sandhi_conn_open(addr, sandhi_url_port(u), use_tls, sandhi_url_host(u));
+    var read_ms = sandhi_http_options_get_read_ms(opts);
+    var write_ms = sandhi_http_options_get_write_ms(opts);
+    var conn = sandhi_conn_open_timed(addr, sandhi_url_port(u), use_tls, sandhi_url_host(u), read_ms, write_ms);
     if (conn == 0) {
         if (use_tls == 1) { return _sandhi_stream_result(0, 0, SANDHI_ERR_TLS, 0); }
         return _sandhi_stream_result(0, 0, SANDHI_ERR_CONNECT, 0);
@@ -255,16 +257,28 @@ fn sandhi_http_stream_opts(url, method, user_headers, body, body_len, cb, ctx, o
 }
 
 # Send the request + drive the read loop. Extracted so the caller
-# stays under the Cyrius local-count threshold.
+# stays under the Cyrius local-count threshold. Maps timeout errno
+# (SO_RCVTIMEO / SO_SNDTIMEO) to SANDHI_ERR_TIMEOUT; any other I/O
+# fail maps to SANDHI_ERR_CONNECT.
 fn _sandhi_stream_run(conn, req, body, body_len, cb, ctx, cap) {
     var req_data = str_data(req);
     var req_len = strlen(req_data);
-    if (sandhi_conn_send_all(conn, req_data, req_len) < 0) {
+    var sw = sandhi_conn_send_all(conn, req_data, req_len);
+    if (sw == 0 - _SANDHI_EAGAIN) {
+        sandhi_conn_close(conn);
+        return _sandhi_stream_result(0, 0, SANDHI_ERR_TIMEOUT, 0);
+    }
+    if (sw < 0) {
         sandhi_conn_close(conn);
         return _sandhi_stream_result(0, 0, SANDHI_ERR_CONNECT, 0);
     }
     if (body_len > 0 && body != 0) {
-        if (sandhi_conn_send_all(conn, body, body_len) < 0) {
+        var sb = sandhi_conn_send_all(conn, body, body_len);
+        if (sb == 0 - _SANDHI_EAGAIN) {
+            sandhi_conn_close(conn);
+            return _sandhi_stream_result(0, 0, SANDHI_ERR_TIMEOUT, 0);
+        }
+        if (sb < 0) {
             sandhi_conn_close(conn);
             return _sandhi_stream_result(0, 0, SANDHI_ERR_CONNECT, 0);
         }
@@ -284,6 +298,7 @@ fn _sandhi_stream_read_loop(conn, cb, ctx, cap) {
     var header_end = 0 - 1;
     while (header_end < 0) {
         var n = sandhi_conn_recv(conn, scratch, _SANDHI_STREAM_READ_CHUNK);
+        if (n == 0 - _SANDHI_EAGAIN) { return _sandhi_stream_result(0, 0, SANDHI_ERR_TIMEOUT, 0); }
         if (n < 0) { return _sandhi_stream_result(0, 0, SANDHI_ERR_CONNECT, 0); }
         if (n == 0) { return _sandhi_stream_result(0, 0, SANDHI_ERR_PROTOCOL, 0); }
         if (_sandhi_sb_append(header_sb, scratch, n) < 0) {
@@ -343,6 +358,7 @@ fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, ca
 
         if (going == 1) {
             var n = sandhi_conn_recv(conn, scratch, _SANDHI_STREAM_READ_CHUNK);
+            if (n == 0 - _SANDHI_EAGAIN) { return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_TIMEOUT, 0); }
             if (n < 0) { return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_CONNECT, 0); }
             if (n == 0) { going = 0; }
             else {

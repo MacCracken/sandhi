@@ -4,6 +4,123 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-04-24
+
+Reliability + observability patch. Per-phase timeouts, retry wrappers
+for idempotent methods, DNS hardening (TXID randomization + answer-
+name verification + compression-pointer loop-guard), AAAA resolver
+primitive, opt-in sakshi tracing, server-side idle-timeout. All
+composed on stdlib (`syscalls` / `net` / `sakshi` / `chrono`); no
+new external dependencies, no FFI, no stdlib patches required.
+
+Pulled in four P1 security items while we were in `net/resolve.cyr`
+(TXID randomness, answer-name match, compression-loop guard, source-
+port leveraged implicitly via kernel ephemeral-port assignment). These
+were on the 0.9.x P1 list; landing them together with the reliability
+work is cheaper than a second read of the same file.
+
+395 assertions green (+61 on the 0.7.1 baseline of 334).
+
+### Added
+- **http/client**: `sandhi_http_options_read_ms(opts, ms)` /
+  `sandhi_http_options_write_ms(opts, ms)` setters + matching getters.
+  Wired via direct `SYS_SETSOCKOPT` (`SO_RCVTIMEO=20` / `SO_SNDTIMEO=21`
+  defined locally; stdlib `net.cyr` exposes the syscall + `SOL_SOCKET`
+  but not the per-direction constants). Options struct 24→40 bytes.
+  `SANDHI_ERR_TIMEOUT` (defined but never raised through 0.7.1) now
+  fires when the SO_*TIMEO kernel deadline elapses.
+- **http/conn**: `sandhi_conn_open_timed(addr, port, use_tls, sni,
+  read_ms, write_ms)` variant. `sandhi_conn_open(...)` remains as a
+  0-timeout wrapper. `sandhi_conn_send` / `_recv` / `_send_all` /
+  `_recv_all` now return `0 - _SANDHI_EAGAIN` (= -11) on kernel
+  timeout, letting callers distinguish timeout from other errors.
+- **http/retry** (new `src/http/retry.cyr`): `sandhi_retry_new()` +
+  `sandhi_retry_max_attempts(r, n)` / `_initial_backoff_ms(r, ms)` /
+  `_max_backoff_ms(r, ms)`. Public verbs `sandhi_http_get_retry` /
+  `_head_retry` / `_put_retry` / `_delete_retry` for idempotent
+  methods only — POST/PATCH retry stays explicit. Retries on
+  `CONNECT` / `TIMEOUT` / `DISCOVERY` / 5xx; not on 4xx / `PARSE` /
+  `TLS` / `PROTOCOL`. Exponential backoff (2×) capped at max. Defaults:
+  3 attempts, initial 50 ms, max 2000 ms. Sleeps via `sleep_ms` from
+  stdlib `chrono`.
+- **net/resolve**: `sandhi_resolve_ipv6(host)` — AAAA resolver
+  returning a 16-byte net-byte-order buffer (or 0 on failure). Shares
+  the hardened parse path (TXID echo + answer-name match). Client-side
+  v6 connect integration deferred (no consumer has asked) — callers
+  that need v6 dialing today use `sandhi_resolve_ipv6` + a future
+  `sandhi_conn_open_v6_timed(...)` verb when it lands.
+- **net/resolve hardening**: random 16-bit TXID per query via
+  `/dev/urandom` (closes the Kaminsky cache-poisoning window). New
+  `_sandhi_resolve_name_eq(buf, blen, off_a, off_b)` follows wire-
+  format names with compression pointers, case-insensitive per RFC
+  1035 §2.3.3, capped at 32 hops per name (`_SANDHI_RESOLVE_MAX_PTR_HOPS`).
+  `_sandhi_resolve_parse_response` now verifies TXID echo + answer
+  name matches question name — RRs for other hosts are scanned past,
+  not trusted. Response qdcount forced to 1 (we only ever send 1
+  question; anything else is malformed). All checks in one patch
+  rather than spread across 0.9.x; the review finding is closed.
+- **obs/trace** (new `src/obs/trace.cyr`): thin opt-in wrapper around
+  stdlib sakshi's span API. `sandhi_trace_enable(on)` gates emission
+  (default off — silent). `sandhi_trace_begin(name)` / `_end()` wrap
+  the three boundary calls: `_sandhi_http_do` emits `sandhi.http`,
+  `sandhi_resolve_ipv4` / `_ipv6` emit `sandhi.dns.v4` / `.v6`,
+  `sandhi_rpc_call` / `_with_headers` emit `sandhi.rpc`. Nesting
+  depth works as expected — the HTTP span appears inside the RPC span
+  naturally. Attribute support deferred until sakshi grows span-attrs.
+- **server**: `sandhi_server_options_new()` + `_idle_ms(opts, ms)` /
+  `_max_conns(opts, n)` + getters. New `http_server_run_opts(addr,
+  port, handler_fp, ctx, opts)` applies `SO_RCVTIMEO` to each accepted
+  connection (slowloris guard; default 30 000 ms matches Go
+  `net/http.Server.IdleTimeout`). `http_server_run(...)` remains as a
+  0-opts wrapper. `max_conns` accepted but **not enforced** in 0.7.2 —
+  server is single-thread accept/serve; concurrent model lands with
+  0.8.0's thread-pool or epoll work.
+
+### Changed
+- **http/client** redirect follower + dispatch thread `read_ms` /
+  `write_ms` through. `_sandhi_http_do`, `_sandhi_http_exchange`,
+  and `_sandhi_http_follow` grew the two new parameters.
+- **http/stream**: opts-aware variant honors `read_ms` / `write_ms`
+  on the streaming connection. Read-loop + body-loop now map
+  `0 - _SANDHI_EAGAIN` to `SANDHI_ERR_TIMEOUT` (was `SANDHI_ERR_CONNECT`
+  collapse).
+- **net/resolve**: `_sandhi_resolve_parse_response(buf, blen, expected_id)`
+  signature changed — third parameter required. Callers inside the
+  module + the synthetic-parse test updated.
+- **src/main.cyr**: `sandhi_version()` → `0.7.2`.
+- **cyrius.cyml `[lib].modules`**: added `src/obs/trace.cyr` (right
+  after `error.cyr` — earliest, so all downstream modules can call
+  into it) and `src/http/retry.cyr` (after `client.cyr`, before
+  `sse.cyr`).
+
+### Deferred from 0.7.2 at planning time
+- **connect_ms** option + non-blocking connect path — requires either
+  local syscall-number constants for `SYS_POLL` / `SYS_GETSOCKOPT`
+  or a stdlib ask. Scheduled for 0.7.3.
+- **total_ms** option — needs monotonic-deadline threading through
+  every I/O phase. 0.7.3 alongside connect_ms.
+- **Happy Eyeballs (RFC 6555)** — parallel v4+v6 connect race. Post-v1.
+- **Connection pool / keep-alive** — shifted to 0.8.0 alongside HTTP/2
+  since h2 multiplexing changes the pool checkout shape. Roadmap
+  0.7.2 entry updated with rationale.
+- **Client-side IPv6 connect path** (`sandhi_conn_open_v6_timed`) —
+  resolver shipped; connect verb awaits a consumer ask.
+- **Server concurrent connections** (`max_conns` enforcement) — 0.8.0.
+
+### Notes
+- No live-network tests added for timeout / retry — both require a
+  blackhole fixture. Unit tests cover options getters/setters,
+  retry-should-retry decision logic, and the EAGAIN-on-socket code
+  path via synthetic response structs.
+- sakshi is always-compiled-in (it's a stdlib dep anyway); the trace
+  layer just gates emission. Zero runtime cost when disabled — every
+  `sandhi_trace_begin`/`_end` short-circuits on the `_sandhi_trace_enabled`
+  check before touching sakshi.
+- DNS hardening bumps parse cost marginally (extra name-walk per
+  answer RR). For typical 1-answer responses the overhead is <1 μs;
+  CNAME-chain responses scale linearly with chain length but those
+  are rare in the A-record path.
+
 ## [0.7.1] — 2026-04-24
 
 Quick-wins patch. No behavior change for existing callers; new default

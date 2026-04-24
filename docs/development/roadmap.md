@@ -107,46 +107,65 @@ behavior change for existing callers; targeted correctness + ergonomics.*
 consumer ergonomics before the HTTP/2 feature push. No new dialects,
 no new security surface — that's 0.8.x.*
 
-- **Per-phase timeouts** in `sandhi_http_options` (`connect_ms` /
-  `read_ms` / `total_ms`). `SANDHI_ERR_TIMEOUT` is defined but never
-  raised today; this wires it up via stdlib `net.cyr` setsockopt
-  (requires confirming `SO_RCVTIMEO` / `SO_SNDTIMEO` exposure — ask
-  stdlib if missing, don't fork).
-- **Opt-in connection pool / keep-alive** — new `src/http/pool.cyr`.
-  Map<(host, port, tls), vec<idle_conn>> with `max_per_host` and
-  `idle_timeout_ms`. `sandhi_http_pool_new(max, idle_ms)` + an option
-  field threading the pool through `_opts` variants. Discard on
-  non-2xx or server-sent `Connection: close`. ~100 ms saved per
-  request at 50 ms RTT for consumer RPC loops.
+- **Phase-2 timeouts** in `sandhi_http_options` (`read_ms` / `write_ms`)
+  via `SO_RCVTIMEO` / `SO_SNDTIMEO` through direct `SYS_SETSOCKOPT`
+  calls. `SANDHI_ERR_TIMEOUT` (defined but never raised today) gets
+  wired for receive/send paths. **Deferred to 0.7.3**: `connect_ms`
+  + `total_ms` — both need non-blocking connect + poll (or a
+  monotonic-deadline wrapper), which requires either local syscall
+  constants for `SYS_POLL`/`SYS_GETSOCKOPT` or an upstream ask to
+  expose them in stdlib. Keeping 0.7.2 scope tight.
 - **AAAA (IPv6) DNS** in `src/net/resolve.cyr`. A-only today. Ship
-  the resolver first; Happy Eyeballs (RFC 6555) can wait.
-- **DNS hardening** — TXID randomness + source-port randomization +
-  negative-cache (tight overlap with 0.8.x P1 list; landing early
-  because it's low-risk and isolated). EDNS0 + 0x20 case
-  randomization stay deferred.
+  the resolver first; Happy Eyeballs (RFC 6555) can wait. Adds a
+  local `sockaddr_in6()` builder + `sock_connect6()` wrapper since
+  stdlib exposes `AF_INET6=10` but no v6-specific verbs.
+- **DNS hardening** — TXID randomness (via `/dev/urandom` as `sigil`
+  does) + ephemeral source-port rotation + answer-name match against
+  question + compression-pointer loop-detection. The last two were
+  originally on the 0.9.x P1 list; pulled forward here because
+  they're touching the same file as the TXID work, and landing them
+  together is strictly cheaper than returning for them later. EDNS0
+  + 0x20 case randomization stay deferred.
 - **sakshi tracing hooks** — one span each at `_sandhi_http_do`,
   `sandhi_rpc_call`, `sandhi_resolve_ipv4`. ~50 lines in a new
-  `src/obs/trace.cyr`.
+  `src/obs/trace.cyr` wrapping `sakshi_span_enter(name, len)` /
+  `_exit()` from stdlib `lib/sakshi.cyr`.
 - **Server caps** in `src/server/mod.cyr` — `max_concurrent_connections`,
   `per_connection_idle_ms` (30000 default). Go `net/http.Server`
   defaults as the reference.
 - **Retry-with-backoff** wrapper verbs for idempotent methods only —
   `sandhi_http_get_retry` / `_head_retry` / `_put_retry` / `_delete_retry`.
-  Exponential 50 → 100 → 200 ms capped. POST retry stays explicit.
+  Exponential 50 → 100 → 200 ms capped via `clock_now_ms()`. POST
+  retry stays explicit.
 
-### 0.8.0 — HTTP/2 (pulled forward from the defer list)
+**Deferred from 0.7.2 at planning time**:
+
+- **Connection pool / keep-alive** → moved to **0.8.0** alongside
+  HTTP/2. Rationale: h2 multiplexes streams over one connection, which
+  changes the pool's checkout shape (per-stream rather than per-
+  connection). Designing both at once avoids a mid-release refactor.
+
+### 0.8.0 — HTTP/2 + connection pool (bundled)
 
 *Moved into 0.8.0 at user direction. Adds the single biggest
 consumer-facing capability increase between now and fold — h2c +
 ALPN negotiation + per-stream body framing, composed on top of the
-existing HTTP/1.1 surface rather than replacing it.*
+existing HTTP/1.1 surface rather than replacing it. Connection pool
+bundled here because h2 multiplexing + HTTP/1.1 keep-alive share the
+same checkout machinery — designed together, not bolted on.*
 
 - ALPN negotiation in `tls_policy::apply` — advertise `h2, http/1.1`
   and select based on server offer. Plain-HTTP path stays 1.1 only
   (h2c prior-knowledge may land later if a consumer asks).
-- Connection multiplexing — one TCP+TLS connection carries many
-  streams. Reuses the 0.7.2 connection pool but with per-stream
-  rather than per-connection checkout.
+- **Connection pool** (new `src/http/pool.cyr`) — map keyed by
+  `host:port:tls` via stdlib `map_u64_*`. `sandhi_http_pool_new(
+  max_per_host, idle_timeout_ms)` + option-field threading. For h2:
+  one connection, vec of active streams. For 1.1: vec of idle
+  connections, checkout/return. Drops `Connection: close` when pool
+  attached; sends `Connection: keep-alive`. Discards on non-2xx +
+  server-sent close. ~100 ms saved per request at 50 ms RTT.
+- Connection multiplexing — one TCP+TLS connection carries many h2
+  streams.
 - Frame parser + HPACK decoder in a new `src/http/h2/*` submodule.
   HPACK static + dynamic table per RFC 7541.
 - Public surface unchanged — `sandhi_http_get(url, headers)` picks
@@ -187,9 +206,6 @@ v5.7.0 fold.*
 
 **P1 sweep** (each its own small release within 0.9.x):
 
-- **DNS**: TXID randomness + compression-pointer loop-detection +
-  answer-name match + source-port randomization (overlap with 0.7.2
-  item — remaining pieces land here if not yet done)
 - **SSE**: parser re-entrance fix (thread state via ctx, not
   module-scope globals); `id:` with NUL ignored per WHATWG
 - **Headers**: duplicate detection for `Host` / `Content-Length` /

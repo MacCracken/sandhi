@@ -46,12 +46,14 @@ output = "build/sandhi-smoke"
 [lib]
 modules = [
     "src/error.cyr",
+    "src/obs/trace.cyr",
     "src/http/headers.cyr",
     "src/http/url.cyr",
     "src/http/conn.cyr",
     "src/http/response.cyr",
     "src/net/resolve.cyr",
     "src/http/client.cyr",
+    "src/http/retry.cyr",
     "src/http/sse.cyr",
     "src/http/stream.cyr",
     "src/tls_policy/policy.cyr",

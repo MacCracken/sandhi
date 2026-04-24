@@ -4,6 +4,8 @@
 
 ## Version
 
+**0.7.2** — 2026-04-24. Reliability + observability patch. `sandhi_http_options` gained `read_ms` / `write_ms` (via SO_RCVTIMEO / SO_SNDTIMEO through direct `SYS_SETSOCKOPT`; `SANDHI_ERR_TIMEOUT` now actually fires). New `src/http/retry.cyr` — `sandhi_http_get_retry` / `_head_retry` / `_put_retry` / `_delete_retry` for idempotent methods; exponential backoff; retries on CONNECT/TIMEOUT/DISCOVERY/5xx. `src/net/resolve.cyr` hardened — random TXID via `/dev/urandom`, answer-name match via new `_sandhi_resolve_name_eq` (follows compression pointers, case-insensitive, 32-hop guard), P1 security items pulled forward. New `sandhi_resolve_ipv6` AAAA resolver (client-side v6 connect wiring deferred). New `src/obs/trace.cyr` — opt-in sakshi spans at the three boundaries (`sandhi.http`, `sandhi.dns.v4`/`.v6`, `sandhi.rpc`); silent by default. `src/server/mod.cyr` grew options struct + `http_server_run_opts` with per-connection SO_RCVTIMEO (slowloris guard; default 30 s). **395 test assertions green (+61 on 0.7.1)**. Deferred from 0.7.2: `connect_ms`/`total_ms` (need non-blocking connect + deadlines; 0.7.3), connection pool (→ 0.8.0 with HTTP/2), Happy Eyeballs (post-v1), client-side v6 connect (awaits consumer ask).
+
 **0.7.1** — 2026-04-24. Quick-wins patch from the 0.7.0 external security + gaps review. Default `User-Agent: sandhi/<version>` + `Accept-Encoding: identity` request headers (override-preserving). New `sandhi_http_options_max_response_bytes` field caps both the buffered-client scratch and the streaming buffers (via new `sandhi_http_stream_opts` variant). New `err_message` slot on the response struct (reserved for 0.8.x security diagnostics; struct grows 40→48 bytes). CI `workflow_call` trigger added so `release.yml` can reuse `ci.yml`. `src/main.cyr` docstring corrected. All 333 test assertions remain valid (new surface not yet asserted; tests added alongside the 0.8.x security pass). Planning: roadmap rewrites for 0.7.2 medium items, 0.8.0 HTTP/2, 0.8.x P0 sweep, 0.9.x P1 + closeout, 1.0.0 fold, post-v1 defer list.
 
 **0.7.0** — M3.5 closed 2026-04-24. SSE streaming + incremental chunked decode. `sandhi_http_stream(url, method, headers, body, body_len, cb, ctx)` drives a callback per parsed event; WHATWG-compliant SSE parser; MCP-over-SSE via `sandhi_rpc_mcp_stream`. Also carries the stdlib-deps audit (added `mmap`/`dynlib`/`fdlopen`/`bigint`/`freelist`) that unstuck the HTTPS investigation, and the toolchain pin bump to 5.6.30. 333 test assertions green.
@@ -36,18 +38,20 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 
 | Module | Lines | Status |
 |--------|-------|--------|
-| `src/main.cyr` | 48 | public API declarations — docstring refreshed at 0.7.1 |
+| `src/main.cyr` | 48 | public API declarations — docstring refreshed at 0.7.1; version bumped 0.7.2 |
+| `src/http/retry.cyr` | 128 | **0.7.2 new** — retry-with-backoff wrappers for idempotent methods (GET/HEAD/PUT/DELETE). Exponential 2× capped at max_backoff_ms. |
+| `src/obs/trace.cyr` | 57 | **0.7.2 new** — opt-in sakshi-span wrapper. Default off; `sandhi_trace_enable(1)` turns on emission. Boundary spans: `sandhi.http` / `sandhi.dns.v4` / `sandhi.dns.v6` / `sandhi.rpc`. |
 | `src/error.cyr` | 33 | scaffold — error kinds defined |
 | `src/http/headers.cyr` | 258 | **M2 done** — key-value store, case-insensitive lookup, wire-format serialize + parse |
 | `src/http/url.cyr` | 193 | **M2 done** — http/https parser with CRLF hardening |
-| `src/http/conn.cyr` | 140 | **M2 done** — tagged plain/TLS connection abstraction |
+| `src/http/conn.cyr` | 193 | **M2 done** — tagged plain/TLS connection abstraction. 0.7.2: `sandhi_conn_open_timed` + SO_RCVTIMEO/SO_SNDTIMEO helpers; EAGAIN surfaced as `0 - _SANDHI_EAGAIN` so callers can distinguish timeout from broken-pipe. |
 | `src/http/response.cyr` | 310 | **M2 done** — Content-Length + chunked + close-delimited body framing. 0.7.1: `err_message` slot added (struct 40→48). |
-| `src/net/resolve.cyr` | 290 | **M2 done** — native UDP DNS (RFC 1035), /etc/resolv.conf + 8.8.8.8 fallback |
-| `src/http/client.cyr` | 371 | **M2 done** — POST/PUT/DELETE/PATCH/HEAD/GET, redirect following, options struct. 0.7.1: default UA + `Accept-Encoding: identity`; options gained `max_response_bytes`. |
+| `src/net/resolve.cyr` | 557 | **M2 done** — native UDP DNS (RFC 1035). 0.7.2: random TXID via `/dev/urandom`; `_sandhi_resolve_name_eq` with compression-pointer following + 32-hop guard; answer-name match against question in the A + AAAA parsers; new `sandhi_resolve_ipv6` + `_sandhi_resolve_build_query_aaaa` + `_sandhi_resolve_parse_response_aaaa`; trace-wrap on both public verbs. Four P1 security items pulled forward from 0.9.x. |
+| `src/http/client.cyr` | 426 | **M2 done** — POST/PUT/DELETE/PATCH/HEAD/GET, redirect following, options struct. 0.7.1: default UA + `Accept-Encoding: identity`; options gained `max_response_bytes`. 0.7.2: options gained `read_ms` / `write_ms`; `SANDHI_ERR_TIMEOUT` now raised; trace-wrap around `_sandhi_http_do`. |
 | `src/http/sse.cyr` | 244 | **M3.5 done** — WHATWG SSE event parser |
-| `src/http/stream.cyr` | 406 | **M3.5 done** — streaming HTTP + incremental chunked decoder + callback-per-event dispatch. 0.7.1: `sandhi_http_stream_opts` variant honors `max_response_bytes`. |
+| `src/http/stream.cyr` | 422 | **M3.5 done** — streaming HTTP + incremental chunked decoder + callback-per-event dispatch. 0.7.1: `sandhi_http_stream_opts` variant honors `max_response_bytes`. 0.7.2: opts-variant also honors `read_ms`/`write_ms`; EAGAIN maps to `SANDHI_ERR_TIMEOUT` in the read + body loops. |
 | `src/rpc/json.cyr` | 365 | **M3 done** — nested JSON build + dotted-path extract |
-| `src/rpc/dispatch.cyr` | 169 | **M3 done** — JSON-over-HTTP + dialect-aware error envelopes |
+| `src/rpc/dispatch.cyr` | 186 | **M3 done** — JSON-over-HTTP + dialect-aware error envelopes. 0.7.2: trace-wrap on `sandhi_rpc_call` / `_with_headers`. |
 | `src/rpc/webdriver.cyr` | 231 | **M3 done** — W3C WebDriver surface (sessions, navigation, elements, exec) |
 | `src/rpc/appium.cyr` | 139 | **M3 done** — Appium extensions (contexts, app lifecycle, mobile exec) |
 | `src/rpc/mcp.cyr` | 104 | **M3 done** — MCP-over-HTTP transport (JSON-RPC 2.0 envelope) |
@@ -62,7 +66,7 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | `src/tls_policy/fingerprint.cyr` | 102 | **M5 done** — SPKI hex normalize / compare / encode helpers |
 | `src/tls_policy/apply.cyr` | 91 | **M5 partial** — surface shipped; enforcement stubbed (awaiting stdlib TLS-init) |
 | `src/tls_policy/mod.cyr` | 28 | dialect-index module |
-| `src/server/mod.cyr` | 478 | **M1 done** — verbatim lift from `lib/http_server.cyr` |
+| `src/server/mod.cyr` | 546 | **M1 done** — verbatim lift from `lib/http_server.cyr`. 0.7.2: `sandhi_server_options_*` struct + `http_server_run_opts` variant; per-connection SO_RCVTIMEO (slowloris guard; 30 s default). `max_conns` option defined but not enforced — concurrent accept model lands 0.8.0. |
 
 Build outputs:
 - `build/sandhi-smoke` — link-proof smoke program.
@@ -114,11 +118,12 @@ No external git deps. sandhi is pure-stdlib-composition.
 
 Release sequence toward v5.7.0 fold (see `roadmap.md` for full detail):
 
-- **0.7.1** ✅ (this patch) — quick-wins from the 0.7.0 review
-- **0.7.2** — medium items (per-phase timeouts, connection pool, IPv6 DNS + hardening, sakshi spans, server caps, retry wrappers)
-- **0.8.0** — HTTP/2 (ALPN-negotiated; h2 for HTTPS, 1.1 for plain HTTP)
+- **0.7.1** ✅ — quick-wins from the 0.7.0 review
+- **0.7.2** ✅ (this patch) — reliability + observability: read/write timeouts, retry wrappers, DNS hardening (incl. 4 P1 security items pulled forward), AAAA resolver, opt-in sakshi spans, server idle-timeout
+- **0.7.3** — deferred from 0.7.2: `connect_ms` / `total_ms` (non-blocking connect + monotonic-deadline threading)
+- **0.8.0** — HTTP/2 + connection pool (paired; h2 multiplex shares pool checkout shape)
 - **0.8.x** — Phase 1 security sweep (P0s: chunked smuggling, CL+TE rejection, redirect cred-strip, pinning fail-closed, chunk-size overflow guard)
-- **0.9.x** — Phase 2 P1 sweep (DNS, SSE, headers, URL, JSON, TLS-policy) + pre-fold closeout (server symbol rename, surface freeze, first `dist/sandhi.cyr`)
+- **0.9.x** — Phase 2 P1 sweep (SSE, headers, URL, JSON, TLS-policy — DNS already landed in 0.7.2) + pre-fold closeout (server symbol rename, surface freeze, first `dist/sandhi.cyr`)
 - **1.0.0** — fold-into-stdlib event at Cyrius v5.7.0
 
 **Under-v1 milestone back-matter**:

@@ -21,6 +21,40 @@
 var _SANDHI_RESOLVE_BUF_SIZE = 512;   # RFC 1035 UDP limit
 var _SANDHI_RESOLVE_TIMEOUT_MS = 2000;  # reserved; net.cyr lacks timeouts today
 
+# Maximum compression-pointer hops when walking a wire-format name.
+# RFC 1035 §4.1.4 bans forward / cyclic pointers, but malformed or
+# hostile responses can have both. Bound the traversal to 32 hops —
+# well above any legitimate DNS message (names are ≤255 bytes = ≤128
+# labels, and compression can only point backward).
+var _SANDHI_RESOLVE_MAX_PTR_HOPS = 32;
+
+# ================================================================
+# Cryptographic randomness for DNS TXID + future needs
+# ================================================================
+
+# Read 2 random bytes from /dev/urandom and return as a u16 (0..65535).
+# Falls back to a deterministic-but-poor source (monotonic-clock-ns low
+# bits XOR PID) if /dev/urandom isn't available — better than a fixed
+# constant for anti-spoofing, worse than real entropy. Callers should
+# not rely on this for cryptographic-grade randomness; it exists
+# specifically to close the Kaminsky-class cache-poisoning window.
+fn _sandhi_resolve_random_u16() {
+    var buf[2];
+    store8(&buf + 0, 0);
+    store8(&buf + 1, 0);
+    var fd = syscall(2, "/dev/urandom", 0, 0);  # open(path, O_RDONLY, 0)
+    if (fd >= 0) {
+        var n = syscall(0, fd, &buf, 2);          # read(fd, buf, 2)
+        syscall(3, fd);                            # close(fd)
+        if (n == 2) {
+            return (load8(&buf + 0) << 8) | load8(&buf + 1);
+        }
+    }
+    # Fallback: clock-nanos low bits. Poor but non-constant.
+    var ns = clock_now_ns();
+    return (ns ^ (ns >> 16)) & 0xFFFF;
+}
+
 # ================================================================
 # IPv4-literal parser — also used by the HTTP client for numeric URLs.
 # ================================================================
@@ -179,6 +213,13 @@ fn _sandhi_resolve_build_query(id, host, out) {
 # Skip a name at offset `off` in the response. Handles both plain
 # length-labeled names and pointer compression (0xC0xx). Returns
 # the offset just past the name. Returns (0 - 1) on malformed.
+#
+# Note: this function only skips — it doesn't follow the pointer
+# target. That's safe for iteration (the caller only needs the offset
+# past the pointer byte), but DOES NOT validate that the pointer
+# target is well-formed. Consumers that need the actual name bytes
+# must use `_sandhi_resolve_name_eq` which does follow pointers with
+# an explicit hop-budget guard.
 fn _sandhi_resolve_skip_name(buf, blen, off) {
     var p = off;
     var safety = 0;
@@ -199,30 +240,117 @@ fn _sandhi_resolve_skip_name(buf, blen, off) {
     return 0 - 1;
 }
 
+# Read one label from a wire-format name, following compression
+# pointers. Returns the label length (0 at terminator) via out-param
+# `label_len_cell`, and writes the label bytes into `label_buf` (must
+# hold ≥63 bytes). Advances the offset via `off_cell`. Returns 0 on
+# success, (0 - 1) on malformed input (bad length / out-of-bounds /
+# pointer loop). `hops_cell` tracks pointer-hops across calls — pass
+# the same cell to successive reads of one name so the budget is
+# shared.
+fn _sandhi_resolve_read_label(buf, blen, off_cell, label_buf, label_len_cell, hops_cell) {
+    var p = load64(off_cell);
+    while (1 == 1) {
+        if (p >= blen) { return 0 - 1; }
+        var c = load8(buf + p);
+        if (c == 0) {
+            store64(label_len_cell, 0);
+            store64(off_cell, p + 1);
+            return 0;
+        }
+        if ((c & 0xC0) == 0xC0) {
+            # Pointer. RFC 1035 §4.1.4: target offset = (c & 0x3F) << 8 | next byte.
+            if (p + 1 >= blen) { return 0 - 1; }
+            var hops = load64(hops_cell);
+            if (hops >= _SANDHI_RESOLVE_MAX_PTR_HOPS) { return 0 - 1; }
+            store64(hops_cell, hops + 1);
+            var target = ((c & 0x3F) << 8) | load8(buf + p + 1);
+            if (target >= p) { return 0 - 1; }  # RFC 1035: pointers must go backward
+            if (target >= blen) { return 0 - 1; }
+            p = target;
+        } else {
+            if (c > 63) { return 0 - 1; }
+            if (p + 1 + c > blen) { return 0 - 1; }
+            var i = 0;
+            while (i < c) {
+                store8(label_buf + i, load8(buf + p + 1 + i));
+                i = i + 1;
+            }
+            store64(label_len_cell, c);
+            store64(off_cell, p + 1 + c);
+            return 0;
+        }
+    }
+    return 0 - 1;
+}
+
+# 1 if the wire-format name at offset `off_a` matches the one at
+# offset `off_b`. Both names may use compression. Case-insensitive
+# ASCII comparison (DNS names are case-insensitive per RFC 1035 §2.3.3).
+fn _sandhi_resolve_name_eq(buf, blen, off_a, off_b) {
+    var pa_cell = alloc(8);
+    var pb_cell = alloc(8);
+    store64(pa_cell, off_a);
+    store64(pb_cell, off_b);
+    var ha_cell = alloc(8);
+    var hb_cell = alloc(8);
+    store64(ha_cell, 0);
+    store64(hb_cell, 0);
+    var la_buf = alloc(64);
+    var lb_buf = alloc(64);
+    var la_cell = alloc(8);
+    var lb_cell = alloc(8);
+    while (1 == 1) {
+        if (_sandhi_resolve_read_label(buf, blen, pa_cell, la_buf, la_cell, ha_cell) < 0) { return 0; }
+        if (_sandhi_resolve_read_label(buf, blen, pb_cell, lb_buf, lb_cell, hb_cell) < 0) { return 0; }
+        var la = load64(la_cell);
+        var lb = load64(lb_cell);
+        if (la != lb) { return 0; }
+        if (la == 0) { return 1; }  # both terminators — match
+        var i = 0;
+        while (i < la) {
+            var ca = load8(la_buf + i);
+            var cb = load8(lb_buf + i);
+            if (ca >= 65 && ca <= 90) { ca = ca + 32; }
+            if (cb >= 65 && cb <= 90) { cb = cb + 32; }
+            if (ca != cb) { return 0; }
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
 # Parse the first A record from a DNS response packet. Returns the
 # IPv4 as a network-byte-order uint32 (same shape as
 # _sandhi_client_parse_ipv4), or (0 - 1) on any parse failure.
-fn _sandhi_resolve_parse_response(buf, blen) {
+#
+# `expected_id` must match the TXID we sent — guards against off-path
+# cache-poisoning (Kaminsky class). Answer names are checked against
+# the question name (echoed at offset 12) — guards against answer
+# substitution where a crafted packet resolves a different host.
+fn _sandhi_resolve_parse_response(buf, blen, expected_id) {
     if (blen < 12) { return 0 - 1; }
+    # TXID echo check.
+    var got_id = (load8(buf + 0) << 8) | load8(buf + 1);
+    if (got_id != expected_id) { return 0 - 1; }
     # Answer count.
     var ancount = (load8(buf + 6) << 8) | load8(buf + 7);
     if (ancount == 0) { return 0 - 1; }
     # Response code (low 4 bits of byte 3).
     var rcode = load8(buf + 3) & 0x0F;
     if (rcode != 0) { return 0 - 1; }
-    # QDCOUNT — skip the question.
+    # QDCOUNT — skip the question. Also remember where qname starts
+    # so we can compare answer names against it.
     var qdcount = (load8(buf + 4) << 8) | load8(buf + 5);
-    var off = 12;
-    var q = 0;
-    while (q < qdcount) {
-        off = _sandhi_resolve_skip_name(buf, blen, off);
-        if (off < 0) { return 0 - 1; }
-        off = off + 4;  # QTYPE + QCLASS
-        q = q + 1;
-    }
+    if (qdcount != 1) { return 0 - 1; }  # we only ever send 1 question
+    var qname_off = 12;
+    var off = _sandhi_resolve_skip_name(buf, blen, qname_off);
+    if (off < 0) { return 0 - 1; }
+    off = off + 4;  # QTYPE + QCLASS
     # Scan answers.
     var a = 0;
     while (a < ancount) {
+        var name_off = off;
         off = _sandhi_resolve_skip_name(buf, blen, off);
         if (off < 0) { return 0 - 1; }
         if (off + 10 > blen) { return 0 - 1; }
@@ -230,17 +358,30 @@ fn _sandhi_resolve_parse_response(buf, blen) {
         var rdlength = (load8(buf + off + 8) << 8) | load8(buf + off + 9);
         off = off + 10;
         if (rtype == 1) {
-            # A record — rdlength must be 4.
+            # A record — rdlength must be 4, and the owner name must
+            # match the question. (CNAME chains land here too, but
+            # stdlib net.cyr's sock_connect doesn't do CNAME following
+            # for us — so we only return the A record that answers
+            # the question directly. CNAME support is post-v1 unless
+            # a consumer needs it.)
             if (rdlength != 4) { return 0 - 1; }
             if (off + 4 > blen) { return 0 - 1; }
-            var a0 = load8(buf + off + 0);
-            var a1 = load8(buf + off + 1);
-            var a2 = load8(buf + off + 2);
-            var a3 = load8(buf + off + 3);
-            return a0 | (a1 << 8) | (a2 << 16) | (a3 << 24);
+            if (_sandhi_resolve_name_eq(buf, blen, name_off, qname_off) == 0) {
+                # Not the name we asked about — skip this RR rather than
+                # trust it.
+                off = off + 4;
+                a = a + 1;
+            } else {
+                var a0 = load8(buf + off + 0);
+                var a1 = load8(buf + off + 1);
+                var a2 = load8(buf + off + 2);
+                var a3 = load8(buf + off + 3);
+                return a0 | (a1 << 8) | (a2 << 16) | (a3 << 24);
+            }
+        } else {
+            off = off + rdlength;
+            a = a + 1;
         }
-        off = off + rdlength;
-        a = a + 1;
     }
     return 0 - 1;
 }
@@ -253,7 +394,127 @@ fn _sandhi_resolve_parse_response(buf, blen) {
 # (0 - 1) on any failure. For IP-literal inputs, caller should use
 # _sandhi_client_parse_ipv4 directly — this function always performs
 # a DNS query.
+# Build a DNS query for AAAA records (QTYPE=28, not 1). Everything else
+# identical to the A-record build. Kept separate so the hot path of
+# IPv4 resolution doesn't pay a branch.
+fn _sandhi_resolve_build_query_aaaa(id, host, out) {
+    store8(out + 0, (id >> 8) & 0xFF);
+    store8(out + 1, id & 0xFF);
+    store8(out + 2, 0x01);
+    store8(out + 3, 0x00);
+    store8(out + 4, 0x00); store8(out + 5, 0x01);
+    store8(out + 6, 0x00); store8(out + 7, 0x00);
+    store8(out + 8, 0x00); store8(out + 9, 0x00);
+    store8(out + 10, 0x00); store8(out + 11, 0x00);
+    var qname_len = _sandhi_resolve_encode_labels(host, out + 12);
+    if (qname_len < 0) { return 0 - 1; }
+    var qi = 12 + qname_len;
+    store8(out + qi + 0, 0x00); store8(out + qi + 1, 0x1C);  # QTYPE = AAAA (28)
+    store8(out + qi + 2, 0x00); store8(out + qi + 3, 0x01);  # QCLASS = IN
+    return qi + 4;
+}
+
+# Parse the first AAAA record from a DNS response. Returns a freshly-
+# alloc'd 16-byte buffer containing the IPv6 address in network order,
+# or 0 on any parse failure / missing RR. Same hardening as the A-
+# record parser: TXID echo + answer-name match + compression-loop guard.
+fn _sandhi_resolve_parse_response_aaaa(buf, blen, expected_id) {
+    if (blen < 12) { return 0; }
+    var got_id = (load8(buf + 0) << 8) | load8(buf + 1);
+    if (got_id != expected_id) { return 0; }
+    var ancount = (load8(buf + 6) << 8) | load8(buf + 7);
+    if (ancount == 0) { return 0; }
+    var rcode = load8(buf + 3) & 0x0F;
+    if (rcode != 0) { return 0; }
+    var qdcount = (load8(buf + 4) << 8) | load8(buf + 5);
+    if (qdcount != 1) { return 0; }
+    var qname_off = 12;
+    var off = _sandhi_resolve_skip_name(buf, blen, qname_off);
+    if (off < 0) { return 0; }
+    off = off + 4;
+    var a = 0;
+    while (a < ancount) {
+        var name_off = off;
+        off = _sandhi_resolve_skip_name(buf, blen, off);
+        if (off < 0) { return 0; }
+        if (off + 10 > blen) { return 0; }
+        var rtype = (load8(buf + off + 0) << 8) | load8(buf + off + 1);
+        var rdlength = (load8(buf + off + 8) << 8) | load8(buf + off + 9);
+        off = off + 10;
+        if (rtype == 28) {
+            # AAAA — rdlength must be 16.
+            if (rdlength != 16) { return 0; }
+            if (off + 16 > blen) { return 0; }
+            if (_sandhi_resolve_name_eq(buf, blen, name_off, qname_off) == 0) {
+                off = off + 16;
+                a = a + 1;
+            } else {
+                var out = alloc(16);
+                var i = 0;
+                while (i < 16) { store8(out + i, load8(buf + off + i)); i = i + 1; }
+                return out;
+            }
+        } else {
+            off = off + rdlength;
+            a = a + 1;
+        }
+    }
+    return 0;
+}
+
+# Resolve `host` to an IPv6 address. Returns a freshly-allocated 16-byte
+# buffer (network-byte-order AAAA record bytes), or 0 on failure. Caller
+# owns the alloc. Intentionally does NOT share a resolver handle with
+# sandhi_resolve_ipv4 — both issue their own UDP query. Happy Eyeballs
+# (parallel v4+v6 with first-response-wins) is deferred per roadmap.
+#
+# Client-side integration deferred: `_sandhi_client_resolve` remains
+# IPv4-only at 0.7.2. A consumer that needs IPv6 connectivity through
+# sandhi today can call `sandhi_resolve_ipv6(host)` and hand the
+# 16-byte buffer to a future `sandhi_conn_open_v6(...)` verb. The
+# connect-path wiring lands when a consumer asks; see roadmap 0.7.3+.
+fn sandhi_resolve_ipv6(host) {
+    sandhi_trace_begin("sandhi.dns.v6");
+    var r = _sandhi_resolve_ipv6_impl(host);
+    sandhi_trace_end();
+    return r;
+}
+
+fn _sandhi_resolve_ipv6_impl(host) {
+    if (host == 0) { return 0; }
+    var ns = _sandhi_resolve_read_resolv_conf();
+    if (ns == 0 - 1) {
+        ns = 8 | (8 << 8) | (8 << 16) | (8 << 24);
+    }
+    var txid = _sandhi_resolve_random_u16();
+    var qbuf = alloc(512);
+    var qlen = _sandhi_resolve_build_query_aaaa(txid, host, qbuf);
+    if (qlen < 0) { return 0; }
+
+    var fd_r = udp_socket();
+    if (is_err_result(fd_r) == 1) { return 0; }
+    var fd = payload(fd_r);
+    var cr = sock_connect(fd, ns, 53);
+    if (is_err_result(cr) == 1) { sock_close(fd); return 0; }
+    var sr = sock_send(fd, qbuf, qlen);
+    if (is_err_result(sr) == 1) { sock_close(fd); return 0; }
+    var rbuf = alloc(_SANDHI_RESOLVE_BUF_SIZE);
+    var rr = sock_recv(fd, rbuf, _SANDHI_RESOLVE_BUF_SIZE);
+    sock_close(fd);
+    if (is_err_result(rr) == 1) { return 0; }
+    var rlen = payload(rr);
+    if (rlen <= 0) { return 0; }
+    return _sandhi_resolve_parse_response_aaaa(rbuf, rlen, txid);
+}
+
 fn sandhi_resolve_ipv4(host) {
+    sandhi_trace_begin("sandhi.dns.v4");
+    var r = _sandhi_resolve_ipv4_impl(host);
+    sandhi_trace_end();
+    return r;
+}
+
+fn _sandhi_resolve_ipv4_impl(host) {
     if (host == 0) { return 0 - 1; }
     var ns = _sandhi_resolve_read_resolv_conf();
     if (ns == 0 - 1) {
@@ -261,8 +522,14 @@ fn sandhi_resolve_ipv4(host) {
         ns = 8 | (8 << 8) | (8 << 16) | (8 << 24);
     }
 
+    # Fresh random TXID per query — closes the Kaminsky window.
+    # Kernel-assigned ephemeral source port (via connect(2) on UDP
+    # without explicit bind) is already random-per-socket on Linux
+    # ≥ 2.6.16 and provides the source-port-randomization leg.
+    var txid = _sandhi_resolve_random_u16();
+
     var qbuf = alloc(512);
-    var qlen = _sandhi_resolve_build_query(0x1234, host, qbuf);
+    var qlen = _sandhi_resolve_build_query(txid, host, qbuf);
     if (qlen < 0) { return 0 - 1; }
 
     var fd_r = udp_socket();
@@ -282,9 +549,9 @@ fn sandhi_resolve_ipv4(host) {
     var rlen = payload(rr);
     if (rlen <= 0) { return 0 - 1; }
 
-    return _sandhi_resolve_parse_response(rbuf, rlen);
+    return _sandhi_resolve_parse_response(rbuf, rlen, txid);
 }
 
 fn sandhi_resolve_version() {
-    return "0.3.0";
+    return "0.7.2";
 }

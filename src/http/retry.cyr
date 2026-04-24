@@ -1,0 +1,128 @@
+# sandhi/http/retry — retry-with-backoff wrappers for idempotent methods.
+#
+# Thin composition on top of `_sandhi_http_dispatch`. Retries only on
+# transient errors (CONNECT / TIMEOUT / DISCOVERY) or transient server
+# responses (5xx). 4xx responses are NOT retried — caller's request is
+# wrong and sending it again won't fix it.
+#
+# **Idempotent methods only** are exposed: GET, HEAD, PUT, DELETE. POST
+# and PATCH are deliberately excluded because a retry could double-
+# apply side effects — consumers that need POST-retry must opt in by
+# calling `sandhi_http_post` in a loop with their own idempotency key.
+#
+# Backoff: exponential (backoff_ms *= 2 per attempt) with a jitter-free
+# cap at `max_backoff_ms`. Jitter not added at 0.7.2 — it's a ~5-line
+# follow-up when a consumer reports thundering-herd behavior.
+#
+# Retry policy struct (24 bytes):
+#   +0   max_attempts       (int: default 3 — one original + two retries)
+#   +8   initial_backoff_ms (int: default 50)
+#   +16  max_backoff_ms     (int: default 2000)
+
+enum SandhiRetryOff {
+    SANDHI_RETRY_OFF_ATTEMPTS = 0;
+    SANDHI_RETRY_OFF_INITIAL  = 8;
+    SANDHI_RETRY_OFF_MAX      = 16;
+}
+
+var SANDHI_RETRY_STRUCT_SIZE = 24;
+var SANDHI_RETRY_DEFAULT_ATTEMPTS = 3;
+var SANDHI_RETRY_DEFAULT_INITIAL  = 50;
+var SANDHI_RETRY_DEFAULT_MAX      = 2000;
+
+fn sandhi_retry_new() {
+    var r = alloc(SANDHI_RETRY_STRUCT_SIZE);
+    store64(r + SANDHI_RETRY_OFF_ATTEMPTS, SANDHI_RETRY_DEFAULT_ATTEMPTS);
+    store64(r + SANDHI_RETRY_OFF_INITIAL,  SANDHI_RETRY_DEFAULT_INITIAL);
+    store64(r + SANDHI_RETRY_OFF_MAX,      SANDHI_RETRY_DEFAULT_MAX);
+    return r;
+}
+
+fn sandhi_retry_max_attempts(r, n) {
+    store64(r + SANDHI_RETRY_OFF_ATTEMPTS, n);
+    return 0;
+}
+
+fn sandhi_retry_initial_backoff_ms(r, ms) {
+    store64(r + SANDHI_RETRY_OFF_INITIAL, ms);
+    return 0;
+}
+
+fn sandhi_retry_max_backoff_ms(r, ms) {
+    store64(r + SANDHI_RETRY_OFF_MAX, ms);
+    return 0;
+}
+
+fn _sandhi_retry_attempts(r) {
+    if (r == 0) { return SANDHI_RETRY_DEFAULT_ATTEMPTS; }
+    return load64(r + SANDHI_RETRY_OFF_ATTEMPTS);
+}
+
+fn _sandhi_retry_initial(r) {
+    if (r == 0) { return SANDHI_RETRY_DEFAULT_INITIAL; }
+    return load64(r + SANDHI_RETRY_OFF_INITIAL);
+}
+
+fn _sandhi_retry_max(r) {
+    if (r == 0) { return SANDHI_RETRY_DEFAULT_MAX; }
+    return load64(r + SANDHI_RETRY_OFF_MAX);
+}
+
+# 1 if `response` represents a transient failure worth retrying.
+# Retryable: CONNECT, TIMEOUT, DISCOVERY (flaky resolver), 5xx.
+# NOT retryable: PARSE, TLS, PROTOCOL, REMOTE (non-5xx), AUTH, INTERNAL, 4xx.
+fn _sandhi_retry_should_retry(response) {
+    var ek = sandhi_http_err_kind(response);
+    if (ek == SANDHI_ERR_CONNECT)   { return 1; }
+    if (ek == SANDHI_ERR_TIMEOUT)   { return 1; }
+    if (ek == SANDHI_ERR_DISCOVERY) { return 1; }
+    var status = sandhi_http_status(response);
+    if (status >= 500 && status <= 599) { return 1; }
+    return 0;
+}
+
+# Core retry driver. Runs up to max_attempts total (original + retries).
+# Sleeps initial_backoff_ms → 2× → 4× ... capped at max_backoff_ms
+# between attempts. Returns the last response (successful or final
+# failure — caller inspects err_kind / status).
+fn _sandhi_http_retry(method, url, user_headers, body, body_len, opts, retry) {
+    var attempts = _sandhi_retry_attempts(retry);
+    var backoff = _sandhi_retry_initial(retry);
+    var max_backoff = _sandhi_retry_max(retry);
+    var tried = 0;
+    var r = _sandhi_http_dispatch(method, url, user_headers, body, body_len, opts);
+    tried = 1;
+    while (tried < attempts) {
+        if (_sandhi_retry_should_retry(r) == 0) { return r; }
+        sleep_ms(backoff);
+        backoff = backoff * 2;
+        if (backoff > max_backoff) { backoff = max_backoff; }
+        r = _sandhi_http_dispatch(method, url, user_headers, body, body_len, opts);
+        tried = tried + 1;
+    }
+    return r;
+}
+
+# ================================================================
+# Public verbs — idempotent methods only
+# ================================================================
+
+fn sandhi_http_get_retry(url, user_headers, opts, retry) {
+    return _sandhi_http_retry("GET", url, user_headers, 0, 0, opts, retry);
+}
+
+fn sandhi_http_head_retry(url, user_headers, opts, retry) {
+    return _sandhi_http_retry("HEAD", url, user_headers, 0, 0, opts, retry);
+}
+
+fn sandhi_http_put_retry(url, user_headers, body, body_len, opts, retry) {
+    return _sandhi_http_retry("PUT", url, user_headers, body, body_len, opts, retry);
+}
+
+fn sandhi_http_delete_retry(url, user_headers, opts, retry) {
+    return _sandhi_http_retry("DELETE", url, user_headers, 0, 0, opts, retry);
+}
+
+fn sandhi_retry_version() {
+    return "0.7.2";
+}

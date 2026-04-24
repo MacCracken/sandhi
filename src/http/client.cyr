@@ -134,9 +134,18 @@ fn _sandhi_client_build_request(method, full_path, host_header, user_headers, bo
 # Core request/response round-trip
 # ================================================================
 
+# Outer trace wrapper — opt-in span via sandhi_trace_enable(1). Span
+# no-op by default; the inner does all the work either way.
+fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes, read_ms, write_ms) {
+    sandhi_trace_begin("sandhi.http");
+    var r = _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes, read_ms, write_ms);
+    sandhi_trace_end();
+    return r;
+}
+
 # Keep this function compact — Cyrius 5.6.22 aliases locals on crowded
 # frames. Everything meaningful lives in helpers.
-fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes) {
+fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes, read_ms, write_ms) {
     var u = sandhi_url_parse(url);
     if (u == 0) { return _sandhi_resp_err(SANDHI_ERR_PARSE); }
 
@@ -145,7 +154,7 @@ fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes) {
 
     var use_tls = 0;
     if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { use_tls = 1; }
-    var conn = sandhi_conn_open(addr, sandhi_url_port(u), use_tls, sandhi_url_host(u));
+    var conn = sandhi_conn_open_timed(addr, sandhi_url_port(u), use_tls, sandhi_url_host(u), read_ms, write_ms);
     if (conn == 0) {
         if (use_tls == 1) { return _sandhi_resp_err(SANDHI_ERR_TLS); }
         return _sandhi_resp_err(SANDHI_ERR_CONNECT);
@@ -159,16 +168,27 @@ fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes) {
 }
 
 # Send request, receive response, close connection. Extracted so the
-# local count in _sandhi_http_do stays small.
+# local count in _sandhi_http_do stays small. Returns SANDHI_ERR_TIMEOUT
+# on SO_RCVTIMEO/SO_SNDTIMEO; SANDHI_ERR_CONNECT for any other I/O fail.
 fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes) {
     var req_data = str_data(req);
     var req_len = strlen(req_data);
-    if (sandhi_conn_send_all(conn, req_data, req_len) < 0) {
+    var sw = sandhi_conn_send_all(conn, req_data, req_len);
+    if (sw == 0 - _SANDHI_EAGAIN) {
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err(SANDHI_ERR_TIMEOUT);
+    }
+    if (sw < 0) {
         sandhi_conn_close(conn);
         return _sandhi_resp_err(SANDHI_ERR_CONNECT);
     }
     if (body_len > 0 && body != 0) {
-        if (sandhi_conn_send_all(conn, body, body_len) < 0) {
+        var sb = sandhi_conn_send_all(conn, body, body_len);
+        if (sb == 0 - _SANDHI_EAGAIN) {
+            sandhi_conn_close(conn);
+            return _sandhi_resp_err(SANDHI_ERR_TIMEOUT);
+        }
+        if (sb < 0) {
             sandhi_conn_close(conn);
             return _sandhi_resp_err(SANDHI_ERR_CONNECT);
         }
@@ -178,6 +198,7 @@ fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes) {
     var rbuf = alloc(cap + 1);
     var nread = sandhi_conn_recv_all(conn, rbuf, cap);
     sandhi_conn_close(conn);
+    if (nread == 0 - _SANDHI_EAGAIN) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
     if (nread < 0) { return _sandhi_resp_err(SANDHI_ERR_CONNECT); }
     return sandhi_http_response_parse(rbuf, nread);
 }
@@ -193,19 +214,29 @@ fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes) {
 # Location may be absolute ("https://other.example.com/x") or relative
 # ("/x" — resolve against the current URL's scheme+authority).
 
-# Options struct (24 bytes):
+# Options struct (40 bytes):
 #   +0   follow_redirects   (int: 0 default, 1 to enable)
 #   +8   max_hops           (int: default 5)
 #   +16  max_response_bytes (int: default 262144 = 256 KB; applies to
 #                            the buffered client's scratch buffer and
 #                            to streaming's per-buffer cap)
+#   +24  read_ms            (int: SO_RCVTIMEO in ms; 0 = blocking).
+#                            Added 0.7.2.
+#   +32  write_ms           (int: SO_SNDTIMEO in ms; 0 = blocking).
+#                            Added 0.7.2.
+#
+# Deferred to 0.7.3: connect_ms (needs non-blocking connect + poll;
+# requires SYS_POLL / SYS_GETSOCKOPT constants not yet exposed by
+# stdlib) and total_ms (needs per-phase monotonic-deadline tracking).
 enum SandhiHttpOptOff {
     SANDHI_HTTP_OPT_OFF_FOLLOW    = 0;
     SANDHI_HTTP_OPT_OFF_MAX_HOPS  = 8;
     SANDHI_HTTP_OPT_OFF_MAX_BYTES = 16;
+    SANDHI_HTTP_OPT_OFF_READ_MS   = 24;
+    SANDHI_HTTP_OPT_OFF_WRITE_MS  = 32;
 }
 
-var SANDHI_HTTP_OPT_STRUCT_SIZE = 24;
+var SANDHI_HTTP_OPT_STRUCT_SIZE = 40;
 var SANDHI_HTTP_DEFAULT_MAX_HOPS = 5;
 var SANDHI_HTTP_DEFAULT_MAX_BYTES = 262144;
 
@@ -214,6 +245,8 @@ fn sandhi_http_options_new() {
     store64(o + SANDHI_HTTP_OPT_OFF_FOLLOW, 0);
     store64(o + SANDHI_HTTP_OPT_OFF_MAX_HOPS, SANDHI_HTTP_DEFAULT_MAX_HOPS);
     store64(o + SANDHI_HTTP_OPT_OFF_MAX_BYTES, SANDHI_HTTP_DEFAULT_MAX_BYTES);
+    store64(o + SANDHI_HTTP_OPT_OFF_READ_MS, 0);
+    store64(o + SANDHI_HTTP_OPT_OFF_WRITE_MS, 0);
     return o;
 }
 
@@ -232,6 +265,16 @@ fn sandhi_http_options_max_response_bytes(opts, n) {
     return 0;
 }
 
+fn sandhi_http_options_read_ms(opts, ms) {
+    store64(opts + SANDHI_HTTP_OPT_OFF_READ_MS, ms);
+    return 0;
+}
+
+fn sandhi_http_options_write_ms(opts, ms) {
+    store64(opts + SANDHI_HTTP_OPT_OFF_WRITE_MS, ms);
+    return 0;
+}
+
 fn sandhi_http_options_follow(opts) {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_FOLLOW);
@@ -245,6 +288,16 @@ fn sandhi_http_options_hops(opts) {
 fn sandhi_http_options_bytes(opts) {
     if (opts == 0) { return SANDHI_HTTP_DEFAULT_MAX_BYTES; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_MAX_BYTES);
+}
+
+fn sandhi_http_options_get_read_ms(opts) {
+    if (opts == 0) { return 0; }
+    return load64(opts + SANDHI_HTTP_OPT_OFF_READ_MS);
+}
+
+fn sandhi_http_options_get_write_ms(opts) {
+    if (opts == 0) { return 0; }
+    return load64(opts + SANDHI_HTTP_OPT_OFF_WRITE_MS);
 }
 
 # 1 if the status code indicates a redirect we follow.
@@ -296,13 +349,13 @@ fn _sandhi_resolve_location(base_url, location) {
 # Redirect-following driver. Keep compact — each iteration reassigns
 # locals rather than allocating new ones, so the function stays under
 # the Cyrius local-count threshold.
-fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops, max_bytes) {
+fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops, max_bytes, read_ms, write_ms) {
     var m = method;
     var u = url;
     var b = body;
     var bl = body_len;
     var hops = 0;
-    var r = _sandhi_http_do(m, u, headers, b, bl, max_bytes);
+    var r = _sandhi_http_do(m, u, headers, b, bl, max_bytes, read_ms, write_ms);
     while (hops < max_hops) {
         if (_sandhi_is_redirect(sandhi_http_status(r)) == 0) { return r; }
         var loc = sandhi_headers_get(sandhi_http_headers(r), "Location");
@@ -312,7 +365,7 @@ fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops, max_bytes
         if (sandhi_http_status(r) == 303) { m = "GET"; b = 0; bl = 0; }
         u = next;
         hops = hops + 1;
-        r = _sandhi_http_do(m, u, headers, b, bl, max_bytes);
+        r = _sandhi_http_do(m, u, headers, b, bl, max_bytes, read_ms, write_ms);
     }
     return r;
 }
@@ -325,10 +378,13 @@ fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops, max_bytes
 # engages the redirect-following driver up to max_hops.
 fn _sandhi_http_dispatch(method, url, headers, body, body_len, opts) {
     var max_bytes = sandhi_http_options_bytes(opts);
+    var read_ms = sandhi_http_options_get_read_ms(opts);
+    var write_ms = sandhi_http_options_get_write_ms(opts);
     if (sandhi_http_options_follow(opts) == 1) {
-        return _sandhi_http_follow(method, url, headers, body, body_len, sandhi_http_options_hops(opts), max_bytes);
+        var hops = sandhi_http_options_hops(opts);
+        return _sandhi_http_follow(method, url, headers, body, body_len, hops, max_bytes, read_ms, write_ms);
     }
-    return _sandhi_http_do(method, url, headers, body, body_len, max_bytes);
+    return _sandhi_http_do(method, url, headers, body, body_len, max_bytes, read_ms, write_ms);
 }
 
 # Simple verbs — no redirect following. Pass user_headers = 0 for none.
