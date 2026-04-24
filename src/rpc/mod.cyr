@@ -1,0 +1,25 @@
+# sandhi/rpc — JSON-RPC patterns (WebDriver wire, Appium dialect, MCP-over-HTTP).
+#
+# Absorbs the JSON-RPC-grade side of the v5.7.x `lib/json.cyr depth`
+# roadmap item. Stdlib json.cyr keeps baseline parse/build for config
+# and data files; sandhi::rpc wraps it for the network-RPC use cases
+# that need nested objects, arrays, streaming responses, and
+# dialect-aware error shapes.
+#
+# Planned verbs (scaffold stubs):
+#   sandhi_rpc_call(endpoint, method, params_json)
+#   sandhi_rpc_response_result(resp)
+#   sandhi_rpc_response_error(resp)
+#   sandhi_rpc_stream(endpoint, method, params_json, callback)  — SSE / chunked
+#
+# Dialects:
+#   sandhi_rpc_webdriver — W3C WebDriver JSON wire (yantra consumer)
+#   sandhi_rpc_appium    — Appium JSON-RPC extensions (yantra consumer)
+#   sandhi_rpc_mcp       — MCP over HTTP (daimon / bote-adjacent consumer)
+#
+# Each dialect is a thin wrapper around the generic call path +
+# dialect-specific header + error-envelope handling.
+
+fn sandhi_rpc_version() {
+    return "0.1.0-scaffold";
+}

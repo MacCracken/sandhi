@@ -1,0 +1,33 @@
+# sandhi — public API / library root.
+#
+# This file declares the top-level surface that consumers include
+# via `lib/sandhi.cyr` (once folded into Cyrius stdlib) or
+# `dist/sandhi.cyr` (the distributed bundle pre-fold).
+#
+# No top-level `main()` / `syscall(60)` — sandhi is a LIBRARY.
+# `programs/smoke.cyr` is the compile-link proof target.
+#
+# Per ADR 0001: sandhi composes stdlib primitives (http.cyr, ws.cyr,
+# tls.cyr, json.cyr, net.cyr) into full-featured client patterns +
+# service discovery. It does NOT reimplement the primitives.
+# Scaffolded 2026-04-24.
+
+# --- Public surface ---------------------------------------------------------
+# Each sub-module exposes a small, documented verb set:
+#   sandhi::http            — full HTTP client (POST/PUT/DELETE/PATCH/HEAD,
+#                             custom headers, HTTPS via tls, redirects,
+#                             keepalive, conn pooling).
+#   sandhi::rpc             — JSON-RPC dialects (WebDriver wire, Appium,
+#                             MCP-over-HTTP). Streaming JSON responses.
+#   sandhi::discovery       — service discovery (local mDNS, daimon-
+#                             registered endpoint lookup, fallback chains).
+#   sandhi::tls_policy      — cert pinning, mTLS, trust store management.
+#                             Wraps stdlib tls.cyr for now; transitions to
+#                             native TLS when Cyrius v5.9.x TLS lands.
+#   sandhi::server          — lifts lib/http_server.cyr out of interim
+#                             stdlib, adds routing + middleware + auth
+#                             primitives.
+
+fn sandhi_version() {
+    return "0.1.0";
+}

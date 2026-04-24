@@ -1,0 +1,33 @@
+# sandhi/error — unified error kinds across sandhi's submodules.
+#
+# Convention: every public sandhi function that can fail returns a
+# `sandhi_result*` with status_code + body ptr (http-response-shaped
+# at the library boundary). Internal call chains can use sakshi
+# structured error logging plus the codes below.
+
+enum SandhiErrorKind {
+    SANDHI_OK              = 0;
+    SANDHI_ERR_PARSE       = 1;
+    SANDHI_ERR_CONNECT     = 2;
+    SANDHI_ERR_TLS         = 3;
+    SANDHI_ERR_TIMEOUT     = 4;
+    SANDHI_ERR_REMOTE      = 5;
+    SANDHI_ERR_PROTOCOL    = 6;
+    SANDHI_ERR_AUTH        = 7;
+    SANDHI_ERR_DISCOVERY   = 8;
+    SANDHI_ERR_INTERNAL    = 99;
+}
+
+fn sandhi_err_kind_name(kind) {
+    if (kind == SANDHI_OK)             { return "OK";         }
+    if (kind == SANDHI_ERR_PARSE)      { return "PARSE";      }
+    if (kind == SANDHI_ERR_CONNECT)    { return "CONNECT";    }
+    if (kind == SANDHI_ERR_TLS)        { return "TLS";        }
+    if (kind == SANDHI_ERR_TIMEOUT)    { return "TIMEOUT";    }
+    if (kind == SANDHI_ERR_REMOTE)     { return "REMOTE";     }
+    if (kind == SANDHI_ERR_PROTOCOL)   { return "PROTOCOL";   }
+    if (kind == SANDHI_ERR_AUTH)       { return "AUTH";       }
+    if (kind == SANDHI_ERR_DISCOVERY)  { return "DISCOVERY";  }
+    if (kind == SANDHI_ERR_INTERNAL)   { return "INTERNAL";   }
+    return "UNKNOWN";
+}

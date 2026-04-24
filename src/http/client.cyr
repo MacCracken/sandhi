@@ -1,0 +1,31 @@
+# sandhi/http/client — full HTTP client wrapping stdlib http.cyr + tls.cyr.
+#
+# Absorbs the v5.7.x `lib/http.cyr depth` roadmap item per the 2026-04-24
+# sandhi-repo plan. Stdlib keeps the minimal GET-only path; sandhi
+# provides the full surface downstream consumers (yantra, sit-remote,
+# ark-remote, daimon) need.
+#
+# Planned verbs (scaffold stubs):
+#   sandhi_http_get(url, headers)
+#   sandhi_http_post(url, headers, body, body_len)
+#   sandhi_http_put(url, headers, body, body_len)
+#   sandhi_http_delete(url, headers)
+#   sandhi_http_patch(url, headers, body, body_len)
+#   sandhi_http_head(url, headers)
+#
+# Response handling:
+#   sandhi_http_status(resp)
+#   sandhi_http_body(resp) / sandhi_http_body_len(resp)
+#   sandhi_http_response_headers(resp)
+#   sandhi_http_follow_redirects(client, max_hops)  — opt-in
+#
+# HTTPS:
+#   URL scheme `https://` routes through sandhi_tls_policy_apply
+#   before sending the HTTP request. Transparent to callers.
+#
+# Keepalive / pooling: deferred to v0.2.0+ — not in the initial
+# scaffold because it interacts with thread lifecycle.
+
+fn sandhi_http_client_version() {
+    return "0.1.0-scaffold";
+}

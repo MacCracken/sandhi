@@ -1,0 +1,85 @@
+[package]
+name = "sandhi"
+version = "${file:VERSION}"
+description = "Service-boundary layer for AGNOS — shared HTTP/TCP/TLS + service discovery"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/sandhi"
+language = "cyrius"
+cyrius = "5.6.22"
+
+# sandhi (सन्धि — junction, connection, joining) is the service-boundary
+# layer for AGNOS. Named 2026-04-24 after extensive search confirmed the
+# planned "services" crate had never received a proper name.
+#
+# Thesis: stdlib carries thin network primitives (http.cyr, ws.cyr,
+# tls.cyr, json.cyr, net.cyr); sandhi composes them into full-featured
+# client patterns + service discovery that multiple AGNOS consumers
+# need. Same shape as sakshi (logging primitives → tracing layer),
+# mabda (GPU primitives → rendering foundation), sankoch (compression
+# primitives → complete codec suite). Scaffolded as a sibling crate;
+# targets fold-into-stdlib before v5.6.x closeout per the cyrius
+# roadmap.
+#
+# sandhi is a **library**. `cyrius test` stays the test runner for
+# consumer `.tcyr` files. `programs/smoke.cyr` is the build-link proof.
+# Downstream consumers pin via `[deps.sandhi]` against `dist/sandhi.cyr`
+# until fold-into-stdlib lands.
+#
+# Planned consumers: vidya, hoosh, ifran, daimon, mela, yantra,
+# sit (remote ops), ark (remote registry).
+#
+# Linguistic kinship note: sandhi shares Sanskrit roots with vyakarana's
+# grammar domain. In linguistics, sandhi governs the rules at boundaries
+# where two units meet; this crate governs the rules at boundaries where
+# two services meet. Same abstract structure at two scales.
+
+[build]
+entry = "programs/smoke.cyr"
+output = "build/sandhi-smoke"
+
+# `[lib]` drives `cyrius distlib` — concatenates the listed modules
+# into `dist/sandhi.cyr` for downstream consumers. Single-pass
+# compiler: each module may only reference symbols defined earlier.
+# Order: foundation (error) → composition layers (tls_policy / http
+# wrapping stdlib) → protocol layers (rpc) → service layer
+# (discovery) → server surface (server) → public API (main).
+[lib]
+modules = [
+    "src/error.cyr",
+    "src/tls_policy/mod.cyr",
+    "src/http/client.cyr",
+    "src/http/headers.cyr",
+    "src/rpc/mod.cyr",
+    "src/discovery/mod.cyr",
+    "src/server/mod.cyr",
+    "src/main.cyr",
+]
+
+[deps]
+stdlib = [
+    "syscalls",
+    "alloc",
+    "fmt",
+    "io",
+    "fs",
+    "str",
+    "string",
+    "vec",
+    "args",
+    "hashmap",
+    "process",
+    "thread",
+    "fnptr",
+    "chrono",
+    "tagged",
+    "assert",
+    "net",
+    "http",
+    "http_server",
+    "tls",
+    "ws",
+    "json",
+    "base64",
+    "sakshi",
+    "sigil",
+]

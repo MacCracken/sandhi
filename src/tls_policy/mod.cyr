@@ -1,0 +1,15 @@
+# sandhi/tls_policy — TLS trust + cert-pinning policy, wrapping stdlib tls.cyr.
+#
+# Scaffold stubs only; real implementation fills in once the native
+# Cyrius TLS 1.3 arc (v5.9.x) lands. Until then, wraps the existing
+# libssl.so.3 FFI bridge from lib/tls.cyr with policy layers above.
+#
+# Planned verbs (all stubbed):
+#   sandhi_tls_policy_default()    — standard trust store, cert verification on
+#   sandhi_tls_policy_pinned(fp)   — pin to a specific SPKI fingerprint
+#   sandhi_tls_policy_mtls(cert, key) — mTLS client certificate
+#   sandhi_tls_apply(policy, sock) — apply policy, return tls_ctx or 0 on fail
+
+fn sandhi_tls_policy_version() {
+    return "0.1.0-scaffold";
+}

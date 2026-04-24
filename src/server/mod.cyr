@@ -1,0 +1,21 @@
+# sandhi/server — HTTP server surface. Future home of lib/http_server.cyr.
+#
+# Per the cyrius roadmap `sandhi repo extraction` item: lib/http_server.cyr
+# is currently interim stdlib; extracting into this module before v5.6.x
+# closeout so the stdlib fold rides in with other lib/ reshuffles.
+#
+# Scaffold stubs only until the migration lands. Once the migration
+# completes, this module contains:
+#
+#   - Verbatim content from lib/http_server.cyr (lift-and-shift)
+#   - Plus routing primitives on top (sandhi_server_route("/path", handler))
+#   - Plus middleware primitives (auth, logging, rate-limit)
+#   - Plus graceful shutdown via kybernet signal handling
+#
+# Stdlib http_server.cyr is ALIASED during the migration window
+# (points to sandhi::server symbols) so downstream consumers don't
+# break. Alias retired at fold-into-stdlib.
+
+fn sandhi_server_version() {
+    return "0.1.0-scaffold";
+}

@@ -1,0 +1,30 @@
+# programs/smoke.cyr — compile-time proof that src/main.cyr + submodules
+# link clean into a single bundle.
+#
+# sandhi is a library — there is no CLI binary. This program exists so
+# `cyrius build programs/smoke.cyr build/sandhi-smoke` can verify the
+# full include chain parses and links without error. The emitted
+# binary writes a one-line banner and exits 0.
+#
+# Downstream consumers use sandhi via `include "lib/sandhi.cyr"` (once
+# folded into Cyrius stdlib) or `include "lib/sandhi.cyr"` vendored from
+# `dist/sandhi.cyr` via `[deps.sandhi]` in their cyrius.cyml.
+
+include "src/error.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/http/headers.cyr"
+include "src/http/client.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn main() {
+    alloc_init();
+    var banner = "sandhi smoke: all modules linked clean\n";
+    syscall(1, 1, banner, strlen(banner));
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

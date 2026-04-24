@@ -1,0 +1,18 @@
+# sandhi/http/headers — HTTP request / response header management.
+#
+# Scaffold stubs only. Real implementation wraps stdlib http.cyr's
+# minimal header handling with a proper key-value header store,
+# case-insensitive lookup, multi-valued fields (Set-Cookie), and
+# canonicalization.
+#
+# Planned verbs:
+#   sandhi_headers_new()              — allocate empty header block
+#   sandhi_headers_set(h, key, value) — add/replace a header
+#   sandhi_headers_add(h, key, value) — append (for multi-valued fields)
+#   sandhi_headers_get(h, key)        — case-insensitive lookup
+#   sandhi_headers_serialize(h)       — emit wire-format HTTP header block
+#   sandhi_headers_parse(buf, len)    — parse a raw header block back in
+
+fn sandhi_headers_version() {
+    return "0.1.0-scaffold";
+}
