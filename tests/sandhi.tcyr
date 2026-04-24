@@ -24,6 +24,7 @@ include "src/tls_policy/policy.cyr"
 include "src/tls_policy/fingerprint.cyr"
 include "src/tls_policy/apply.cyr"
 include "src/server/mod.cyr"
+include "src/main.cyr"  # sandhi_version() used by the http client's default User-Agent (0.7.1)
 
 fn test_url_decode() {
     var a = http_url_decode("hello%20world");
@@ -425,15 +426,21 @@ fn test_client_host_header() {
     return 0;
 }
 
+# NOTE: the default `User-Agent: sandhi/<version>` string in the
+# expected-wire-bytes tests below embeds sandhi_version() at the time
+# this file was last touched. Bump the literal on each version bump
+# alongside src/main.cyr's sandhi_version(). Added in 0.7.1.
+
 fn test_client_build_request_get() {
     var req = _sandhi_client_build_request("GET", "/path", "example.com", 0, 0);
-    assert_streq(str_data(req), "GET /path HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n", "build: GET no body no user headers");
+    var expected = "GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: sandhi/0.7.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    assert_streq(str_data(req), expected, "build: GET no body no user headers");
     return 0;
 }
 
 fn test_client_build_request_post() {
     var req = _sandhi_client_build_request("POST", "/api", "api.example.com", 0, 42);
-    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nConnection: close\r\n\r\n";
+    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nUser-Agent: sandhi/0.7.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: POST emits Content-Length");
     return 0;
 }
@@ -441,7 +448,7 @@ fn test_client_build_request_post() {
 fn test_client_build_request_post_empty_body() {
     # POST with body_len 0 should still emit Content-Length: 0.
     var req = _sandhi_client_build_request("POST", "/ping", "example.com", 0, 0);
-    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nUser-Agent: sandhi/0.7.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: POST empty body");
     return 0;
 }
@@ -451,8 +458,21 @@ fn test_client_build_request_user_headers() {
     sandhi_headers_set(h, "Authorization", "Bearer xyz");
     sandhi_headers_set(h, "Accept", "application/json");
     var req = _sandhi_client_build_request("GET", "/me", "api.example.com", h, 0);
-    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
+    # User-supplied Accept != Accept-Encoding, so both defaults still inject.
+    # User hasn't supplied User-Agent either, so the default lands.
+    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: sandhi/0.7.1\r\nAccept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: user headers serialized");
+    return 0;
+}
+
+fn test_client_build_request_override_ua_and_ae() {
+    # Caller-supplied User-Agent + Accept-Encoding suppress the defaults.
+    var h = sandhi_headers_new();
+    sandhi_headers_set(h, "User-Agent", "yantra/1.2.3");
+    sandhi_headers_set(h, "Accept-Encoding", "gzip, deflate");
+    var req = _sandhi_client_build_request("GET", "/probe", "probe.example", h, 0);
+    var expected = "GET /probe HTTP/1.1\r\nHost: probe.example\r\nUser-Agent: yantra/1.2.3\r\nAccept-Encoding: gzip, deflate\r\nConnection: close\r\n\r\n";
+    assert_streq(str_data(req), expected, "build: caller UA+AE override defaults");
     return 0;
 }
 
@@ -1317,6 +1337,9 @@ fn main() {
 
     test_group("http/client/build_with_headers");
     test_client_build_request_user_headers();
+
+    test_group("http/client/build_ua_ae_override");
+    test_client_build_request_override_ua_and_ae();
 
     test_group("http/client/bad_url");
     test_client_bad_url_returns_parse_err();

@@ -14,20 +14,35 @@
 
 # --- Public surface ---------------------------------------------------------
 # Each sub-module exposes a small, documented verb set:
-#   sandhi::http            — full HTTP client (POST/PUT/DELETE/PATCH/HEAD,
-#                             custom headers, HTTPS via tls, redirects,
-#                             keepalive, conn pooling).
-#   sandhi::rpc             — JSON-RPC dialects (WebDriver wire, Appium,
-#                             MCP-over-HTTP). Streaming JSON responses.
-#   sandhi::discovery       — service discovery (local mDNS, daimon-
-#                             registered endpoint lookup, fallback chains).
-#   sandhi::tls_policy      — cert pinning, mTLS, trust store management.
-#                             Wraps stdlib tls.cyr for now; transitions to
-#                             native TLS when Cyrius v5.9.x TLS lands.
-#   sandhi::server          — lifts lib/http_server.cyr out of interim
-#                             stdlib, adds routing + middleware + auth
-#                             primitives.
+#   sandhi::http            — full HTTP client (GET/POST/PUT/DELETE/PATCH/
+#                             HEAD, custom headers, HTTPS via tls, opt-in
+#                             bounded redirect following, configurable
+#                             response-size cap). Keep-alive / connection
+#                             pooling are 0.7.2 roadmap items.
+#   sandhi::http::stream    — streaming HTTP + WHATWG SSE parser +
+#                             incremental chunked decode + callback-per-
+#                             event dispatch (0.7.0).
+#   sandhi::rpc             — JSON-RPC dialects (W3C WebDriver wire,
+#                             Appium extensions, MCP-over-HTTP + SSE).
+#                             Transport only per ADR 0001 — protocol
+#                             semantics live in bote / t-ron.
+#   sandhi::discovery       — service discovery: daimon-registered
+#                             lookup, chain-fallback composition, mDNS
+#                             interface (lookup stubbed pending stdlib
+#                             net.cyr multicast primitives).
+#   sandhi::tls_policy      — cert pinning (SPKI), mTLS, custom trust
+#                             store, policy composition. Wraps stdlib
+#                             tls.cyr today; transitions to native TLS
+#                             at Cyrius v5.9.x. Runtime enforcement
+#                             stubbed pending libssl-pthread-deadlock
+#                             resolution (see docs/issues/).
+#   sandhi::server          — HTTP/1.1 server lifted from stdlib
+#                             http_server.cyr at M1 (v0.2.0). Routing +
+#                             middleware layer deferred until a consumer
+#                             asks. Symbol prefix (`http_*`) still matches
+#                             the stdlib origin; 0.9.x closeout renames
+#                             to `sandhi_server_*` before the v5.7.0 fold.
 
 fn sandhi_version() {
-    return "0.7.0";
+    return "0.7.1";
 }

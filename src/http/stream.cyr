@@ -221,6 +221,12 @@ fn _sandhi_stream_feed_sse(body_buf, cb, ctx, total_events_ptr, stop_out) {
 #
 # Returns a stream-result struct.
 fn sandhi_http_stream(url, method, user_headers, body, body_len, cb, ctx) {
+    return sandhi_http_stream_opts(url, method, user_headers, body, body_len, cb, ctx, 0);
+}
+
+# Opts-aware variant — honors `max_response_bytes` for the stream
+# buffers (header drain, body accumulator, chunked-decode output).
+fn sandhi_http_stream_opts(url, method, user_headers, body, body_len, cb, ctx, opts) {
     var u = sandhi_url_parse(url);
     if (u == 0) { return _sandhi_stream_result(0, 0, SANDHI_ERR_PARSE, 0); }
 
@@ -244,12 +250,13 @@ fn sandhi_http_stream(url, method, user_headers, body, body_len, cb, ctx) {
     }
     var req = _sandhi_client_build_request(method, full_path, host_hdr, hs, body_len);
 
-    return _sandhi_stream_run(conn, req, body, body_len, cb, ctx);
+    var cap = sandhi_http_options_bytes(opts);
+    return _sandhi_stream_run(conn, req, body, body_len, cb, ctx, cap);
 }
 
 # Send the request + drive the read loop. Extracted so the caller
 # stays under the Cyrius local-count threshold.
-fn _sandhi_stream_run(conn, req, body, body_len, cb, ctx) {
+fn _sandhi_stream_run(conn, req, body, body_len, cb, ctx, cap) {
     var req_data = str_data(req);
     var req_len = strlen(req_data);
     if (sandhi_conn_send_all(conn, req_data, req_len) < 0) {
@@ -262,15 +269,15 @@ fn _sandhi_stream_run(conn, req, body, body_len, cb, ctx) {
             return _sandhi_stream_result(0, 0, SANDHI_ERR_CONNECT, 0);
         }
     }
-    var out = _sandhi_stream_read_loop(conn, cb, ctx);
+    var out = _sandhi_stream_read_loop(conn, cb, ctx, cap);
     sandhi_conn_close(conn);
     return out;
 }
 
 # Read loop: drain headers, then feed body bytes through SSE parser.
 # Returns stream-result. Handles chunked or close-delimited bodies.
-fn _sandhi_stream_read_loop(conn, cb, ctx) {
-    var header_sb = _sandhi_sb_new(_SANDHI_STREAM_BUF_CAP);
+fn _sandhi_stream_read_loop(conn, cb, ctx, cap) {
+    var header_sb = _sandhi_sb_new(cap);
     var scratch = alloc(_SANDHI_STREAM_READ_CHUNK);
 
     # Drain header block.
@@ -300,18 +307,18 @@ fn _sandhi_stream_read_loop(conn, cb, ctx) {
     var chunked = _sandhi_resp_is_chunked(headers);
 
     # Body-buffer starts with whatever's past the header marker.
-    var body_sb = _sandhi_sb_new(_SANDHI_STREAM_BUF_CAP);
+    var body_sb = _sandhi_sb_new(cap);
     var total = _sandhi_sb_len(header_sb);
     if (total > header_end) {
         _sandhi_sb_append(body_sb, hp + header_end, total - header_end);
     }
 
-    return _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx);
+    return _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, cap);
 }
 
 # Body-loop: alternate "read more" + "decode + dispatch". Kept
 # compact — per-iteration work lives in helpers.
-fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx) {
+fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, cap) {
     var total_events_cell = alloc(8);
     store64(total_events_cell, 0);
     var stop_cell = alloc(8);
@@ -322,7 +329,7 @@ fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx) {
     while (going == 1) {
         # Process whatever's already in body_sb.
         if (chunked == 1) {
-            var decoded = _sandhi_sb_new(_SANDHI_STREAM_BUF_CAP);
+            var decoded = _sandhi_sb_new(cap);
             _sandhi_stream_decode_chunked_into(body_sb, chunk_state, decoded);
             if (_sandhi_sb_len(decoded) > 0) {
                 _sandhi_stream_feed_sse(decoded, cb, ctx, total_events_cell, stop_cell);
@@ -395,5 +402,5 @@ fn _sandhi_stream_decode_chunked_into(in_sb, chunk_state, out_sb) {
 }
 
 fn sandhi_stream_version() {
-    return "0.7.0";
+    return "0.7.1";
 }

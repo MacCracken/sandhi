@@ -4,6 +4,56 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-04-24
+
+Quick-wins patch. No behavior change for existing callers; new default
+request headers + new response / options fields. Motivated by the 0.7.0
+external security + gaps review (`docs/development/review-2026-04-24.md`
+planning context captured in `roadmap.md` 0.7.1 entry).
+
+### Added
+- **http/client**: default `User-Agent: sandhi/<version>` and
+  `Accept-Encoding: identity` request headers. Both are only emitted
+  when the caller hasn't set their own — preserves override semantics.
+  Explicit `identity` guards against servers that would otherwise
+  return `Content-Encoding: gzip` sandhi cannot decode.
+- **http/client**: `sandhi_http_options_max_response_bytes(opts, n)` +
+  `sandhi_http_options_bytes(opts)`. Caps the buffered client's scratch
+  buffer (previously a hard-coded 256 KB that silently truncated larger
+  responses). Default unchanged at 262144.
+- **http/stream**: `sandhi_http_stream_opts(url, method, headers, body,
+  body_len, cb, ctx, opts)` — opts-aware variant honoring
+  `max_response_bytes` for the header drain, body accumulator, and
+  chunked-decode output buffer. `sandhi_http_stream(...)` unchanged —
+  now a wrapper delegating with opts=0.
+- **http/response**: `err_message` slot (cstr, +40 offset; struct size
+  48) + `sandhi_http_err_message(r)` accessor + `_sandhi_resp_err_msg`
+  private constructor. Reserved for the 0.8.x security pass — today's
+  parser still populates only `err_kind`. ABI-breaking now so the
+  security pass doesn't break it later.
+
+### Changed
+- **src/main.cyr** docstring corrected. Previously claimed the client
+  shipped keepalive + conn pooling (0.7.2 roadmap items) and that the
+  server module added routing + middleware (deferred). Now accurate.
+- **src/main.cyr** `sandhi_version()` → `0.7.1`; per-submodule
+  `*_version()` pointers aligned.
+
+### Fixed
+- **CI workflow**: `.github/workflows/ci.yml` gained an `on:
+  workflow_call:` trigger. The 0.7.0 tag release failed because
+  `release.yml` called `ci.yml` as a reusable workflow but `ci.yml`
+  declared only `push` / `pull_request` triggers. Fix ships in 0.7.1
+  for future release-tag workflows; the 0.7.0 release stands without
+  a build-artifact upload.
+
+### Notes
+- The `User-Agent` string embeds `sandhi_version()` dynamically so it
+  stays current across future patch bumps with no extra churn.
+- No test regressions — all 333 existing assertions remain valid.
+- New security-review surface findings are scoped to later releases
+  (0.8.x P0 sweep, 0.9.x P1 + closeout) per `roadmap.md`.
+
 ## [0.7.0] — 2026-04-24
 
 M3.5 close — SSE streaming + incremental chunked decode. Also carries the deps-stdlib audit + toolchain bump that unstuck the HTTPS investigation. 333 assertions green (+42 for sse + stream).

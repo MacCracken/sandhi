@@ -9,12 +9,19 @@
 # bytes until the buffer is complete) is the caller's concern — the
 # client does that via sandhi_conn_recv_all.
 #
-# Struct layout (40 bytes):
-#   +0   status     (int: 100..599, or 0 if unparseable)
-#   +8   body_ptr   (ptr: alloc-owned; null-terminated for convenience)
-#   +16  body_len   (int: decoded body length)
-#   +24  headers    (ptr: sandhi_headers block, never 0 after parse)
-#   +32  err_kind   (int: SandhiErrorKind — 0 on parseable status)
+# Struct layout (48 bytes):
+#   +0   status      (int: 100..599, or 0 if unparseable)
+#   +8   body_ptr    (ptr: alloc-owned; null-terminated for convenience)
+#   +16  body_len    (int: decoded body length)
+#   +24  headers     (ptr: sandhi_headers block, never 0 after parse)
+#   +32  err_kind    (int: SandhiErrorKind — 0 on parseable status)
+#   +40  err_message (cstr: optional context; 0 if none. Added in 0.7.1
+#                    to mirror rpc-response shape. Callers today receive
+#                    0 for every err_kind the parser raises; the slot
+#                    is reserved so the 0.8.x security pass — which
+#                    needs to surface "CL+TE both present" / "chunked
+#                    truncated" / "redirect strip" reasons — doesn't
+#                    break ABI.)
 #
 # NOTE (2026-04-24): the body-framing logic is split into
 # `_sandhi_resp_frame` because under a heavier local count in
@@ -38,17 +45,19 @@ enum SandhiRespOff {
     SANDHI_RESP_OFF_BODY_LEN  = 16;
     SANDHI_RESP_OFF_HEADERS   = 24;
     SANDHI_RESP_OFF_ERR_KIND  = 32;
+    SANDHI_RESP_OFF_ERR_MSG   = 40;
 }
 
-var SANDHI_RESP_STRUCT_SIZE = 40;
+var SANDHI_RESP_STRUCT_SIZE = 48;
 
 # Public accessors. Same rationale as URL accessors — lets us reshape
 # the struct without churning call sites.
-fn sandhi_http_status(r)    { return load64(r + SANDHI_RESP_OFF_STATUS); }
-fn sandhi_http_body(r)      { return load64(r + SANDHI_RESP_OFF_BODY_PTR); }
-fn sandhi_http_body_len(r)  { return load64(r + SANDHI_RESP_OFF_BODY_LEN); }
-fn sandhi_http_headers(r)   { return load64(r + SANDHI_RESP_OFF_HEADERS); }
-fn sandhi_http_err_kind(r)  { return load64(r + SANDHI_RESP_OFF_ERR_KIND); }
+fn sandhi_http_status(r)       { return load64(r + SANDHI_RESP_OFF_STATUS); }
+fn sandhi_http_body(r)         { return load64(r + SANDHI_RESP_OFF_BODY_PTR); }
+fn sandhi_http_body_len(r)     { return load64(r + SANDHI_RESP_OFF_BODY_LEN); }
+fn sandhi_http_headers(r)      { return load64(r + SANDHI_RESP_OFF_HEADERS); }
+fn sandhi_http_err_kind(r)     { return load64(r + SANDHI_RESP_OFF_ERR_KIND); }
+fn sandhi_http_err_message(r)  { return load64(r + SANDHI_RESP_OFF_ERR_MSG); }
 
 # Build a response struct in one shot. Private — callers get responses
 # via the parser or the public client verbs.
@@ -59,6 +68,7 @@ fn _sandhi_resp_new(status, body_ptr, body_len, headers, err_kind) {
     store64(r + SANDHI_RESP_OFF_BODY_LEN, body_len);
     store64(r + SANDHI_RESP_OFF_HEADERS, headers);
     store64(r + SANDHI_RESP_OFF_ERR_KIND, err_kind);
+    store64(r + SANDHI_RESP_OFF_ERR_MSG, 0);
     return r;
 }
 
@@ -67,6 +77,16 @@ fn _sandhi_resp_new(status, body_ptr, body_len, headers, err_kind) {
 # without null-checking.
 fn _sandhi_resp_err(err_kind) {
     return _sandhi_resp_new(0, 0, 0, sandhi_headers_new(), err_kind);
+}
+
+# Error-response with a caller-supplied context message. The parser
+# still uses `_sandhi_resp_err` for today's failure modes — this is
+# the escape hatch for the 0.8.x security pass (CL+TE rejection,
+# chunked-truncation diagnostics, redirect header-strip reasons).
+fn _sandhi_resp_err_msg(err_kind, msg) {
+    var r = _sandhi_resp_err(err_kind);
+    store64(r + SANDHI_RESP_OFF_ERR_MSG, msg);
+    return r;
 }
 
 # Parse status line. Returns the int status code, or 0 on malformed.
@@ -286,5 +306,5 @@ fn sandhi_http_response_parse(buf, blen) {
 }
 
 fn sandhi_response_version() {
-    return "0.3.0";
+    return "0.7.1";
 }

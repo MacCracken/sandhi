@@ -83,6 +83,140 @@
 
 **Acceptance (live enforcement) — pending**: the pinned-cert-rejects test and mTLS-authenticates test both need live HTTPS to work, which is blocked on the libssl-pthread-deadlock issue (`docs/issues/2026-04-24-libssl-pthread-deadlock.md`). The TODO list at the top of `src/tls_policy/apply.cyr` enumerates the exact OpenSSL calls to fill in — ~50 lines once `SSL_connect` round-trips, no API change.
 
+### 0.7.1 — Quick-wins patch — ✅ shipped 2026-04-24
+
+*Hours-scale items from the 0.7.0 external security + gaps review. No
+behavior change for existing callers; targeted correctness + ergonomics.*
+
+- Default `User-Agent: sandhi/<version>` + `Accept-Encoding: identity`
+  request headers (override-preserving)
+- `sandhi_http_options_max_response_bytes` — caps the buffered client
+  scratch (previously a 256 KB silent-truncation)
+- `sandhi_http_stream_opts` — opts-aware streaming variant honoring
+  the same cap across header drain + body accumulator + chunked-decode
+  output buffer
+- `err_message` slot on the response struct (reserved for 0.8.x security
+  diagnostics; ABI-breaking now so it doesn't break later)
+- CI `workflow_call:` trigger added so `release.yml` can reuse it
+- `src/main.cyr` docstring corrected — previously claimed surface that
+  didn't exist (keepalive / pooling / routing)
+
+### 0.7.2 — Medium items (ergonomics + reliability)
+
+*Days-scale items from the same review. Targeted at reliability and
+consumer ergonomics before the HTTP/2 feature push. No new dialects,
+no new security surface — that's 0.8.x.*
+
+- **Per-phase timeouts** in `sandhi_http_options` (`connect_ms` /
+  `read_ms` / `total_ms`). `SANDHI_ERR_TIMEOUT` is defined but never
+  raised today; this wires it up via stdlib `net.cyr` setsockopt
+  (requires confirming `SO_RCVTIMEO` / `SO_SNDTIMEO` exposure — ask
+  stdlib if missing, don't fork).
+- **Opt-in connection pool / keep-alive** — new `src/http/pool.cyr`.
+  Map<(host, port, tls), vec<idle_conn>> with `max_per_host` and
+  `idle_timeout_ms`. `sandhi_http_pool_new(max, idle_ms)` + an option
+  field threading the pool through `_opts` variants. Discard on
+  non-2xx or server-sent `Connection: close`. ~100 ms saved per
+  request at 50 ms RTT for consumer RPC loops.
+- **AAAA (IPv6) DNS** in `src/net/resolve.cyr`. A-only today. Ship
+  the resolver first; Happy Eyeballs (RFC 6555) can wait.
+- **DNS hardening** — TXID randomness + source-port randomization +
+  negative-cache (tight overlap with 0.8.x P1 list; landing early
+  because it's low-risk and isolated). EDNS0 + 0x20 case
+  randomization stay deferred.
+- **sakshi tracing hooks** — one span each at `_sandhi_http_do`,
+  `sandhi_rpc_call`, `sandhi_resolve_ipv4`. ~50 lines in a new
+  `src/obs/trace.cyr`.
+- **Server caps** in `src/server/mod.cyr` — `max_concurrent_connections`,
+  `per_connection_idle_ms` (30000 default). Go `net/http.Server`
+  defaults as the reference.
+- **Retry-with-backoff** wrapper verbs for idempotent methods only —
+  `sandhi_http_get_retry` / `_head_retry` / `_put_retry` / `_delete_retry`.
+  Exponential 50 → 100 → 200 ms capped. POST retry stays explicit.
+
+### 0.8.0 — HTTP/2 (pulled forward from the defer list)
+
+*Moved into 0.8.0 at user direction. Adds the single biggest
+consumer-facing capability increase between now and fold — h2c +
+ALPN negotiation + per-stream body framing, composed on top of the
+existing HTTP/1.1 surface rather than replacing it.*
+
+- ALPN negotiation in `tls_policy::apply` — advertise `h2, http/1.1`
+  and select based on server offer. Plain-HTTP path stays 1.1 only
+  (h2c prior-knowledge may land later if a consumer asks).
+- Connection multiplexing — one TCP+TLS connection carries many
+  streams. Reuses the 0.7.2 connection pool but with per-stream
+  rather than per-connection checkout.
+- Frame parser + HPACK decoder in a new `src/http/h2/*` submodule.
+  HPACK static + dynamic table per RFC 7541.
+- Public surface unchanged — `sandhi_http_get(url, headers)` picks
+  h2 or 1.1 automatically based on ALPN. No new verbs, no consumer
+  code churn.
+- Non-goals: server push (retired from the spec anyway), prioritization
+  trees (CVE surface and almost never useful), h2c prior-knowledge
+  over plain TCP (rare in AGNOS shape).
+
+### 0.8.x — Phase 1 security (P0 sweep)
+
+*Ship-stopper security findings from the 0.7.0 external review. Each
+patch is its own focused release (0.8.1 / 0.8.2 / etc.) with a
+regression test per fix.*
+
+1. **Chunked decoder**: require terminal 0-chunk + footer CRLF; track
+   `seen_digit` guard; reject `size == 0` mid-stream as truncation,
+   not success. (`src/http/response.cyr`)
+2. **CL + TE coexistence**: reject (`SANDHI_ERR_PROTOCOL` on client;
+   400 on server) when both headers are present. RFC 7230 §3.3.3
+   mandatory. (`src/http/response.cyr` + `src/server/mod.cyr`)
+3. **Chunk-size overflow**: reject chunk sizes > 2^31 explicitly;
+   unsigned-safe comparison before `memcpy`. (`src/http/response.cyr`)
+4. **Redirect credential strip**: on each hop, compare scheme + host +
+   port against the previous; strip `Authorization` / `Cookie` /
+   `Proxy-*` when authority changes; refuse https→http; opt-in
+   private-IP block for daimon-class consumers. (`src/http/client.cyr`)
+5. **TLS-policy fail-closed**: when
+   `sandhi_tls_policy_enforcement_available() == 0` AND policy
+   has `PINNED | MTLS | CUSTOM_TRUST`, refuse the connection rather
+   than silently downgrading. (`src/tls_policy/apply.cyr` +
+   `src/http/client.cyr`)
+
+### 0.9.x — Phase 2 security (P1 sweep) + Phase 3 closeout
+
+*P1 hardening + pre-fold closeout. Closes the surface area for the
+v5.7.0 fold.*
+
+**P1 sweep** (each its own small release within 0.9.x):
+
+- **DNS**: TXID randomness + compression-pointer loop-detection +
+  answer-name match + source-port randomization (overlap with 0.7.2
+  item — remaining pieces land here if not yet done)
+- **SSE**: parser re-entrance fix (thread state via ctx, not
+  module-scope globals); `id:` with NUL ignored per WHATWG
+- **Headers**: duplicate detection for `Host` / `Content-Length` /
+  `Transfer-Encoding` at parse time; CRLF / NUL validation on
+  `sandhi_headers_add` / `_set`
+- **TLS-policy**: constant-time SPKI compare
+- **URL**: port overflow guard before the 65535 check
+- **Content-Length**: strict parse (reject `+` / `,` / `0x` /
+  multi-value) on client + server
+- **JSON**: escape-state tracking fix (`\\\\`  runs); lone-surrogate
+  rejection at build time
+
+**Pre-fold closeout**:
+
+- **Server symbol rename**: `http_get_method` / `http_send_response` /
+  `http_server_run` etc. → `sandhi_server_*`. Last chance before the
+  v5.7.0 fold freezes them in stdlib permanently. Transitional
+  `http_*` aliases retained through 0.9.x; dropped at 1.0.0.
+- **Surface freeze** — no new verbs past this point unless a second
+  consumer asks. Speculative surface is doubly discouraged by a
+  clean-break fold.
+- **`dist/sandhi.cyr` generation** via `cyrius distlib`. First formal
+  bundle.
+- **Consumer pin uplift** — coordinate with yantra / daimon / hoosh /
+  ifran / sit / ark / mela to pin 0.9.x tags for their 5.7.0-
+  compatible cuts.
+
 ### M6 — Fold into Cyrius stdlib (v1.0.0) — clean-break at v5.7.0
 
 *Per [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md): one event at the Cyrius v5.7.0 release gate, not a separate sandhi milestone. The 5.6.YY window is the notice period; 5.7.0 is the cutover.*
@@ -103,6 +237,39 @@
 - Consumer repos (yantra, hoosh, ifran, daimon, mela, vidya, sit-remote, ark-remote) build against 5.7.0 stdlib without `[deps.sandhi]` pins
 - `dist/sandhi.cyr` is byte-identical to `lib/sandhi.cyr` at the fold commit
 - No include of `lib/http_server.cyr` survives anywhere in AGNOS
+
+### Post-v1 (stdlib-maintenance window)
+
+*Deferred from the 0.7.0 review. Each item waits on a second-consumer
+ask before it ships; the fold freezes the public surface, so anything
+here lands via the Cyrius release cycle, not sandhi's.*
+
+- **CONNECT / proxy tunneling** — no documented AGNOS egress-proxy
+  need today.
+- **Cookie jar** — no AGNOS consumer uses cookie-bearing APIs. RFC 6265
+  is a regret-magnet; wait for a real ask.
+- **OCSP stapling / CT log check / HSTS preload** — operational
+  footguns (HPKP retirement lessons). Pin + custom trust store covers
+  AGNOS's actual threat model.
+- **JSON Merge Patch (RFC 7396)** / **JSON-RPC 2.0 batch** — batch
+  is the likelier ask (MCP tool-discovery latency); wait for it.
+- **gRPC-Web / GraphQL-over-HTTP** — explicit non-goals.
+- **Arena-per-request allocator** — profile first; stdlib `alloc` may
+  already be a bump allocator.
+- **Fuzzing harness** — Cyrius toolchain doesn't ship AFL/libFuzzer
+  equivalent yet. Revisit when it does.
+- **mDNS lookup + publishing** — blocked on stdlib `net.cyr`
+  multicast primitives (`IP_ADD_MEMBERSHIP` / `IP_MULTICAST_TTL` /
+  `IP_MULTICAST_LOOP` / `SO_REUSEPORT` / `IP_MULTICAST_IF`). Request
+  as a targeted stdlib patch when multicast becomes a priority for
+  any consumer.
+- **Session-resumption cache in tls_policy** — right moment is the
+  v5.9.x native-TLS transition.
+- **TLS ALPN extensions beyond `http/1.1`** — `h2` ships in 0.8.0;
+  anything beyond that waits for a consumer ask.
+- **SIMD / hot-path micro-optimization** — Cyrius has no SIMD
+  intrinsics; byte-at-a-time is perfectly adequate at SSE / HTTP
+  parsing rates observed so far.
 
 ## What sandhi does NOT plan to do
 

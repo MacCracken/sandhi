@@ -4,6 +4,8 @@
 
 ## Version
 
+**0.7.1** — 2026-04-24. Quick-wins patch from the 0.7.0 external security + gaps review. Default `User-Agent: sandhi/<version>` + `Accept-Encoding: identity` request headers (override-preserving). New `sandhi_http_options_max_response_bytes` field caps both the buffered-client scratch and the streaming buffers (via new `sandhi_http_stream_opts` variant). New `err_message` slot on the response struct (reserved for 0.8.x security diagnostics; struct grows 40→48 bytes). CI `workflow_call` trigger added so `release.yml` can reuse `ci.yml`. `src/main.cyr` docstring corrected. All 333 test assertions remain valid (new surface not yet asserted; tests added alongside the 0.8.x security pass). Planning: roadmap rewrites for 0.7.2 medium items, 0.8.0 HTTP/2, 0.8.x P0 sweep, 0.9.x P1 + closeout, 1.0.0 fold, post-v1 defer list.
+
 **0.7.0** — M3.5 closed 2026-04-24. SSE streaming + incremental chunked decode. `sandhi_http_stream(url, method, headers, body, body_len, cb, ctx)` drives a callback per parsed event; WHATWG-compliant SSE parser; MCP-over-SSE via `sandhi_rpc_mcp_stream`. Also carries the stdlib-deps audit (added `mmap`/`dynlib`/`fdlopen`/`bigint`/`freelist`) that unstuck the HTTPS investigation, and the toolchain pin bump to 5.6.30. 333 test assertions green.
 
 **0.6.0** — M5 closed 2026-04-24. TLS-policy surface: policy struct + constructors (`default` / `pinned` / `mtls` / `trust_store`), additive `combine`, SPKI fingerprint format helpers (normalize, compare, encode, byte-length), `sandhi_conn_open_with_policy` integration point. Runtime enforcement stubbed pending the stdlib TLS-init fix — `sandhi_tls_policy_enforcement_available() == 0` surfaces the stub state. 291 test assertions green.
@@ -34,16 +36,16 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 
 | Module | Lines | Status |
 |--------|-------|--------|
-| `src/main.cyr` | 33 | scaffold — public API declarations |
+| `src/main.cyr` | 48 | public API declarations — docstring refreshed at 0.7.1 |
 | `src/error.cyr` | 33 | scaffold — error kinds defined |
 | `src/http/headers.cyr` | 258 | **M2 done** — key-value store, case-insensitive lookup, wire-format serialize + parse |
 | `src/http/url.cyr` | 193 | **M2 done** — http/https parser with CRLF hardening |
 | `src/http/conn.cyr` | 140 | **M2 done** — tagged plain/TLS connection abstraction |
-| `src/http/response.cyr` | 282 | **M2 done** — Content-Length + chunked + close-delimited body framing |
+| `src/http/response.cyr` | 310 | **M2 done** — Content-Length + chunked + close-delimited body framing. 0.7.1: `err_message` slot added (struct 40→48). |
 | `src/net/resolve.cyr` | 290 | **M2 done** — native UDP DNS (RFC 1035), /etc/resolv.conf + 8.8.8.8 fallback |
-| `src/http/client.cyr` | 333 | **M2 done** — POST/PUT/DELETE/PATCH/HEAD/GET, redirect following, options struct |
+| `src/http/client.cyr` | 371 | **M2 done** — POST/PUT/DELETE/PATCH/HEAD/GET, redirect following, options struct. 0.7.1: default UA + `Accept-Encoding: identity`; options gained `max_response_bytes`. |
 | `src/http/sse.cyr` | 244 | **M3.5 done** — WHATWG SSE event parser |
-| `src/http/stream.cyr` | 399 | **M3.5 done** — streaming HTTP + incremental chunked decoder + callback-per-event dispatch |
+| `src/http/stream.cyr` | 406 | **M3.5 done** — streaming HTTP + incremental chunked decoder + callback-per-event dispatch. 0.7.1: `sandhi_http_stream_opts` variant honors `max_response_bytes`. |
 | `src/rpc/json.cyr` | 365 | **M3 done** — nested JSON build + dotted-path extract |
 | `src/rpc/dispatch.cyr` | 169 | **M3 done** — JSON-over-HTTP + dialect-aware error envelopes |
 | `src/rpc/webdriver.cyr` | 231 | **M3 done** — W3C WebDriver surface (sessions, navigation, elements, exec) |
@@ -109,6 +111,17 @@ No external git deps. sandhi is pure-stdlib-composition.
 - **No stdlib-side alias.** Per [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md), stdlib keeps `lib/http_server.cyr` unchanged through the 5.6.x window, emits a deprecation warning in 5.6.YY releases, and deletes it outright at v5.7.0 as the `lib/sandhi.cyr` fold lands in the same release. This is a cyrius-agent-side change; sandhi repo is unaffected.
 
 ## Next
+
+Release sequence toward v5.7.0 fold (see `roadmap.md` for full detail):
+
+- **0.7.1** ✅ (this patch) — quick-wins from the 0.7.0 review
+- **0.7.2** — medium items (per-phase timeouts, connection pool, IPv6 DNS + hardening, sakshi spans, server caps, retry wrappers)
+- **0.8.0** — HTTP/2 (ALPN-negotiated; h2 for HTTPS, 1.1 for plain HTTP)
+- **0.8.x** — Phase 1 security sweep (P0s: chunked smuggling, CL+TE rejection, redirect cred-strip, pinning fail-closed, chunk-size overflow guard)
+- **0.9.x** — Phase 2 P1 sweep (DNS, SSE, headers, URL, JSON, TLS-policy) + pre-fold closeout (server symbol rename, surface freeze, first `dist/sandhi.cyr`)
+- **1.0.0** — fold-into-stdlib event at Cyrius v5.7.0
+
+**Under-v1 milestone back-matter**:
 
 All M2–M5 must land before the Cyrius v5.7.0 fold event (public surface freezes at fold per ADR 0002).
 
