@@ -4,6 +4,106 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-04-24
+
+Closes the two timeout knobs deferred from 0.7.2: `connect_ms` (non-
+blocking connect + poll) and `total_ms` (monotonic-deadline threading
+through every I/O phase). With both shipped, sandhi's HTTP client has
+the full timeout surface — connect, read, write, and end-to-end — that
+production consumers expect from a curl/reqwest-class library.
+
+411 assertions green (+16 on the 0.7.2 baseline of 395), including
+two live-network tests that fire connect against a TEST-NET-1
+(192.0.2.0/24, RFC 5737) blackhole and verify the timeout returns
+within budget.
+
+### Added
+- **http/conn**: `_sandhi_conn_connect_nb(fd, addr, port, timeout_ms)`
+  — non-blocking connect via `O_NONBLOCK` + `connect()` (expects
+  `EINPROGRESS`) + `poll(POLLOUT, timeout_ms)` + `getsockopt(SO_ERROR)`
+  to distinguish connected from refused/unreachable. Restores
+  blocking mode on every exit path. Local syscall constants
+  `_SANDHI_SYS_POLL=7`, `_SANDHI_SYS_GETSOCKOPT=55`, `_SANDHI_F_GETFL=3`,
+  `_SANDHI_F_SETFL=4`, `_SANDHI_O_NONBLOCK=2048`, `_SANDHI_EINPROGRESS=115`,
+  `_SANDHI_SO_ERROR=4`, `_SANDHI_POLLOUT=4` (Linux x86_64; matches
+  the existing `SYS_SETSOCKOPT=54` in stdlib `net.cyr` — aarch64
+  needs a cross-cutting pass when it becomes a goal).
+- **http/conn**: `sandhi_conn_open_fully_timed(addr, port, use_tls,
+  sni, connect_ms, read_ms, write_ms)` — supersedes
+  `sandhi_conn_open_timed` (now a 0-connect-ms wrapper). Uses
+  `_sandhi_conn_connect_nb` when `connect_ms > 0`.
+- **http/conn**: module-level `_sandhi_conn_last_err` + accessor
+  `sandhi_conn_last_open_err()` — classifies the last open failure as
+  `SANDHI_CONN_OPEN_OK` / `_CONNECT` / `_TIMEOUT` / `_TLS`. Single-
+  threaded only; revisit if multi-threaded client model ever lands.
+- **http/conn**: `sandhi_conn_recv_all_deadline(conn, buf, max,
+  deadline_ms)` variant for `total_ms` enforcement. Loop-checks
+  `clock_now_ms() >= deadline_ms` before each next-recv. SO_RCVTIMEO
+  still bounds individual recv calls; the deadline is the outer
+  ceiling. `sandhi_conn_recv_all` is now a `deadline_ms=0` wrapper.
+- **http/client**: `sandhi_http_options_connect_ms(opts, ms)` /
+  `sandhi_http_options_total_ms(opts, ms)` setters + matching
+  getters. Options struct 40→56 bytes.
+- **http/client**: `_sandhi_http_clamp_ms(raw_ms, deadline_ms)`
+  helper — returns `raw_ms` if no deadline, the lesser of `raw_ms`
+  and `(deadline - now)` if both, or `-1` sentinel if the deadline
+  has elapsed. Used at every phase boundary in `_sandhi_http_do_impl`
+  to bound the next operation against `total_ms`.
+
+### Changed
+- **http/client `_sandhi_http_do_impl`** computes `deadline_ms` at
+  entry from `total_ms`, threads it to `_sandhi_http_exchange`, and
+  uses `_sandhi_http_clamp_ms` to bound `connect_ms`. On
+  `_sandhi_conn_open_fully_timed` failure, reads
+  `sandhi_conn_last_open_err()` to map to `SANDHI_ERR_TIMEOUT` /
+  `_TLS` / `_CONNECT` precisely (was: collapsed everything to
+  CONNECT or TLS based on `use_tls`).
+- **http/client `_sandhi_http_follow`** + `_sandhi_http_dispatch`
+  thread the new `connect_ms` / `total_ms` through. Per-hop semantics
+  for redirect chains: each hop gets its own `total_ms` budget — the
+  total across all hops is bounded by `max_hops × total_ms`. If a
+  consumer needs end-to-end-across-redirects, lower max_hops or
+  shorten per-hop total_ms accordingly.
+- **http/client `_sandhi_http_exchange`** gains a `deadline_ms` param;
+  checks it at entry and uses the new
+  `sandhi_conn_recv_all_deadline` for the body read.
+- **http/stream `sandhi_http_stream_opts`** computes the same
+  deadline + clamp + open-with-classification flow as the client.
+  Body-loop checks `deadline_ms` before each next-recv — long-lived
+  SSE streams now honor `total_ms` as an overall lifetime ceiling
+  rather than a per-event timeout.
+- **http/client / conn / stream**: `*_version()` strings → 0.7.3.
+- **src/main.cyr**: `sandhi_version()` → 0.7.3.
+- **tests**: bumped 4 expected-wire-bytes UA strings 0.7.2 → 0.7.3.
+
+### Tests
+- New: options coverage for `connect_ms` / `total_ms` defaults +
+  mutators (4 new assertions in defaults + 2 in mutators).
+- New: `_sandhi_http_clamp_ms` unit coverage — no-deadline / future-
+  deadline / elapsed (~6 assertions across 3 cases).
+- New: live-network connect_ms blackhole test against TEST-NET-1
+  192.0.2.1:80 with 200 ms timeout, asserts `SANDHI_ERR_TIMEOUT`
+  raised within a 5 s budget.
+- New: live-network total_ms blackhole — same target, no connect_ms,
+  total_ms=300 ms; verifies the deadline clamp closes the connect
+  phase even when connect_ms isn't set explicitly.
+
+### Notes
+- Per-hop total_ms semantics are documented in the redirect-follower
+  comment. End-to-end-across-redirects could be added later as a
+  separate option (`overall_ms`) if a consumer asks; the shape is
+  one extra field + threading the deadline across hops instead of
+  recomputing.
+- The non-blocking connect helper restores the fd to blocking mode
+  before returning so subsequent recv/send don't get EAGAIN'd
+  unexpectedly. SO_RCVTIMEO/SO_SNDTIMEO still apply post-connect.
+- `_sandhi_conn_last_err` is module-level state. Today's callers
+  (single-threaded HTTP client + stream) read it immediately after
+  the open call returns 0, so there's no race window. A
+  multi-threaded client would need this lifted to a per-call ctx;
+  flagged for the 0.8.0 connection-pool work where multiple opens
+  may interleave.
+
 ## [0.7.2] — 2026-04-24
 
 Reliability + observability patch. Per-phase timeouts, retry wrappers

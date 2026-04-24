@@ -37,6 +37,44 @@ var _SANDHI_SO_SNDTIMEO = 21;
 # Linux errno for "would block / timed out on socket with SO_RCVTIMEO".
 var _SANDHI_EAGAIN = 11;
 
+# Non-blocking connect primitives (0.7.3). Linux x86_64 syscall
+# numbers; aarch64 differs (poll is ppoll=73, getsockopt=209) — when
+# aarch64 support becomes a goal it needs a cross-cutting pass across
+# sandhi + stdlib anyway (SYS_SETSOCKOPT=54 in net.cyr is already
+# x86_64-only). No regression.
+var _SANDHI_SYS_POLL       = 7;
+var _SANDHI_SYS_GETSOCKOPT = 55;
+var _SANDHI_F_GETFL        = 3;
+var _SANDHI_F_SETFL        = 4;
+var _SANDHI_O_NONBLOCK     = 2048;   # 0x800
+var _SANDHI_EINPROGRESS    = 115;
+var _SANDHI_SO_ERROR       = 4;
+var _SANDHI_POLLOUT        = 4;
+
+# Return sentinels for _sandhi_conn_connect_nb (and read by the
+# open path to classify failures).
+var _SANDHI_CONN_NB_OK      = 0;
+var _SANDHI_CONN_NB_ERR     = 0 - 1;
+var _SANDHI_CONN_NB_TIMEOUT = 0 - 2;
+
+# Classification of the last sandhi_conn_open_* attempt. Module-level
+# because Cyrius doesn't expose tagged-union returns and restructuring
+# the conn-struct shape would break every caller. Single-threaded
+# client today (server is also single-threaded per server/mod.cyr);
+# any multi-threaded client model would need this lifted to a ctx.
+var _sandhi_conn_last_err = 0;
+
+enum SandhiConnOpenErr {
+    SANDHI_CONN_OPEN_OK        = 0;
+    SANDHI_CONN_OPEN_CONNECT   = 1;
+    SANDHI_CONN_OPEN_TIMEOUT   = 2;
+    SANDHI_CONN_OPEN_TLS       = 3;
+}
+
+fn sandhi_conn_last_open_err() {
+    return _sandhi_conn_last_err;
+}
+
 fn sandhi_conn_kind(c)    { return load64(c + SANDHI_CONN_OFF_KIND); }
 fn sandhi_conn_fd(c)      { return load64(c + SANDHI_CONN_OFF_FD); }
 fn sandhi_conn_tls_ctx(c) { return load64(c + SANDHI_CONN_OFF_TLS_CTX); }
@@ -63,32 +101,121 @@ fn _sandhi_conn_set_timeout_ms(fd, ms, opt) {
 # `addr` is the same shape net.cyr expects: a 32-bit big-endian IPv4
 # address packed as an int (e.g. 127.0.0.1 → 0x0100007F on little-
 # endian hosts per INADDR_LOOPBACK).
+# Non-blocking connect with poll-based timeout. Puts the fd in
+# O_NONBLOCK, fires connect (expects EINPROGRESS), polls for POLLOUT
+# up to timeout_ms, reads SO_ERROR to distinguish connected from
+# refused, then restores blocking mode. Leaves the fd in blocking
+# mode on every exit path so subsequent recv/send behave normally.
+#
+# Returns:
+#   _SANDHI_CONN_NB_OK      (0)  — connected
+#   _SANDHI_CONN_NB_TIMEOUT (-2) — poll timed out waiting for completion
+#   _SANDHI_CONN_NB_ERR     (-1) — any other failure (fcntl, immediate
+#                                  connect err, SO_ERROR non-zero)
+fn _sandhi_conn_connect_nb(fd, addr, port, timeout_ms) {
+    var flags = syscall(SYS_FCNTL, fd, _SANDHI_F_GETFL, 0);
+    if (flags < 0) { return _SANDHI_CONN_NB_ERR; }
+    syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags | _SANDHI_O_NONBLOCK);
+
+    var cr = sock_connect(fd, addr, port);
+    if (is_err_result(cr) == 0) {
+        # Instant success (common for localhost).
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_OK;
+    }
+
+    var err = payload(cr);
+    if (err != _SANDHI_EINPROGRESS) {
+        # Real error — don't poll, just fail.
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_ERR;
+    }
+
+    # Poll for POLLOUT with the caller's timeout.
+    # struct pollfd { fd: i32, events: i16, revents: i16 } = 8 bytes.
+    var pfd = alloc(8);
+    store32(pfd, fd);
+    store16(pfd + 4, _SANDHI_POLLOUT);
+    store16(pfd + 6, 0);
+    var nr = syscall(_SANDHI_SYS_POLL, pfd, 1, timeout_ms);
+    if (nr == 0) {
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_TIMEOUT;
+    }
+    if (nr < 0) {
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_ERR;
+    }
+
+    # Check SO_ERROR — distinguishes connect-ok from connect-refused/
+    # unreachable. getsockopt(fd, SOL_SOCKET, SO_ERROR, &int, &len) —
+    # int is 4 bytes; len cell is 4 bytes (socklen_t).
+    var err_val = alloc(4);
+    store32(err_val, 0);
+    var len_cell = alloc(4);
+    store32(len_cell, 4);
+    syscall(_SANDHI_SYS_GETSOCKOPT, fd, SOL_SOCKET, _SANDHI_SO_ERROR, err_val, len_cell);
+    var so_err = load32(err_val);
+    syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+    if (so_err != 0) { return _SANDHI_CONN_NB_ERR; }
+    return _SANDHI_CONN_NB_OK;
+}
+
 fn sandhi_conn_open(addr, port, use_tls, sni_host) {
     return sandhi_conn_open_timed(addr, port, use_tls, sni_host, 0, 0);
 }
 
 # Open a connection with per-operation timeouts. read_ms and write_ms
 # apply to subsequent recv/send via SO_RCVTIMEO/SO_SNDTIMEO; 0 means
-# blocking (kernel default). connect() itself is NOT timed here —
-# that's a 0.7.3 item awaiting non-blocking connect primitives.
+# blocking (kernel default). connect() itself is blocking (kernel
+# default; can take up to ~75 s on a dropped-SYN blackhole). For a
+# bounded connect, use sandhi_conn_open_fully_timed with connect_ms.
 #
 # On a timeout during recv/send, the underlying syscall returns
 # EAGAIN (-11). sandhi_conn_recv/send convert that to -_SANDHI_EAGAIN
 # so callers can distinguish "connection broke" from "deadline fired".
 fn sandhi_conn_open_timed(addr, port, use_tls, sni_host, read_ms, write_ms) {
-    var sfd_r = tcp_socket();
-    if (is_err_result(sfd_r) == 1) { return 0; }
-    var fd = payload(sfd_r);
+    return sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, 0, read_ms, write_ms);
+}
 
-    var cr = sock_connect(fd, addr, port);
-    if (is_err_result(cr) == 1) {
-        sock_close(fd);
+# Open with connect + r/w timeouts (0.7.3). connect_ms=0 means blocking
+# connect (pre-0.7.3 behavior). connect_ms>0 uses _sandhi_conn_connect_nb.
+# On failure, `sandhi_conn_last_open_err()` returns the classification
+# (SANDHI_CONN_OPEN_CONNECT / _TIMEOUT / _TLS) so callers can raise
+# the right SANDHI_ERR_*.
+fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
+    _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
+
+    var sfd_r = tcp_socket();
+    if (is_err_result(sfd_r) == 1) {
+        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
         return 0;
     }
+    var fd = payload(sfd_r);
 
-    # Apply recv/send timeouts post-connect. A failure to set either
-    # isn't fatal — fall through as an untimed connection; the caller
-    # gets legacy blocking semantics rather than a mystery 0.
+    if (connect_ms > 0) {
+        var nbr = _sandhi_conn_connect_nb(fd, addr, port, connect_ms);
+        if (nbr == _SANDHI_CONN_NB_TIMEOUT) {
+            sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TIMEOUT;
+            return 0;
+        }
+        if (nbr != _SANDHI_CONN_NB_OK) {
+            sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+            return 0;
+        }
+    } else {
+        var cr = sock_connect(fd, addr, port);
+        if (is_err_result(cr) == 1) {
+            sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+            return 0;
+        }
+    }
+
+    # Apply recv/send timeouts post-connect. Non-fatal on setsockopt
+    # failure — fall through to untimed (blocking) behavior.
     if (read_ms > 0)  { _sandhi_conn_set_timeout_ms(fd, read_ms,  _SANDHI_SO_RCVTIMEO); }
     if (write_ms > 0) { _sandhi_conn_set_timeout_ms(fd, write_ms, _SANDHI_SO_SNDTIMEO); }
 
@@ -97,11 +224,13 @@ fn sandhi_conn_open_timed(addr, port, use_tls, sni_host, read_ms, write_ms) {
     if (use_tls == 1) {
         if (tls_available() == 0) {
             sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
             return 0;
         }
         tls_ctx = tls_connect(fd, sni_host);
         if (tls_ctx == 0) {
             sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
             return 0;
         }
         kind = SANDHI_CONN_TLS;
@@ -165,9 +294,25 @@ fn sandhi_conn_recv(conn, buf, max) {
 # if read-timeout fires; `0 - 1` for any other error. Always null-
 # terminates buf at the returned length (buf must have room for max+1).
 fn sandhi_conn_recv_all(conn, buf, max) {
+    return sandhi_conn_recv_all_deadline(conn, buf, max, 0);
+}
+
+# Same as sandhi_conn_recv_all but bounded by a monotonic deadline
+# (clock_now_ms() value; 0 = no deadline). Added 0.7.3 for total_ms
+# enforcement — each iteration of the read loop checks the deadline
+# before the next recv and returns -_SANDHI_EAGAIN if it's passed.
+# SO_RCVTIMEO still bounds individual recv calls; the deadline is
+# the outer ceiling.
+fn sandhi_conn_recv_all_deadline(conn, buf, max, deadline_ms) {
     var have = 0;
     var going = 1;
     while (going == 1 && have < max) {
+        if (deadline_ms > 0) {
+            if (clock_now_ms() >= deadline_ms) {
+                store8(buf + have, 0);
+                return 0 - _SANDHI_EAGAIN;
+            }
+        }
         var n = sandhi_conn_recv(conn, buf + have, max - have);
         if (n == 0 - _SANDHI_EAGAIN) { return 0 - _SANDHI_EAGAIN; }
         if (n < 0) { return 0 - 1; }
@@ -189,5 +334,5 @@ fn sandhi_conn_close(conn) {
 }
 
 fn sandhi_conn_version() {
-    return "0.7.2";
+    return "0.7.3";
 }

@@ -107,14 +107,13 @@ behavior change for existing callers; targeted correctness + ergonomics.*
 consumer ergonomics before the HTTP/2 feature push. No new dialects,
 no new security surface — that's 0.8.x.*
 
-- **Phase-2 timeouts** in `sandhi_http_options` (`read_ms` / `write_ms`)
-  via `SO_RCVTIMEO` / `SO_SNDTIMEO` through direct `SYS_SETSOCKOPT`
-  calls. `SANDHI_ERR_TIMEOUT` (defined but never raised today) gets
-  wired for receive/send paths. **Deferred to 0.7.3**: `connect_ms`
-  + `total_ms` — both need non-blocking connect + poll (or a
-  monotonic-deadline wrapper), which requires either local syscall
-  constants for `SYS_POLL`/`SYS_GETSOCKOPT` or an upstream ask to
-  expose them in stdlib. Keeping 0.7.2 scope tight.
+- **Phase-2 timeouts** ✅ shipped 0.7.2 — `read_ms` / `write_ms`
+  via `SO_RCVTIMEO` / `SO_SNDTIMEO`. `SANDHI_ERR_TIMEOUT` now raised.
+  **`connect_ms` + `total_ms`** ✅ shipped 0.7.3 — non-blocking
+  connect via `O_NONBLOCK` + `poll(POLLOUT)` + `getsockopt(SO_ERROR)`;
+  monotonic deadline via `clock_now_ms` threaded through every I/O
+  phase. Local syscall constants for `SYS_POLL` / `SYS_GETSOCKOPT`
+  defined in `conn.cyr` (Linux x86_64). No stdlib ask needed.
 - **AAAA (IPv6) DNS** in `src/net/resolve.cyr`. A-only today. Ship
   the resolver first; Happy Eyeballs (RFC 6555) can wait. Adds a
   local `sockaddr_in6()` builder + `sock_connect6()` wrapper since
@@ -139,6 +138,39 @@ no new security surface — that's 0.8.x.*
   retry stays explicit.
 
 **Deferred from 0.7.2 at planning time**:
+
+### 0.7.3 — Connect/total timeouts — ✅ shipped 2026-04-24
+
+*Closes the two deferrals from 0.7.2's timeout work. With this patch,
+sandhi's HTTP client has the full timeout surface — connect, read,
+write, and end-to-end — that production consumers expect.*
+
+- `connect_ms` via non-blocking connect: `O_NONBLOCK` + `connect()`
+  → `poll(POLLOUT, ms)` → `getsockopt(SO_ERROR)`. Local syscall
+  constants `_SANDHI_SYS_POLL=7`, `_SANDHI_SYS_GETSOCKOPT=55` in
+  `conn.cyr`. Restores blocking mode on every exit path.
+- `total_ms` via monotonic deadline: `clock_now_ms() + total_ms`
+  computed at entry, threaded through `_sandhi_http_exchange` and
+  `_sandhi_stream_run`. New `_sandhi_http_clamp_ms` helper bounds
+  effective `connect_ms` against the deadline. New
+  `sandhi_conn_recv_all_deadline` variant for the recv loop.
+- Module-level `_sandhi_conn_last_err` lets the caller distinguish
+  `SANDHI_ERR_TIMEOUT` from `SANDHI_ERR_CONNECT` / `_TLS` precisely
+  (was: collapsed by `use_tls` flag).
+- Per-hop `total_ms` semantics for redirect chains — each hop gets
+  a fresh budget. End-to-end across hops is `max_hops × total_ms`;
+  if a tighter end-to-end bound is needed, lower max_hops or shorten
+  per-hop total_ms. Documented in the follow-loop comment.
+- Live-network blackhole tests (TEST-NET-1 192.0.2.1) verify
+  `connect_ms` and `total_ms` fire within budget against an unrouted
+  destination.
+
+**Deferred to a future patch**: end-to-end-across-redirects
+(`overall_ms` option) — wait for a consumer ask. Multi-threaded
+client model (which would need `_sandhi_conn_last_err` lifted to a
+per-call ctx) — unblocked by 0.8.0's pool work.
+
+### 0.7.2 deferred (continued)
 
 - **Connection pool / keep-alive** → moved to **0.8.0** alongside
   HTTP/2. Rationale: h2 multiplexes streams over one connection, which

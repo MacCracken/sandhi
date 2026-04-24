@@ -435,14 +435,14 @@ fn test_client_host_header() {
 
 fn test_client_build_request_get() {
     var req = _sandhi_client_build_request("GET", "/path", "example.com", 0, 0);
-    var expected = "GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: sandhi/0.7.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: sandhi/0.7.3\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: GET no body no user headers");
     return 0;
 }
 
 fn test_client_build_request_post() {
     var req = _sandhi_client_build_request("POST", "/api", "api.example.com", 0, 42);
-    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nUser-Agent: sandhi/0.7.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nUser-Agent: sandhi/0.7.3\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: POST emits Content-Length");
     return 0;
 }
@@ -450,7 +450,7 @@ fn test_client_build_request_post() {
 fn test_client_build_request_post_empty_body() {
     # POST with body_len 0 should still emit Content-Length: 0.
     var req = _sandhi_client_build_request("POST", "/ping", "example.com", 0, 0);
-    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nUser-Agent: sandhi/0.7.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nUser-Agent: sandhi/0.7.3\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: POST empty body");
     return 0;
 }
@@ -462,7 +462,7 @@ fn test_client_build_request_user_headers() {
     var req = _sandhi_client_build_request("GET", "/me", "api.example.com", h, 0);
     # User-supplied Accept != Accept-Encoding, so both defaults still inject.
     # User hasn't supplied User-Agent either, so the default lands.
-    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: sandhi/0.7.2\r\nAccept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
+    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: sandhi/0.7.3\r\nAccept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: user headers serialized");
     return 0;
 }
@@ -539,11 +539,15 @@ fn test_http_options_defaults() {
     assert_eq(sandhi_http_options_bytes(o), 262144, "opts: max_bytes default 256K");
     assert_eq(sandhi_http_options_get_read_ms(o), 0, "opts: read_ms default 0");
     assert_eq(sandhi_http_options_get_write_ms(o), 0, "opts: write_ms default 0");
+    assert_eq(sandhi_http_options_get_connect_ms(o), 0, "opts: connect_ms default 0");
+    assert_eq(sandhi_http_options_get_total_ms(o), 0, "opts: total_ms default 0");
     assert_eq(sandhi_http_options_follow(0), 0, "opts: null → follow off");
     assert_eq(sandhi_http_options_hops(0), 5, "opts: null → hops 5");
     assert_eq(sandhi_http_options_bytes(0), 262144, "opts: null → bytes 256K");
     assert_eq(sandhi_http_options_get_read_ms(0), 0, "opts: null → read_ms 0");
     assert_eq(sandhi_http_options_get_write_ms(0), 0, "opts: null → write_ms 0");
+    assert_eq(sandhi_http_options_get_connect_ms(0), 0, "opts: null → connect_ms 0");
+    assert_eq(sandhi_http_options_get_total_ms(0), 0, "opts: null → total_ms 0");
     return 0;
 }
 
@@ -554,11 +558,67 @@ fn test_http_options_mutators() {
     sandhi_http_options_max_response_bytes(o, 65536);
     sandhi_http_options_read_ms(o, 5000);
     sandhi_http_options_write_ms(o, 2500);
+    sandhi_http_options_connect_ms(o, 1500);
+    sandhi_http_options_total_ms(o, 10000);
     assert_eq(sandhi_http_options_follow(o), 1, "opts: follow=1 sticks");
     assert_eq(sandhi_http_options_hops(o), 10, "opts: max_hops=10 sticks");
     assert_eq(sandhi_http_options_bytes(o), 65536, "opts: max_bytes=64K sticks");
     assert_eq(sandhi_http_options_get_read_ms(o), 5000, "opts: read_ms=5000 sticks");
     assert_eq(sandhi_http_options_get_write_ms(o), 2500, "opts: write_ms=2500 sticks");
+    assert_eq(sandhi_http_options_get_connect_ms(o), 1500, "opts: connect_ms=1500 sticks");
+    assert_eq(sandhi_http_options_get_total_ms(o), 10000, "opts: total_ms=10000 sticks");
+    return 0;
+}
+
+fn test_http_clamp_ms_no_deadline() {
+    # deadline=0 → return raw_ms unchanged.
+    assert_eq(_sandhi_http_clamp_ms(5000, 0), 5000, "clamp: no deadline → raw");
+    assert_eq(_sandhi_http_clamp_ms(0, 0), 0, "clamp: zero raw, no deadline → 0");
+    return 0;
+}
+
+fn test_http_clamp_ms_with_deadline_in_future() {
+    var deadline = clock_now_ms() + 60000;
+    var clamped = _sandhi_http_clamp_ms(1000, deadline);
+    assert_eq(clamped > 0 && clamped <= 1000, 1, "clamp: raw < remaining → raw");
+    var clamped2 = _sandhi_http_clamp_ms(0, deadline);
+    assert_eq(clamped2 > 50000 && clamped2 <= 60000, 1, "clamp: raw 0 → remaining");
+    var clamped3 = _sandhi_http_clamp_ms(100000, deadline);
+    assert_eq(clamped3 > 50000 && clamped3 <= 60000, 1, "clamp: raw > remaining → remaining");
+    return 0;
+}
+
+fn test_http_clamp_ms_deadline_elapsed() {
+    var deadline = clock_now_ms() - 1000;
+    assert_eq(_sandhi_http_clamp_ms(5000, deadline), 0 - 1, "clamp: elapsed → -1 sentinel");
+    return 0;
+}
+
+fn test_connect_ms_blackhole_returns_timeout() {
+    # 192.0.2.0/24 is TEST-NET-1 (RFC 5737) — guaranteed not routed.
+    # connect() with a 200 ms timeout should return TIMEOUT well
+    # before the kernel's default ~75 s SYN-retry budget. Budget kept
+    # generous (5 s) to avoid flakiness on busy CI hosts.
+    var opts = sandhi_http_options_new();
+    sandhi_http_options_connect_ms(opts, 200);
+    var t0 = clock_now_ms();
+    var r = sandhi_http_get_opts("http://192.0.2.1/", 0, opts);
+    var elapsed = clock_now_ms() - t0;
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_TIMEOUT, "connect_ms blackhole: TIMEOUT raised");
+    assert_eq(elapsed < 5000, 1, "connect_ms blackhole: returned within budget");
+    return 0;
+}
+
+fn test_total_ms_blackhole_returns_timeout() {
+    # Same target, no connect_ms, but total_ms=300 → must still TIMEOUT
+    # because the connect-phase clamp uses the deadline as ceiling.
+    var opts = sandhi_http_options_new();
+    sandhi_http_options_total_ms(opts, 300);
+    var t0 = clock_now_ms();
+    var r = sandhi_http_get_opts("http://192.0.2.1/", 0, opts);
+    var elapsed = clock_now_ms() - t0;
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_TIMEOUT, "total_ms blackhole: TIMEOUT raised");
+    assert_eq(elapsed < 5000, 1, "total_ms blackhole: returned within budget");
     return 0;
 }
 
@@ -1677,6 +1737,21 @@ fn main() {
 
     test_group("http/options/mutators");
     test_http_options_mutators();
+
+    test_group("http/clamp_ms/no_deadline");
+    test_http_clamp_ms_no_deadline();
+
+    test_group("http/clamp_ms/future");
+    test_http_clamp_ms_with_deadline_in_future();
+
+    test_group("http/clamp_ms/elapsed");
+    test_http_clamp_ms_deadline_elapsed();
+
+    test_group("http/connect_ms/blackhole");
+    test_connect_ms_blackhole_returns_timeout();
+
+    test_group("http/total_ms/blackhole");
+    test_total_ms_blackhole_returns_timeout();
 
     test_group("http/retry/defaults");
     test_retry_defaults();

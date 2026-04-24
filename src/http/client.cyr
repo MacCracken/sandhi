@@ -136,27 +136,53 @@ fn _sandhi_client_build_request(method, full_path, host_header, user_headers, bo
 
 # Outer trace wrapper — opt-in span via sandhi_trace_enable(1). Span
 # no-op by default; the inner does all the work either way.
-fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes, read_ms, write_ms) {
+fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes, connect_ms, read_ms, write_ms, total_ms) {
     sandhi_trace_begin("sandhi.http");
-    var r = _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes, read_ms, write_ms);
+    var r = _sandhi_http_do_impl(method, url, user_headers, body, body_len,
+                                  max_bytes, connect_ms, read_ms, write_ms, total_ms);
     sandhi_trace_end();
     return r;
 }
 
+# Compute the effective connect_ms given a monotonic deadline.
+# Returns connect_ms unchanged when deadline is disabled; otherwise
+# clamps to `deadline - now`. Returns 0 if the deadline has already
+# elapsed (caller treats as TIMEOUT).
+fn _sandhi_http_clamp_ms(raw_ms, deadline_ms) {
+    if (deadline_ms <= 0) { return raw_ms; }
+    var remaining = deadline_ms - clock_now_ms();
+    if (remaining <= 0) { return 0 - 1; }  # sentinel: already elapsed
+    if (raw_ms <= 0 || raw_ms > remaining) { return remaining; }
+    return raw_ms;
+}
+
 # Keep this function compact — Cyrius 5.6.22 aliases locals on crowded
 # frames. Everything meaningful lives in helpers.
-fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes, read_ms, write_ms) {
+fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes, connect_ms, read_ms, write_ms, total_ms) {
     var u = sandhi_url_parse(url);
     if (u == 0) { return _sandhi_resp_err(SANDHI_ERR_PARSE); }
 
     var addr = _sandhi_client_resolve(sandhi_url_host(u));
     if (addr == 0 - 1) { return _sandhi_resp_err(SANDHI_ERR_DISCOVERY); }
 
+    # Compute monotonic deadline if total_ms is set. Passed through to
+    # exchange so the recv loop can break early. A fresh deadline
+    # applies per _sandhi_http_do call; the redirect follower re-enters
+    # here for each hop, so each hop gets its own `total_ms` budget.
+    var deadline_ms = 0;
+    if (total_ms > 0) { deadline_ms = clock_now_ms() + total_ms; }
+
+    var eff_connect = _sandhi_http_clamp_ms(connect_ms, deadline_ms);
+    if (eff_connect == 0 - 1) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
+
     var use_tls = 0;
     if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { use_tls = 1; }
-    var conn = sandhi_conn_open_timed(addr, sandhi_url_port(u), use_tls, sandhi_url_host(u), read_ms, write_ms);
+    var conn = sandhi_conn_open_fully_timed(addr, sandhi_url_port(u), use_tls,
+                                             sandhi_url_host(u), eff_connect, read_ms, write_ms);
     if (conn == 0) {
-        if (use_tls == 1) { return _sandhi_resp_err(SANDHI_ERR_TLS); }
+        var oe = sandhi_conn_last_open_err();
+        if (oe == SANDHI_CONN_OPEN_TIMEOUT) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
+        if (oe == SANDHI_CONN_OPEN_TLS)     { return _sandhi_resp_err(SANDHI_ERR_TLS); }
         return _sandhi_resp_err(SANDHI_ERR_CONNECT);
     }
 
@@ -164,13 +190,18 @@ fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes, re
     var host_hdr = _sandhi_client_host_header(u);
     var req = _sandhi_client_build_request(method, full_path, host_hdr, user_headers, body_len);
 
-    return _sandhi_http_exchange(conn, req, body, body_len, max_bytes);
+    return _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms);
 }
 
 # Send request, receive response, close connection. Extracted so the
 # local count in _sandhi_http_do stays small. Returns SANDHI_ERR_TIMEOUT
-# on SO_RCVTIMEO/SO_SNDTIMEO; SANDHI_ERR_CONNECT for any other I/O fail.
-fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes) {
+# on SO_RCVTIMEO/SO_SNDTIMEO or deadline-exceeded; SANDHI_ERR_CONNECT
+# for any other I/O fail.
+fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms) {
+    if (deadline_ms > 0 && clock_now_ms() >= deadline_ms) {
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err(SANDHI_ERR_TIMEOUT);
+    }
     var req_data = str_data(req);
     var req_len = strlen(req_data);
     var sw = sandhi_conn_send_all(conn, req_data, req_len);
@@ -196,7 +227,7 @@ fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes) {
     var cap = max_bytes;
     if (cap <= 0) { cap = _SANDHI_HTTP_RESP_BUF_SIZE; }
     var rbuf = alloc(cap + 1);
-    var nread = sandhi_conn_recv_all(conn, rbuf, cap);
+    var nread = sandhi_conn_recv_all_deadline(conn, rbuf, cap, deadline_ms);
     sandhi_conn_close(conn);
     if (nread == 0 - _SANDHI_EAGAIN) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
     if (nread < 0) { return _sandhi_resp_err(SANDHI_ERR_CONNECT); }
@@ -214,7 +245,7 @@ fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes) {
 # Location may be absolute ("https://other.example.com/x") or relative
 # ("/x" — resolve against the current URL's scheme+authority).
 
-# Options struct (40 bytes):
+# Options struct (56 bytes):
 #   +0   follow_redirects   (int: 0 default, 1 to enable)
 #   +8   max_hops           (int: default 5)
 #   +16  max_response_bytes (int: default 262144 = 256 KB; applies to
@@ -224,19 +255,24 @@ fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes) {
 #                            Added 0.7.2.
 #   +32  write_ms           (int: SO_SNDTIMEO in ms; 0 = blocking).
 #                            Added 0.7.2.
-#
-# Deferred to 0.7.3: connect_ms (needs non-blocking connect + poll;
-# requires SYS_POLL / SYS_GETSOCKOPT constants not yet exposed by
-# stdlib) and total_ms (needs per-phase monotonic-deadline tracking).
+#   +40  connect_ms         (int: non-blocking connect + poll timeout
+#                            in ms; 0 = blocking connect). Added 0.7.3.
+#   +48  total_ms           (int: monotonic deadline for entire
+#                            request-response cycle; 0 = no deadline).
+#                            Bounds connect_ms + recv loop but not
+#                            redirect-follow chain (each hop gets a
+#                            fresh deadline). Added 0.7.3.
 enum SandhiHttpOptOff {
-    SANDHI_HTTP_OPT_OFF_FOLLOW    = 0;
-    SANDHI_HTTP_OPT_OFF_MAX_HOPS  = 8;
-    SANDHI_HTTP_OPT_OFF_MAX_BYTES = 16;
-    SANDHI_HTTP_OPT_OFF_READ_MS   = 24;
-    SANDHI_HTTP_OPT_OFF_WRITE_MS  = 32;
+    SANDHI_HTTP_OPT_OFF_FOLLOW     = 0;
+    SANDHI_HTTP_OPT_OFF_MAX_HOPS   = 8;
+    SANDHI_HTTP_OPT_OFF_MAX_BYTES  = 16;
+    SANDHI_HTTP_OPT_OFF_READ_MS    = 24;
+    SANDHI_HTTP_OPT_OFF_WRITE_MS   = 32;
+    SANDHI_HTTP_OPT_OFF_CONNECT_MS = 40;
+    SANDHI_HTTP_OPT_OFF_TOTAL_MS   = 48;
 }
 
-var SANDHI_HTTP_OPT_STRUCT_SIZE = 40;
+var SANDHI_HTTP_OPT_STRUCT_SIZE = 56;
 var SANDHI_HTTP_DEFAULT_MAX_HOPS = 5;
 var SANDHI_HTTP_DEFAULT_MAX_BYTES = 262144;
 
@@ -247,6 +283,8 @@ fn sandhi_http_options_new() {
     store64(o + SANDHI_HTTP_OPT_OFF_MAX_BYTES, SANDHI_HTTP_DEFAULT_MAX_BYTES);
     store64(o + SANDHI_HTTP_OPT_OFF_READ_MS, 0);
     store64(o + SANDHI_HTTP_OPT_OFF_WRITE_MS, 0);
+    store64(o + SANDHI_HTTP_OPT_OFF_CONNECT_MS, 0);
+    store64(o + SANDHI_HTTP_OPT_OFF_TOTAL_MS, 0);
     return o;
 }
 
@@ -275,6 +313,16 @@ fn sandhi_http_options_write_ms(opts, ms) {
     return 0;
 }
 
+fn sandhi_http_options_connect_ms(opts, ms) {
+    store64(opts + SANDHI_HTTP_OPT_OFF_CONNECT_MS, ms);
+    return 0;
+}
+
+fn sandhi_http_options_total_ms(opts, ms) {
+    store64(opts + SANDHI_HTTP_OPT_OFF_TOTAL_MS, ms);
+    return 0;
+}
+
 fn sandhi_http_options_follow(opts) {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_FOLLOW);
@@ -298,6 +346,16 @@ fn sandhi_http_options_get_read_ms(opts) {
 fn sandhi_http_options_get_write_ms(opts) {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_WRITE_MS);
+}
+
+fn sandhi_http_options_get_connect_ms(opts) {
+    if (opts == 0) { return 0; }
+    return load64(opts + SANDHI_HTTP_OPT_OFF_CONNECT_MS);
+}
+
+fn sandhi_http_options_get_total_ms(opts) {
+    if (opts == 0) { return 0; }
+    return load64(opts + SANDHI_HTTP_OPT_OFF_TOTAL_MS);
 }
 
 # 1 if the status code indicates a redirect we follow.
@@ -348,14 +406,17 @@ fn _sandhi_resolve_location(base_url, location) {
 
 # Redirect-following driver. Keep compact — each iteration reassigns
 # locals rather than allocating new ones, so the function stays under
-# the Cyrius local-count threshold.
-fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops, max_bytes, read_ms, write_ms) {
+# the Cyrius local-count threshold. total_ms resets per hop (each
+# destination gets its own request budget); if a tighter end-to-end
+# bound is needed, the caller should lower max_hops or pre-compute.
+fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
+                        max_bytes, connect_ms, read_ms, write_ms, total_ms) {
     var m = method;
     var u = url;
     var b = body;
     var bl = body_len;
     var hops = 0;
-    var r = _sandhi_http_do(m, u, headers, b, bl, max_bytes, read_ms, write_ms);
+    var r = _sandhi_http_do(m, u, headers, b, bl, max_bytes, connect_ms, read_ms, write_ms, total_ms);
     while (hops < max_hops) {
         if (_sandhi_is_redirect(sandhi_http_status(r)) == 0) { return r; }
         var loc = sandhi_headers_get(sandhi_http_headers(r), "Location");
@@ -365,7 +426,7 @@ fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops, max_bytes
         if (sandhi_http_status(r) == 303) { m = "GET"; b = 0; bl = 0; }
         u = next;
         hops = hops + 1;
-        r = _sandhi_http_do(m, u, headers, b, bl, max_bytes, read_ms, write_ms);
+        r = _sandhi_http_do(m, u, headers, b, bl, max_bytes, connect_ms, read_ms, write_ms, total_ms);
     }
     return r;
 }
@@ -380,11 +441,15 @@ fn _sandhi_http_dispatch(method, url, headers, body, body_len, opts) {
     var max_bytes = sandhi_http_options_bytes(opts);
     var read_ms = sandhi_http_options_get_read_ms(opts);
     var write_ms = sandhi_http_options_get_write_ms(opts);
+    var connect_ms = sandhi_http_options_get_connect_ms(opts);
+    var total_ms = sandhi_http_options_get_total_ms(opts);
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
-        return _sandhi_http_follow(method, url, headers, body, body_len, hops, max_bytes, read_ms, write_ms);
+        return _sandhi_http_follow(method, url, headers, body, body_len, hops,
+                                    max_bytes, connect_ms, read_ms, write_ms, total_ms);
     }
-    return _sandhi_http_do(method, url, headers, body, body_len, max_bytes, read_ms, write_ms);
+    return _sandhi_http_do(method, url, headers, body, body_len,
+                            max_bytes, connect_ms, read_ms, write_ms, total_ms);
 }
 
 # Simple verbs — no redirect following. Pass user_headers = 0 for none.
@@ -423,5 +488,5 @@ fn sandhi_http_post_opts(url, user_headers, body, body_len, opts) {
 }
 
 fn sandhi_http_client_version() {
-    return "0.7.1";
+    return "0.7.3";
 }
