@@ -1,0 +1,55 @@
+# programs/dns-probe.cyr — ad-hoc live-DNS check.
+#
+# Not part of the test suite (requires network). Run manually:
+#   cyrius run programs/dns-probe.cyr <hostname>
+# Example:
+#   cyrius run programs/dns-probe.cyr example.com
+
+include "src/error.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn main() {
+    alloc_init();
+    args_init();
+
+    var host = "example.com";
+    if (argc() >= 2) {
+        var arg = argv(1);
+        if (arg != 0 && load8(arg) != 0) { host = arg; }
+    }
+
+    syscall(1, 1, "resolving: ", 11);
+    syscall(1, 1, host, strlen(host));
+    syscall(1, 1, "\n", 1);
+
+    var ip = sandhi_resolve_ipv4(host);
+    if (ip == 0 - 1) {
+        syscall(1, 1, "resolve failed\n", 15);
+        return 1;
+    }
+
+    # Decode back into A.B.C.D for display.
+    var a0 = ip & 0xFF;
+    var a1 = (ip >> 8) & 0xFF;
+    var a2 = (ip >> 16) & 0xFF;
+    var a3 = (ip >> 24) & 0xFF;
+    syscall(1, 1, "ip: ", 4);
+    fmt_int(a0); syscall(1, 1, ".", 1);
+    fmt_int(a1); syscall(1, 1, ".", 1);
+    fmt_int(a2); syscall(1, 1, ".", 1);
+    fmt_int(a3); syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,290 @@
+# sandhi/net/resolve — native DNS resolver (UDP, RFC 1035).
+#
+# Linux-first, A-records only, single-nameserver fallback from
+# /etc/resolv.conf. Written because fdlopen_getaddrinfo is blocked
+# at the 5.6.22 toolchain pin (docs/issues/2026-04-24-fdlopen...).
+# Retires opportunistically when fdlopen orchestration lands and
+# sandhi can drop back to a thin stdlib-compose wrapper.
+#
+# Scope: what service consumers actually hit.
+#   - UDP only (no TCP fallback for >512B responses — rare for A-only)
+#   - A records only (AAAA — ipv6 — deferred until a consumer asks)
+#   - First nameserver from /etc/resolv.conf (no per-query retry across
+#     multiple nameservers yet — add when we see timeouts in practice)
+#   - No /etc/hosts consultation; resolve_ipv4 defers to the client's
+#     IP-literal path for numeric inputs before reaching here.
+#
+# All RFC 1035 packet building + parsing is inline — it's tight, and
+# pulling in a generic DNS library would inflate the fold-into-stdlib
+# surface area ADR 0002 is trying to keep small.
+
+var _SANDHI_RESOLVE_BUF_SIZE = 512;   # RFC 1035 UDP limit
+var _SANDHI_RESOLVE_TIMEOUT_MS = 2000;  # reserved; net.cyr lacks timeouts today
+
+# ================================================================
+# IPv4-literal parser — also used by the HTTP client for numeric URLs.
+# ================================================================
+
+# Parse "127.0.0.1" / "1.2.3.4" into a network-byte-order uint32.
+# Returns (0 - 1) on malformed input. sock_connect expects this shape.
+fn sandhi_net_parse_ipv4(host) {
+    if (host == 0) { return 0 - 1; }
+    var octets[4];
+    store8(&octets + 0, 0);
+    store8(&octets + 1, 0);
+    store8(&octets + 2, 0);
+    store8(&octets + 3, 0);
+    var oi = 0;
+    var got = 0;
+    var cur = 0;
+    var i = 0;
+    while (load8(host + i) != 0) {
+        var c = load8(host + i);
+        if (c == 46) {
+            if (got == 0) { return 0 - 1; }
+            if (oi >= 3) { return 0 - 1; }
+            if (cur > 255) { return 0 - 1; }
+            store8(&octets + oi, cur);
+            oi = oi + 1;
+            cur = 0;
+            got = 0;
+        } elif (c >= 48 && c <= 57) {
+            cur = cur * 10 + (c - 48);
+            got = 1;
+            if (cur > 255) { return 0 - 1; }
+        } else {
+            return 0 - 1;
+        }
+        i = i + 1;
+    }
+    if (got == 0) { return 0 - 1; }
+    if (oi != 3) { return 0 - 1; }
+    store8(&octets + 3, cur);
+    var a0 = load8(&octets + 0);
+    var a1 = load8(&octets + 1);
+    var a2 = load8(&octets + 2);
+    var a3 = load8(&octets + 3);
+    return a0 | (a1 << 8) | (a2 << 16) | (a3 << 24);
+}
+
+# ================================================================
+# /etc/resolv.conf parser
+# ================================================================
+
+# Return the first `nameserver A.B.C.D` entry in /etc/resolv.conf as
+# an IPv4 uint32 (network-byte-order, shape matches INADDR_LOOPBACK).
+# Returns (0 - 1) on any failure — caller falls back to 8.8.8.8.
+fn _sandhi_resolve_read_resolv_conf() {
+    var buf = alloc(4096);
+    var n = file_read_all("/etc/resolv.conf", buf, 4095);
+    if (n <= 0) { return 0 - 1; }
+    store8(buf + n, 0);
+    var i = 0;
+    while (i < n) {
+        # Skip leading whitespace.
+        while (i < n && (load8(buf + i) == 32 || load8(buf + i) == 9)) { i = i + 1; }
+        # Comment line? Skip to newline.
+        if (i < n && load8(buf + i) == 35) {
+            while (i < n && load8(buf + i) != 10) { i = i + 1; }
+            i = i + 1;
+        } elif (i + 10 < n && memeq(buf + i, "nameserver", 10) == 1
+                && (load8(buf + i + 10) == 32 || load8(buf + i + 10) == 9)) {
+            # Found "nameserver" — advance past whitespace, read up to ws/EOL.
+            i = i + 10;
+            while (i < n && (load8(buf + i) == 32 || load8(buf + i) == 9)) { i = i + 1; }
+            var ns_start = i;
+            while (i < n && load8(buf + i) != 32 && load8(buf + i) != 9
+                         && load8(buf + i) != 13 && load8(buf + i) != 10) {
+                i = i + 1;
+            }
+            var nlen = i - ns_start;
+            var ns = alloc(nlen + 1);
+            memcpy(ns, buf + ns_start, nlen);
+            store8(ns + nlen, 0);
+            return sandhi_net_parse_ipv4(ns);
+        } else {
+            # Skip to newline.
+            while (i < n && load8(buf + i) != 10) { i = i + 1; }
+            i = i + 1;
+        }
+    }
+    return 0 - 1;
+}
+
+# ================================================================
+# DNS wire-format: query build
+# ================================================================
+
+# Encode a hostname as DNS labels: "example.com" → 07 example 03 com 00.
+# Writes to `out` starting at offset 0, returns bytes written. Returns
+# (0 - 1) if any label exceeds 63 bytes or total exceeds 255.
+fn _sandhi_resolve_encode_labels(host, out) {
+    var total = 0;
+    var label_start = 0;
+    var p = 0;
+    var wi = 1;  # +1: leaves room for the length byte of label 0
+    while (load8(host + p) != 0) {
+        var c = load8(host + p);
+        if (c == 46) {
+            var llen = p - label_start;
+            if (llen == 0) { return 0 - 1; }
+            if (llen > 63) { return 0 - 1; }
+            store8(out + (wi - llen - 1), llen);
+            label_start = p + 1;
+            wi = wi + 1;
+        } else {
+            store8(out + wi, c);
+            wi = wi + 1;
+        }
+        p = p + 1;
+        total = wi;
+    }
+    # Emit last label.
+    var last_len = p - label_start;
+    if (last_len == 0) { return 0 - 1; }
+    if (last_len > 63) { return 0 - 1; }
+    store8(out + (wi - last_len - 1), last_len);
+    store8(out + wi, 0);  # root terminator
+    wi = wi + 1;
+    if (wi > 255) { return 0 - 1; }
+    return wi;
+}
+
+# Build the full DNS query packet. Writes into `out` (must hold at
+# least 12 + 255 + 4 bytes). Returns packet length.
+fn _sandhi_resolve_build_query(id, host, out) {
+    # Header
+    store8(out + 0, (id >> 8) & 0xFF);
+    store8(out + 1, id & 0xFF);
+    store8(out + 2, 0x01);  # Flags MSB: QR=0, Opcode=0, AA=0, TC=0, RD=1
+    store8(out + 3, 0x00);  # Flags LSB: all zero
+    store8(out + 4, 0x00); store8(out + 5, 0x01);  # QDCOUNT = 1
+    store8(out + 6, 0x00); store8(out + 7, 0x00);  # ANCOUNT
+    store8(out + 8, 0x00); store8(out + 9, 0x00);  # NSCOUNT
+    store8(out + 10, 0x00); store8(out + 11, 0x00);  # ARCOUNT
+
+    # Question
+    var qname_len = _sandhi_resolve_encode_labels(host, out + 12);
+    if (qname_len < 0) { return 0 - 1; }
+    var qi = 12 + qname_len;
+    store8(out + qi + 0, 0x00); store8(out + qi + 1, 0x01);  # QTYPE = A
+    store8(out + qi + 2, 0x00); store8(out + qi + 3, 0x01);  # QCLASS = IN
+    return qi + 4;
+}
+
+# ================================================================
+# DNS wire-format: response parse
+# ================================================================
+
+# Skip a name at offset `off` in the response. Handles both plain
+# length-labeled names and pointer compression (0xC0xx). Returns
+# the offset just past the name. Returns (0 - 1) on malformed.
+fn _sandhi_resolve_skip_name(buf, blen, off) {
+    var p = off;
+    var safety = 0;
+    while (safety < 256) {
+        if (p >= blen) { return 0 - 1; }
+        var c = load8(buf + p);
+        if (c == 0) { return p + 1; }
+        if ((c & 0xC0) == 0xC0) {
+            # Two-byte compression pointer — name continues elsewhere.
+            if (p + 1 >= blen) { return 0 - 1; }
+            return p + 2;
+        }
+        # Otherwise c is the label length (max 63).
+        if (c > 63) { return 0 - 1; }
+        p = p + 1 + c;
+        safety = safety + 1;
+    }
+    return 0 - 1;
+}
+
+# Parse the first A record from a DNS response packet. Returns the
+# IPv4 as a network-byte-order uint32 (same shape as
+# _sandhi_client_parse_ipv4), or (0 - 1) on any parse failure.
+fn _sandhi_resolve_parse_response(buf, blen) {
+    if (blen < 12) { return 0 - 1; }
+    # Answer count.
+    var ancount = (load8(buf + 6) << 8) | load8(buf + 7);
+    if (ancount == 0) { return 0 - 1; }
+    # Response code (low 4 bits of byte 3).
+    var rcode = load8(buf + 3) & 0x0F;
+    if (rcode != 0) { return 0 - 1; }
+    # QDCOUNT — skip the question.
+    var qdcount = (load8(buf + 4) << 8) | load8(buf + 5);
+    var off = 12;
+    var q = 0;
+    while (q < qdcount) {
+        off = _sandhi_resolve_skip_name(buf, blen, off);
+        if (off < 0) { return 0 - 1; }
+        off = off + 4;  # QTYPE + QCLASS
+        q = q + 1;
+    }
+    # Scan answers.
+    var a = 0;
+    while (a < ancount) {
+        off = _sandhi_resolve_skip_name(buf, blen, off);
+        if (off < 0) { return 0 - 1; }
+        if (off + 10 > blen) { return 0 - 1; }
+        var rtype = (load8(buf + off + 0) << 8) | load8(buf + off + 1);
+        var rdlength = (load8(buf + off + 8) << 8) | load8(buf + off + 9);
+        off = off + 10;
+        if (rtype == 1) {
+            # A record — rdlength must be 4.
+            if (rdlength != 4) { return 0 - 1; }
+            if (off + 4 > blen) { return 0 - 1; }
+            var a0 = load8(buf + off + 0);
+            var a1 = load8(buf + off + 1);
+            var a2 = load8(buf + off + 2);
+            var a3 = load8(buf + off + 3);
+            return a0 | (a1 << 8) | (a2 << 16) | (a3 << 24);
+        }
+        off = off + rdlength;
+        a = a + 1;
+    }
+    return 0 - 1;
+}
+
+# ================================================================
+# Public resolver
+# ================================================================
+
+# Resolve `host` to an IPv4 address (net-byte-order uint32). Returns
+# (0 - 1) on any failure. For IP-literal inputs, caller should use
+# _sandhi_client_parse_ipv4 directly — this function always performs
+# a DNS query.
+fn sandhi_resolve_ipv4(host) {
+    if (host == 0) { return 0 - 1; }
+    var ns = _sandhi_resolve_read_resolv_conf();
+    if (ns == 0 - 1) {
+        # Fall back to public DNS (Google's 8.8.8.8 = 0x08080808 LE).
+        ns = 8 | (8 << 8) | (8 << 16) | (8 << 24);
+    }
+
+    var qbuf = alloc(512);
+    var qlen = _sandhi_resolve_build_query(0x1234, host, qbuf);
+    if (qlen < 0) { return 0 - 1; }
+
+    var fd_r = udp_socket();
+    if (is_err_result(fd_r) == 1) { return 0 - 1; }
+    var fd = payload(fd_r);
+
+    var cr = sock_connect(fd, ns, 53);
+    if (is_err_result(cr) == 1) { sock_close(fd); return 0 - 1; }
+
+    var sr = sock_send(fd, qbuf, qlen);
+    if (is_err_result(sr) == 1) { sock_close(fd); return 0 - 1; }
+
+    var rbuf = alloc(_SANDHI_RESOLVE_BUF_SIZE);
+    var rr = sock_recv(fd, rbuf, _SANDHI_RESOLVE_BUF_SIZE);
+    sock_close(fd);
+    if (is_err_result(rr) == 1) { return 0 - 1; }
+    var rlen = payload(rr);
+    if (rlen <= 0) { return 0 - 1; }
+
+    return _sandhi_resolve_parse_response(rbuf, rlen);
+}
+
+fn sandhi_resolve_version() {
+    return "0.3.0";
+}

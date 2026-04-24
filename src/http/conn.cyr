@@ -1,0 +1,140 @@
+# sandhi/http/conn — unified plain-TCP + TLS connection abstraction.
+#
+# Tagged struct so client code can treat plain http:// and https://
+# uniformly. Opens a socket via stdlib net.cyr, optionally wraps it
+# in a TLS session via stdlib tls.cyr. Send/recv dispatch on the
+# connection kind.
+#
+# Struct layout (24 bytes):
+#   +0   kind     (int: SANDHI_CONN_PLAIN | SANDHI_CONN_TLS)
+#   +8   fd       (int: raw socket fd)
+#   +16  tls_ctx  (ptr: tls_connect ctx if kind == TLS, else 0)
+#
+# Ownership: sandhi_conn_open allocates the struct; sandhi_conn_close
+# frees the TLS context and closes the fd. Caller does not free the
+# struct itself — v1 is alloc-once, no explicit free (Cyrius mem model).
+
+enum SandhiConnKind {
+    SANDHI_CONN_PLAIN = 0;
+    SANDHI_CONN_TLS   = 1;
+}
+
+enum SandhiConnOff {
+    SANDHI_CONN_OFF_KIND    = 0;
+    SANDHI_CONN_OFF_FD      = 8;
+    SANDHI_CONN_OFF_TLS_CTX = 16;
+}
+
+var SANDHI_CONN_STRUCT_SIZE = 24;
+
+fn sandhi_conn_kind(c)    { return load64(c + SANDHI_CONN_OFF_KIND); }
+fn sandhi_conn_fd(c)      { return load64(c + SANDHI_CONN_OFF_FD); }
+fn sandhi_conn_tls_ctx(c) { return load64(c + SANDHI_CONN_OFF_TLS_CTX); }
+
+# Open a connection to the given IPv4 address (network-byte-order
+# uint32 from sandhi_resolve_ipv4 or a hand-built literal) and port.
+# If use_tls == 1, wrap the socket via tls_connect using sni_host for
+# SNI + peer verification. Returns the conn struct on success, 0 on
+# any failure path (socket create, connect, TLS handshake).
+#
+# `addr` is the same shape net.cyr expects: a 32-bit big-endian IPv4
+# address packed as an int (e.g. 127.0.0.1 → 0x0100007F on little-
+# endian hosts per INADDR_LOOPBACK).
+fn sandhi_conn_open(addr, port, use_tls, sni_host) {
+    var sfd_r = tcp_socket();
+    if (is_err_result(sfd_r) == 1) { return 0; }
+    var fd = payload(sfd_r);
+
+    var cr = sock_connect(fd, addr, port);
+    if (is_err_result(cr) == 1) {
+        sock_close(fd);
+        return 0;
+    }
+
+    var tls_ctx = 0;
+    var kind = SANDHI_CONN_PLAIN;
+    if (use_tls == 1) {
+        if (tls_available() == 0) {
+            sock_close(fd);
+            return 0;
+        }
+        tls_ctx = tls_connect(fd, sni_host);
+        if (tls_ctx == 0) {
+            sock_close(fd);
+            return 0;
+        }
+        kind = SANDHI_CONN_TLS;
+    }
+
+    var conn = alloc(SANDHI_CONN_STRUCT_SIZE);
+    store64(conn + SANDHI_CONN_OFF_KIND, kind);
+    store64(conn + SANDHI_CONN_OFF_FD, fd);
+    store64(conn + SANDHI_CONN_OFF_TLS_CTX, tls_ctx);
+    return conn;
+}
+
+# Send `len` bytes through the connection. Returns bytes sent, or
+# (0 - 1) on error. Full write not guaranteed — caller loops on partial.
+fn sandhi_conn_send(conn, buf, len) {
+    if (conn == 0) { return 0 - 1; }
+    if (sandhi_conn_kind(conn) == SANDHI_CONN_TLS) {
+        return tls_write(sandhi_conn_tls_ctx(conn), buf, len);
+    }
+    var r = sock_send(sandhi_conn_fd(conn), buf, len);
+    if (is_err_result(r) == 1) { return 0 - 1; }
+    return payload(r);
+}
+
+# Send a full cstr. Loops on partial writes. Returns 0 on success, -1 on failure.
+fn sandhi_conn_send_all(conn, buf, len) {
+    var sent = 0;
+    while (sent < len) {
+        var n = sandhi_conn_send(conn, buf + sent, len - sent);
+        if (n <= 0) { return 0 - 1; }
+        sent = sent + n;
+    }
+    return 0;
+}
+
+# Receive up to `max` bytes. Returns bytes read (0 at EOF), or (0 - 1) on error.
+fn sandhi_conn_recv(conn, buf, max) {
+    if (conn == 0) { return 0 - 1; }
+    if (sandhi_conn_kind(conn) == SANDHI_CONN_TLS) {
+        var tr = tls_read(sandhi_conn_tls_ctx(conn), buf, max);
+        if (tr < 0) { return 0 - 1; }
+        return tr;
+    }
+    var r = sock_recv(sandhi_conn_fd(conn), buf, max);
+    if (is_err_result(r) == 1) { return 0 - 1; }
+    return payload(r);
+}
+
+# Drain the connection into `buf` up to `max` bytes. Reads until EOF or
+# max reached. Returns total bytes read, or (0 - 1) on error. Always
+# null-terminates buf at the returned length (buf must have room for max+1).
+fn sandhi_conn_recv_all(conn, buf, max) {
+    var have = 0;
+    var going = 1;
+    while (going == 1 && have < max) {
+        var n = sandhi_conn_recv(conn, buf + have, max - have);
+        if (n < 0) { return 0 - 1; }
+        if (n == 0) { going = 0; }
+        else { have = have + n; }
+    }
+    store8(buf + have, 0);
+    return have;
+}
+
+# Close the connection. Shuts TLS cleanly, closes the fd. No-op on 0.
+fn sandhi_conn_close(conn) {
+    if (conn == 0) { return 0; }
+    if (sandhi_conn_kind(conn) == SANDHI_CONN_TLS) {
+        tls_close(sandhi_conn_tls_ctx(conn));
+    }
+    sock_close(sandhi_conn_fd(conn));
+    return 0;
+}
+
+fn sandhi_conn_version() {
+    return "0.3.0";
+}

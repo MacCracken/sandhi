@@ -2,6 +2,12 @@
 # Stdlib auto-included via cyrius.cyml; sandhi modules included below.
 
 include "src/error.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
 include "src/server/mod.cyr"
 
 fn test_url_decode() {
@@ -94,9 +100,491 @@ fn test_request_parse() {
 }
 
 fn test_sandhi_identity() {
-    assert_streq(sandhi_server_version(), "0.2.0", "server version string");
+    assert_streq(sandhi_server_version(), "0.2.0", "server version string (module retains its landing version)");
     assert_eq(SANDHI_OK, 0, "error enum: OK is 0");
     assert_streq(sandhi_err_kind_name(SANDHI_ERR_TLS), "TLS", "error kind name");
+    return 0;
+}
+
+fn test_headers_basic() {
+    var h = sandhi_headers_new();
+    assert_eq(sandhi_headers_count(h), 0, "headers: new is empty");
+
+    sandhi_headers_set(h, "Host", "example.com");
+    sandhi_headers_set(h, "User-Agent", "sandhi/0.3.0");
+    assert_eq(sandhi_headers_count(h), 2, "headers: two entries after set/set");
+
+    assert_streq(sandhi_headers_get(h, "Host"), "example.com", "headers: get Host");
+    assert_streq(sandhi_headers_get(h, "host"), "example.com", "headers: get is case-insensitive");
+    assert_streq(sandhi_headers_get(h, "HOST"), "example.com", "headers: get upper-case too");
+
+    assert_eq(sandhi_headers_has(h, "Content-Type"), 0, "headers: has absent → 0");
+    assert_eq(sandhi_headers_has(h, "host"), 1, "headers: has present → 1");
+    return 0;
+}
+
+fn test_headers_set_replaces() {
+    var h = sandhi_headers_new();
+    sandhi_headers_set(h, "X-Test", "first");
+    sandhi_headers_set(h, "X-Test", "second");
+    assert_eq(sandhi_headers_count(h), 1, "headers: set replaces, not appends");
+    assert_streq(sandhi_headers_get(h, "X-Test"), "second", "headers: set leaves last value");
+    return 0;
+}
+
+fn test_headers_add_preserves_order() {
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Set-Cookie", "a=1");
+    sandhi_headers_add(h, "Set-Cookie", "b=2");
+    sandhi_headers_add(h, "Set-Cookie", "c=3");
+    assert_eq(sandhi_headers_count(h), 3, "headers: add stacks multi-value");
+    assert_streq(sandhi_headers_get(h, "Set-Cookie"), "a=1", "headers: get returns first value");
+    assert_streq(sandhi_headers_value_at(h, 0), "a=1", "headers: value_at[0]");
+    assert_streq(sandhi_headers_value_at(h, 1), "b=2", "headers: value_at[1]");
+    assert_streq(sandhi_headers_value_at(h, 2), "c=3", "headers: value_at[2]");
+    return 0;
+}
+
+fn test_headers_remove() {
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "A", "1");
+    sandhi_headers_add(h, "B", "2");
+    sandhi_headers_add(h, "a", "3");  # case-insensitive dup
+    sandhi_headers_add(h, "C", "4");
+    assert_eq(sandhi_headers_remove(h, "A"), 2, "headers: remove returns count");
+    assert_eq(sandhi_headers_count(h), 2, "headers: remaining count");
+    assert_streq(sandhi_headers_name_at(h, 0), "B", "headers: B survives");
+    assert_streq(sandhi_headers_name_at(h, 1), "C", "headers: C survives");
+    return 0;
+}
+
+fn test_headers_serialize() {
+    var h = sandhi_headers_new();
+    sandhi_headers_set(h, "Host", "example.com");
+    sandhi_headers_set(h, "Content-Length", "13");
+    var sb = str_builder_new();
+    sandhi_headers_serialize(h, sb);
+    var s = str_data(str_builder_build(sb));
+    assert_streq(s, "Host: example.com\r\nContent-Length: 13\r\n", "headers: wire format");
+    return 0;
+}
+
+fn test_headers_parse() {
+    var raw = "Host: example.com\r\nContent-Type: application/json\r\nX-Multi: v1\r\nX-Multi: v2\r\n\r\nbody-data";
+    var rlen = strlen(raw);
+    var h = sandhi_headers_parse(raw, rlen);
+    assert_eq(sandhi_headers_count(h), 4, "parse: 4 entries");
+    assert_streq(sandhi_headers_get(h, "host"), "example.com", "parse: Host");
+    assert_streq(sandhi_headers_get(h, "Content-Type"), "application/json", "parse: Content-Type");
+    assert_streq(sandhi_headers_value_at(h, 2), "v1", "parse: multi-value first");
+    assert_streq(sandhi_headers_value_at(h, 3), "v2", "parse: multi-value second");
+    return 0;
+}
+
+fn test_headers_parse_trimming() {
+    var raw = "X-Padded:    spaced-value   \r\nX-Tabs:\thello\r\n\r\n";
+    var rlen = strlen(raw);
+    var h = sandhi_headers_parse(raw, rlen);
+    assert_streq(sandhi_headers_get(h, "X-Padded"), "spaced-value", "parse: trims SP");
+    assert_streq(sandhi_headers_get(h, "X-Tabs"), "hello", "parse: trims HTAB");
+    return 0;
+}
+
+fn test_headers_parse_skips_malformed() {
+    var raw = "Good: value\r\nmalformed-no-colon\r\nOther: ok\r\n\r\n";
+    var rlen = strlen(raw);
+    var h = sandhi_headers_parse(raw, rlen);
+    assert_eq(sandhi_headers_count(h), 2, "parse: malformed lines skipped");
+    assert_streq(sandhi_headers_get(h, "Good"), "value", "parse: valid survives");
+    assert_streq(sandhi_headers_get(h, "Other"), "ok", "parse: post-malformed survives");
+    return 0;
+}
+
+fn test_url_http_basic() {
+    var u = sandhi_url_parse("http://example.com/foo");
+    assert_neq(u, 0, "url: parses http");
+    assert_eq(sandhi_url_scheme(u), SANDHI_URL_HTTP, "url: scheme HTTP");
+    assert_streq(sandhi_url_host(u), "example.com", "url: host");
+    assert_eq(sandhi_url_port(u), 80, "url: default port 80");
+    assert_streq(sandhi_url_path(u), "/foo", "url: path");
+    assert_eq(sandhi_url_query(u), 0, "url: no query");
+    return 0;
+}
+
+fn test_url_https_default_port() {
+    var u = sandhi_url_parse("https://example.com/");
+    assert_neq(u, 0, "url: parses https");
+    assert_eq(sandhi_url_scheme(u), SANDHI_URL_HTTPS, "url: scheme HTTPS");
+    assert_eq(sandhi_url_port(u), 443, "url: default port 443");
+    return 0;
+}
+
+fn test_url_custom_port() {
+    var u = sandhi_url_parse("http://localhost:8080/api");
+    assert_neq(u, 0, "url: parses with port");
+    assert_streq(sandhi_url_host(u), "localhost", "url: host");
+    assert_eq(sandhi_url_port(u), 8080, "url: port 8080");
+    assert_streq(sandhi_url_path(u), "/api", "url: path");
+    return 0;
+}
+
+fn test_url_query() {
+    var u = sandhi_url_parse("https://api.example.com/v1/users?active=1&limit=50");
+    assert_neq(u, 0, "url: parses with query");
+    assert_streq(sandhi_url_path(u), "/v1/users", "url: path without query");
+    assert_streq(sandhi_url_query(u), "active=1&limit=50", "url: query string");
+    return 0;
+}
+
+fn test_url_no_path() {
+    var u = sandhi_url_parse("http://example.com");
+    assert_neq(u, 0, "url: parses no-path");
+    assert_streq(sandhi_url_host(u), "example.com", "url: host");
+    assert_streq(sandhi_url_path(u), "/", "url: path defaults to /");
+    return 0;
+}
+
+fn test_url_only_query() {
+    var u = sandhi_url_parse("http://example.com?x=1");
+    assert_neq(u, 0, "url: parses host + query no path");
+    assert_streq(sandhi_url_path(u), "/", "url: path defaults to /");
+    assert_streq(sandhi_url_query(u), "x=1", "url: query preserved");
+    return 0;
+}
+
+fn test_url_case_insensitive_scheme() {
+    var a = sandhi_url_parse("HTTP://example.com/");
+    var b = sandhi_url_parse("HtTpS://example.com/");
+    assert_neq(a, 0, "url: HTTP (upper) parses");
+    assert_neq(b, 0, "url: HtTpS (mixed) parses");
+    assert_eq(sandhi_url_scheme(a), SANDHI_URL_HTTP, "url: upper scheme normalized");
+    assert_eq(sandhi_url_scheme(b), SANDHI_URL_HTTPS, "url: mixed scheme normalized");
+    return 0;
+}
+
+fn test_url_rejects_malformed() {
+    assert_eq(sandhi_url_parse(""), 0, "url: empty → 0");
+    assert_eq(sandhi_url_parse("ftp://example.com/"), 0, "url: unsupported scheme → 0");
+    assert_eq(sandhi_url_parse("example.com/"), 0, "url: no scheme → 0");
+    assert_eq(sandhi_url_parse("http:///path"), 0, "url: empty host → 0");
+    assert_eq(sandhi_url_parse("http://example.com:0/"), 0, "url: port 0 → 0");
+    assert_eq(sandhi_url_parse("http://example.com:99999/"), 0, "url: port > 65535 → 0");
+    assert_eq(sandhi_url_parse("http://example.com:abc/"), 0, "url: non-numeric port → 0");
+    return 0;
+}
+
+fn test_url_crlf_injection() {
+    # stdlib http.cyr pattern — URLs with control bytes can smuggle
+    # extra headers if reflected into a request; sandhi rejects early.
+    assert_eq(sandhi_url_parse("http://example.com/\r\nX-Evil: 1"), 0, "url: CR rejected");
+    assert_eq(sandhi_url_parse("http://example.com/\nX-Evil: 1"), 0, "url: LF rejected");
+    assert_eq(sandhi_url_parse("http://example.com/ with space"), 0, "url: SP rejected");
+    assert_eq(sandhi_url_parse("http://example.com/\twith-tab"), 0, "url: TAB rejected");
+    return 0;
+}
+
+fn test_response_content_length() {
+    var raw = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello";
+    var r = sandhi_http_response_parse(raw, strlen(raw));
+    assert_eq(sandhi_http_status(r), 200, "resp: status 200");
+    assert_eq(sandhi_http_err_kind(r), SANDHI_OK, "resp: err_kind OK");
+    assert_eq(sandhi_http_body_len(r), 5, "resp: Content-Length honored");
+    assert_streq(sandhi_http_body(r), "hello", "resp: body bytes");
+    assert_streq(sandhi_headers_get(sandhi_http_headers(r), "Content-Type"), "text/plain", "resp: headers accessible");
+    return 0;
+}
+
+fn test_response_chunked() {
+    # 5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n  → "hello world"
+    var raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+    var r = sandhi_http_response_parse(raw, strlen(raw));
+    assert_eq(sandhi_http_status(r), 200, "chunked: status");
+    assert_eq(sandhi_http_body_len(r), 11, "chunked: total decoded length");
+    assert_streq(sandhi_http_body(r), "hello world", "chunked: decoded body");
+    return 0;
+}
+
+fn test_response_chunked_hex_large() {
+    # One chunk of 0xa = 10 bytes.
+    var raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\na\r\n0123456789\r\n0\r\n\r\n";
+    var r = sandhi_http_response_parse(raw, strlen(raw));
+    assert_eq(sandhi_http_body_len(r), 10, "chunked: hex size");
+    assert_streq(sandhi_http_body(r), "0123456789", "chunked: hex payload");
+    return 0;
+}
+
+fn test_response_chunked_with_extension() {
+    # Chunk extensions after ';' must be ignored.
+    var raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;name=foo\r\nhello\r\n0\r\n\r\n";
+    var r = sandhi_http_response_parse(raw, strlen(raw));
+    assert_eq(sandhi_http_body_len(r), 5, "chunked: size ignores extension");
+    assert_streq(sandhi_http_body(r), "hello", "chunked: body after extension");
+    return 0;
+}
+
+fn test_response_close_delimited() {
+    # No Content-Length, no Transfer-Encoding → read-to-close semantics.
+    var raw = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello close-delimited body";
+    var r = sandhi_http_response_parse(raw, strlen(raw));
+    assert_eq(sandhi_http_status(r), 200, "close: status");
+    assert_eq(sandhi_http_body_len(r), 26, "close: body = everything after headers");
+    assert_streq(sandhi_http_body(r), "hello close-delimited body", "close: body bytes");
+    return 0;
+}
+
+fn test_response_status_codes() {
+    var r1 = sandhi_http_response_parse("HTTP/1.1 404 Not Found\r\n\r\n", 26);
+    assert_eq(sandhi_http_status(r1), 404, "status: 404");
+
+    var r2 = sandhi_http_response_parse("HTTP/1.0 301 Moved\r\n\r\n", 22);
+    assert_eq(sandhi_http_status(r2), 301, "status: 301 over HTTP/1.0");
+
+    var r3 = sandhi_http_response_parse("HTTP/1.1 500 Internal Server Error\r\n\r\n", 38);
+    assert_eq(sandhi_http_status(r3), 500, "status: 500");
+    return 0;
+}
+
+fn test_response_malformed() {
+    var r1 = sandhi_http_response_parse("GARBAGE", 7);
+    assert_eq(sandhi_http_err_kind(r1), SANDHI_ERR_PROTOCOL, "malformed: no HTTP/ prefix");
+
+    var r2 = sandhi_http_response_parse("HTTP/1.1 200 OK\r\nno-end", 23);
+    assert_eq(sandhi_http_err_kind(r2), SANDHI_ERR_PROTOCOL, "malformed: no \\r\\n\\r\\n terminator");
+    return 0;
+}
+
+fn test_response_empty_body() {
+    var raw = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+    var r = sandhi_http_response_parse(raw, strlen(raw));
+    assert_eq(sandhi_http_status(r), 204, "empty: 204");
+    assert_eq(sandhi_http_body_len(r), 0, "empty: body_len 0");
+    return 0;
+}
+
+fn test_client_ipv4_parse() {
+    # Expected 0x0100007F on little-endian = INADDR_LOOPBACK shape.
+    assert_eq(sandhi_net_parse_ipv4("127.0.0.1"), 0x0100007F, "ipv4: 127.0.0.1");
+    assert_eq(sandhi_net_parse_ipv4("0.0.0.0"), 0, "ipv4: 0.0.0.0");
+    # 1.2.3.4 → bytes 01 02 03 04 → LE uint32 0x04030201
+    assert_eq(sandhi_net_parse_ipv4("1.2.3.4"), 0x04030201, "ipv4: 1.2.3.4");
+    # 255.255.255.255 → 0xFFFFFFFF
+    assert_eq(sandhi_net_parse_ipv4("255.255.255.255"), 0xFFFFFFFF, "ipv4: 255.255.255.255");
+    return 0;
+}
+
+fn test_client_ipv4_rejects() {
+    assert_eq(sandhi_net_parse_ipv4(""), 0 - 1, "ipv4: empty");
+    assert_eq(sandhi_net_parse_ipv4("example.com"), 0 - 1, "ipv4: hostname");
+    assert_eq(sandhi_net_parse_ipv4("1.2.3"), 0 - 1, "ipv4: only 3 octets");
+    assert_eq(sandhi_net_parse_ipv4("1.2.3.4.5"), 0 - 1, "ipv4: 5 octets");
+    assert_eq(sandhi_net_parse_ipv4("256.1.1.1"), 0 - 1, "ipv4: octet > 255");
+    assert_eq(sandhi_net_parse_ipv4("1..2.3"), 0 - 1, "ipv4: empty octet");
+    assert_eq(sandhi_net_parse_ipv4("1.2.3."), 0 - 1, "ipv4: trailing dot");
+    return 0;
+}
+
+fn test_client_full_path() {
+    var u1 = sandhi_url_parse("http://127.0.0.1/foo");
+    assert_streq(_sandhi_client_full_path(u1), "/foo", "full_path: no query");
+
+    var u2 = sandhi_url_parse("http://127.0.0.1/api?x=1&y=2");
+    assert_streq(_sandhi_client_full_path(u2), "/api?x=1&y=2", "full_path: with query");
+
+    var u3 = sandhi_url_parse("http://127.0.0.1/");
+    assert_streq(_sandhi_client_full_path(u3), "/", "full_path: root");
+    return 0;
+}
+
+fn test_client_host_header() {
+    var u1 = sandhi_url_parse("http://example.com/");
+    assert_streq(_sandhi_client_host_header(u1), "example.com", "host: default http port omitted");
+
+    var u2 = sandhi_url_parse("https://example.com/");
+    assert_streq(_sandhi_client_host_header(u2), "example.com", "host: default https port omitted");
+
+    var u3 = sandhi_url_parse("http://example.com:8080/");
+    assert_streq(_sandhi_client_host_header(u3), "example.com:8080", "host: custom port included");
+
+    var u4 = sandhi_url_parse("https://example.com:8443/");
+    assert_streq(_sandhi_client_host_header(u4), "example.com:8443", "host: custom https port");
+    return 0;
+}
+
+fn test_client_build_request_get() {
+    var req = _sandhi_client_build_request("GET", "/path", "example.com", 0, 0);
+    assert_streq(str_data(req), "GET /path HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n", "build: GET no body no user headers");
+    return 0;
+}
+
+fn test_client_build_request_post() {
+    var req = _sandhi_client_build_request("POST", "/api", "api.example.com", 0, 42);
+    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nConnection: close\r\n\r\n";
+    assert_streq(str_data(req), expected, "build: POST emits Content-Length");
+    return 0;
+}
+
+fn test_client_build_request_post_empty_body() {
+    # POST with body_len 0 should still emit Content-Length: 0.
+    var req = _sandhi_client_build_request("POST", "/ping", "example.com", 0, 0);
+    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    assert_streq(str_data(req), expected, "build: POST empty body");
+    return 0;
+}
+
+fn test_client_build_request_user_headers() {
+    var h = sandhi_headers_new();
+    sandhi_headers_set(h, "Authorization", "Bearer xyz");
+    sandhi_headers_set(h, "Accept", "application/json");
+    var req = _sandhi_client_build_request("GET", "/me", "api.example.com", h, 0);
+    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
+    assert_streq(str_data(req), expected, "build: user headers serialized");
+    return 0;
+}
+
+fn test_client_bad_url_returns_parse_err() {
+    var r = sandhi_http_get("ftp://example.com/", 0);
+    assert_eq(sandhi_http_status(r), 0, "bad url: status 0");
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_PARSE, "bad url: err_kind PARSE");
+    return 0;
+}
+
+fn test_client_unresolvable_hostname() {
+    # Bogus hostname — both /etc/hosts and real DNS should fail to
+    # resolve it, producing SANDHI_ERR_DISCOVERY regardless of env.
+    var r = sandhi_http_get("http://this-does-not-exist.invalid/", 0);
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_DISCOVERY, "hostname: unresolvable → DISCOVERY");
+    return 0;
+}
+
+fn test_redirect_is_redirect() {
+    assert_eq(_sandhi_is_redirect(200), 0, "redirect: 200 no");
+    assert_eq(_sandhi_is_redirect(301), 1, "redirect: 301 yes");
+    assert_eq(_sandhi_is_redirect(302), 1, "redirect: 302 yes");
+    assert_eq(_sandhi_is_redirect(303), 1, "redirect: 303 yes");
+    assert_eq(_sandhi_is_redirect(304), 0, "redirect: 304 not followed");
+    assert_eq(_sandhi_is_redirect(307), 1, "redirect: 307 yes");
+    assert_eq(_sandhi_is_redirect(308), 1, "redirect: 308 yes");
+    assert_eq(_sandhi_is_redirect(400), 0, "redirect: 400 no");
+    return 0;
+}
+
+fn test_redirect_absolute_location() {
+    var out = _sandhi_resolve_location("http://a.example.com/x", "https://b.example.com/y");
+    assert_streq(out, "https://b.example.com/y", "redirect: absolute Location");
+    return 0;
+}
+
+fn test_redirect_relative_location() {
+    var out = _sandhi_resolve_location("http://example.com/old", "/new/path");
+    assert_streq(out, "http://example.com/new/path", "redirect: relative → scheme+host+path");
+
+    var out2 = _sandhi_resolve_location("https://example.com:8443/old", "/new");
+    assert_streq(out2, "https://example.com:8443/new", "redirect: relative preserves custom port");
+
+    var out3 = _sandhi_resolve_location("https://example.com/old", "/new");
+    # Default https port omitted.
+    assert_streq(out3, "https://example.com/new", "redirect: relative omits default port");
+    return 0;
+}
+
+fn test_redirect_bad_location() {
+    # Non-slash relative is rejected (protocol-relative "//host" would need
+    # real support; skip for v0.3.0).
+    assert_eq(_sandhi_resolve_location("http://example.com/old", "new-no-slash"), 0, "redirect: bad relative");
+    assert_eq(_sandhi_resolve_location("http://example.com/old", 0), 0, "redirect: null Location");
+    return 0;
+}
+
+fn test_http_options_defaults() {
+    var o = sandhi_http_options_new();
+    assert_eq(sandhi_http_options_follow(o), 0, "opts: follow default off");
+    assert_eq(sandhi_http_options_hops(o), 5, "opts: max_hops default 5");
+    assert_eq(sandhi_http_options_follow(0), 0, "opts: null → default off");
+    assert_eq(sandhi_http_options_hops(0), 5, "opts: null → default 5");
+    return 0;
+}
+
+fn test_http_options_mutators() {
+    var o = sandhi_http_options_new();
+    sandhi_http_options_follow_redirects(o, 1);
+    sandhi_http_options_max_hops(o, 10);
+    assert_eq(sandhi_http_options_follow(o), 1, "opts: follow=1 sticks");
+    assert_eq(sandhi_http_options_hops(o), 10, "opts: max_hops=10 sticks");
+    return 0;
+}
+
+fn test_resolve_label_encode() {
+    var buf[64];
+    memset(&buf, 0, 64);
+    var n = _sandhi_resolve_encode_labels("example.com", &buf);
+    # Expected: 07 e x a m p l e 03 c o m 00 → 13 bytes
+    assert_eq(n, 13, "dns labels: example.com length");
+    assert_eq(load8(&buf + 0), 7, "dns labels: first label len 7");
+    assert_eq(load8(&buf + 1), 101, "dns labels: 'e'");
+    assert_eq(load8(&buf + 8), 3, "dns labels: second label len 3");
+    assert_eq(load8(&buf + 9), 99, "dns labels: 'c'");
+    assert_eq(load8(&buf + 12), 0, "dns labels: root terminator");
+    return 0;
+}
+
+fn test_resolve_label_encode_single() {
+    var buf[16];
+    memset(&buf, 0, 16);
+    var n = _sandhi_resolve_encode_labels("localhost", &buf);
+    # Expected: 09 l o c a l h o s t 00 → 11 bytes
+    assert_eq(n, 11, "dns labels: localhost length");
+    assert_eq(load8(&buf + 0), 9, "dns labels: label len 9");
+    assert_eq(load8(&buf + 10), 0, "dns labels: terminator");
+    return 0;
+}
+
+fn test_resolve_parse_response_synthetic() {
+    # Hand-built minimal DNS response: Header + Question + 1 A answer.
+    # ID: 0x1234, QR=1 RD=1 RA=1, QDCOUNT=1, ANCOUNT=1, NSCOUNT=0, ARCOUNT=0
+    # Question: "a.com" / A / IN  (7 bytes name + 4 bytes type/class = 11)
+    # Answer:   name-ptr 0xC00C / type A / class IN / TTL 60 / RDLENGTH 4 / 10.0.0.1
+    var pkt[64];
+    memset(&pkt, 0, 64);
+    # Header (12 bytes)
+    store8(&pkt + 0, 0x12); store8(&pkt + 1, 0x34);  # ID
+    store8(&pkt + 2, 0x81); store8(&pkt + 3, 0x80);  # Flags: QR=1, RD=1, RA=1, RCODE=0
+    store8(&pkt + 5, 1);  # QDCOUNT=1
+    store8(&pkt + 7, 1);  # ANCOUNT=1
+    # Question: "a.com"
+    store8(&pkt + 12, 1); store8(&pkt + 13, 97);     # "a"
+    store8(&pkt + 14, 3); store8(&pkt + 15, 99); store8(&pkt + 16, 111); store8(&pkt + 17, 109);  # "com"
+    store8(&pkt + 18, 0);  # terminator
+    store8(&pkt + 20, 1);  # QTYPE=A
+    store8(&pkt + 22, 1);  # QCLASS=IN
+    # Answer
+    store8(&pkt + 23, 0xC0); store8(&pkt + 24, 0x0C);  # name pointer to offset 12
+    store8(&pkt + 26, 1);  # type A
+    store8(&pkt + 28, 1);  # class IN
+    store8(&pkt + 32, 60);  # TTL low byte
+    store8(&pkt + 34, 4);  # RDLENGTH
+    store8(&pkt + 35, 10); store8(&pkt + 36, 0); store8(&pkt + 37, 0); store8(&pkt + 38, 1);  # 10.0.0.1
+    var ip = _sandhi_resolve_parse_response(&pkt, 39);
+    # 10.0.0.1 → bytes 10,0,0,1 → LE uint32 = 0x0100000A
+    assert_eq(ip, 0x0100000A, "dns parse: A record extracted");
+    return 0;
+}
+
+fn test_resolve_parse_nxdomain() {
+    # Response with RCODE=3 (NXDOMAIN) should be rejected.
+    var pkt[16];
+    memset(&pkt, 0, 16);
+    store8(&pkt + 2, 0x81); store8(&pkt + 3, 0x83);  # RCODE=3
+    store8(&pkt + 7, 0);  # ANCOUNT=0
+    assert_eq(_sandhi_resolve_parse_response(&pkt, 12), 0 - 1, "dns parse: NXDOMAIN → -1");
+    return 0;
+}
+
+fn test_resolve_parse_no_answer() {
+    # Well-formed header but ANCOUNT=0.
+    var pkt[12];
+    memset(&pkt, 0, 12);
+    store8(&pkt + 2, 0x81); store8(&pkt + 3, 0x80);
+    assert_eq(_sandhi_resolve_parse_response(&pkt, 12), 0 - 1, "dns parse: no answers → -1");
     return 0;
 }
 
@@ -124,6 +612,144 @@ fn main() {
 
     test_group("sandhi/identity");
     test_sandhi_identity();
+
+    test_group("http/headers/basic");
+    test_headers_basic();
+
+    test_group("http/headers/set_replaces");
+    test_headers_set_replaces();
+
+    test_group("http/headers/add_order");
+    test_headers_add_preserves_order();
+
+    test_group("http/headers/remove");
+    test_headers_remove();
+
+    test_group("http/headers/serialize");
+    test_headers_serialize();
+
+    test_group("http/headers/parse");
+    test_headers_parse();
+
+    test_group("http/headers/parse_trim");
+    test_headers_parse_trimming();
+
+    test_group("http/headers/parse_malformed");
+    test_headers_parse_skips_malformed();
+
+    test_group("http/url/http_basic");
+    test_url_http_basic();
+
+    test_group("http/url/https_default_port");
+    test_url_https_default_port();
+
+    test_group("http/url/custom_port");
+    test_url_custom_port();
+
+    test_group("http/url/query");
+    test_url_query();
+
+    test_group("http/url/no_path");
+    test_url_no_path();
+
+    test_group("http/url/only_query");
+    test_url_only_query();
+
+    test_group("http/url/scheme_case");
+    test_url_case_insensitive_scheme();
+
+    test_group("http/url/rejects_malformed");
+    test_url_rejects_malformed();
+
+    test_group("http/url/crlf_injection");
+    test_url_crlf_injection();
+
+    test_group("http/response/content_length");
+    test_response_content_length();
+
+    test_group("http/response/chunked");
+    test_response_chunked();
+
+    test_group("http/response/chunked_hex");
+    test_response_chunked_hex_large();
+
+    test_group("http/response/chunked_extension");
+    test_response_chunked_with_extension();
+
+    test_group("http/response/close_delimited");
+    test_response_close_delimited();
+
+    test_group("http/response/status_codes");
+    test_response_status_codes();
+
+    test_group("http/response/malformed");
+    test_response_malformed();
+
+    test_group("http/response/empty_body");
+    test_response_empty_body();
+
+    test_group("http/client/ipv4_parse");
+    test_client_ipv4_parse();
+
+    test_group("http/client/ipv4_rejects");
+    test_client_ipv4_rejects();
+
+    test_group("http/client/full_path");
+    test_client_full_path();
+
+    test_group("http/client/host_header");
+    test_client_host_header();
+
+    test_group("http/client/build_get");
+    test_client_build_request_get();
+
+    test_group("http/client/build_post");
+    test_client_build_request_post();
+
+    test_group("http/client/build_post_empty");
+    test_client_build_request_post_empty_body();
+
+    test_group("http/client/build_with_headers");
+    test_client_build_request_user_headers();
+
+    test_group("http/client/bad_url");
+    test_client_bad_url_returns_parse_err();
+
+    test_group("http/client/unresolvable_hostname");
+    test_client_unresolvable_hostname();
+
+    test_group("http/redirect/is_redirect");
+    test_redirect_is_redirect();
+
+    test_group("http/redirect/absolute");
+    test_redirect_absolute_location();
+
+    test_group("http/redirect/relative");
+    test_redirect_relative_location();
+
+    test_group("http/redirect/bad_location");
+    test_redirect_bad_location();
+
+    test_group("http/options/defaults");
+    test_http_options_defaults();
+
+    test_group("http/options/mutators");
+    test_http_options_mutators();
+
+    test_group("net/resolve/label_encode");
+    test_resolve_label_encode();
+
+    test_group("net/resolve/label_single");
+    test_resolve_label_encode_single();
+
+    test_group("net/resolve/parse_synthetic");
+    test_resolve_parse_response_synthetic();
+
+    test_group("net/resolve/parse_nxdomain");
+    test_resolve_parse_nxdomain();
+
+    test_group("net/resolve/parse_no_answer");
+    test_resolve_parse_no_answer();
 
     return assert_summary();
 }

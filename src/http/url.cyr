@@ -1,0 +1,193 @@
+# sandhi/http/url — URL parser (http:// + https://).
+#
+# Returns a 40-byte struct on success, 0 on malformed input. Caller
+# is responsible for null-checking before dereferencing fields.
+#
+# Struct layout:
+#   +0   scheme      (int: SANDHI_URL_HTTP | SANDHI_URL_HTTPS)
+#   +8   host        (cstr — null-terminated, alloc-owned)
+#   +16  port        (int: 1..65535)
+#   +24  path        (cstr — includes leading '/'; always non-empty)
+#   +32  query       (cstr — after '?', or 0 if none)
+#
+# CRLF-injection hardening: reject any URL containing control bytes
+# (CR / LF / TAB / SPACE) before we allocate anything. Same posture
+# as stdlib http.cyr::_http_parse_url — these bytes can smuggle extra
+# request-line / header content if the URL is reflected into a wire
+# request. Rejecting at the boundary (returning 0) keeps caller-side
+# code simple: null-check once, dereference fields freely thereafter.
+
+enum SandhiUrlScheme {
+    SANDHI_URL_HTTP  = 0;
+    SANDHI_URL_HTTPS = 1;
+}
+
+# Field offsets within the parsed URL struct.
+enum SandhiUrlOff {
+    SANDHI_URL_OFF_SCHEME = 0;
+    SANDHI_URL_OFF_HOST   = 8;
+    SANDHI_URL_OFF_PORT   = 16;
+    SANDHI_URL_OFF_PATH   = 24;
+    SANDHI_URL_OFF_QUERY  = 32;
+}
+
+var SANDHI_URL_STRUCT_SIZE = 40;
+
+# Accessors. Inline-friendly — callers can load64 directly, but going
+# through accessors reads better and lets us reshape the struct later.
+fn sandhi_url_scheme(u) { return load64(u + SANDHI_URL_OFF_SCHEME); }
+fn sandhi_url_host(u)   { return load64(u + SANDHI_URL_OFF_HOST); }
+fn sandhi_url_port(u)   { return load64(u + SANDHI_URL_OFF_PORT); }
+fn sandhi_url_path(u)   { return load64(u + SANDHI_URL_OFF_PATH); }
+fn sandhi_url_query(u)  { return load64(u + SANDHI_URL_OFF_QUERY); }
+
+# Validate that no byte in the URL can escape the request line / header
+# block. Returns 1 if safe, 0 if any disallowed byte is present.
+fn _sandhi_url_safe(url) {
+    var i = 0;
+    while (load8(url + i) != 0) {
+        var c = load8(url + i);
+        if (c == 13) { return 0; }  # CR
+        if (c == 10) { return 0; }  # LF
+        if (c == 9)  { return 0; }  # TAB
+        if (c == 32) { return 0; }  # SPACE
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Lowercase-equal comparison for scheme detection ("HTTP" == "http").
+# Compares up to `n` bytes; returns 1 if equal ignoring case, 0 otherwise.
+fn _sandhi_url_sceq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
+        if (cb >= 65 && cb <= 90) { cb = cb + 32; }
+        if (ca != cb) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Parse a URL. Returns the struct on success, 0 on any malformed input.
+fn sandhi_url_parse(url) {
+    if (url == 0) { return 0; }
+    if (_sandhi_url_safe(url) == 0) { return 0; }
+
+    # Scheme detection. Default port follows the scheme.
+    var scheme = 0;
+    var default_port = 80;
+    var p = 0;
+    if (_sandhi_url_sceq(url, "https://", 8) == 1) {
+        scheme = SANDHI_URL_HTTPS;
+        default_port = 443;
+        p = 8;
+    } elif (_sandhi_url_sceq(url, "http://", 7) == 1) {
+        scheme = SANDHI_URL_HTTP;
+        default_port = 80;
+        p = 7;
+    } else {
+        return 0;  # unsupported scheme
+    }
+
+    # Host — runs until ':' (port) or '/' (path) or '?' (query) or end.
+    # Cyrius has no `break`; walk forward while none of those delimiters
+    # has appeared, then fall into the tail with p pointing at the
+    # delimiter (or end-of-string).
+    var host_start = p;
+    var scanning = 1;
+    while (scanning == 1) {
+        var c = load8(url + p);
+        if (c == 0)  { scanning = 0; }
+        elif (c == 58) { scanning = 0; }
+        elif (c == 47) { scanning = 0; }
+        elif (c == 63) { scanning = 0; }
+        else { p = p + 1; }
+    }
+    return _sandhi_url_finish(url, scheme, default_port, host_start, p);
+}
+
+# Continue parsing after the host boundary has been found. `host_end`
+# points at ':' / '/' / '?' / NUL.
+fn _sandhi_url_finish(url, scheme, default_port, host_start, host_end) {
+    var host_len = host_end - host_start;
+    if (host_len == 0) { return 0; }
+
+    var port = default_port;
+    var p = host_end;
+    if (load8(url + p) == 58) {
+        p = p + 1;
+        port = 0;
+        var got = 0;
+        while (load8(url + p) >= 48 && load8(url + p) <= 57) {
+            port = port * 10 + (load8(url + p) - 48);
+            got = 1;
+            p = p + 1;
+            if (port > 65535) { return 0; }
+        }
+        if (got == 0) { return 0; }
+        if (port == 0) { return 0; }
+    }
+
+    # Path + query. If delimiter is '/' → path runs to '?' or NUL. If '?' →
+    # path defaults to "/" and query follows. If NUL → path "/" and no query.
+    var path = "/";
+    var query = 0;
+
+    if (load8(url + p) == 47) {
+        var path_start = p;
+        var qmark = 0 - 1;
+        var scan = 1;
+        while (scan == 1) {
+            var c = load8(url + p);
+            if (c == 0)  { scan = 0; }
+            elif (c == 63) { qmark = p; scan = 0; }
+            else { p = p + 1; }
+        }
+        var path_end = p;
+        if (qmark >= 0) { path_end = qmark; }
+        var plen = path_end - path_start;
+        var path_out = alloc(plen + 1);
+        memcpy(path_out, url + path_start, plen);
+        store8(path_out + plen, 0);
+        path = path_out;
+
+        if (qmark >= 0) {
+            var q_start = qmark + 1;
+            var q_end = q_start;
+            while (load8(url + q_end) != 0) { q_end = q_end + 1; }
+            var qlen = q_end - q_start;
+            var query_out = alloc(qlen + 1);
+            memcpy(query_out, url + q_start, qlen);
+            store8(query_out + qlen, 0);
+            query = query_out;
+        }
+    } elif (load8(url + p) == 63) {
+        var qs = p + 1;
+        var qe = qs;
+        while (load8(url + qe) != 0) { qe = qe + 1; }
+        var qlen2 = qe - qs;
+        var query_out2 = alloc(qlen2 + 1);
+        memcpy(query_out2, url + qs, qlen2);
+        store8(query_out2 + qlen2, 0);
+        query = query_out2;
+    }
+
+    var host = alloc(host_len + 1);
+    memcpy(host, url + host_start, host_len);
+    store8(host + host_len, 0);
+
+    var result = alloc(SANDHI_URL_STRUCT_SIZE);
+    store64(result + SANDHI_URL_OFF_SCHEME, scheme);
+    store64(result + SANDHI_URL_OFF_HOST, host);
+    store64(result + SANDHI_URL_OFF_PORT, port);
+    store64(result + SANDHI_URL_OFF_PATH, path);
+    store64(result + SANDHI_URL_OFF_QUERY, query);
+    return result;
+}
+
+fn sandhi_url_version() {
+    return "0.3.0";
+}

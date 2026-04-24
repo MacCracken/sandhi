@@ -1,0 +1,282 @@
+# sandhi/http/response — response parser (status line + headers + body).
+#
+# Handles the three HTTP/1.1 body framings:
+#   - Content-Length: N  — N bytes of body
+#   - Transfer-Encoding: chunked  — decoded chunk-by-chunk
+#   - Neither  — read-to-close (Connection: close semantics)
+#
+# The parser works on a complete response buffer. Drainage (reading
+# bytes until the buffer is complete) is the caller's concern — the
+# client does that via sandhi_conn_recv_all.
+#
+# Struct layout (40 bytes):
+#   +0   status     (int: 100..599, or 0 if unparseable)
+#   +8   body_ptr   (ptr: alloc-owned; null-terminated for convenience)
+#   +16  body_len   (int: decoded body length)
+#   +24  headers    (ptr: sandhi_headers block, never 0 after parse)
+#   +32  err_kind   (int: SandhiErrorKind — 0 on parseable status)
+#
+# NOTE (2026-04-24): the body-framing logic is split into
+# `_sandhi_resp_frame_body` not because framing is conceptually
+# separate, but because Cyrius 5.6.22 has stack-slot aliasing issues
+# when sandhi_http_response_parse carries too many locals — under a
+# threshold, `var headers` was getting zeroed after a downstream
+# sandhi_headers_get call. Splitting shrinks each frame below the
+# threshold. Tracked in docs/issues/2026-04-24-fdlopen... (separate
+# issue, same toolchain note).
+
+enum SandhiRespOff {
+    SANDHI_RESP_OFF_STATUS    = 0;
+    SANDHI_RESP_OFF_BODY_PTR  = 8;
+    SANDHI_RESP_OFF_BODY_LEN  = 16;
+    SANDHI_RESP_OFF_HEADERS   = 24;
+    SANDHI_RESP_OFF_ERR_KIND  = 32;
+}
+
+var SANDHI_RESP_STRUCT_SIZE = 40;
+
+# Public accessors. Same rationale as URL accessors — lets us reshape
+# the struct without churning call sites.
+fn sandhi_http_status(r)    { return load64(r + SANDHI_RESP_OFF_STATUS); }
+fn sandhi_http_body(r)      { return load64(r + SANDHI_RESP_OFF_BODY_PTR); }
+fn sandhi_http_body_len(r)  { return load64(r + SANDHI_RESP_OFF_BODY_LEN); }
+fn sandhi_http_headers(r)   { return load64(r + SANDHI_RESP_OFF_HEADERS); }
+fn sandhi_http_err_kind(r)  { return load64(r + SANDHI_RESP_OFF_ERR_KIND); }
+
+# Build a response struct in one shot. Private — callers get responses
+# via the parser or the public client verbs.
+fn _sandhi_resp_new(status, body_ptr, body_len, headers, err_kind) {
+    var r = alloc(SANDHI_RESP_STRUCT_SIZE);
+    store64(r + SANDHI_RESP_OFF_STATUS, status);
+    store64(r + SANDHI_RESP_OFF_BODY_PTR, body_ptr);
+    store64(r + SANDHI_RESP_OFF_BODY_LEN, body_len);
+    store64(r + SANDHI_RESP_OFF_HEADERS, headers);
+    store64(r + SANDHI_RESP_OFF_ERR_KIND, err_kind);
+    return r;
+}
+
+# Error-response shortcut — caller got something un-parseable. Headers
+# is always an empty block (never 0) so downstream code can iterate
+# without null-checking.
+fn _sandhi_resp_err(err_kind) {
+    return _sandhi_resp_new(0, 0, 0, sandhi_headers_new(), err_kind);
+}
+
+# Parse status line. Returns the int status code, or 0 on malformed.
+fn _sandhi_resp_status(buf, blen) {
+    if (blen < 12) { return 0; }
+    # "HTTP/1.x NNN ..."
+    if (load8(buf) != 72)  { return 0; }  # H
+    if (load8(buf + 1) != 84) { return 0; }  # T
+    if (load8(buf + 2) != 84) { return 0; }  # T
+    if (load8(buf + 3) != 80) { return 0; }  # P
+    if (load8(buf + 4) != 47) { return 0; }  # /
+    if (load8(buf + 8) != 32) { return 0; }  # SP after minor version
+    var d0 = load8(buf + 9);
+    var d1 = load8(buf + 10);
+    var d2 = load8(buf + 11);
+    if (d0 < 48 || d0 > 57) { return 0; }
+    if (d1 < 48 || d1 > 57) { return 0; }
+    if (d2 < 48 || d2 > 57) { return 0; }
+    return (d0 - 48) * 100 + (d1 - 48) * 10 + (d2 - 48);
+}
+
+# Find the offset of the end-of-headers marker (\r\n\r\n). Returns
+# (0 - 1) if not present — the buffer is incomplete.
+fn _sandhi_resp_headers_end(buf, blen) {
+    var i = 0;
+    while (i + 3 < blen) {
+        if (load8(buf + i) == 13
+        && load8(buf + i + 1) == 10
+        && load8(buf + i + 2) == 13
+        && load8(buf + i + 3) == 10) {
+            return i;
+        }
+        i = i + 1;
+    }
+    # Also accept LF-only terminators (permissive parser).
+    i = 0;
+    while (i + 1 < blen) {
+        if (load8(buf + i) == 10 && load8(buf + i + 1) == 10) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Offset of the first CR or LF from `start`, bounded by `end`.
+fn _sandhi_resp_eol(buf, start, end) {
+    var i = start;
+    while (i < end) {
+        var c = load8(buf + i);
+        if (c == 13 || c == 10) { return i; }
+        i = i + 1;
+    }
+    return end;
+}
+
+# Parse chunk-size line (hex digits, CRLF-terminated). Returns the
+# decoded size. Ignores chunk extensions (";name=value" after the hex).
+# Walks `*offset_ptr` past the CRLF.
+fn _sandhi_resp_chunk_size(buf, blen, offset_ptr) {
+    var p = load64(offset_ptr);
+    var size = 0;
+    var scan = 1;
+    while (scan == 1 && p < blen) {
+        var c = load8(buf + p);
+        if (c >= 48 && c <= 57)      { size = size * 16 + (c - 48); p = p + 1; }
+        elif (c >= 97 && c <= 102)   { size = size * 16 + (c - 87); p = p + 1; }
+        elif (c >= 65 && c <= 70)    { size = size * 16 + (c - 55); p = p + 1; }
+        else { scan = 0; }
+    }
+    # Skip chunk extensions ";..." up to CRLF.
+    while (p < blen && load8(buf + p) != 13 && load8(buf + p) != 10) {
+        p = p + 1;
+    }
+    if (p < blen && load8(buf + p) == 13) { p = p + 1; }
+    if (p < blen && load8(buf + p) == 10) { p = p + 1; }
+    store64(offset_ptr, p);
+    return size;
+}
+
+# Decode a chunked body starting at `start` within `buf`. Returns an
+# allocated contiguous body buffer + length via out-params. On error
+# (truncated chunk / bad hex) returns body_len 0.
+fn _sandhi_resp_decode_chunked(buf, blen, start, body_out_ptr, body_len_ptr) {
+    var cap = blen - start;
+    if (cap < 1) { cap = 1; }
+    var out = alloc(cap + 1);
+    var out_len = 0;
+    var off_cell = alloc(8);
+    store64(off_cell, start);
+    var going = 1;
+    while (going == 1) {
+        var size = _sandhi_resp_chunk_size(buf, blen, off_cell);
+        var off = load64(off_cell);
+        if (size == 0) { going = 0; }
+        else {
+            if (off + size > blen) {
+                going = 0;
+            } else {
+                memcpy(out + out_len, buf + off, size);
+                out_len = out_len + size;
+                off = off + size;
+                if (off < blen && load8(buf + off) == 13) { off = off + 1; }
+                if (off < blen && load8(buf + off) == 10) { off = off + 1; }
+                store64(off_cell, off);
+            }
+        }
+    }
+    store8(out + out_len, 0);
+    store64(body_out_ptr, out);
+    store64(body_len_ptr, out_len);
+    return 0;
+}
+
+# 1 if the headers block declares Transfer-Encoding: chunked.
+fn _sandhi_resp_is_chunked(headers) {
+    var te = sandhi_headers_get(headers, "Transfer-Encoding");
+    if (te == 0) { return 0; }
+    var i = 0;
+    while (load8(te + i) != 0) {
+        if (load8(te + i) == 99
+        && load8(te + i + 1) == 104
+        && load8(te + i + 2) == 117
+        && load8(te + i + 3) == 110
+        && load8(te + i + 4) == 107
+        && load8(te + i + 5) == 101
+        && load8(te + i + 6) == 100) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Parse the decimal Content-Length value from a cstr. Returns 0 on empty.
+fn _sandhi_resp_parse_clen(v) {
+    if (v == 0) { return 0; }
+    var n = 0;
+    var i = 0;
+    while (load8(v + i) != 0) {
+        var c = load8(v + i);
+        if (c >= 48 && c <= 57) { n = n * 10 + (c - 48); }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Copy `len` bytes starting at `buf+start` into a fresh null-terminated alloc.
+fn _sandhi_resp_body_copy(buf, start, len) {
+    if (len < 0) { len = 0; }
+    var out = alloc(len + 1);
+    if (len > 0) { memcpy(out, buf + start, len); }
+    store8(out + len, 0);
+    return out;
+}
+
+# Figure out body framing and return the struct. Kept small so the
+# caller (sandhi_http_response_parse) stays under Cyrius's stack-slot
+# aliasing threshold.
+fn _sandhi_resp_frame(buf, blen, status, headers, body_start) {
+    var body_ptr = 0;
+    var body_len = 0;
+
+    if (_sandhi_resp_is_chunked(headers) == 1) {
+        var outp_cell = alloc(8);
+        var outl_cell = alloc(8);
+        _sandhi_resp_decode_chunked(buf, blen, body_start, outp_cell, outl_cell);
+        body_ptr = load64(outp_cell);
+        body_len = load64(outl_cell);
+    } else {
+        var clen_v = sandhi_headers_get(headers, "Content-Length");
+        if (clen_v != 0) {
+            var n = _sandhi_resp_parse_clen(clen_v);
+            if (body_start + n > blen) { n = blen - body_start; }
+            body_len = n;
+            body_ptr = _sandhi_resp_body_copy(buf, body_start, body_len);
+        } else {
+            body_len = blen - body_start;
+            body_ptr = _sandhi_resp_body_copy(buf, body_start, body_len);
+        }
+    }
+
+    return _sandhi_resp_new(status, body_ptr, body_len, headers, SANDHI_OK);
+}
+
+# Parse a complete response buffer. Returns a response struct; on
+# malformed input returns a struct with err_kind set (headers is
+# always a valid block).
+fn sandhi_http_response_parse(buf, blen) {
+    if (buf == 0 || blen <= 0) {
+        return _sandhi_resp_err(SANDHI_ERR_PROTOCOL);
+    }
+
+    var status = _sandhi_resp_status(buf, blen);
+    if (status == 0) {
+        return _sandhi_resp_err(SANDHI_ERR_PROTOCOL);
+    }
+
+    var sline_end = _sandhi_resp_eol(buf, 0, blen);
+    var header_start = sline_end;
+    if (header_start < blen && load8(buf + header_start) == 13) { header_start = header_start + 1; }
+    if (header_start < blen && load8(buf + header_start) == 10) { header_start = header_start + 1; }
+
+    var hend = _sandhi_resp_headers_end(buf, blen);
+    if (hend < 0) {
+        return _sandhi_resp_err(SANDHI_ERR_PROTOCOL);
+    }
+
+    var hblock_len = hend - header_start;
+    if (hblock_len < 0) { hblock_len = 0; }
+    var headers = sandhi_headers_parse(buf + header_start, hblock_len);
+
+    var body_start = hend + 4;
+    if (load8(buf + hend) == 10) { body_start = hend + 2; }
+    if (body_start > blen) { body_start = blen; }
+
+    return _sandhi_resp_frame(buf, blen, status, headers, body_start);
+}
+
+fn sandhi_response_version() {
+    return "0.3.0";
+}

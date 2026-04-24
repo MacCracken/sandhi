@@ -1,18 +1,258 @@
-# sandhi/http/headers — HTTP request / response header management.
+# sandhi/http/headers — HTTP request/response header management.
 #
-# Scaffold stubs only. Real implementation wraps stdlib http.cyr's
-# minimal header handling with a proper key-value header store,
-# case-insensitive lookup, multi-valued fields (Set-Cookie), and
-# canonicalization.
+# Wraps stdlib str/vec/alloc with a proper key-value store:
+# case-insensitive lookup, multi-valued fields (Set-Cookie etc.),
+# CRLF-terminated wire-format serialize + parse. Order is preserved
+# across set/add so downstream tests don't race on iteration shape.
 #
-# Planned verbs:
-#   sandhi_headers_new()              — allocate empty header block
-#   sandhi_headers_set(h, key, value) — add/replace a header
-#   sandhi_headers_add(h, key, value) — append (for multi-valued fields)
-#   sandhi_headers_get(h, key)        — case-insensitive lookup
-#   sandhi_headers_serialize(h)       — emit wire-format HTTP header block
-#   sandhi_headers_parse(buf, len)    — parse a raw header block back in
+# Storage model — a vec of entry pointers. Each entry is a 16-byte
+# alloc: { name_cstr, value_cstr }. Header blocks are small (< 30
+# entries in practice); linear scan beats a hashmap here on both
+# code size and constant factor, and matters for serialization
+# ordering (multi-value fields render in the order they were added).
+
+# ================================================================
+# Entry layout + helpers
+# ================================================================
+
+fn _sandhi_hdr_entry_new(name, value) {
+    var e = alloc(16);
+    store64(e, name);
+    store64(e + 8, value);
+    return e;
+}
+
+fn _sandhi_hdr_entry_name(e) {
+    return load64(e);
+}
+
+fn _sandhi_hdr_entry_value(e) {
+    return load64(e + 8);
+}
+
+# ASCII lowercase — header names are ASCII-only per RFC 7230.
+fn _sandhi_hdr_to_lower(c) {
+    if (c >= 65) { if (c <= 90) { return c + 32; } }
+    return c;
+}
+
+# Case-insensitive cstr equality. Returns 1 if equal, 0 otherwise.
+fn _sandhi_hdr_ieq(a, b) {
+    var i = 0;
+    while (1 == 1) {
+        var ca = _sandhi_hdr_to_lower(load8(a + i));
+        var cb = _sandhi_hdr_to_lower(load8(b + i));
+        if (ca != cb) { return 0; }
+        if (ca == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Trim ASCII SP / HTAB from both ends of a cstr range [ptr+start, ptr+end).
+# Returns a fresh null-terminated alloc with just the trimmed content.
+fn _sandhi_hdr_trim_copy(ptr, start, end) {
+    var s = start;
+    var e = end;
+    while (s < e && (load8(ptr + s) == 32 || load8(ptr + s) == 9)) { s = s + 1; }
+    while (e > s && (load8(ptr + e - 1) == 32 || load8(ptr + e - 1) == 9)) { e = e - 1; }
+    var n = e - s;
+    var out = alloc(n + 1);
+    memcpy(out, ptr + s, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Duplicate a cstr into a fresh null-terminated alloc. Used on set/add
+# so the block owns its copies (caller can free / reuse the inputs).
+fn _sandhi_hdr_cstr_dup(s) {
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    var out = alloc(n + 1);
+    memcpy(out, s, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# ================================================================
+# Public API — block creation + mutation
+# ================================================================
+
+# Allocate an empty header block. Returns a vec of entry pointers.
+fn sandhi_headers_new() {
+    return vec_new();
+}
+
+# Total entry count (includes duplicate-name entries).
+fn sandhi_headers_count(h) {
+    return vec_len(h);
+}
+
+# Append an entry. Multi-value-friendly — `add` never replaces;
+# use `set` when you want single-value semantics.
+fn sandhi_headers_add(h, name, value) {
+    var e = _sandhi_hdr_entry_new(
+        _sandhi_hdr_cstr_dup(name),
+        _sandhi_hdr_cstr_dup(value));
+    vec_push(h, e);
+    return 0;
+}
+
+# Replace all entries with the given name, then append one new entry.
+# Use for single-value headers (Host, Content-Length, User-Agent).
+fn sandhi_headers_set(h, name, value) {
+    sandhi_headers_remove(h, name);
+    sandhi_headers_add(h, name, value);
+    return 0;
+}
+
+# Remove all entries with the given name. Returns number removed.
+# Order-preserving for surviving entries.
+fn sandhi_headers_remove(h, name) {
+    var i = 0;
+    var w = 0;
+    var removed = 0;
+    var n = vec_len(h);
+    while (i < n) {
+        var e = vec_get(h, i);
+        if (_sandhi_hdr_ieq(_sandhi_hdr_entry_name(e), name) == 1) {
+            removed = removed + 1;
+        } else {
+            vec_set(h, w, e);
+            w = w + 1;
+        }
+        i = i + 1;
+    }
+    # Shrink the vec — store64 the new length into the len slot (vec
+    # layout: {data, len, cap} per lib/vec.cyr). No public vec_truncate,
+    # so we reach in. Safe because w <= old_len.
+    store64(h + 8, w);
+    return removed;
+}
+
+# First value for the given name, case-insensitive. Returns 0 if absent.
+# For multi-value headers (Set-Cookie), iterate via the _at() verbs.
+fn sandhi_headers_get(h, name) {
+    var i = 0;
+    var n = vec_len(h);
+    while (i < n) {
+        var e = vec_get(h, i);
+        if (_sandhi_hdr_ieq(_sandhi_hdr_entry_name(e), name) == 1) {
+            return _sandhi_hdr_entry_value(e);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Indexed name access (iteration). Returns 0 if out of range.
+fn sandhi_headers_name_at(h, idx) {
+    if (idx < 0) { return 0; }
+    if (idx >= vec_len(h)) { return 0; }
+    return _sandhi_hdr_entry_name(vec_get(h, idx));
+}
+
+# Indexed value access (iteration). Returns 0 if out of range.
+fn sandhi_headers_value_at(h, idx) {
+    if (idx < 0) { return 0; }
+    if (idx >= vec_len(h)) { return 0; }
+    return _sandhi_hdr_entry_value(vec_get(h, idx));
+}
+
+# 1 if any entry matches the given name (case-insensitive).
+fn sandhi_headers_has(h, name) {
+    if (sandhi_headers_get(h, name) == 0) { return 0; }
+    return 1;
+}
+
+# ================================================================
+# Serialization
+# ================================================================
+
+# Append each entry to the str_builder as "Name: Value\r\n".
+# Does NOT append the terminating blank line — caller emits that
+# after any request-line / status-line framing so the builder can
+# be shared with method-specific prefixes.
+fn sandhi_headers_serialize(h, sb) {
+    var i = 0;
+    var n = vec_len(h);
+    while (i < n) {
+        var e = vec_get(h, i);
+        str_builder_add_cstr(sb, _sandhi_hdr_entry_name(e));
+        str_builder_add_cstr(sb, ": ");
+        str_builder_add_cstr(sb, _sandhi_hdr_entry_value(e));
+        str_builder_add_cstr(sb, "\r\n");
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Parsing
+# ================================================================
+
+# Parse a raw HTTP header block into a new sandhi_headers block.
+# Expects the request-line OR status-line to already be stripped —
+# start the buffer at the first header line. Stops at the first
+# empty (CRLF-only) line or at blen, whichever comes first.
+#
+# Returns a new sandhi_headers block. Malformed lines (no ':' sep)
+# are skipped. Multi-line folded headers (RFC 7230 obsolete) are
+# NOT supported — modern HTTP/1.1 deprecates them.
+fn sandhi_headers_parse(buf, blen) {
+    var h = sandhi_headers_new();
+    var i = 0;
+    while (i < blen) {
+        # End-of-headers marker — empty line.
+        if (i + 1 < blen && load8(buf + i) == 13 && load8(buf + i + 1) == 10) {
+            return h;
+        }
+        if (load8(buf + i) == 10) { return h; }
+
+        # Find end of line (next LF).
+        var line_start = i;
+        var line_end = i;
+        while (line_end < blen && load8(buf + line_end) != 10) {
+            line_end = line_end + 1;
+        }
+        # Strip trailing CR.
+        var trim_end = line_end;
+        if (trim_end > line_start && load8(buf + trim_end - 1) == 13) {
+            trim_end = trim_end - 1;
+        }
+
+        # Find colon. If absent, skip the line.
+        var colon = line_start;
+        while (colon < trim_end && load8(buf + colon) != 58) {
+            colon = colon + 1;
+        }
+        if (colon < trim_end) {
+            # Name: [line_start, colon) — trim trailing whitespace.
+            var name_end = colon;
+            while (name_end > line_start && (load8(buf + name_end - 1) == 32 || load8(buf + name_end - 1) == 9)) {
+                name_end = name_end - 1;
+            }
+            var name_len = name_end - line_start;
+            if (name_len > 0) {
+                var name = alloc(name_len + 1);
+                memcpy(name, buf + line_start, name_len);
+                store8(name + name_len, 0);
+
+                # Value: [colon+1, trim_end) — trim leading + trailing whitespace.
+                var val = _sandhi_hdr_trim_copy(buf, colon + 1, trim_end);
+                sandhi_headers_add(h, name, val);
+            }
+        }
+
+        i = line_end + 1;
+    }
+    return h;
+}
+
+# ================================================================
+# Identity
+# ================================================================
 
 fn sandhi_headers_version() {
-    return "0.1.0-scaffold";
+    return "0.3.0";
 }

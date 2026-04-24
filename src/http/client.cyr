@@ -1,31 +1,333 @@
-# sandhi/http/client — full HTTP client wrapping stdlib http.cyr + tls.cyr.
+# sandhi/http/client — full HTTP client.
 #
-# Absorbs the v5.7.x `lib/http.cyr depth` roadmap item per the 2026-04-24
-# sandhi-repo plan. Stdlib keeps the minimal GET-only path; sandhi
-# provides the full surface downstream consumers (yantra, sit-remote,
-# ark-remote, daimon) need.
+# Verbs: sandhi_http_get / post / put / delete / patch / head. Each is
+# a thin wrapper around `_sandhi_http_do(method, url, headers, body, body_len)`.
 #
-# Planned verbs (scaffold stubs):
-#   sandhi_http_get(url, headers)
-#   sandhi_http_post(url, headers, body, body_len)
-#   sandhi_http_put(url, headers, body, body_len)
-#   sandhi_http_delete(url, headers)
-#   sandhi_http_patch(url, headers, body, body_len)
-#   sandhi_http_head(url, headers)
+# Composes: url.cyr (parse) → resolve (IPv4 literal in v0.3.0, native DNS
+# in src/net/resolve.cyr at P7) → conn.cyr (plain or TLS) → wire-format
+# request build → response.cyr (parse).
 #
-# Response handling:
-#   sandhi_http_status(resp)
-#   sandhi_http_body(resp) / sandhi_http_body_len(resp)
-#   sandhi_http_response_headers(resp)
-#   sandhi_http_follow_redirects(client, max_hops)  — opt-in
+# Layering note: this module stays small — Cyrius 5.6.22 has a
+# stack-slot aliasing issue on fns with ~15+ locals (see
+# docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md log). Each
+# helper here stays well under that threshold.
+
+var _SANDHI_HTTP_RESP_BUF_SIZE = 262144;  # 256 KB — enough for most API responses
+
+# ================================================================
+# Host resolution
+# ================================================================
 #
-# HTTPS:
-#   URL scheme `https://` routes through sandhi_tls_policy_apply
-#   before sending the HTTP request. Transparent to callers.
+# Try the numeric-literal fast path first (sandhi_net_parse_ipv4 in
+# src/net/resolve.cyr); on miss, fall through to sandhi_resolve_ipv4
+# which does a real UDP DNS query. Returns the address (net-byte-
+# order uint32), or (0 - 1) on any failure.
+fn _sandhi_client_resolve(host) {
+    var lit = sandhi_net_parse_ipv4(host);
+    if (lit != 0 - 1) { return lit; }
+    return sandhi_resolve_ipv4(host);
+}
+
+# ================================================================
+# Request build
+# ================================================================
+
+# Combine path + query into a single cstr "path?query" (or just path).
+# Caller owns the returned alloc.
+fn _sandhi_client_full_path(url_struct) {
+    var path = sandhi_url_path(url_struct);
+    var query = sandhi_url_query(url_struct);
+    if (query == 0) {
+        # Dup so caller can free uniformly.
+        var plen = strlen(path);
+        var out = alloc(plen + 1);
+        memcpy(out, path, plen);
+        store8(out + plen, 0);
+        return out;
+    }
+    var plen2 = strlen(path);
+    var qlen = strlen(query);
+    var total = plen2 + 1 + qlen;
+    var out2 = alloc(total + 1);
+    memcpy(out2, path, plen2);
+    store8(out2 + plen2, 63);  # '?'
+    memcpy(out2 + plen2 + 1, query, qlen);
+    store8(out2 + total, 0);
+    return out2;
+}
+
+# Build the Host header value: "host" for default port, "host:port" otherwise.
+fn _sandhi_client_host_header(url_struct) {
+    var host = sandhi_url_host(url_struct);
+    var port = sandhi_url_port(url_struct);
+    var scheme = sandhi_url_scheme(url_struct);
+    var default_port = 80;
+    if (scheme == SANDHI_URL_HTTPS) { default_port = 443; }
+    var hlen = strlen(host);
+    if (port == default_port) {
+        var out = alloc(hlen + 1);
+        memcpy(out, host, hlen);
+        store8(out + hlen, 0);
+        return out;
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, host);
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_int(sb, port);
+    return str_data(str_builder_build(sb));
+}
+
+# Construct the wire-format request as a Str. user_headers may be 0.
+# Body is sent separately — the builder emits headers + blank line only.
+fn _sandhi_client_build_request(method, full_path, host_header, user_headers, body_len) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, " ");
+    str_builder_add_cstr(sb, full_path);
+    str_builder_add_cstr(sb, " HTTP/1.1\r\nHost: ");
+    str_builder_add_cstr(sb, host_header);
+    str_builder_add_cstr(sb, "\r\n");
+
+    # Content-Length: present whenever a body will follow. 0 for POST
+    # with no body (HTTP/1.1 convention; some servers require it).
+    var add_clen = 0;
+    if (body_len > 0) { add_clen = 1; }
+    if (streq(method, "POST") == 1) { add_clen = 1; }
+    if (streq(method, "PUT") == 1)  { add_clen = 1; }
+    if (streq(method, "PATCH") == 1){ add_clen = 1; }
+    if (add_clen == 1) {
+        str_builder_add_cstr(sb, "Content-Length: ");
+        str_builder_add_int(sb, body_len);
+        str_builder_add_cstr(sb, "\r\n");
+    }
+
+    # User headers (after the auto headers so a user-supplied Host
+    # would override — but we already wrote ours; doc that if it matters).
+    if (user_headers != 0) {
+        sandhi_headers_serialize(user_headers, sb);
+    }
+
+    str_builder_add_cstr(sb, "Connection: close\r\n\r\n");
+    return str_builder_build(sb);
+}
+
+# ================================================================
+# Core request/response round-trip
+# ================================================================
+
+# Keep this function compact — Cyrius 5.6.22 aliases locals on crowded
+# frames. Everything meaningful lives in helpers.
+fn _sandhi_http_do(method, url, user_headers, body, body_len) {
+    var u = sandhi_url_parse(url);
+    if (u == 0) { return _sandhi_resp_err(SANDHI_ERR_PARSE); }
+
+    var addr = _sandhi_client_resolve(sandhi_url_host(u));
+    if (addr == 0 - 1) { return _sandhi_resp_err(SANDHI_ERR_DISCOVERY); }
+
+    var use_tls = 0;
+    if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { use_tls = 1; }
+    var conn = sandhi_conn_open(addr, sandhi_url_port(u), use_tls, sandhi_url_host(u));
+    if (conn == 0) {
+        if (use_tls == 1) { return _sandhi_resp_err(SANDHI_ERR_TLS); }
+        return _sandhi_resp_err(SANDHI_ERR_CONNECT);
+    }
+
+    var full_path = _sandhi_client_full_path(u);
+    var host_hdr = _sandhi_client_host_header(u);
+    var req = _sandhi_client_build_request(method, full_path, host_hdr, user_headers, body_len);
+
+    return _sandhi_http_exchange(conn, req, body, body_len);
+}
+
+# Send request, receive response, close connection. Extracted so the
+# local count in _sandhi_http_do stays small.
+fn _sandhi_http_exchange(conn, req, body, body_len) {
+    var req_data = str_data(req);
+    var req_len = strlen(req_data);
+    if (sandhi_conn_send_all(conn, req_data, req_len) < 0) {
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err(SANDHI_ERR_CONNECT);
+    }
+    if (body_len > 0 && body != 0) {
+        if (sandhi_conn_send_all(conn, body, body_len) < 0) {
+            sandhi_conn_close(conn);
+            return _sandhi_resp_err(SANDHI_ERR_CONNECT);
+        }
+    }
+    var rbuf = alloc(_SANDHI_HTTP_RESP_BUF_SIZE + 1);
+    var nread = sandhi_conn_recv_all(conn, rbuf, _SANDHI_HTTP_RESP_BUF_SIZE);
+    sandhi_conn_close(conn);
+    if (nread < 0) { return _sandhi_resp_err(SANDHI_ERR_CONNECT); }
+    return sandhi_http_response_parse(rbuf, nread);
+}
+
+# ================================================================
+# Redirect following (opt-in, bounded)
+# ================================================================
 #
-# Keepalive / pooling: deferred to v0.2.0+ — not in the initial
-# scaffold because it interacts with thread lifecycle.
+# RFC 7231 §6.4 method rewrite semantics:
+#   303 See Other            — rewrite to GET, drop body
+#   301/302/307/308         — preserve method + body
+#
+# Location may be absolute ("https://other.example.com/x") or relative
+# ("/x" — resolve against the current URL's scheme+authority).
+
+# Options struct (16 bytes):
+#   +0   follow_redirects  (int: 0 default, 1 to enable)
+#   +8   max_hops          (int: default 5)
+enum SandhiHttpOptOff {
+    SANDHI_HTTP_OPT_OFF_FOLLOW    = 0;
+    SANDHI_HTTP_OPT_OFF_MAX_HOPS  = 8;
+}
+
+var SANDHI_HTTP_OPT_STRUCT_SIZE = 16;
+var SANDHI_HTTP_DEFAULT_MAX_HOPS = 5;
+
+fn sandhi_http_options_new() {
+    var o = alloc(SANDHI_HTTP_OPT_STRUCT_SIZE);
+    store64(o + SANDHI_HTTP_OPT_OFF_FOLLOW, 0);
+    store64(o + SANDHI_HTTP_OPT_OFF_MAX_HOPS, SANDHI_HTTP_DEFAULT_MAX_HOPS);
+    return o;
+}
+
+fn sandhi_http_options_follow_redirects(opts, on) {
+    store64(opts + SANDHI_HTTP_OPT_OFF_FOLLOW, on);
+    return 0;
+}
+
+fn sandhi_http_options_max_hops(opts, n) {
+    store64(opts + SANDHI_HTTP_OPT_OFF_MAX_HOPS, n);
+    return 0;
+}
+
+fn sandhi_http_options_follow(opts) {
+    if (opts == 0) { return 0; }
+    return load64(opts + SANDHI_HTTP_OPT_OFF_FOLLOW);
+}
+
+fn sandhi_http_options_hops(opts) {
+    if (opts == 0) { return SANDHI_HTTP_DEFAULT_MAX_HOPS; }
+    return load64(opts + SANDHI_HTTP_OPT_OFF_MAX_HOPS);
+}
+
+# 1 if the status code indicates a redirect we follow.
+fn _sandhi_is_redirect(status) {
+    if (status == 301) { return 1; }
+    if (status == 302) { return 1; }
+    if (status == 303) { return 1; }
+    if (status == 307) { return 1; }
+    if (status == 308) { return 1; }
+    return 0;
+}
+
+# Resolve a Location header value against a base URL. Returns an alloc'd
+# cstr with a fully-qualified URL, or 0 if resolution fails.
+fn _sandhi_resolve_location(base_url, location) {
+    if (location == 0) { return 0; }
+    # Absolute — starts with scheme. Just dup.
+    if (_sandhi_url_sceq(location, "http://", 7) == 1
+     || _sandhi_url_sceq(location, "https://", 8) == 1) {
+        var llen = strlen(location);
+        var out = alloc(llen + 1);
+        memcpy(out, location, llen);
+        store8(out + llen, 0);
+        return out;
+    }
+    # Relative — must start with '/'. Build scheme://authority + location.
+    if (load8(location) != 47) { return 0; }
+    var u = sandhi_url_parse(base_url);
+    if (u == 0) { return 0; }
+    var sb = str_builder_new();
+    if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) {
+        str_builder_add_cstr(sb, "https://");
+    } else {
+        str_builder_add_cstr(sb, "http://");
+    }
+    str_builder_add_cstr(sb, sandhi_url_host(u));
+    # Only include port if non-default.
+    var scheme = sandhi_url_scheme(u);
+    var default_port = 80;
+    if (scheme == SANDHI_URL_HTTPS) { default_port = 443; }
+    if (sandhi_url_port(u) != default_port) {
+        str_builder_add_cstr(sb, ":");
+        str_builder_add_int(sb, sandhi_url_port(u));
+    }
+    str_builder_add_cstr(sb, location);
+    return str_data(str_builder_build(sb));
+}
+
+# Redirect-following driver. Keep compact — each iteration reassigns
+# locals rather than allocating new ones, so the function stays under
+# the Cyrius local-count threshold.
+fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops) {
+    var m = method;
+    var u = url;
+    var b = body;
+    var bl = body_len;
+    var hops = 0;
+    var r = _sandhi_http_do(m, u, headers, b, bl);
+    while (hops < max_hops) {
+        if (_sandhi_is_redirect(sandhi_http_status(r)) == 0) { return r; }
+        var loc = sandhi_headers_get(sandhi_http_headers(r), "Location");
+        if (loc == 0) { return r; }
+        var next = _sandhi_resolve_location(u, loc);
+        if (next == 0) { return r; }
+        if (sandhi_http_status(r) == 303) { m = "GET"; b = 0; bl = 0; }
+        u = next;
+        hops = hops + 1;
+        r = _sandhi_http_do(m, u, headers, b, bl);
+    }
+    return r;
+}
+
+# ================================================================
+# Public verbs
+# ================================================================
+
+# Core dispatch. Opts == 0 means single request; opts with follow == 1
+# engages the redirect-following driver up to max_hops.
+fn _sandhi_http_dispatch(method, url, headers, body, body_len, opts) {
+    if (sandhi_http_options_follow(opts) == 1) {
+        return _sandhi_http_follow(method, url, headers, body, body_len, sandhi_http_options_hops(opts));
+    }
+    return _sandhi_http_do(method, url, headers, body, body_len);
+}
+
+# Simple verbs — no redirect following. Pass user_headers = 0 for none.
+fn sandhi_http_get(url, user_headers) {
+    return _sandhi_http_dispatch("GET", url, user_headers, 0, 0, 0);
+}
+
+fn sandhi_http_post(url, user_headers, body, body_len) {
+    return _sandhi_http_dispatch("POST", url, user_headers, body, body_len, 0);
+}
+
+fn sandhi_http_put(url, user_headers, body, body_len) {
+    return _sandhi_http_dispatch("PUT", url, user_headers, body, body_len, 0);
+}
+
+fn sandhi_http_patch(url, user_headers, body, body_len) {
+    return _sandhi_http_dispatch("PATCH", url, user_headers, body, body_len, 0);
+}
+
+fn sandhi_http_delete(url, user_headers) {
+    return _sandhi_http_dispatch("DELETE", url, user_headers, 0, 0, 0);
+}
+
+fn sandhi_http_head(url, user_headers) {
+    return _sandhi_http_dispatch("HEAD", url, user_headers, 0, 0, 0);
+}
+
+# _opts variants — pass a sandhi_http_options_new() with
+# follow_redirects enabled to opt into redirect chasing.
+fn sandhi_http_get_opts(url, user_headers, opts) {
+    return _sandhi_http_dispatch("GET", url, user_headers, 0, 0, opts);
+}
+
+fn sandhi_http_post_opts(url, user_headers, body, body_len, opts) {
+    return _sandhi_http_dispatch("POST", url, user_headers, body, body_len, opts);
+}
 
 fn sandhi_http_client_version() {
-    return "0.1.0-scaffold";
+    return "0.3.0";
 }

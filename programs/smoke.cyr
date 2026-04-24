@@ -13,11 +13,16 @@
 include "src/error.cyr"
 include "src/tls_policy/mod.cyr"
 include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
 include "src/http/client.cyr"
 include "src/rpc/mod.cyr"
 include "src/discovery/mod.cyr"
 include "src/server/mod.cyr"
 include "src/main.cyr"
+# NOTE: keep this list in sync with cyrius.cyml [lib].modules.
 
 fn main() {
     alloc_init();
