@@ -5,10 +5,11 @@
 # caller-supplied TLS policy.
 #
 # STATUS (2026-04-24): surface ships clean. Enforcement is
-# STUBBED pending the stdlib TLS-init blocker logged in
-# `docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md` (P8
-# entry). When that fix lands, filling in the OpenSSL calls below
-# is a ~50-line patch — no API shape change, no consumer code churn.
+# STUBBED pending the libssl pthread-lock deadlock logged in
+# `docs/issues/2026-04-24-libssl-pthread-deadlock.md`. When that
+# fix lands (`SSL_connect` stops hanging on a futex), filling in
+# the OpenSSL calls below is a ~50-line patch — no API shape
+# change, no consumer code churn.
 #
 # What's deferred and why:
 #

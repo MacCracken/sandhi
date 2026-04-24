@@ -1,0 +1,90 @@
+# programs/tls-probe.cyr — minimum viable TLS probe.
+#
+# Isolates each stage of the TLS flow so we can see where things
+# actually fail on the current toolchain.
+
+include "src/error.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(msg) {
+    syscall(1, 1, msg, strlen(msg));
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    say("stage 1: tls_available() ...\n");
+    var ok = tls_available();
+    say("  tls_available returned: "); fmt_int(ok); say("\n");
+    if (ok == 0) { say("  ABORT: libssl not loadable\n"); return 0; }
+
+    say("stage 2: resolve example.com ...\n");
+    var ip = sandhi_resolve_ipv4("example.com");
+    if (ip == 0 - 1) { say("  ABORT: resolve failed\n"); return 1; }
+    say("  ipv4 packed: "); fmt_int(ip); say("\n");
+
+    say("stage 3: plain TCP socket + connect ...\n");
+    var sfd_r = tcp_socket();
+    if (is_err_result(sfd_r) == 1) { say("  ABORT: socket failed\n"); return 1; }
+    var fd = payload(sfd_r);
+    var cr = sock_connect(fd, ip, 443);
+    if (is_err_result(cr) == 1) { say("  ABORT: connect 443 failed\n"); sock_close(fd); return 1; }
+    say("  connected fd="); fmt_int(fd); say("\n");
+
+    say("stage 4: tls_connect ...\n");
+    var tls = tls_connect(fd, "example.com");
+    if (tls == 0) { say("  ABORT: tls_connect returned 0\n"); sock_close(fd); return 1; }
+    say("  tls ctx non-null\n");
+
+    say("stage 5: tls_write simple HTTP/1.1 GET ...\n");
+    var req = "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    var n = tls_write(tls, req, strlen(req));
+    say("  bytes written: "); fmt_int(n); say("\n");
+    if (n <= 0) { say("  ABORT: tls_write failed\n"); tls_close(tls); sock_close(fd); return 1; }
+
+    say("stage 6: tls_read one chunk ...\n");
+    var buf = alloc(4096);
+    var r = tls_read(tls, buf, 4095);
+    say("  bytes read: "); fmt_int(r); say("\n");
+    if (r > 0) {
+        store8(buf + r, 0);
+        say("  first 80 bytes: ");
+        var show = r;
+        if (show > 80) { show = 80; }
+        syscall(1, 1, buf, show);
+        say("\n");
+    }
+
+    say("stage 7: tls_close + sock_close ...\n");
+    tls_close(tls);
+    sock_close(fd);
+    say("done\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

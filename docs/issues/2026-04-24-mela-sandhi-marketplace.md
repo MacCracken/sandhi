@@ -38,7 +38,7 @@ var first_price = sandhi_json_get_string(sandhi_http_body(r),
 
 ## Known caveats
 
-- **HTTPS runtime currently blocked** (`2026-04-24-fdlopen-getaddrinfo-blocked.md`). Real marketplaces are HTTPS. mela builds against the surface today; live round-trips wait for the stdlib TLS-init fix.
+- **HTTPS runtime currently blocked** (`2026-04-24-libssl-pthread-deadlock.md`). Real marketplaces are HTTPS. mela builds against the surface today; live round-trips wait for the libssl pthread-lock fix.
 - **JSON array navigation** (`path.N.field`) is not in sandhi today; mela gets string extraction + whole-body navigation. If marketplace shapes demand array traversal often, file as a sandhi follow-up — it's a small addition to `rpc/json.cyr`.
 
 ## Proposed mela roadmap entry

@@ -44,10 +44,33 @@ var _fn_SSL_read = 0;
 var _fn_SSL_shutdown = 0;
 var _fn_SSL_get_error = 0;
 
-# Lazy-init: load libssl on first use
+# Lazy-init: load libssl on first use.
+# v5.6.29: run the dynlib bootstrap sequence BEFORE the dynlib_open
+# calls. Per `lib/dynlib.cyr:939-946`, libc consumers (which libssl
+# and libcrypto are — they link against glibc internals) need
+# cpu_features + TLS + stack_end populated so IFUNC resolvers and
+# any libc entry that touches `%fs:N` / `__libc_stack_end` /
+# IRELATIVE relocations don't fault. Without this:
+#   • libcrypto's IFUNC-resolved AES / SHA / EVP cipher selection
+#     reads __cpu_features → SIGSEGV inside the resolver
+#   • libssl's TLS (`%fs:N`) accesses inside session-state setup
+#     fault on a static cyrius binary that never had TLS installed
+#   • the resulting state is asymmetric: `_tls_init` returns 0
+#     (looks success), but the first `SSL_connect` enters a tight
+#     loop somewhere in libssl handshake init
+# Symptom (sandhi M2, 2026-04-24 §3): `http-probe https://example.com/`
+# prints "GET https://example.com/" hundreds of times per second
+# until killed. Plain HTTP works (no libssl path).
 fn _tls_init() {
     if (_tls_inited == 1) { return 0; }
     _tls_inited = 1;
+
+    # Bootstrap glibc state required by IFUNC + TLS-using libs.
+    # These are idempotent (per their own implementations), so it's
+    # safe even if a caller already ran them earlier.
+    dynlib_bootstrap_cpu_features();
+    dynlib_bootstrap_tls();
+    dynlib_bootstrap_stack_end(0);
 
     # Load libcrypto first — libssl depends on it for symbol resolution
     var hc = dynlib_open("libcrypto.so.3");

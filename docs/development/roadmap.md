@@ -34,7 +34,7 @@
 
 - Full method surface: GET, POST, PUT, DELETE, PATCH, HEAD ✅
 - Custom headers via `sandhi::http::headers` (real key-value store) ✅
-- HTTPS via `lib/tls.cyr` wrap — compiles clean; runtime blocked on a stdlib TLS-init issue (see `docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md`)
+- HTTPS via `lib/tls.cyr` wrap — compiles clean; runtime blocked on a libssl-side pthread deadlock in `SSL_connect` (see `docs/issues/2026-04-24-libssl-pthread-deadlock.md`)
 - Redirect following — opt-in via `sandhi_http_options_new()`, bounded (default max 5 hops), RFC 7231 §6.4 semantics (303 → GET, 301/302/307/308 preserve method) ✅
 - Chunked transfer encoding decode ✅
 - HTTP/1.1 request line with explicit `Connection: close` (behavior-equivalent to stdlib HTTP/1.0; standards-current) ✅
@@ -81,7 +81,7 @@
 
 **Acceptance** (surface): policy constructors + combine + fingerprint normalization unit-tested (41 assertions covering every constructor, composition semantics, fingerprint format tolerance, byte-length decoding, encoding).
 
-**Acceptance (live enforcement) — pending**: the pinned-cert-rejects test and mTLS-authenticates test both need live HTTPS to work, which is blocked on the stdlib TLS-init issue (`docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md`). The TODO list at the top of `src/tls_policy/apply.cyr` enumerates the exact OpenSSL calls to fill in — ~50 lines once TLS-init stabilizes, no API change.
+**Acceptance (live enforcement) — pending**: the pinned-cert-rejects test and mTLS-authenticates test both need live HTTPS to work, which is blocked on the libssl-pthread-deadlock issue (`docs/issues/2026-04-24-libssl-pthread-deadlock.md`). The TODO list at the top of `src/tls_policy/apply.cyr` enumerates the exact OpenSSL calls to fill in — ~50 lines once `SSL_connect` round-trips, no API change.
 
 ### M6 — Fold into Cyrius stdlib (v1.0.0) — clean-break at v5.7.0
 

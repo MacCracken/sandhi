@@ -47,7 +47,7 @@ That's the same shape for every WebDriver / Appium backend. Per-backend code is 
 
 ## Known caveats
 
-- **HTTPS runtime currently blocked** (see `2026-04-24-fdlopen-getaddrinfo-blocked.md`). Plain HTTP works end-to-end. Local drivers (geckodriver on 127.0.0.1:4444) are the default anyway — HTTPS isn't on yantra's critical path for the acceptance line.
+- **HTTPS runtime currently blocked** (see `2026-04-24-libssl-pthread-deadlock.md`). Plain HTTP works end-to-end. Local drivers (geckodriver on 127.0.0.1:4444) are the default anyway — HTTPS isn't on yantra's critical path for the acceptance line.
 - **Streaming responses (SSE)** deferred to sandhi M3.5. WebDriver BiDi events will land when a yantra backend actually needs them.
 
 ## Proposed yantra roadmap entry

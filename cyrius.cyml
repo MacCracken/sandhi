@@ -5,7 +5,7 @@ description = "Service-boundary layer for AGNOS — shared HTTP/TCP/TLS + servic
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sandhi"
 language = "cyrius"
-cyrius = "5.6.22"
+cyrius = "5.6.30"
 
 # sandhi (सन्धि — junction, connection, joining) is the service-boundary
 # layer for AGNOS. Named 2026-04-24 after extensive search confirmed the
@@ -52,6 +52,8 @@ modules = [
     "src/http/response.cyr",
     "src/net/resolve.cyr",
     "src/http/client.cyr",
+    "src/http/sse.cyr",
+    "src/http/stream.cyr",
     "src/tls_policy/policy.cyr",
     "src/tls_policy/fingerprint.cyr",
     "src/tls_policy/apply.cyr",
@@ -90,6 +92,18 @@ stdlib = [
     "chrono",
     "tagged",
     "assert",
+    # mmap / dynlib / fdlopen: transitive requirements of tls.cyr. Without
+    # these, cyrius non-strict mode patches undef-fn call sites with
+    # placeholder bytes that silently loop back into _cyrius_init --
+    # root cause of the 2026-04-24 HTTPS-loop saga. See
+    # docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md log entry
+    # dated v5.6.29-1 for the full post-mortem.
+    "mmap",
+    "dynlib",
+    "fdlopen",
+    # bigint / freelist: transitive requirements of sigil.
+    "bigint",
+    "freelist",
     "net",
     "http",
     # http_server dropped at M1 — lifted into src/server/mod.cyr; stdlib

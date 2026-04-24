@@ -43,7 +43,7 @@ var version = sandhi_json_get_string(sandhi_http_body(rr), "latest.version");
 
 ## Known caveats
 
-- **HTTPS runtime currently blocked** (`2026-04-24-fdlopen-getaddrinfo-blocked.md`). Production registries are HTTPS; ark can build against the sandhi surface while the stdlib TLS-init fix lands. Local-mirror plain-HTTP flows work today.
+- **HTTPS runtime currently blocked** (`2026-04-24-libssl-pthread-deadlock.md`). Production registries are HTTPS; ark can build against the sandhi surface while the libssl pthread-lock fix lands. Local-mirror plain-HTTP flows work today.
 - **Large package payloads** — same buffer-size caveat as sit. Typical package manifests and tarballs under a few MB fit in the 256 KB default; larger payloads would need the sandhi streaming / configurable-buffer enhancement to land first.
 
 ## Proposed ark roadmap entry

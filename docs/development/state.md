@@ -4,6 +4,8 @@
 
 ## Version
 
+**0.7.0** — M3.5 closed 2026-04-24. SSE streaming + incremental chunked decode. `sandhi_http_stream(url, method, headers, body, body_len, cb, ctx)` drives a callback per parsed event; WHATWG-compliant SSE parser; MCP-over-SSE via `sandhi_rpc_mcp_stream`. Also carries the stdlib-deps audit (added `mmap`/`dynlib`/`fdlopen`/`bigint`/`freelist`) that unstuck the HTTPS investigation, and the toolchain pin bump to 5.6.30. 333 test assertions green.
+
 **0.6.0** — M5 closed 2026-04-24. TLS-policy surface: policy struct + constructors (`default` / `pinned` / `mtls` / `trust_store`), additive `combine`, SPKI fingerprint format helpers (normalize, compare, encode, byte-length), `sandhi_conn_open_with_policy` integration point. Runtime enforcement stubbed pending the stdlib TLS-init fix — `sandhi_tls_policy_enforcement_available() == 0` surfaces the stub state. 291 test assertions green.
 
 **0.5.0** — M4 closed 2026-04-24. Service discovery: service + resolver types, chain fallback (first-hit wins, no resolver load-bearing), daimon-backed HTTP resolver, mDNS interface (impl-stubbed pending multicast primitives in stdlib net.cyr), register/deregister. 250 test assertions green.
@@ -40,6 +42,8 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | `src/http/response.cyr` | 282 | **M2 done** — Content-Length + chunked + close-delimited body framing |
 | `src/net/resolve.cyr` | 290 | **M2 done** — native UDP DNS (RFC 1035), /etc/resolv.conf + 8.8.8.8 fallback |
 | `src/http/client.cyr` | 333 | **M2 done** — POST/PUT/DELETE/PATCH/HEAD/GET, redirect following, options struct |
+| `src/http/sse.cyr` | 244 | **M3.5 done** — WHATWG SSE event parser |
+| `src/http/stream.cyr` | 399 | **M3.5 done** — streaming HTTP + incremental chunked decoder + callback-per-event dispatch |
 | `src/rpc/json.cyr` | 365 | **M3 done** — nested JSON build + dotted-path extract |
 | `src/rpc/dispatch.cyr` | 169 | **M3 done** — JSON-over-HTTP + dialect-aware error envelopes |
 | `src/rpc/webdriver.cyr` | 231 | **M3 done** — W3C WebDriver surface (sessions, navigation, elements, exec) |
@@ -67,7 +71,7 @@ Planned `dist/sandhi.cyr` bundle via `cyrius distlib` — can now be produced an
 
 ## Tests
 
-- `tests/sandhi.tcyr` — **291 assertions green** across 73 test groups: smoke + server helpers + http/* + net/resolve + rpc/* + discovery/* + **tls_policy (default / pinned / mtls / trust_store / combine-additive / combine-right-wins / combine-null-safe), tls_policy/fp (normalize / delimiters / invalid / eq / byte-length / encode), tls_policy/enforcement-flag**.
+- `tests/sandhi.tcyr` — **333 assertions green** across 89 test groups: all of the above + **sse (single-event / named-event / multi-line-data / id+retry / comments / multiple-events / CRLF / partial-trailing / no-space-after-colon / empty-data / blank-line-resets) and stream (result-accessors / chunk-parse-size / incomplete / zero-size / chunked-roundtrip)**.
 - `tests/integration/` — cross-submodule integration not yet a separate file; loopback client+server round-trip deferred until the HTTPS TLS-init issue resolves.
 
 ## Dependencies
@@ -110,7 +114,8 @@ All M2–M5 must land before the Cyrius v5.7.0 fold event (public surface freeze
 
 1. ~~**M1 — `lib/http_server.cyr` lift-and-shift.**~~ ✅ landed 2026-04-24 (v0.2.0).
 2. ~~**M2 — `sandhi::http::client` real implementation.**~~ ✅ landed 2026-04-24 (v0.3.0). HTTPS runtime still blocked on stdlib TLS-init (see issue doc); compiles clean, runs fine over plain HTTP.
-3. ~~**M3 — `sandhi::rpc` WebDriver + Appium + MCP.**~~ ✅ landed 2026-04-24 (v0.4.0). JSON-RPC dispatch, dialect-aware errors, W3C WebDriver / Appium / MCP envelopes. SSE streaming deferred to M3.5 (no consumer asking today).
+3. ~~**M3 — `sandhi::rpc` WebDriver + Appium + MCP.**~~ ✅ landed 2026-04-24 (v0.4.0).
+3.5. ~~**M3.5 — SSE streaming.**~~ ✅ landed 2026-04-24 (v0.7.0). WHATWG SSE parser, incremental chunked decode, callback-per-event dispatch, MCP-over-SSE wrapper. Verified against synthetic byte streams; live-HTTPS SSE waits on the libssl pthread-lock fix like every other HTTPS path.
 4. ~~**M4 — `sandhi::discovery` chain resolver + daimon integration.**~~ ✅ landed 2026-04-24 (v0.5.0). Service + resolver vocabulary, chain fallback, daimon HTTP resolver, register/deregister. **Cross-repo**: daimon-side registry endpoints are specified but not yet committed to daimon's roadmap — coordination doc at `docs/issues/2026-04-24-daimon-registry-endpoints.md`. mDNS lookup stubbed — impl awaits multicast primitives in stdlib net.cyr.
 5. ~~**M5 — `sandhi::tls_policy` cert pinning + mTLS.**~~ ✅ **surface** landed 2026-04-24 (v0.6.0). Policy constructors, fingerprint helpers, `sandhi_conn_open_with_policy` integration point all shipped + unit-tested. **Enforcement stubbed** pending stdlib TLS-init fix — filling in is a focused ~50-line patch (exact OpenSSL calls enumerated in `src/tls_policy/apply.cyr` TODO list). Native TLS transition at Cyrius v5.9.x is a transport swap beneath this policy surface — no consumer-facing API change.
 6. **Fold-into-stdlib at v5.7.0** — one event: stdlib deletes `lib/http_server.cyr`, adds `lib/sandhi.cyr`, consumers migrate their includes in the same release. 5.6.YY releases carry the deprecation warning. Checked at the Cyrius release gate, not in this repo.

@@ -8,6 +8,8 @@ include "src/http/conn.cyr"
 include "src/http/response.cyr"
 include "src/net/resolve.cyr"
 include "src/http/client.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
 include "src/rpc/json.cyr"
 include "src/rpc/dispatch.cyr"
 include "src/rpc/webdriver.cyr"
@@ -1021,6 +1023,177 @@ fn test_tls_enforcement_flag() {
     return 0;
 }
 
+fn test_sse_single_event() {
+    var raw = "data: hello\n\n";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_eq(vec_len(events), 1, "sse: one event");
+    var e = vec_get(events, 0);
+    assert_streq(sandhi_sse_event_name(e), "message", "sse: default event name");
+    assert_streq(sandhi_sse_event_data(e), "hello", "sse: data extracted");
+    assert_eq(sandhi_sse_event_id(e), 0, "sse: no id");
+    assert_eq(sandhi_sse_event_retry(e), 0 - 1, "sse: retry unset → -1");
+    return 0;
+}
+
+fn test_sse_named_event() {
+    var raw = "event: ping\ndata: {}\n\n";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_eq(vec_len(events), 1, "sse: one event");
+    var e = vec_get(events, 0);
+    assert_streq(sandhi_sse_event_name(e), "ping", "sse: named event");
+    assert_streq(sandhi_sse_event_data(e), "{}", "sse: JSON payload");
+    return 0;
+}
+
+fn test_sse_multi_line_data() {
+    # WHATWG spec: multiple data: lines concatenate with \n.
+    var raw = "data: line one\ndata: line two\ndata: line three\n\n";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_eq(vec_len(events), 1, "sse: one event from 3 data lines");
+    var e = vec_get(events, 0);
+    assert_streq(sandhi_sse_event_data(e), "line one\nline two\nline three", "sse: data concatenated with LF");
+    return 0;
+}
+
+fn test_sse_id_and_retry() {
+    var raw = "id: 42\nretry: 3000\ndata: hi\n\n";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    var e = vec_get(events, 0);
+    assert_streq(sandhi_sse_event_id(e), "42", "sse: id captured");
+    assert_eq(sandhi_sse_event_retry(e), 3000, "sse: retry ms parsed");
+    return 0;
+}
+
+fn test_sse_comments_ignored() {
+    var raw = ": keepalive heartbeat\ndata: hello\n: another comment\n\n";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_eq(vec_len(events), 1, "sse: comments don't block event");
+    assert_streq(sandhi_sse_event_data(vec_get(events, 0)), "hello", "sse: data still extracted");
+    return 0;
+}
+
+fn test_sse_multiple_events() {
+    var raw = "data: one\n\ndata: two\n\ndata: three\n\n";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_eq(vec_len(events), 3, "sse: three events");
+    assert_streq(sandhi_sse_event_data(vec_get(events, 0)), "one", "sse: e0");
+    assert_streq(sandhi_sse_event_data(vec_get(events, 1)), "two", "sse: e1");
+    assert_streq(sandhi_sse_event_data(vec_get(events, 2)), "three", "sse: e2");
+    return 0;
+}
+
+fn test_sse_crlf_line_endings() {
+    var raw = "data: hello\r\n\r\n";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_eq(vec_len(events), 1, "sse: CRLF accepted");
+    assert_streq(sandhi_sse_event_data(vec_get(events, 0)), "hello", "sse: data clean of CR");
+    return 0;
+}
+
+fn test_sse_partial_trailing_event() {
+    # Last event has no terminating blank line — should stay in remaining.
+    var raw = "data: first\n\ndata: partial";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_eq(vec_len(events), 1, "sse: only complete event emitted");
+    assert_streq(sandhi_sse_event_data(vec_get(events, 0)), "first", "sse: complete one");
+    # remaining offset should be just past the first blank-line terminator.
+    var r = load64(rem);
+    assert_eq(r, 13, "sse: remaining points past 'data: first\\n\\n'");
+    return 0;
+}
+
+fn test_sse_field_without_space_after_colon() {
+    # Spec: optional leading SP after colon is stripped; tight form also valid.
+    var raw = "data:tight\n\n";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_streq(sandhi_sse_event_data(vec_get(events, 0)), "tight", "sse: no-space variant");
+    return 0;
+}
+
+fn test_sse_empty_data_field() {
+    var raw = "event: ping\ndata:\n\n";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_eq(vec_len(events), 1, "sse: event dispatched despite empty data");
+    assert_streq(sandhi_sse_event_data(vec_get(events, 0)), "", "sse: empty data value");
+    return 0;
+}
+
+fn test_sse_blank_line_resets_fields() {
+    # After the first event dispatches, event_name should reset to "message".
+    var raw = "event: ping\ndata: one\n\ndata: two\n\n";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_eq(vec_len(events), 2, "sse: two events");
+    assert_streq(sandhi_sse_event_name(vec_get(events, 0)), "ping", "sse: first is named");
+    assert_streq(sandhi_sse_event_name(vec_get(events, 1)), "message", "sse: second resets to default");
+    return 0;
+}
+
+fn test_stream_result_accessors() {
+    var r = _sandhi_stream_result(200, 5, SANDHI_OK, 1);
+    assert_eq(sandhi_stream_status(r), 200, "stream: status");
+    assert_eq(sandhi_stream_events(r), 5, "stream: event count");
+    assert_eq(sandhi_stream_err(r), SANDHI_OK, "stream: err_kind");
+    assert_eq(sandhi_stream_stopped(r), 1, "stream: stopped-by-cb flag");
+    return 0;
+}
+
+fn test_stream_chunk_parse_size() {
+    var sb = _sandhi_sb_new(256);
+    var s = "a\r\n0123456789";
+    _sandhi_sb_append(sb, s, strlen(s));
+    var sz = _sandhi_chunk_parse_size(sb);
+    assert_neq(sz, 0 - 1, "chunk: parse returns valid");
+    assert_eq(sz & 0xFFFFFFFF, 10, "chunk: hex a → 10");
+    assert_eq((sz >> 32) & 0xFFFFFFFF, 3, "chunk: consumed 'a\\r\\n' (3 bytes)");
+    return 0;
+}
+
+fn test_stream_chunk_parse_size_incomplete() {
+    var sb = _sandhi_sb_new(256);
+    var s = "ff";  # no CRLF yet
+    _sandhi_sb_append(sb, s, strlen(s));
+    assert_eq(_sandhi_chunk_parse_size(sb), 0 - 1, "chunk: incomplete line → -1");
+    return 0;
+}
+
+fn test_stream_chunk_parse_size_zero() {
+    var sb = _sandhi_sb_new(256);
+    var s = "0\r\n";
+    _sandhi_sb_append(sb, s, strlen(s));
+    var sz = _sandhi_chunk_parse_size(sb);
+    assert_eq(sz & 0xFFFFFFFF, 0, "chunk: zero-size terminal");
+    assert_eq((sz >> 32) & 0xFFFFFFFF, 3, "chunk: consumed terminal line");
+    return 0;
+}
+
+fn test_stream_chunked_decode_roundtrip() {
+    # Two chunks "hello" (5) + " world" (6) + terminal 0.
+    var in_sb = _sandhi_sb_new(256);
+    var frame = "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+    _sandhi_sb_append(in_sb, frame, strlen(frame));
+    var out_sb = _sandhi_sb_new(256);
+    var state = _sandhi_chunk_state_new();
+    _sandhi_stream_decode_chunked_into(in_sb, state, out_sb);
+    assert_eq(_sandhi_chunk_done(state), 1, "chunk: terminal seen");
+    assert_eq(_sandhi_sb_len(out_sb), 11, "chunk: 11 bytes decoded");
+    # Compare contents.
+    var p = _sandhi_sb_ptr(out_sb);
+    store8(p + 11, 0);
+    assert_streq(p, "hello world", "chunk: decoded bytes");
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -1321,6 +1494,54 @@ fn main() {
 
     test_group("tls_policy/enforcement_flag");
     test_tls_enforcement_flag();
+
+    test_group("sse/single_event");
+    test_sse_single_event();
+
+    test_group("sse/named_event");
+    test_sse_named_event();
+
+    test_group("sse/multi_line_data");
+    test_sse_multi_line_data();
+
+    test_group("sse/id_and_retry");
+    test_sse_id_and_retry();
+
+    test_group("sse/comments");
+    test_sse_comments_ignored();
+
+    test_group("sse/multiple_events");
+    test_sse_multiple_events();
+
+    test_group("sse/crlf");
+    test_sse_crlf_line_endings();
+
+    test_group("sse/partial_trailing");
+    test_sse_partial_trailing_event();
+
+    test_group("sse/no_space_after_colon");
+    test_sse_field_without_space_after_colon();
+
+    test_group("sse/empty_data");
+    test_sse_empty_data_field();
+
+    test_group("sse/blank_line_resets");
+    test_sse_blank_line_resets_fields();
+
+    test_group("stream/result");
+    test_stream_result_accessors();
+
+    test_group("stream/chunk_parse_size");
+    test_stream_chunk_parse_size();
+
+    test_group("stream/chunk_parse_incomplete");
+    test_stream_chunk_parse_size_incomplete();
+
+    test_group("stream/chunk_parse_zero");
+    test_stream_chunk_parse_size_zero();
+
+    test_group("stream/chunked_roundtrip");
+    test_stream_chunked_decode_roundtrip();
 
     return assert_summary();
 }

@@ -49,7 +49,7 @@ var r = sandhi_http_post("https://git.example.com/repo.git/git-upload-pack",
 
 ## Known caveats
 
-- **HTTPS runtime currently blocked** (`2026-04-24-fdlopen-getaddrinfo-blocked.md`). Effectively all git remotes today are HTTPS (GitHub, GitLab, self-hosted with TLS). sit's remote milestone is therefore **gated** on the stdlib TLS-init fix as well as sit's local-VCS completion. Plain-HTTP git remotes (rare, usually internal) work today.
+- **HTTPS runtime currently blocked** (`2026-04-24-libssl-pthread-deadlock.md`). Effectively all git remotes today are HTTPS (GitHub, GitLab, self-hosted with TLS). sit's remote milestone is therefore **gated** on the libssl pthread-lock fix as well as sit's local-VCS completion. Plain-HTTP git remotes (rare, usually internal) work today.
 - **Large packfile responses** — sandhi's HTTP client reads into a 256 KB default buffer (`_SANDHI_HTTP_RESP_BUF_SIZE`). Real packfiles can be MB to GB. sit's remote milestone needs either (a) a larger buffer configurable per-request, or (b) a streaming callback surface. This is a sandhi-side enhancement sit can drive when its milestone opens — file as "sandhi extension: streaming / configurable response buffer" at that point.
 - **SSH remotes** are out of scope. sandhi doesn't speak SSH; sit's SSH transport stays as sit-owned code (or via a separate crate).
 

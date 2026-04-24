@@ -44,7 +44,7 @@ var reply = sandhi_json_get_string(sandhi_http_body(r),
 
 ## Known caveats
 
-- **HTTPS runtime currently blocked** (`2026-04-24-fdlopen-getaddrinfo-blocked.md`). Every production LLM provider uses HTTPS. hoosh / ifran can build against the sandhi surface and test against a local plain-HTTP mock (`programs/http-probe.cyr` shape) while the stdlib TLS-init fix lands — the API doesn't change when TLS starts working.
+- **HTTPS runtime currently blocked** (`2026-04-24-libssl-pthread-deadlock.md`). Every production LLM provider uses HTTPS. hoosh / ifran can build against the sandhi surface and test against a local plain-HTTP mock (`programs/http-probe.cyr` shape) while the libssl pthread-lock fix lands — the API doesn't change when TLS starts working.
 - **JSON array navigation** (`path.0.field`) isn't yet in `sandhi_json_get_string`. Consumers handle arrays either by `get_string` + manual substring scan, or by pre-built array fragments. If a second LLM-provider consumer needs array navigation, we'll add it.
 - **Streaming (SSE)** deferred to sandhi M3.5. Chunked responses decode correctly today; SSE-as-iterator-callbacks awaits a consumer explicitly asking.
 

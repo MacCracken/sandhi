@@ -1,0 +1,399 @@
+# sandhi/http/stream — streaming HTTP request / SSE dispatcher.
+#
+# Sends an HTTP request, reads the response incrementally, feeds the
+# body bytes through the SSE parser, and calls a callback per event.
+# Supports both `Transfer-Encoding: chunked` and close-delimited
+# bodies — both are common for SSE streams (`text/event-stream`).
+#
+# Callback contract:
+#   fn callback(ctx, event) -> int
+#     return 1 to keep consuming the stream
+#     return 0 to stop the stream early (connection closed cleanly)
+#
+# Result struct (32 bytes):
+#   +0   http_status        (int — 0 if no status line ever seen)
+#   +8   events_dispatched  (int — how many events the callback got)
+#   +16  err_kind           (int — SandhiErrorKind on failure, 0 on clean)
+#   +24  stopped_by_cb      (int — 1 if cb returned 0, 0 if hit EOF/err)
+#
+# Kept under the Cyrius local-count threshold by delegating the
+# per-chunk work to helper fns.
+
+enum SandhiStreamOff {
+    SANDHI_STREAM_OFF_STATUS  = 0;
+    SANDHI_STREAM_OFF_EVENTS  = 8;
+    SANDHI_STREAM_OFF_ERR     = 16;
+    SANDHI_STREAM_OFF_STOPPED = 24;
+}
+
+var SANDHI_STREAM_RESULT_SIZE = 32;
+var _SANDHI_STREAM_READ_CHUNK = 16384;
+var _SANDHI_STREAM_BUF_CAP    = 262144;
+
+fn _sandhi_stream_result(status, events, err, stopped) {
+    var r = alloc(SANDHI_STREAM_RESULT_SIZE);
+    store64(r + SANDHI_STREAM_OFF_STATUS, status);
+    store64(r + SANDHI_STREAM_OFF_EVENTS, events);
+    store64(r + SANDHI_STREAM_OFF_ERR, err);
+    store64(r + SANDHI_STREAM_OFF_STOPPED, stopped);
+    return r;
+}
+
+fn sandhi_stream_status(r)  { return load64(r + SANDHI_STREAM_OFF_STATUS); }
+fn sandhi_stream_events(r)  { return load64(r + SANDHI_STREAM_OFF_EVENTS); }
+fn sandhi_stream_err(r)     { return load64(r + SANDHI_STREAM_OFF_ERR); }
+fn sandhi_stream_stopped(r) { return load64(r + SANDHI_STREAM_OFF_STOPPED); }
+
+# ================================================================
+# Buffer helpers
+# ================================================================
+#
+# A stream-buffer is a cstr-shaped alloc with len + cap bookkeeping.
+# Bytes are appended from the network at the tail and consumed from
+# the head as SSE parses complete events.
+
+enum SandhiStreamBufOff {
+    SANDHI_SB_OFF_PTR = 0;
+    SANDHI_SB_OFF_LEN = 8;
+    SANDHI_SB_OFF_CAP = 16;
+}
+
+fn _sandhi_sb_new(cap) {
+    var sb = alloc(24);
+    store64(sb + SANDHI_SB_OFF_PTR, alloc(cap + 1));
+    store64(sb + SANDHI_SB_OFF_LEN, 0);
+    store64(sb + SANDHI_SB_OFF_CAP, cap);
+    return sb;
+}
+
+fn _sandhi_sb_ptr(sb) { return load64(sb + SANDHI_SB_OFF_PTR); }
+fn _sandhi_sb_len(sb) { return load64(sb + SANDHI_SB_OFF_LEN); }
+fn _sandhi_sb_cap(sb) { return load64(sb + SANDHI_SB_OFF_CAP); }
+
+# Append `n` bytes from `src` onto the buffer. Returns 0 on success,
+# -1 on overflow (caller decides whether to grow or drop).
+fn _sandhi_sb_append(sb, src, n) {
+    var len = _sandhi_sb_len(sb);
+    var cap = _sandhi_sb_cap(sb);
+    if (len + n > cap) { return 0 - 1; }
+    var p = _sandhi_sb_ptr(sb);
+    memcpy(p + len, src, n);
+    store64(sb + SANDHI_SB_OFF_LEN, len + n);
+    return 0;
+}
+
+# Drop the first `n` bytes, shifting the remainder left.
+fn _sandhi_sb_consume(sb, n) {
+    var len = _sandhi_sb_len(sb);
+    if (n <= 0) { return 0; }
+    if (n >= len) {
+        store64(sb + SANDHI_SB_OFF_LEN, 0);
+        return 0;
+    }
+    var p = _sandhi_sb_ptr(sb);
+    memcpy(p, p + n, len - n);
+    store64(sb + SANDHI_SB_OFF_LEN, len - n);
+    return 0;
+}
+
+# ================================================================
+# HTTP header drain (incremental)
+# ================================================================
+
+# Find `\r\n\r\n` in sb. Returns byte offset just past the marker, or
+# -1 if not yet present.
+fn _sandhi_stream_headers_end(sb) {
+    var p = _sandhi_sb_ptr(sb);
+    var n = _sandhi_sb_len(sb);
+    var i = 0;
+    while (i + 3 < n) {
+        if (load8(p + i) == 13 && load8(p + i + 1) == 10
+         && load8(p + i + 2) == 13 && load8(p + i + 3) == 10) {
+            return i + 4;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# ================================================================
+# Chunked decoder state machine
+# ================================================================
+#
+# Chunked = {size-hex "\r\n" data-bytes "\r\n"}... "0\r\n\r\n"
+# State struct (16 bytes):
+#   +0   remaining_in_chunk (int — bytes left in current chunk, -1 if reading size)
+#   +8   done               (int — 1 when terminal 0-length chunk seen)
+enum SandhiChunkOff {
+    SANDHI_CHUNK_OFF_REM  = 0;
+    SANDHI_CHUNK_OFF_DONE = 8;
+}
+
+fn _sandhi_chunk_state_new() {
+    var c = alloc(16);
+    store64(c, 0 - 1);  # reading size
+    store64(c + 8, 0);
+    return c;
+}
+
+fn _sandhi_chunk_rem(c)  { return load64(c + SANDHI_CHUNK_OFF_REM); }
+fn _sandhi_chunk_done(c) { return load64(c + SANDHI_CHUNK_OFF_DONE); }
+
+fn _sandhi_chunk_set_rem(c, v)  { store64(c + SANDHI_CHUNK_OFF_REM, v); return 0; }
+fn _sandhi_chunk_set_done(c, v) { store64(c + SANDHI_CHUNK_OFF_DONE, v); return 0; }
+
+# Parse one hex chunk-size line out of sb starting at offset 0.
+# Returns (size | (consumed_offset << 32)), or -1 if no complete line yet.
+fn _sandhi_chunk_parse_size(sb) {
+    var p = _sandhi_sb_ptr(sb);
+    var n = _sandhi_sb_len(sb);
+    var size = 0;
+    var seen_digit = 0;
+    var i = 0;
+    var scanning = 1;
+    while (scanning == 1 && i < n) {
+        var c = load8(p + i);
+        if (c >= 48 && c <= 57)      { size = size * 16 + (c - 48); seen_digit = 1; i = i + 1; }
+        elif (c >= 97 && c <= 102)   { size = size * 16 + (c - 87); seen_digit = 1; i = i + 1; }
+        elif (c >= 65 && c <= 70)    { size = size * 16 + (c - 55); seen_digit = 1; i = i + 1; }
+        else { scanning = 0; }
+    }
+    # Skip chunk extensions (";name=value" etc.) up to CRLF/LF.
+    while (i < n && load8(p + i) != 13 && load8(p + i) != 10) { i = i + 1; }
+    if (i >= n) { return 0 - 1; }
+    if (load8(p + i) == 13) {
+        i = i + 1;
+        if (i >= n) { return 0 - 1; }
+    }
+    if (load8(p + i) != 10) { return 0 - 1; }
+    i = i + 1;
+    if (seen_digit == 0) { return 0 - 1; }
+    return size | (i << 32);
+}
+
+# ================================================================
+# Dispatch events through the callback
+# ================================================================
+
+# Dispatch a vec of events. Returns the number dispatched successfully.
+# If the callback returns 0, stops and writes 1 into *stop_out.
+fn _sandhi_stream_dispatch(events, cb, ctx, stop_out) {
+    var n = vec_len(events);
+    var i = 0;
+    var dispatched = 0;
+    while (i < n) {
+        var ev = vec_get(events, i);
+        var r = fncall2(cb, ctx, ev);
+        dispatched = dispatched + 1;
+        if (r == 0) {
+            store64(stop_out, 1);
+            return dispatched;
+        }
+        i = i + 1;
+    }
+    store64(stop_out, 0);
+    return dispatched;
+}
+
+# Parse any complete SSE events currently in the body-buffer, dispatch
+# them, consume the parsed bytes. Updates total_events in-place.
+fn _sandhi_stream_feed_sse(body_buf, cb, ctx, total_events_ptr, stop_out) {
+    var p = _sandhi_sb_ptr(body_buf);
+    var n = _sandhi_sb_len(body_buf);
+    if (n == 0) { return 0; }
+    var rem_cell = alloc(8);
+    store64(rem_cell, 0);
+    var events = sandhi_sse_parse(p, n, rem_cell);
+    var consumed = load64(rem_cell);
+    _sandhi_sb_consume(body_buf, consumed);
+    var dispatched = _sandhi_stream_dispatch(events, cb, ctx, stop_out);
+    store64(total_events_ptr, load64(total_events_ptr) + dispatched);
+    return 0;
+}
+
+# ================================================================
+# Public API
+# ================================================================
+
+# Open the TLS-or-plain connection, send the HTTP request, stream the
+# response body through the SSE parser calling `cb(ctx, event)` for
+# each parsed event. `method` is "GET" or "POST"; body may be 0.
+#
+# Returns a stream-result struct.
+fn sandhi_http_stream(url, method, user_headers, body, body_len, cb, ctx) {
+    var u = sandhi_url_parse(url);
+    if (u == 0) { return _sandhi_stream_result(0, 0, SANDHI_ERR_PARSE, 0); }
+
+    var addr = _sandhi_client_resolve(sandhi_url_host(u));
+    if (addr == 0 - 1) { return _sandhi_stream_result(0, 0, SANDHI_ERR_DISCOVERY, 0); }
+
+    var use_tls = 0;
+    if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { use_tls = 1; }
+    var conn = sandhi_conn_open(addr, sandhi_url_port(u), use_tls, sandhi_url_host(u));
+    if (conn == 0) {
+        if (use_tls == 1) { return _sandhi_stream_result(0, 0, SANDHI_ERR_TLS, 0); }
+        return _sandhi_stream_result(0, 0, SANDHI_ERR_CONNECT, 0);
+    }
+
+    var full_path = _sandhi_client_full_path(u);
+    var host_hdr = _sandhi_client_host_header(u);
+    var hs = user_headers;
+    if (hs == 0) { hs = sandhi_headers_new(); }
+    if (sandhi_headers_has(hs, "Accept") == 0) {
+        sandhi_headers_set(hs, "Accept", "text/event-stream");
+    }
+    var req = _sandhi_client_build_request(method, full_path, host_hdr, hs, body_len);
+
+    return _sandhi_stream_run(conn, req, body, body_len, cb, ctx);
+}
+
+# Send the request + drive the read loop. Extracted so the caller
+# stays under the Cyrius local-count threshold.
+fn _sandhi_stream_run(conn, req, body, body_len, cb, ctx) {
+    var req_data = str_data(req);
+    var req_len = strlen(req_data);
+    if (sandhi_conn_send_all(conn, req_data, req_len) < 0) {
+        sandhi_conn_close(conn);
+        return _sandhi_stream_result(0, 0, SANDHI_ERR_CONNECT, 0);
+    }
+    if (body_len > 0 && body != 0) {
+        if (sandhi_conn_send_all(conn, body, body_len) < 0) {
+            sandhi_conn_close(conn);
+            return _sandhi_stream_result(0, 0, SANDHI_ERR_CONNECT, 0);
+        }
+    }
+    var out = _sandhi_stream_read_loop(conn, cb, ctx);
+    sandhi_conn_close(conn);
+    return out;
+}
+
+# Read loop: drain headers, then feed body bytes through SSE parser.
+# Returns stream-result. Handles chunked or close-delimited bodies.
+fn _sandhi_stream_read_loop(conn, cb, ctx) {
+    var header_sb = _sandhi_sb_new(_SANDHI_STREAM_BUF_CAP);
+    var scratch = alloc(_SANDHI_STREAM_READ_CHUNK);
+
+    # Drain header block.
+    var header_end = 0 - 1;
+    while (header_end < 0) {
+        var n = sandhi_conn_recv(conn, scratch, _SANDHI_STREAM_READ_CHUNK);
+        if (n < 0) { return _sandhi_stream_result(0, 0, SANDHI_ERR_CONNECT, 0); }
+        if (n == 0) { return _sandhi_stream_result(0, 0, SANDHI_ERR_PROTOCOL, 0); }
+        if (_sandhi_sb_append(header_sb, scratch, n) < 0) {
+            return _sandhi_stream_result(0, 0, SANDHI_ERR_PROTOCOL, 0);
+        }
+        header_end = _sandhi_stream_headers_end(header_sb);
+    }
+
+    # Parse status + headers. Re-use response.cyr helpers.
+    var hp = _sandhi_sb_ptr(header_sb);
+    var status = _sandhi_resp_status(hp, header_end);
+    if (status == 0) { return _sandhi_stream_result(0, 0, SANDHI_ERR_PROTOCOL, 0); }
+
+    var sline_end = _sandhi_resp_eol(hp, 0, header_end);
+    var hstart = sline_end;
+    if (hstart < header_end && load8(hp + hstart) == 13) { hstart = hstart + 1; }
+    if (hstart < header_end && load8(hp + hstart) == 10) { hstart = hstart + 1; }
+    var hend = _sandhi_resp_headers_end(hp, header_end);
+    if (hend < 0) { hend = header_end; }
+    var headers = sandhi_headers_parse(hp + hstart, hend - hstart);
+    var chunked = _sandhi_resp_is_chunked(headers);
+
+    # Body-buffer starts with whatever's past the header marker.
+    var body_sb = _sandhi_sb_new(_SANDHI_STREAM_BUF_CAP);
+    var total = _sandhi_sb_len(header_sb);
+    if (total > header_end) {
+        _sandhi_sb_append(body_sb, hp + header_end, total - header_end);
+    }
+
+    return _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx);
+}
+
+# Body-loop: alternate "read more" + "decode + dispatch". Kept
+# compact — per-iteration work lives in helpers.
+fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx) {
+    var total_events_cell = alloc(8);
+    store64(total_events_cell, 0);
+    var stop_cell = alloc(8);
+    store64(stop_cell, 0);
+    var chunk_state = _sandhi_chunk_state_new();
+
+    var going = 1;
+    while (going == 1) {
+        # Process whatever's already in body_sb.
+        if (chunked == 1) {
+            var decoded = _sandhi_sb_new(_SANDHI_STREAM_BUF_CAP);
+            _sandhi_stream_decode_chunked_into(body_sb, chunk_state, decoded);
+            if (_sandhi_sb_len(decoded) > 0) {
+                _sandhi_stream_feed_sse(decoded, cb, ctx, total_events_cell, stop_cell);
+                if (load64(stop_cell) == 1) { going = 0; }
+            }
+            if (_sandhi_chunk_done(chunk_state) == 1) { going = 0; }
+        } else {
+            _sandhi_stream_feed_sse(body_sb, cb, ctx, total_events_cell, stop_cell);
+            if (load64(stop_cell) == 1) { going = 0; }
+        }
+
+        if (going == 1) {
+            var n = sandhi_conn_recv(conn, scratch, _SANDHI_STREAM_READ_CHUNK);
+            if (n < 0) { return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_CONNECT, 0); }
+            if (n == 0) { going = 0; }
+            else {
+                if (_sandhi_sb_append(body_sb, scratch, n) < 0) {
+                    return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_PROTOCOL, 0);
+                }
+            }
+        }
+    }
+
+    return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_OK, load64(stop_cell));
+}
+
+# Decode as many chunked frames as possible out of `in_sb` into
+# `out_sb`. Advances chunk_state. Stops when a complete frame can't
+# be parsed or the terminal 0-chunk is seen.
+fn _sandhi_stream_decode_chunked_into(in_sb, chunk_state, out_sb) {
+    var going = 1;
+    while (going == 1) {
+        var rem = _sandhi_chunk_rem(chunk_state);
+        if (_sandhi_chunk_done(chunk_state) == 1) { return 0; }
+        if (rem == 0 - 1) {
+            # Reading a chunk-size line.
+            var sz = _sandhi_chunk_parse_size(in_sb);
+            if (sz == 0 - 1) { return 0; }  # need more bytes
+            var size = sz & 0xFFFFFFFF;
+            var consumed = (sz >> 32) & 0xFFFFFFFF;
+            _sandhi_sb_consume(in_sb, consumed);
+            if (size == 0) {
+                _sandhi_chunk_set_done(chunk_state, 1);
+                return 0;
+            }
+            _sandhi_chunk_set_rem(chunk_state, size);
+        } else {
+            # Reading chunk body + trailing CRLF.
+            var avail = _sandhi_sb_len(in_sb);
+            if (avail == 0) { return 0; }
+            var take = rem;
+            if (take > avail) { take = avail; }
+            _sandhi_sb_append(out_sb, _sandhi_sb_ptr(in_sb), take);
+            _sandhi_sb_consume(in_sb, take);
+            var new_rem = rem - take;
+            if (new_rem > 0) {
+                _sandhi_chunk_set_rem(chunk_state, new_rem);
+                return 0;
+            }
+            # Chunk done — eat trailing CRLF if present, then loop.
+            _sandhi_chunk_set_rem(chunk_state, 0 - 1);
+            var after = _sandhi_sb_len(in_sb);
+            if (after < 2) { return 0; }
+            var pp = _sandhi_sb_ptr(in_sb);
+            if (load8(pp) == 13 && load8(pp + 1) == 10) { _sandhi_sb_consume(in_sb, 2); }
+            elif (load8(pp) == 10) { _sandhi_sb_consume(in_sb, 1); }
+        }
+    }
+    return 0;
+}
+
+fn sandhi_stream_version() {
+    return "0.7.0";
+}

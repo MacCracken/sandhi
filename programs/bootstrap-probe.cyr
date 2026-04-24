@@ -1,0 +1,93 @@
+# programs/bootstrap-probe.cyr — which dynlib_bootstrap_* step cores on this host?
+#
+# tls.cyr at 5.6.29 runs three bootstrap calls before dynlib_open("libcrypto.so.3").
+# tls-probe cores in stage 1 (tls_available). We don't know which of the three.
+# This probe calls them in isolation and flushes stdout between each so the
+# coredump tells us exactly which stage.
+
+include "src/error.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) {
+    syscall(1, 1, m, strlen(m));
+    # fsync(1) = syscall 74 — force the write through before a potential crash.
+    syscall(74, 1);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    say("[A] entering main\n");
+
+    say("[B] calling dynlib_bootstrap_cpu_features ...\n");
+    var a = dynlib_bootstrap_cpu_features();
+    say("[B.done] cpu_features returned: ");
+    fmt_int(a);
+    say("\n");
+
+    say("[C] calling dynlib_bootstrap_tls ...\n");
+    var b = dynlib_bootstrap_tls();
+    say("[C.done] tls returned (tls-block ptr or 0): ");
+    fmt_int(b);
+    say("\n");
+
+    say("[D] calling dynlib_bootstrap_stack_end(0) ...\n");
+    var c = dynlib_bootstrap_stack_end(0);
+    say("[D.done] stack_end returned: ");
+    fmt_int(c);
+    say("\n");
+
+    say("[E] calling dynlib_open libcrypto.so.3 ...\n");
+    var hc = dynlib_open("libcrypto.so.3");
+    say("[E.done] libcrypto handle: ");
+    fmt_int(hc);
+    say("\n");
+
+    say("[F] calling dynlib_open libssl.so.3 ...\n");
+    var hs = dynlib_open("libssl.so.3");
+    say("[F.done] libssl handle: ");
+    fmt_int(hs);
+    say("\n");
+
+    say("[G] resolving TLS_client_method via _dynlib_resolve_global ...\n");
+    var fp = _dynlib_resolve_global("TLS_client_method");
+    say("[G.done] fn ptr: ");
+    fmt_int(fp);
+    say("\n");
+
+    say("[H] calling fncall0(TLS_client_method) ...\n");
+    var meth = fncall0(fp);
+    say("[H.done] method: ");
+    fmt_int(meth);
+    say("\n");
+
+    say("[I] done\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

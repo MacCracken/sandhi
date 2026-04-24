@@ -18,10 +18,10 @@
 #   var combined = sandhi_tls_policy_combine(p, q);
 #   var conn = sandhi_conn_open_with_policy(addr, 443, 1, "example.com", combined);
 #
-# See `docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md` (P8
-# entry) for why live enforcement is currently stubbed — surface is
-# shipped, call sites are stable, enforcement fills in when the
-# stdlib TLS-init path stabilizes.
+# See `docs/issues/2026-04-24-libssl-pthread-deadlock.md` for why
+# live enforcement is currently stubbed — surface is shipped, call
+# sites are stable, enforcement fills in when `SSL_connect` stops
+# deadlocking on a libssl-internal futex wait.
 
 fn sandhi_tls_policy_mod_version() {
     return "0.6.0";

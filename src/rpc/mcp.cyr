@@ -99,6 +99,29 @@ fn sandhi_rpc_mcp_error_message(resp) {
     return sandhi_json_get_string(body, "error.message");
 }
 
+# ================================================================
+# Streaming — SSE-wrapped JSON-RPC notifications
+# ================================================================
+#
+# Some MCP servers expose long-lived endpoints that stream
+# JSON-RPC notifications (tools/progress updates, resource change
+# events) as Server-Sent Events. `sandhi_rpc_mcp_stream` sends the
+# initial request and drives the SSE-feeding callback loop until
+# the callback stops it or the stream closes.
+#
+# Callback signature: fn cb(ctx, sse_event) -> int (1 = continue, 0 = stop).
+# The callback receives `sandhi_sse_event` structs; `sandhi_sse_event_data(e)`
+# is the raw JSON payload the server pushed.
+
+fn sandhi_rpc_mcp_stream(endpoint_url, method_name, params_json, cb, ctx) {
+    var body = _sandhi_mcp_build_request(method_name, params_json);
+    var body_len = strlen(body);
+    var headers = sandhi_headers_new();
+    sandhi_headers_set(headers, "Content-Type", "application/json");
+    sandhi_headers_set(headers, "Accept", "text/event-stream");
+    return sandhi_http_stream(endpoint_url, "POST", headers, body, body_len, cb, ctx);
+}
+
 fn sandhi_rpc_mcp_version() {
-    return "0.4.0";
+    return "0.7.0";
 }

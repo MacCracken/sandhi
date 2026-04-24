@@ -30,12 +30,13 @@ zero ambiguity on what to put on its roadmap.
 
 | Doc | Upstream | Effect |
 |-----|----------|--------|
-| [`2026-04-24-fdlopen-getaddrinfo-blocked.md`](2026-04-24-fdlopen-getaddrinfo-blocked.md) | cyrius-lang (stdlib `fdlopen.cyr` + `tls.cyr` + compiler local-slot aliasing) | DNS went native; HTTPS runtime pending; response parser split around the compiler quirk |
+| [`2026-04-24-libssl-pthread-deadlock.md`](2026-04-24-libssl-pthread-deadlock.md) | cyrius-lang (stdlib `tls.cyr` + pthread init in static cyrius binaries) | `SSL_connect` deadlocks on a futex-wait; M2 HTTPS + M5 TLS-policy enforcement pending live verification. Plain HTTP unaffected. |
 
-All three logged symptoms in the fdlopen doc are coordinated
-through the cyrius-lang agent when bandwidth allows — sandhi is
-unblocked (native DNS + plain-HTTP round-trips + refactored parser)
-and doesn't need a specific timeline.
+## Archived (resolved)
+
+| Doc | Closed at | Summary |
+|-----|-----------|---------|
+| [`archive/2026-04-24-fdlopen-getaddrinfo-blocked.md`](archive/2026-04-24-fdlopen-getaddrinfo-blocked.md) | cyrius v5.6.29-1 | Three logged symptoms: `fdlopen_init` incomplete (was stale doc text — actually landed v5.5.34); local-slot aliasing in response parser (worked around sandhi-side by extracting helpers); HTTPS infinite-loop (ROOT CAUSE: sandhi's `[deps.stdlib]` was missing `dynlib`/`fdlopen`/`mmap`, so `cyrius build` patched undef-fn call-sites with a placeholder disp32 that silently looped through `_cyrius_init`). Closed when sandhi added the missing deps and cyrius shipped a `ud2` fixup so the next missing-include mistake crashes loud instead of looping silent. |
 
 ## How to use this directory
 

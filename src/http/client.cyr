@@ -7,10 +7,12 @@
 # in src/net/resolve.cyr at P7) → conn.cyr (plain or TLS) → wire-format
 # request build → response.cyr (parse).
 #
-# Layering note: this module stays small — Cyrius 5.6.22 has a
-# stack-slot aliasing issue on fns with ~15+ locals (see
-# docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md log). Each
-# helper here stays well under that threshold.
+# Layering note: this module stays small — originally prompted by a
+# suspected cyrius 5.6.22 stack-slot issue, later re-attributed to
+# sandhi's missing `[deps.stdlib]` entries (see
+# `docs/issues/archive/2026-04-24-fdlopen-getaddrinfo-blocked.md`
+# post-mortem, closed v5.6.29-1). The small-function shape stays
+# because it reads better; no compiler quirk was at fault.
 
 var _SANDHI_HTTP_RESP_BUF_SIZE = 262144;  # 256 KB — enough for most API responses
 

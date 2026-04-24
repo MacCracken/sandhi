@@ -1,0 +1,73 @@
+# programs/tls-raw-probe.cyr — minimum-viable stdlib-only TLS connect + handshake.
+#
+# No sandhi modules. Pure stdlib flow. If this hangs, it's a stdlib TLS
+# issue independent of anything sandhi does.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/syscalls.cyr"
+include "lib/mmap.cyr"
+include "lib/fnptr.cyr"
+include "lib/dynlib.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/tls.cyr"
+
+fn say(m) {
+    syscall(1, 1, m, strlen(m));
+    syscall(74, 1);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    say("[1] tls_available ...\n");
+    var ok = tls_available();
+    say("  -> "); fmt_int(ok); say("\n");
+    if (ok == 0) { say("ABORT: libssl not loadable\n"); return 1; }
+
+    say("[2] tcp_socket + sock_connect ...\n");
+    var fd_r = tcp_socket();
+    if (is_err_result(fd_r) == 1) { say("ABORT: socket\n"); return 2; }
+    var fd = payload(fd_r);
+    # 1.1.1.1 as IP literal: bytes 1,1,1,1 packed LE = 0x01010101
+    var ip = 1 | (1 << 8) | (1 << 16) | (1 << 24);
+    var cr = sock_connect(fd, ip, 443);
+    if (is_err_result(cr) == 1) { say("ABORT: connect\n"); return 3; }
+    say("  connected fd="); fmt_int(fd); say("\n");
+
+    say("[3] tls_connect ...\n");
+    var tls = tls_connect(fd, "one.one.one.one");
+    say("  tls ctx = "); fmt_int(tls); say("\n");
+    if (tls == 0) { say("ABORT: tls_connect returned 0\n"); sock_close(fd); return 4; }
+
+    say("[4] tls_write ...\n");
+    var req = "GET / HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: close\r\n\r\n";
+    var w = tls_write(tls, req, strlen(req));
+    say("  wrote "); fmt_int(w); say("\n");
+    if (w <= 0) { say("ABORT: write\n"); tls_close(tls); sock_close(fd); return 5; }
+
+    say("[5] tls_read ...\n");
+    var buf = alloc(4096);
+    var r = tls_read(tls, buf, 4095);
+    say("  read "); fmt_int(r); say("\n");
+    if (r > 0) {
+        store8(buf + r, 0);
+        var show = r;
+        if (show > 60) { show = 60; }
+        say("  first 60 bytes: ");
+        syscall(1, 1, buf, show);
+        say("\n");
+    }
+
+    say("[6] tls_close + sock_close ...\n");
+    tls_close(tls);
+    sock_close(fd);
+    say("done\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

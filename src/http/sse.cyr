@@ -1,0 +1,244 @@
+# sandhi/http/sse — Server-Sent Events parser.
+#
+# Implements the WHATWG SSE/EventSource parse spec at the level we
+# actually need: event dispatch with name/data/id/retry fields,
+# multi-line `data:` concatenation, comment skipping, flexible line
+# endings (CRLF / LF / CR).
+#
+# Reference: https://html.spec.whatwg.org/multipage/server-sent-events.html
+#
+# Event struct (40 bytes):
+#   +0   event_name   (cstr — "message" default, or last `event:` value)
+#   +8   data         (cstr — lines concatenated with \n, no trailing \n)
+#   +16  id           (cstr — last `id:` value, or 0 if unset)
+#   +24  retry_ms     (int — last `retry:` value as int, or -1 if unset)
+#   +32  reserved     (future use — origin, tag flags, etc.)
+#
+# Parser shape:
+#   sandhi_sse_parse_buffer(buf, blen, remaining_out) → vec of events.
+#   remaining_out receives the byte offset of the first unconsumed byte
+#   so callers doing streaming reads can continue from there.
+
+enum SandhiSseOff {
+    SANDHI_SSE_OFF_EVENT  = 0;
+    SANDHI_SSE_OFF_DATA   = 8;
+    SANDHI_SSE_OFF_ID     = 16;
+    SANDHI_SSE_OFF_RETRY  = 24;
+    SANDHI_SSE_OFF_RES    = 32;
+}
+
+var SANDHI_SSE_EVENT_STRUCT_SIZE = 40;
+var SANDHI_SSE_RETRY_UNSET = 0 - 1;
+
+fn _sandhi_sse_dup(s) {
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    var out = alloc(n + 1);
+    memcpy(out, s, n);
+    store8(out + n, 0);
+    return out;
+}
+
+fn sandhi_sse_event_new(event_name, data, id, retry_ms) {
+    var e = alloc(SANDHI_SSE_EVENT_STRUCT_SIZE);
+    store64(e + SANDHI_SSE_OFF_EVENT, event_name);
+    store64(e + SANDHI_SSE_OFF_DATA, data);
+    store64(e + SANDHI_SSE_OFF_ID, id);
+    store64(e + SANDHI_SSE_OFF_RETRY, retry_ms);
+    store64(e + SANDHI_SSE_OFF_RES, 0);
+    return e;
+}
+
+fn sandhi_sse_event_name(e)  { return load64(e + SANDHI_SSE_OFF_EVENT); }
+fn sandhi_sse_event_data(e)  { return load64(e + SANDHI_SSE_OFF_DATA); }
+fn sandhi_sse_event_id(e)    { return load64(e + SANDHI_SSE_OFF_ID); }
+fn sandhi_sse_event_retry(e) { return load64(e + SANDHI_SSE_OFF_RETRY); }
+
+# ================================================================
+# Internal: line-at-a-time parsing helpers
+# ================================================================
+
+# Return offset of the byte just past the next line terminator (CRLF,
+# LF, or CR — WHATWG spec lets servers use any of the three). Returns
+# (0 - 1) if no complete line in [start, end).
+fn _sandhi_sse_next_line_end(buf, start, end) {
+    var i = start;
+    while (i < end) {
+        var c = load8(buf + i);
+        if (c == 13) {
+            # CR — check for trailing LF (CRLF).
+            if (i + 1 < end && load8(buf + i + 1) == 10) { return i + 2; }
+            return i + 1;
+        }
+        if (c == 10) { return i + 1; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# 1 if line is empty (zero bytes before terminator), 0 otherwise.
+fn _sandhi_sse_line_empty(buf, line_start, line_end) {
+    var p = line_start;
+    while (p < line_end) {
+        var c = load8(buf + p);
+        if (c == 13 || c == 10) { return 1; }
+        return 0;
+    }
+    return 1;  # line_start == line_end (defensive)
+}
+
+# Parse one field line into (field_name, value). Writes cstr pointers
+# into out_name_ptr / out_value_ptr. Returns 0 on a valid field, 1 if
+# the line is a comment (starts with ':'), 2 if malformed.
+#
+# Format rules (WHATWG):
+#   - If line starts with ':' → comment, ignore.
+#   - If line has no ':' → whole line is the field name, value is "".
+#   - Otherwise: name = up-to-first-':', value = after-':'-with-optional-leading-SP-stripped.
+fn _sandhi_sse_parse_field(buf, line_start, line_end, out_name_ptr, out_value_ptr) {
+    # Strip trailing CR/LF from line_end.
+    var le = line_end;
+    if (le > line_start && load8(buf + le - 1) == 10) { le = le - 1; }
+    if (le > line_start && load8(buf + le - 1) == 13) { le = le - 1; }
+
+    if (le == line_start) { return 2; }  # empty — caller shouldn't reach here
+
+    if (load8(buf + line_start) == 58) {
+        return 1;  # comment
+    }
+
+    # Find first ':'.
+    var colon = line_start;
+    while (colon < le && load8(buf + colon) != 58) { colon = colon + 1; }
+
+    var name_len = colon - line_start;
+    if (name_len == 0) { return 2; }
+    var name = alloc(name_len + 1);
+    memcpy(name, buf + line_start, name_len);
+    store8(name + name_len, 0);
+
+    var vstart = colon;
+    if (vstart < le && load8(buf + vstart) == 58) {
+        vstart = vstart + 1;
+        # Strip optional leading SPACE (only one, per spec).
+        if (vstart < le && load8(buf + vstart) == 32) { vstart = vstart + 1; }
+    }
+    var value_len = le - vstart;
+    var value = alloc(value_len + 1);
+    if (value_len > 0) { memcpy(value, buf + vstart, value_len); }
+    store8(value + value_len, 0);
+
+    store64(out_name_ptr, name);
+    store64(out_value_ptr, value);
+    return 0;
+}
+
+# Append a new data-line to an existing data cstr (or build fresh).
+# Caller passes current cstr (may be 0). Returns fresh cstr that's
+# `current + "\n" + addition`. No trailing newline.
+fn _sandhi_sse_data_append(current, addition) {
+    if (current == 0) { return _sandhi_sse_dup(addition); }
+    var cur_len = strlen(current);
+    var add_len = strlen(addition);
+    var out = alloc(cur_len + 1 + add_len + 1);
+    memcpy(out, current, cur_len);
+    store8(out + cur_len, 10);  # \n between data lines per spec
+    memcpy(out + cur_len + 1, addition, add_len);
+    store8(out + cur_len + 1 + add_len, 0);
+    return out;
+}
+
+# ================================================================
+# Buffer parse — extract complete events
+# ================================================================
+#
+# Returns vec of sandhi_sse_event pointers. Writes the byte offset of
+# the first un-consumed byte into *remaining_out. Events are emitted
+# only on complete dispatch — a blank line after one or more field
+# lines. Partial events (no terminating blank line) stay in the
+# remaining buffer for the next call.
+
+# Cyrius has no closures, and threading the in-progress event through
+# the parse loop via multiple out-params gets unreadable fast. Parse
+# state lives at module scope and is reset on entry to
+# `sandhi_sse_parse`. Not thread-safe — SSE parsing is expected to
+# happen on the single stream-consumer thread.
+var _sandhi_sse_cur_event = 0;
+var _sandhi_sse_cur_data = 0;
+var _sandhi_sse_cur_id = 0;
+var _sandhi_sse_cur_retry = 0 - 1;
+var _sandhi_sse_has_fields = 0;
+
+fn _sandhi_sse_apply_line(buf, line_start, line_end) {
+    var name_cell = alloc(8);
+    var value_cell = alloc(8);
+    store64(name_cell, 0);
+    store64(value_cell, 0);
+    var rc = _sandhi_sse_parse_field(buf, line_start, line_end, name_cell, value_cell);
+    if (rc != 0) { return 0; }  # comment or malformed — skip
+    var name = load64(name_cell);
+    var value = load64(value_cell);
+    _sandhi_sse_has_fields = 1;
+    if (streq(name, "event") == 1) {
+        _sandhi_sse_cur_event = value;
+    } elif (streq(name, "data") == 1) {
+        _sandhi_sse_cur_data = _sandhi_sse_data_append(_sandhi_sse_cur_data, value);
+    } elif (streq(name, "id") == 1) {
+        _sandhi_sse_cur_id = value;
+    } elif (streq(name, "retry") == 1) {
+        _sandhi_sse_cur_retry = atoi(value);
+    }
+    # Unknown field names: silently ignore per WHATWG.
+    return 0;
+}
+
+# Top-level parse using the global dispatcher state. Resets state on
+# entry so repeated calls don't leak between invocations.
+fn sandhi_sse_parse(buf, blen, remaining_out) {
+    _sandhi_sse_cur_event = _sandhi_sse_dup("message");
+    _sandhi_sse_cur_data = 0;
+    _sandhi_sse_cur_id = 0;
+    _sandhi_sse_cur_retry = SANDHI_SSE_RETRY_UNSET;
+    _sandhi_sse_has_fields = 0;
+
+    var events = vec_new();
+    if (buf == 0 || blen <= 0) {
+        store64(remaining_out, 0);
+        return events;
+    }
+
+    var consumed = 0;
+    var pos = 0;
+    while (pos < blen) {
+        var line_end = _sandhi_sse_next_line_end(buf, pos, blen);
+        if (line_end < 0) { pos = blen; }
+        else {
+            if (_sandhi_sse_line_empty(buf, pos, line_end) == 1) {
+                if (_sandhi_sse_has_fields == 1) {
+                    var d = _sandhi_sse_cur_data;
+                    if (d == 0) { d = _sandhi_sse_dup(""); }
+                    var ev = sandhi_sse_event_new(_sandhi_sse_cur_event, d,
+                                                  _sandhi_sse_cur_id,
+                                                  _sandhi_sse_cur_retry);
+                    vec_push(events, ev);
+                    _sandhi_sse_cur_event = _sandhi_sse_dup("message");
+                    _sandhi_sse_cur_data = 0;
+                    _sandhi_sse_cur_id = 0;
+                    _sandhi_sse_cur_retry = SANDHI_SSE_RETRY_UNSET;
+                    _sandhi_sse_has_fields = 0;
+                }
+                consumed = line_end;
+            } else {
+                _sandhi_sse_apply_line(buf, pos, line_end);
+                consumed = line_end;
+            }
+            pos = line_end;
+        }
+    }
+    store64(remaining_out, consumed);
+    return events;
+}
+
+fn sandhi_sse_version() {
+    return "0.7.0";
+}

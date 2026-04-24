@@ -4,6 +4,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-04-24
+
+M3.5 close — SSE streaming + incremental chunked decode. Also carries the deps-stdlib audit + toolchain bump that unstuck the HTTPS investigation. 333 assertions green (+42 for sse + stream).
+
+### Added
+- **http/sse** (`src/http/sse.cyr`): WHATWG SSE/EventSource parser. Event struct `{name, data, id, retry_ms}` + `sandhi_sse_parse(buf, blen, remaining_out) -> vec<event>`. Handles multi-line `data:` concatenation (lines joined with `\n`), comment skipping (`: keepalive`), CRLF / LF / CR line endings, default event name `"message"`, proper field reset between events, empty-data-field dispatch.
+- **http/stream** (`src/http/stream.cyr`): streaming HTTP dispatcher. `sandhi_http_stream(url, method, headers, body, body_len, cb, ctx)` sends the request, drains response headers, then feeds body bytes through an incremental chunked decoder (state-machine, not the buffer-the-whole-thing decoder in response.cyr) and into the SSE parser. Callback fires once per event; returning 0 stops the stream cleanly. Returns a stream-result struct `{http_status, events_dispatched, err_kind, stopped_by_cb}`.
+- **rpc/mcp**: `sandhi_rpc_mcp_stream(endpoint, method, params, cb, ctx)` — JSON-RPC envelope build + SSE response streaming. Useful for MCP servers that stream tools/progress or resources/change notifications.
+
+### Fixed
+- **`cyrius.cyml [deps.stdlib]`** — added `mmap`, `dynlib`, `fdlopen`, `bigint`, `freelist`. These were transitive requirements of `tls` / `sigil` that sandhi's main manifest never listed, so `cyrius build` (non-strict default) patched undef-fn call-sites with a placeholder disp32 that silently looped back into `_cyrius_init` at runtime. All sandhi builds since scaffold had this latent issue — surfaced only when M2 HTTPS exercised `tls_connect`. Root-cause postmortem at `docs/issues/archive/2026-04-24-fdlopen-getaddrinfo-blocked.md` (closed at cyrius v5.6.29-1; cyrius shipped a `ud2` fixup so future missing-includes SIGILL instead of looping).
+
+### Changed
+- **Toolchain pin** — `cyrius.cyml [package].cyrius` bumped from `5.6.22` to `5.6.30` (via 5.6.29-1). Gains: the `_tls_init` bootstrap sequence (`dynlib_bootstrap_cpu_features/tls/stack_end` before `dynlib_open`) + the undef-fn `ud2` safety net (5.6.29-1) + stale-comment cleanup in `fdlopen.cyr` (5.6.30, doc-only). Residual HTTPS blocker is now at the libssl layer, not the cyrius layer — tracked in `docs/issues/2026-04-24-libssl-pthread-deadlock.md`.
+- **cyrius.cyml `[lib].modules`**: http/sse + http/stream added in order (sse first — stream composes on top).
+- **Source-comment retro** — `src/http/response.cyr` + `src/http/client.cyr` notes about "Cyrius 5.6.22 stack-slot aliasing" re-framed: the symptom was almost certainly the same undef-fn silent-stomp as the HTTPS loop. Kept the small-function shape because it reads better; dropped the "compiler quirk" framing.
+- **src/main.cyr**: `sandhi_version()` → 0.7.0.
+
+### Notes
+- SSE works over plain HTTP (verified via unit tests against synthetic byte streams for parser correctness + chunked-decode roundtrip). Live HTTPS SSE waits on the libssl-pthread-deadlock blocker — same block as every other HTTPS path.
+- No automatic reconnect on SSE disconnect per the spec's `retry:` field — callers handle it by re-calling `sandhi_http_stream`. Can add an opt-in reconnect wrapper when a consumer asks.
+- The `_sandhi_sse_cur_*` dispatcher state lives at module scope because Cyrius has no closures and threading it through the loop via out-params gets unreadable. Parser is single-threaded by design — SSE consumers should drive from one thread.
+
 ## [0.6.0] — 2026-04-24
 
 M5 close. TLS-policy surface — SPKI cert pinning, mTLS client certs, custom trust store, policy composition. Surface fully shipped + unit-tested; runtime enforcement stubbed pending the stdlib TLS-init fix. 291 assertions green (+41 for tls_policy).
@@ -19,7 +42,7 @@ M5 close. TLS-policy surface — SPKI cert pinning, mTLS client certs, custom tr
 - **src/main.cyr**: `sandhi_version()` → 0.6.0.
 
 ### Deferred with explicit path forward
-- **Live enforcement** — the TODO list in `apply.cyr` enumerates exactly the OpenSSL calls needed (`SSL_CTX_load_verify_locations`, `SSL_CTX_use_certificate_file`, `SSL_CTX_use_PrivateKey_file`, `SSL_get_peer_certificate`, `X509_get_pubkey`, `i2d_PUBKEY`). When stdlib TLS-init stabilizes (issue doc `2026-04-24-fdlopen-getaddrinfo-blocked.md`), wiring these is a ~50-line follow-up with no API shape change.
+- **Live enforcement** — the TODO list in `apply.cyr` enumerates exactly the OpenSSL calls needed (`SSL_CTX_load_verify_locations`, `SSL_CTX_use_certificate_file`, `SSL_CTX_use_PrivateKey_file`, `SSL_get_peer_certificate`, `X509_get_pubkey`, `i2d_PUBKEY`). When stdlib TLS-init stabilizes (issue doc `docs/issues/archive/2026-04-24-fdlopen-getaddrinfo-blocked.md` — closed post-release at v5.6.29-1; follow-on blocker now tracked at `docs/issues/2026-04-24-libssl-pthread-deadlock.md`), wiring these is a ~50-line follow-up with no API shape change.
 - **SPKI extraction from peer certificate** — same gate. `sandhi_fp_encode_bytes` already handles the output-side formatting, so the fill-in is: resolve the two additional OpenSSL symbols, call them, hash with `sha256_hex`, compare via `sandhi_fp_eq`.
 
 ## [0.5.0] — 2026-04-24
@@ -71,7 +94,7 @@ M2 close. Full HTTP client surface — POST/PUT/DELETE/PATCH/HEAD/GET over HTTP 
 - **http/conn** (`src/http/conn.cyr`): tagged `{kind, fd, tls_ctx}` connection abstraction. `sandhi_conn_open` wraps plain TCP via net.cyr or TLS via tls.cyr; unified `_send` / `_send_all` / `_recv` / `_recv_all` / `_close`.
 - **http/response** (`src/http/response.cyr`): response parser handling Content-Length, Transfer-Encoding: chunked, and connection-close framings. Response struct `{status, body_ptr, body_len, headers, err_kind}`.
 - **http/client** (`src/http/client.cyr`): `sandhi_http_get` / `post` / `put` / `delete` / `patch` / `head`. Request builder with HTTP/1.1 request line, Host header, auto Content-Length for body-bearing methods, `Connection: close`. Opt-in redirect following via `sandhi_http_options_new` + `_opts` variants (RFC 7231 §6.4 method rewrite: 303 → GET, 301/302/307/308 preserve). Absolute + relative Location resolution.
-- **net/resolve** (`src/net/resolve.cyr`): native UDP DNS resolver. RFC 1035 query build + response parse, `/etc/resolv.conf` nameserver discovery with 8.8.8.8 fallback, A-records only, Linux-first. Includes `sandhi_net_parse_ipv4` for numeric literals. Written because `fdlopen_getaddrinfo` is blocked at 5.6.22 (tracked in `docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md`).
+- **net/resolve** (`src/net/resolve.cyr`): native UDP DNS resolver. RFC 1035 query build + response parse, `/etc/resolv.conf` nameserver discovery with 8.8.8.8 fallback, A-records only, Linux-first. Includes `sandhi_net_parse_ipv4` for numeric literals. Written because `fdlopen_getaddrinfo` is blocked at 5.6.22 (tracked in `docs/issues/archive/2026-04-24-fdlopen-getaddrinfo-blocked.md`).
 - **programs/dns-probe.cyr** + **programs/http-probe.cyr**: ad-hoc live-probe tools (not part of test suite; require network).
 
 ### Changed
@@ -80,7 +103,7 @@ M2 close. Full HTTP client surface — POST/PUT/DELETE/PATCH/HEAD/GET over HTTP 
 - **src/main.cyr**: `sandhi_version()` bumped to 0.3.0.
 
 ### Known issues
-- **HTTPS runtime via `lib/tls.cyr` is unstable.** Compilation is clean and `tls_policy` surface is intact, but live HTTPS round-trips trigger a re-entrant-execution symptom (`programs/http-probe.cyr https://...` prints "GET ..." hundreds of times before being killed). Candidate cause: `_tls_init` calls `dynlib_open` without the `dynlib_bootstrap_*` sequence that `lib/dynlib.cyr` documents as required for libc-dependent sidecars. Logged in `docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md` (P8 entry). Plain HTTP works end-to-end against hostname and IP-literal URLs.
+- **HTTPS runtime via `lib/tls.cyr` is unstable.** Compilation is clean and `tls_policy` surface is intact, but live HTTPS round-trips trigger a re-entrant-execution symptom (`programs/http-probe.cyr https://...` prints "GET ..." hundreds of times before being killed). Candidate cause: `_tls_init` calls `dynlib_open` without the `dynlib_bootstrap_*` sequence that `lib/dynlib.cyr` documents as required for libc-dependent sidecars. Logged in `docs/issues/archive/2026-04-24-fdlopen-getaddrinfo-blocked.md` (P8 entry). Plain HTTP works end-to-end against hostname and IP-literal URLs.
 - **Stack-slot aliasing on crowded frames.** Cyrius 5.6.22 silently zeroes a caller's local after a function call if the caller has ~15+ locals. Worked around by keeping individual sandhi functions below that threshold (see `src/http/response.cyr` comment). Logged in the same issue file.
 
 ## [0.2.0] — 2026-04-24

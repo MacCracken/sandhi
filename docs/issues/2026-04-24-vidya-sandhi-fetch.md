@@ -38,7 +38,7 @@ var body = sandhi_http_body(r);
 
 ## Known caveats
 
-- **HTTPS runtime currently blocked** (`2026-04-24-fdlopen-getaddrinfo-blocked.md`). External knowledge sources are almost entirely HTTPS now; vidya's live work is therefore gated on the stdlib TLS-init fix.
+- **HTTPS runtime currently blocked** (`2026-04-24-libssl-pthread-deadlock.md`). External knowledge sources are almost entirely HTTPS now; vidya's live work is therefore gated on the libssl pthread-lock fix.
 - **Large responses** — same buffer caveat as sit / ark. Full Wikipedia articles etc. may exceed the 256 KB default. Add streaming / configurable buffer when vidya's fetch work opens and actually hits this.
 - **Rate limiting / polite scraping** is vidya's concern, not sandhi's. sandhi ships no built-in rate limiter.
 

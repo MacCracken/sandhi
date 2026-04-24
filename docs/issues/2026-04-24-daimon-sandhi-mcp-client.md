@@ -42,7 +42,7 @@ var result_json = sandhi_rpc_mcp_result_raw(r);
 ## Known caveats
 
 - **MCP message semantics stay in bote / t-ron.** sandhi will not grow tool-typed or prompt-typed verbs. If daimon needs a helper for a common MCP pattern, that pattern lives in bote.
-- **HTTPS runtime currently blocked** (cross-link to `2026-04-24-fdlopen-getaddrinfo-blocked.md`). MCP endpoints that speak plain HTTP work fine; https:// MCP servers wait on the stdlib TLS-init fix.
+- **HTTPS runtime currently blocked** (cross-link to `2026-04-24-libssl-pthread-deadlock.md`). MCP endpoints that speak plain HTTP work fine; https:// MCP servers wait on the libssl pthread-lock fix.
 
 ## Proposed daimon roadmap entry
 
