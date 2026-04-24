@@ -1,0 +1,116 @@
+# sandhi/discovery/daimon — resolver backed by the daimon service registry.
+#
+# Daimon is AGNOS's local agent orchestrator; when a sandhi consumer
+# runs alongside daimon, daimon knows which services are alive and
+# where they live. This resolver speaks a minimal HTTP contract
+# against daimon's registry endpoint; daimon implements it.
+#
+# Contract (this file is the reference):
+#
+#   GET  {base}/services/{name}
+#       200 → {"host":"...","port":N}  (service found)
+#       404 → miss
+#       any other response → miss (safe fail-open so chain falls through)
+#
+#   POST {base}/services/{name}  body: {"host":"...","port":N}
+#       2xx → registered
+#       non-2xx → caller should surface as SANDHI_ERR_DISCOVERY
+#
+#   DELETE {base}/services/{name}
+#       2xx → deregistered
+#       non-2xx → see above
+#
+# Base URL is whatever daimon is listening on — typically
+# "http://127.0.0.1:9000" for a local daimon. Chain-resolver users
+# can make daimon one backend among many; daimon outages fall through.
+
+# Context struct (16 bytes):
+#   +0   base_url  (cstr)
+#   +8   reserved  (kept 0 for now — future: auth token, timeouts)
+enum SandhiDaimonCtxOff {
+    SANDHI_DAIMON_CTX_OFF_BASE = 0;
+    SANDHI_DAIMON_CTX_OFF_RES  = 8;
+}
+
+var SANDHI_DAIMON_CTX_SIZE = 16;
+
+fn _sandhi_discovery_daimon_ctx_new(base_url) {
+    var c = alloc(SANDHI_DAIMON_CTX_SIZE);
+    store64(c + SANDHI_DAIMON_CTX_OFF_BASE, base_url);
+    store64(c + SANDHI_DAIMON_CTX_OFF_RES, 0);
+    return c;
+}
+
+# Build "{base}/services/{name}" with trailing-slash normalization on base.
+fn _sandhi_daimon_url(base, name) {
+    var sb = str_builder_new();
+    var blen = strlen(base);
+    if (blen > 0 && load8(base + blen - 1) == 47) {
+        # Trim trailing slash.
+        var trimmed = alloc(blen);
+        memcpy(trimmed, base, blen - 1);
+        store8(trimmed + blen - 1, 0);
+        str_builder_add_cstr(sb, trimmed);
+    } else {
+        str_builder_add_cstr(sb, base);
+    }
+    str_builder_add_cstr(sb, "/services/");
+    str_builder_add_cstr(sb, name);
+    return str_data(str_builder_build(sb));
+}
+
+# The resolver callback. Matches fn(ctx, name) → *service.
+# Kept small — fits under the local-count threshold.
+fn _sandhi_daimon_lookup(ctx, name) {
+    if (ctx == 0 || name == 0) { return 0; }
+    var base = load64(ctx + SANDHI_DAIMON_CTX_OFF_BASE);
+    if (base == 0) { return 0; }
+    var url = _sandhi_daimon_url(base, name);
+    var resp = sandhi_http_get(url, 0);
+    # Any non-2xx or transport error → miss (fall-through for chain).
+    if (sandhi_http_err_kind(resp) != SANDHI_OK) { return 0; }
+    var status = sandhi_http_status(resp);
+    if (status < 200 || status >= 300) { return 0; }
+    var body = sandhi_http_body(resp);
+    if (body == 0) { return 0; }
+    return _sandhi_daimon_parse_service(body, name);
+}
+
+# Parse daimon's {"host":"...","port":N} response into a service.
+# Fails gracefully — returns 0 if either field is missing/malformed.
+fn _sandhi_daimon_parse_service(body, name) {
+    var host = sandhi_json_get_string(body, "host");
+    if (host == 0) { return 0; }
+    var port = sandhi_json_get_int(body, "port");
+    if (port <= 0) { return 0; }
+    if (port > 65535) { return 0; }
+    # Daimon might also include a pre-resolved "address" field.
+    var ipv4 = 0;
+    var addr_str = sandhi_json_get_string(body, "address");
+    if (addr_str != 0) {
+        var a = sandhi_net_parse_ipv4(addr_str);
+        if (a != 0 - 1) { ipv4 = a; }
+    }
+    # Dup the caller-passed name so the service is self-contained.
+    var name_copy = 0;
+    if (name != 0) {
+        var nlen = strlen(name);
+        name_copy = alloc(nlen + 1);
+        memcpy(name_copy, name, nlen);
+        store8(name_copy + nlen, 0);
+    }
+    return sandhi_service_new(name_copy, host, port, ipv4);
+}
+
+# Build a resolver for the given daimon base URL. Usage:
+#   sandhi_discovery_chain_add(chain,
+#       sandhi_discovery_daimon_resolver("http://127.0.0.1:9000"));
+fn sandhi_discovery_daimon_resolver(base_url) {
+    if (base_url == 0) { return 0; }
+    var ctx = _sandhi_discovery_daimon_ctx_new(base_url);
+    return sandhi_resolver_new(&_sandhi_daimon_lookup, ctx);
+}
+
+fn sandhi_discovery_daimon_version() {
+    return "0.5.0";
+}

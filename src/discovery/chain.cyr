@@ -1,0 +1,61 @@
+# sandhi/discovery/chain — fallback sequence of resolvers.
+#
+# A chain holds an ordered list of resolvers. On resolve, it asks
+# each in turn and returns the first non-null service. No resolver
+# is load-bearing — if daimon is down, the chain falls through to
+# the next backend (mDNS, static config, …) without the caller
+# having to notice.
+#
+# Usage:
+#   var c = sandhi_discovery_chain_new();
+#   sandhi_discovery_chain_add(c, sandhi_discovery_daimon_resolver("http://127.0.0.1:9000"));
+#   sandhi_discovery_chain_add(c, sandhi_discovery_local_resolver());
+#   var svc = sandhi_discovery_chain_resolve(c, "yantra-worker");
+
+# Chain is just a vec of resolver pointers. Kept as a typed alias so
+# the API documents intent rather than leaking "vec".
+fn sandhi_discovery_chain_new() {
+    return vec_new();
+}
+
+# Append a resolver. Resolvers run in insertion order on lookup.
+fn sandhi_discovery_chain_add(chain, resolver) {
+    if (chain == 0 || resolver == 0) { return 0; }
+    vec_push(chain, resolver);
+    return 0;
+}
+
+# Count of resolvers in the chain. Handy for diagnostics.
+fn sandhi_discovery_chain_count(chain) {
+    if (chain == 0) { return 0; }
+    return vec_len(chain);
+}
+
+# Resolve `name` by trying each resolver. Returns the first non-null
+# service, or 0 if every resolver misses.
+fn sandhi_discovery_chain_resolve(chain, name) {
+    if (chain == 0 || name == 0) { return 0; }
+    var n = vec_len(chain);
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(chain, i);
+        var svc = sandhi_resolver_lookup(r, name);
+        if (svc != 0) { return svc; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Wrap a chain as a resolver itself, so one chain can nest another.
+# The caller passes the chain as ctx; the adapter calls chain_resolve.
+fn _sandhi_discovery_chain_adapter(ctx, name) {
+    return sandhi_discovery_chain_resolve(ctx, name);
+}
+
+fn sandhi_discovery_chain_as_resolver(chain) {
+    return sandhi_resolver_new(&_sandhi_discovery_chain_adapter, chain);
+}
+
+fn sandhi_discovery_chain_version() {
+    return "0.5.0";
+}

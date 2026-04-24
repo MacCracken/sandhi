@@ -1,0 +1,70 @@
+# sandhi/discovery/local — mDNS / local-link resolver.
+#
+# M4 ships the INTERFACE only; the implementation returns 0 (miss)
+# today. Chain-resolver users can wire this in without code churn —
+# when the real lookup lands, existing `sandhi_discovery_local_resolver()`
+# callers start getting hits without any API change.
+#
+# Why deferred:
+#   mDNS requires multicast-UDP socket setup (IP_ADD_MEMBERSHIP,
+#   IP_MULTICAST_TTL, IP_MULTICAST_IF) that stdlib `net.cyr` does not
+#   currently expose. Two paths forward, neither in M4 scope:
+#
+#   A) Extend net.cyr with multicast setsockopt helpers; sandhi's
+#      local resolver then sends `<name>.local.` A-record queries to
+#      224.0.0.251:5353 and parses the first response. ~100 lines of
+#      sandhi code on top of the net.cyr patch.
+#
+#   B) Shell out to `avahi-resolve` or `getent hosts` via
+#      `process.cyr`. Quick but introduces an external-binary
+#      dependency sandhi has otherwise avoided.
+#
+# Revisit when a consumer actually asks for mDNS in-process, or when
+# net.cyr gains multicast primitives as part of other work.
+#
+# Reference for the eventual implementation:
+#   RFC 6762 (Multicast DNS), RFC 6763 (DNS-Based Service Discovery).
+
+# Context struct reserved for future parameters (interface index,
+# timeout, domain override). Allocated so the resolver's shape
+# matches what the real impl will look like — caller code doesn't
+# change when we fill it in.
+enum SandhiLocalCtxOff {
+    SANDHI_LOCAL_CTX_OFF_IFACE   = 0;  # reserved: interface name or index
+    SANDHI_LOCAL_CTX_OFF_TIMEOUT = 8;  # reserved: query timeout ms
+}
+
+var SANDHI_LOCAL_CTX_SIZE = 16;
+
+fn _sandhi_discovery_local_ctx_new() {
+    var c = alloc(SANDHI_LOCAL_CTX_SIZE);
+    store64(c + SANDHI_LOCAL_CTX_OFF_IFACE, 0);
+    store64(c + SANDHI_LOCAL_CTX_OFF_TIMEOUT, 2000);
+    return c;
+}
+
+# Resolver callback. Returns 0 (miss) until multicast lands.
+fn _sandhi_local_lookup(ctx, name) {
+    if (ctx == 0 || name == 0) { return 0; }
+    # Always miss for now. When the real impl lands, construct the
+    # multicast query here using the ctx-configured interface/timeout.
+    return 0;
+}
+
+# Build the mDNS resolver. Returns a resolver struct whose lookup
+# always misses today but becomes functional when multicast lands.
+fn sandhi_discovery_local_resolver() {
+    var ctx = _sandhi_discovery_local_ctx_new();
+    return sandhi_resolver_new(&_sandhi_local_lookup, ctx);
+}
+
+# 1 if the local resolver has a working implementation on this
+# platform, 0 if it's a no-op stub. Callers constructing a chain
+# at startup can log a warning when this returns 0.
+fn sandhi_discovery_local_available() {
+    return 0;
+}
+
+fn sandhi_discovery_local_version() {
+    return "0.5.0-stub";
+}

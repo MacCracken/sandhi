@@ -1,15 +1,28 @@
-# sandhi/tls_policy — TLS trust + cert-pinning policy, wrapping stdlib tls.cyr.
+# sandhi/tls_policy — TLS trust + cert-pinning policy layer.
 #
-# Scaffold stubs only; real implementation fills in once the native
-# Cyrius TLS 1.3 arc (v5.9.x) lands. Until then, wraps the existing
-# libssl.so.3 FFI bridge from lib/tls.cyr with policy layers above.
+# Composes:
+#   tls_policy/policy      — policy struct + constructors + combine
+#   tls_policy/fingerprint — SPKI hex format helpers (normalize, compare)
+#   tls_policy/apply       — wire policy into sandhi_conn_open
 #
-# Planned verbs (all stubbed):
-#   sandhi_tls_policy_default()    — standard trust store, cert verification on
-#   sandhi_tls_policy_pinned(fp)   — pin to a specific SPKI fingerprint
-#   sandhi_tls_policy_mtls(cert, key) — mTLS client certificate
-#   sandhi_tls_apply(policy, sock) — apply policy, return tls_ctx or 0 on fail
+# Today this wraps stdlib `lib/tls.cyr` (which is FFI-to-libssl).
+# When Cyrius v5.9.x native TLS lands, the surface here does not
+# change — only the transport underneath apply.cyr swaps out. Per
+# ADR 0001, that's the whole point of composing rather than
+# reimplementing.
+#
+# Typical usage:
+#
+#   var p = sandhi_tls_policy_new_pinned("e3b0c442:98fc1c14:...");
+#   var q = sandhi_tls_policy_new_mtls("client.pem", "client.key");
+#   var combined = sandhi_tls_policy_combine(p, q);
+#   var conn = sandhi_conn_open_with_policy(addr, 443, 1, "example.com", combined);
+#
+# See `docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md` (P8
+# entry) for why live enforcement is currently stubbed — surface is
+# shipped, call sites are stable, enforcement fills in when the
+# stdlib TLS-init path stabilizes.
 
-fn sandhi_tls_policy_version() {
-    return "0.1.0-scaffold";
+fn sandhi_tls_policy_mod_version() {
+    return "0.6.0";
 }

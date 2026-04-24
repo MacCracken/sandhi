@@ -1,0 +1,102 @@
+# sandhi/tls_policy/fingerprint — SPKI hash format helpers.
+#
+# SPKI pinning compares a SHA-256 hash of the server's Subject Public
+# Key Info (DER bytes) against a caller-supplied hex string. This
+# module handles format normalization + comparison; actual DER
+# extraction from server certs lives in apply.cyr (or its deferred
+# TLS-integration successor) since that requires OpenSSL X509 symbols
+# that stdlib `tls.cyr` doesn't currently expose.
+#
+# Accepted caller formats — all of these compare equal:
+#
+#   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+#   "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+#   "e3:b0:c4:42:98:fc:1c:14:9a:fb:f4:c8:99:6f:b9:24:27:ae:41:e4:64:9b:93:4c:a4:95:99:1b:78:52:b8:55"
+#   "e3 b0 c4 42 98 fc 1c 14 9a fb f4 c8 99 6f b9 24 27 ae 41 e4 64 9b 93 4c a4 95 99 1b 78 52 b8 55"
+#
+# Normalization strips ':' / ' ' / '\t' and lowercases the hex.
+# Length is not enforced here — callers pinning non-SHA-256 hashes
+# (e.g. SHA-1 legacy — discouraged) get their length back.
+
+# Lowercase an ASCII byte. Non-alpha bytes pass through.
+fn _sandhi_fp_to_lower(c) {
+    if (c >= 65) { if (c <= 90) { return c + 32; } }
+    return c;
+}
+
+# 1 if the byte is a hex digit (0-9 / a-f / A-F), 0 otherwise.
+fn _sandhi_fp_is_hex(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    if (c >= 65 && c <= 70) { return 1; }
+    if (c >= 97 && c <= 102) { return 1; }
+    return 0;
+}
+
+# Normalize an SPKI hex string: strip delimiters (: space tab),
+# lowercase. Returns a fresh alloc'd cstr. Returns 0 if input is 0.
+# Non-hex, non-delimiter bytes are rejected — returns 0.
+fn sandhi_fp_normalize(hex) {
+    if (hex == 0) { return 0; }
+    var slen = strlen(hex);
+    var out = alloc(slen + 1);
+    var oi = 0;
+    var i = 0;
+    while (i < slen) {
+        var c = load8(hex + i);
+        if (c == 58 || c == 32 || c == 9) {
+            # Delimiter — skip.
+            i = i + 1;
+        } elif (_sandhi_fp_is_hex(c) == 1) {
+            store8(out + oi, _sandhi_fp_to_lower(c));
+            oi = oi + 1;
+            i = i + 1;
+        } else {
+            # Invalid byte — reject.
+            return 0;
+        }
+    }
+    store8(out + oi, 0);
+    return out;
+}
+
+# Case- and delimiter-insensitive equality. Returns 1 if the two
+# strings represent the same hex fingerprint, 0 otherwise. Either
+# operand being 0 returns 0 (null-safe; absent pin never matches).
+fn sandhi_fp_eq(a, b) {
+    if (a == 0 || b == 0) { return 0; }
+    var na = sandhi_fp_normalize(a);
+    var nb = sandhi_fp_normalize(b);
+    if (na == 0 || nb == 0) { return 0; }
+    return streq(na, nb);
+}
+
+# Byte length of the normalized fingerprint (2 hex chars per byte).
+# Returns 0 on malformed input, 32 for SHA-256, 20 for SHA-1 (legacy).
+fn sandhi_fp_byte_length(hex) {
+    var n = sandhi_fp_normalize(hex);
+    if (n == 0) { return 0; }
+    var len = strlen(n);
+    if ((len & 1) != 0) { return 0; }  # odd number of nibbles — malformed
+    return len / 2;
+}
+
+# Encode raw SHA-256 bytes (or any digest buffer) as lowercase hex.
+# Caller passes the digest + its length; we return a fresh alloc'd cstr.
+fn sandhi_fp_encode_bytes(bytes, nbytes) {
+    var out = alloc(nbytes * 2 + 1);
+    var i = 0;
+    while (i < nbytes) {
+        var b = load8(bytes + i);
+        var hi = (b >> 4) & 0xF;
+        var lo = b & 0xF;
+        var c1 = 48 + hi;
+        if (hi >= 10) { c1 = 87 + hi; }
+        var c2 = 48 + lo;
+        if (lo >= 10) { c2 = 87 + lo; }
+        store8(out + i * 2, c1);
+        store8(out + i * 2 + 1, c2);
+        i = i + 1;
+    }
+    store8(out + nbytes * 2, 0);
+    return out;
+}

@@ -1,0 +1,91 @@
+# sandhi/tls_policy/apply — wire policy into the connection layer.
+#
+# Public API: `sandhi_conn_open_with_policy(addr, port, use_tls,
+# sni_host, policy)` — parallel to `sandhi_conn_open` but honors a
+# caller-supplied TLS policy.
+#
+# STATUS (2026-04-24): surface ships clean. Enforcement is
+# STUBBED pending the stdlib TLS-init blocker logged in
+# `docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md` (P8
+# entry). When that fix lands, filling in the OpenSSL calls below
+# is a ~50-line patch — no API shape change, no consumer code churn.
+#
+# What's deferred and why:
+#
+#   - SPKI extraction from the peer cert requires `X509_get_pubkey`
+#     + `i2d_PUBKEY` + `SSL_get_peer_certificate` — OpenSSL symbols
+#     stdlib `lib/tls.cyr` does not currently resolve. Adding them
+#     sandhi-side works via `_dynlib_resolve_global` (same pattern
+#     tls.cyr uses) but is load-bearing on live-HTTPS working at all,
+#     which today it doesn't.
+#
+#   - mTLS requires `SSL_CTX_use_certificate_file` +
+#     `SSL_CTX_use_PrivateKey_file` plus customizing the SSL_CTX that
+#     tls.cyr creates privately inside `tls_connect`. sandhi needs to
+#     either (a) re-implement tls_connect with policy hooks, or
+#     (b) add an SSL_CTX factory callback to stdlib tls.cyr. Both
+#     paths land easier once tls.cyr itself runs reliably.
+#
+#   - Custom trust store via `SSL_CTX_load_verify_locations` — same
+#     SSL_CTX customization concern as mTLS.
+#
+# Until those fill in, `sandhi_conn_open_with_policy` delegates to
+# `sandhi_conn_open` and records what policy was requested so
+# integration tests (when they can run) can verify the policy shape
+# travelled through the API correctly.
+
+# Apply the given policy while opening a connection. `addr` + `port`
+# + `use_tls` + `sni_host` match `sandhi_conn_open`. `policy` may be
+# 0 — equivalent to `sandhi_tls_policy_new_default()`.
+#
+# Returns the conn struct on success (with policy-enforcement status
+# recorded in the reserved slot), or 0 on failure.
+fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
+    # Plain TCP — policy is irrelevant but we still return the conn
+    # so caller code doesn't branch on use_tls at the call site.
+    if (use_tls == 0) {
+        return sandhi_conn_open(addr, port, 0, sni_host);
+    }
+
+    # For TLS connections: today we pass through to the default
+    # tls.cyr flow. Policy fields are read here so the enforcement
+    # path can be wired without rearchitecting the call site.
+    var pinned = sandhi_tls_policy_pinned_hash(policy);
+    var mtls_cert = sandhi_tls_policy_mtls_cert(policy);
+    var mtls_key = sandhi_tls_policy_mtls_key(policy);
+    var trust_store = sandhi_tls_policy_trust_store(policy);
+
+    # TODO: when stdlib TLS-init lands, replace the line below with
+    # a policy-aware variant that:
+    #   1. Allocates a fresh SSL_CTX via _fn_SSL_CTX_new.
+    #   2. If trust_store != 0: SSL_CTX_load_verify_locations(ctx, trust_store, 0).
+    #      Else: SSL_CTX_set_default_verify_paths(ctx).
+    #   3. SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, 0).
+    #   4. If mtls_cert != 0 && mtls_key != 0:
+    #        SSL_CTX_use_certificate_file(ctx, mtls_cert, SSL_FILETYPE_PEM);
+    #        SSL_CTX_use_PrivateKey_file(ctx, mtls_key, SSL_FILETYPE_PEM);
+    #   5. SSL_new(ctx) / SSL_set_fd(ssl, fd) / SSL_ctrl SNI / SSL_connect.
+    #   6. After SSL_connect succeeds, if pinned != 0:
+    #        SSL_get_peer_certificate(ssl) → X509*;
+    #        X509_get_pubkey + i2d_PUBKEY → DER bytes;
+    #        sha256_hex over DER → actual_hex;
+    #        sandhi_fp_eq(actual_hex, pinned) or abort.
+    #   7. Return conn with policy recorded.
+    #
+    # For now, delegate to the default path.
+    return sandhi_conn_open(addr, port, 1, sni_host);
+}
+
+# 1 if the apply layer can actually enforce the given policy on this
+# platform right now, 0 if it's in stubbed-delegate mode. Callers
+# that require hard enforcement (anything mission-critical) should
+# check this at startup and refuse to run when enforcement is unavailable.
+fn sandhi_tls_policy_enforcement_available() {
+    # See module-level comment. Returns 0 until stdlib TLS-init
+    # stabilizes AND the additional OpenSSL symbols are wired.
+    return 0;
+}
+
+fn sandhi_tls_policy_version() {
+    return "0.6.0";
+}

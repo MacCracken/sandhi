@@ -1,0 +1,173 @@
+# sandhi/tls_policy/policy — policy struct + constructors.
+#
+# A TLS policy carries declarative intent that the connection layer
+# applies at handshake time: pin to a specific SPKI hash, present an
+# mTLS client certificate, override the system trust store.
+#
+# Policies are additive — `sandhi_tls_policy_combine(a, b)` merges
+# two policies so callers can compose pinning + mTLS + custom CA
+# without a combinatorial explosion of constructors.
+#
+# Struct layout (48 bytes):
+#   +0   flags              (bitmask: PINNED | MTLS | CUSTOM_TRUST)
+#   +8   pinned_spki_hex    (cstr — SHA-256 hex of Subject Public Key Info, or 0)
+#   +16  mtls_cert_path     (cstr — PEM cert path, or 0)
+#   +24  mtls_key_path      (cstr — PEM key path, or 0)
+#   +32  trust_store_path   (cstr — CA bundle file, or 0 for system default)
+#   +40  reserved           (future: verify callback fn ptr or flags)
+
+enum SandhiTlsPolicyFlag {
+    SANDHI_TLS_POLICY_DEFAULT      = 0;
+    SANDHI_TLS_POLICY_PINNED       = 1;
+    SANDHI_TLS_POLICY_MTLS         = 2;
+    SANDHI_TLS_POLICY_CUSTOM_TRUST = 4;
+}
+
+enum SandhiTlsPolicyOff {
+    SANDHI_TLS_POLICY_OFF_FLAGS       = 0;
+    SANDHI_TLS_POLICY_OFF_PINNED      = 8;
+    SANDHI_TLS_POLICY_OFF_MTLS_CERT   = 16;
+    SANDHI_TLS_POLICY_OFF_MTLS_KEY    = 24;
+    SANDHI_TLS_POLICY_OFF_TRUST_STORE = 32;
+    SANDHI_TLS_POLICY_OFF_RESERVED    = 40;
+}
+
+var SANDHI_TLS_POLICY_STRUCT_SIZE = 48;
+
+fn _sandhi_tls_policy_dup(s) {
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    var out = alloc(n + 1);
+    memcpy(out, s, n);
+    store8(out + n, 0);
+    return out;
+}
+
+fn _sandhi_tls_policy_empty() {
+    var p = alloc(SANDHI_TLS_POLICY_STRUCT_SIZE);
+    store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, 0);
+    store64(p + SANDHI_TLS_POLICY_OFF_PINNED, 0);
+    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_CERT, 0);
+    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_KEY, 0);
+    store64(p + SANDHI_TLS_POLICY_OFF_TRUST_STORE, 0);
+    store64(p + SANDHI_TLS_POLICY_OFF_RESERVED, 0);
+    return p;
+}
+
+# ================================================================
+# Constructors
+# ================================================================
+
+# Default policy — standard system trust store, peer verification on.
+# Identical to `sandhi_conn_open`'s current behavior; explicit policy
+# lets the caller make the intent visible even when it matches defaults.
+fn sandhi_tls_policy_new_default() {
+    return _sandhi_tls_policy_empty();
+}
+
+# Pin to an SPKI fingerprint — a SHA-256 hash of the server's Subject
+# Public Key Info (DER), hex-encoded. Handshake rejects any cert
+# whose SPKI hash differs. Delimiters + case in `spki_hex` are
+# ignored at comparison time (see fingerprint.cyr).
+fn sandhi_tls_policy_new_pinned(spki_hex) {
+    var p = _sandhi_tls_policy_empty();
+    store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_PINNED);
+    store64(p + SANDHI_TLS_POLICY_OFF_PINNED, _sandhi_tls_policy_dup(spki_hex));
+    return p;
+}
+
+# Present a client certificate during the TLS handshake (mTLS).
+# Both files are PEM-encoded. Paths are duplicated into the policy;
+# caller keeps ownership of the strings it passed in.
+fn sandhi_tls_policy_new_mtls(cert_path, key_path) {
+    var p = _sandhi_tls_policy_empty();
+    store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_MTLS);
+    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_CERT, _sandhi_tls_policy_dup(cert_path));
+    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_KEY, _sandhi_tls_policy_dup(key_path));
+    return p;
+}
+
+# Override the CA trust store with a specific bundle file.
+fn sandhi_tls_policy_new_trust_store(bundle_path) {
+    var p = _sandhi_tls_policy_empty();
+    store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_CUSTOM_TRUST);
+    store64(p + SANDHI_TLS_POLICY_OFF_TRUST_STORE, _sandhi_tls_policy_dup(bundle_path));
+    return p;
+}
+
+# ================================================================
+# Combine — merge two policies into one.
+# ================================================================
+#
+# Right-hand fields win where present; falls back to left-hand
+# otherwise. Flags OR together. Lets callers build up:
+#   var p = sandhi_tls_policy_combine(
+#               sandhi_tls_policy_new_pinned(fp),
+#               sandhi_tls_policy_new_mtls(cert, key));
+
+fn sandhi_tls_policy_combine(a, b) {
+    if (a == 0) { return b; }
+    if (b == 0) { return a; }
+    var out = _sandhi_tls_policy_empty();
+    var fa = load64(a + SANDHI_TLS_POLICY_OFF_FLAGS);
+    var fb = load64(b + SANDHI_TLS_POLICY_OFF_FLAGS);
+    store64(out + SANDHI_TLS_POLICY_OFF_FLAGS, fa | fb);
+
+    var pin_a = load64(a + SANDHI_TLS_POLICY_OFF_PINNED);
+    var pin_b = load64(b + SANDHI_TLS_POLICY_OFF_PINNED);
+    if (pin_b != 0) { store64(out + SANDHI_TLS_POLICY_OFF_PINNED, pin_b); }
+    else            { store64(out + SANDHI_TLS_POLICY_OFF_PINNED, pin_a); }
+
+    var cert_a = load64(a + SANDHI_TLS_POLICY_OFF_MTLS_CERT);
+    var cert_b = load64(b + SANDHI_TLS_POLICY_OFF_MTLS_CERT);
+    if (cert_b != 0) { store64(out + SANDHI_TLS_POLICY_OFF_MTLS_CERT, cert_b); }
+    else             { store64(out + SANDHI_TLS_POLICY_OFF_MTLS_CERT, cert_a); }
+
+    var key_a = load64(a + SANDHI_TLS_POLICY_OFF_MTLS_KEY);
+    var key_b = load64(b + SANDHI_TLS_POLICY_OFF_MTLS_KEY);
+    if (key_b != 0) { store64(out + SANDHI_TLS_POLICY_OFF_MTLS_KEY, key_b); }
+    else            { store64(out + SANDHI_TLS_POLICY_OFF_MTLS_KEY, key_a); }
+
+    var trust_a = load64(a + SANDHI_TLS_POLICY_OFF_TRUST_STORE);
+    var trust_b = load64(b + SANDHI_TLS_POLICY_OFF_TRUST_STORE);
+    if (trust_b != 0) { store64(out + SANDHI_TLS_POLICY_OFF_TRUST_STORE, trust_b); }
+    else              { store64(out + SANDHI_TLS_POLICY_OFF_TRUST_STORE, trust_a); }
+
+    return out;
+}
+
+# ================================================================
+# Accessors
+# ================================================================
+
+fn sandhi_tls_policy_flags(p) {
+    if (p == 0) { return 0; }
+    return load64(p + SANDHI_TLS_POLICY_OFF_FLAGS);
+}
+
+fn sandhi_tls_policy_pinned_hash(p) {
+    if (p == 0) { return 0; }
+    return load64(p + SANDHI_TLS_POLICY_OFF_PINNED);
+}
+
+fn sandhi_tls_policy_mtls_cert(p) {
+    if (p == 0) { return 0; }
+    return load64(p + SANDHI_TLS_POLICY_OFF_MTLS_CERT);
+}
+
+fn sandhi_tls_policy_mtls_key(p) {
+    if (p == 0) { return 0; }
+    return load64(p + SANDHI_TLS_POLICY_OFF_MTLS_KEY);
+}
+
+fn sandhi_tls_policy_trust_store(p) {
+    if (p == 0) { return 0; }
+    return load64(p + SANDHI_TLS_POLICY_OFF_TRUST_STORE);
+}
+
+fn sandhi_tls_policy_has_flag(p, flag) {
+    if (p == 0) { return 0; }
+    var f = load64(p + SANDHI_TLS_POLICY_OFF_FLAGS);
+    if ((f & flag) == flag) { return 1; }
+    return 0;
+}

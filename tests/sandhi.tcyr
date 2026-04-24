@@ -13,6 +13,14 @@ include "src/rpc/dispatch.cyr"
 include "src/rpc/webdriver.cyr"
 include "src/rpc/appium.cyr"
 include "src/rpc/mcp.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
 include "src/server/mod.cyr"
 
 fn test_url_decode() {
@@ -765,6 +773,254 @@ fn test_mcp_id_is_monotonic() {
     return 0;
 }
 
+fn test_discovery_service_accessors() {
+    var s = sandhi_service_new("yantra-worker", "10.0.0.5", 8080, 0x0500000A);
+    assert_streq(sandhi_service_name(s), "yantra-worker", "service: name");
+    assert_streq(sandhi_service_host(s), "10.0.0.5", "service: host");
+    assert_eq(sandhi_service_port(s), 8080, "service: port");
+    assert_eq(sandhi_service_ipv4(s), 0x0500000A, "service: ipv4");
+    return 0;
+}
+
+# Stub resolvers for chain testing — one always-miss, one always-hit.
+fn _test_resolver_miss(ctx, name) {
+    return 0;
+}
+
+fn _test_resolver_hit(ctx, name) {
+    # ctx is the port number we want to return; name passes through as service name.
+    return sandhi_service_new(name, "127.0.0.1", ctx, 0x0100007F);
+}
+
+fn test_discovery_chain_empty() {
+    var c = sandhi_discovery_chain_new();
+    assert_eq(sandhi_discovery_chain_count(c), 0, "chain: empty count");
+    assert_eq(sandhi_discovery_chain_resolve(c, "anything"), 0, "chain: empty resolves to 0");
+    return 0;
+}
+
+fn test_discovery_chain_all_miss() {
+    var c = sandhi_discovery_chain_new();
+    sandhi_discovery_chain_add(c, sandhi_resolver_new(&_test_resolver_miss, 0));
+    sandhi_discovery_chain_add(c, sandhi_resolver_new(&_test_resolver_miss, 0));
+    assert_eq(sandhi_discovery_chain_count(c), 2, "chain: count after 2 adds");
+    assert_eq(sandhi_discovery_chain_resolve(c, "svc"), 0, "chain: all-miss returns 0");
+    return 0;
+}
+
+fn test_discovery_chain_first_hit() {
+    var c = sandhi_discovery_chain_new();
+    sandhi_discovery_chain_add(c, sandhi_resolver_new(&_test_resolver_hit, 9001));
+    sandhi_discovery_chain_add(c, sandhi_resolver_new(&_test_resolver_miss, 0));
+    var svc = sandhi_discovery_chain_resolve(c, "a");
+    assert_neq(svc, 0, "chain: first-hit resolves");
+    assert_eq(sandhi_service_port(svc), 9001, "chain: uses first resolver's port");
+    return 0;
+}
+
+fn test_discovery_chain_fallthrough() {
+    # daimon unreachable → local miss → third resolver hits.
+    var c = sandhi_discovery_chain_new();
+    sandhi_discovery_chain_add(c, sandhi_resolver_new(&_test_resolver_miss, 0));
+    sandhi_discovery_chain_add(c, sandhi_resolver_new(&_test_resolver_miss, 0));
+    sandhi_discovery_chain_add(c, sandhi_resolver_new(&_test_resolver_hit, 7777));
+    var svc = sandhi_discovery_chain_resolve(c, "svc");
+    assert_neq(svc, 0, "chain: fallthrough past misses");
+    assert_streq(sandhi_service_host(svc), "127.0.0.1", "chain: host from hitting resolver");
+    assert_eq(sandhi_service_port(svc), 7777, "chain: port from hitting resolver");
+    return 0;
+}
+
+fn test_discovery_chain_as_resolver_nested() {
+    # Nest one chain inside another (composition).
+    var inner = sandhi_discovery_chain_new();
+    sandhi_discovery_chain_add(inner, sandhi_resolver_new(&_test_resolver_hit, 5555));
+
+    var outer = sandhi_discovery_chain_new();
+    sandhi_discovery_chain_add(outer, sandhi_resolver_new(&_test_resolver_miss, 0));
+    sandhi_discovery_chain_add(outer, sandhi_discovery_chain_as_resolver(inner));
+
+    var svc = sandhi_discovery_chain_resolve(outer, "nested-svc");
+    assert_neq(svc, 0, "chain: nested resolves");
+    assert_eq(sandhi_service_port(svc), 5555, "chain: nested port");
+    return 0;
+}
+
+fn test_discovery_daimon_url_building() {
+    # No trailing slash on base.
+    assert_streq(_sandhi_daimon_url("http://127.0.0.1:9000", "yantra"),
+                 "http://127.0.0.1:9000/services/yantra",
+                 "daimon: url no trailing slash");
+    # With trailing slash on base.
+    assert_streq(_sandhi_daimon_url("http://127.0.0.1:9000/", "yantra"),
+                 "http://127.0.0.1:9000/services/yantra",
+                 "daimon: url trailing slash absorbed");
+    return 0;
+}
+
+fn test_discovery_daimon_parse_service_roundtrip() {
+    var body = "{\"host\":\"10.0.0.42\",\"port\":9100}";
+    var s = _sandhi_daimon_parse_service(body, "worker");
+    assert_neq(s, 0, "daimon parse: non-null");
+    assert_streq(sandhi_service_host(s), "10.0.0.42", "daimon parse: host");
+    assert_eq(sandhi_service_port(s), 9100, "daimon parse: port");
+    assert_streq(sandhi_service_name(s), "worker", "daimon parse: name copied");
+    return 0;
+}
+
+fn test_discovery_daimon_parse_service_with_address() {
+    var body = "{\"host\":\"node-7.internal\",\"port\":9100,\"address\":\"10.1.2.3\"}";
+    var s = _sandhi_daimon_parse_service(body, "srv");
+    # address parsed → ipv4 pre-populated. Bytes [10,1,2,3] packed
+    # little-endian (matches net.cyr sock_connect shape).
+    assert_eq(sandhi_service_ipv4(s), 0x0302010A, "daimon parse: pre-resolved ipv4");
+    return 0;
+}
+
+fn test_discovery_daimon_parse_service_rejects_malformed() {
+    assert_eq(_sandhi_daimon_parse_service("{}", "x"), 0, "daimon parse: empty obj → 0");
+    assert_eq(_sandhi_daimon_parse_service("{\"host\":\"h\"}", "x"), 0, "daimon parse: no port → 0");
+    assert_eq(_sandhi_daimon_parse_service("{\"host\":\"h\",\"port\":0}", "x"), 0, "daimon parse: port 0 → 0");
+    assert_eq(_sandhi_daimon_parse_service("{\"host\":\"h\",\"port\":99999}", "x"), 0, "daimon parse: port >65535 → 0");
+    return 0;
+}
+
+fn test_discovery_local_stub_always_misses() {
+    var r = sandhi_discovery_local_resolver();
+    assert_neq(r, 0, "local: resolver non-null");
+    assert_eq(sandhi_resolver_lookup(r, "any.local"), 0, "local: stub misses");
+    assert_eq(sandhi_discovery_local_available(), 0, "local: available=0 until impl lands");
+    return 0;
+}
+
+fn test_discovery_register_rejects_bad_inputs() {
+    assert_eq(sandhi_discovery_register(0, "n", "h", 80), SANDHI_ERR_INTERNAL, "register: null base_url");
+    assert_eq(sandhi_discovery_register("http://x", 0, "h", 80), SANDHI_ERR_INTERNAL, "register: null name");
+    assert_eq(sandhi_discovery_register("http://x", "n", 0, 80), SANDHI_ERR_INTERNAL, "register: null host");
+    assert_eq(sandhi_discovery_register("http://x", "n", "h", 0), SANDHI_ERR_INTERNAL, "register: port 0");
+    assert_eq(sandhi_discovery_register("http://x", "n", "h", 99999), SANDHI_ERR_INTERNAL, "register: port >65535");
+    assert_eq(sandhi_discovery_deregister(0, "n"), SANDHI_ERR_INTERNAL, "deregister: null base_url");
+    return 0;
+}
+
+fn test_tls_policy_default() {
+    var p = sandhi_tls_policy_new_default();
+    assert_eq(sandhi_tls_policy_flags(p), SANDHI_TLS_POLICY_DEFAULT, "policy: default flags 0");
+    assert_eq(sandhi_tls_policy_pinned_hash(p), 0, "policy: default no pin");
+    assert_eq(sandhi_tls_policy_mtls_cert(p), 0, "policy: default no mtls");
+    assert_eq(sandhi_tls_policy_trust_store(p), 0, "policy: default no trust override");
+    return 0;
+}
+
+fn test_tls_policy_pinned() {
+    var p = sandhi_tls_policy_new_pinned("abc123");
+    assert_eq(sandhi_tls_policy_has_flag(p, SANDHI_TLS_POLICY_PINNED), 1, "policy: pinned flag set");
+    assert_eq(sandhi_tls_policy_has_flag(p, SANDHI_TLS_POLICY_MTLS), 0, "policy: mtls not set");
+    assert_streq(sandhi_tls_policy_pinned_hash(p), "abc123", "policy: pin stored");
+    return 0;
+}
+
+fn test_tls_policy_mtls() {
+    var p = sandhi_tls_policy_new_mtls("/etc/client.pem", "/etc/client.key");
+    assert_eq(sandhi_tls_policy_has_flag(p, SANDHI_TLS_POLICY_MTLS), 1, "policy: mtls flag set");
+    assert_streq(sandhi_tls_policy_mtls_cert(p), "/etc/client.pem", "policy: mtls cert path");
+    assert_streq(sandhi_tls_policy_mtls_key(p), "/etc/client.key", "policy: mtls key path");
+    return 0;
+}
+
+fn test_tls_policy_trust_store() {
+    var p = sandhi_tls_policy_new_trust_store("/etc/ssl/custom-ca.pem");
+    assert_eq(sandhi_tls_policy_has_flag(p, SANDHI_TLS_POLICY_CUSTOM_TRUST), 1, "policy: custom trust flag");
+    assert_streq(sandhi_tls_policy_trust_store(p), "/etc/ssl/custom-ca.pem", "policy: trust bundle path");
+    return 0;
+}
+
+fn test_tls_policy_combine_additive() {
+    var a = sandhi_tls_policy_new_pinned("pin");
+    var b = sandhi_tls_policy_new_mtls("c", "k");
+    var c = sandhi_tls_policy_combine(a, b);
+    assert_eq(sandhi_tls_policy_has_flag(c, SANDHI_TLS_POLICY_PINNED), 1, "combine: keeps PINNED");
+    assert_eq(sandhi_tls_policy_has_flag(c, SANDHI_TLS_POLICY_MTLS), 1, "combine: adds MTLS");
+    assert_streq(sandhi_tls_policy_pinned_hash(c), "pin", "combine: pin preserved from a");
+    assert_streq(sandhi_tls_policy_mtls_cert(c), "c", "combine: mtls cert from b");
+    return 0;
+}
+
+fn test_tls_policy_combine_right_wins() {
+    var a = sandhi_tls_policy_new_pinned("old-pin");
+    var b = sandhi_tls_policy_new_pinned("new-pin");
+    var c = sandhi_tls_policy_combine(a, b);
+    assert_streq(sandhi_tls_policy_pinned_hash(c), "new-pin", "combine: right-hand wins on conflict");
+    return 0;
+}
+
+fn test_tls_policy_combine_null_safe() {
+    var a = sandhi_tls_policy_new_pinned("pin");
+    assert_neq(sandhi_tls_policy_combine(a, 0), 0, "combine: null-rhs passthrough");
+    assert_neq(sandhi_tls_policy_combine(0, a), 0, "combine: null-lhs passthrough");
+    return 0;
+}
+
+fn test_fp_normalize_basic() {
+    assert_streq(sandhi_fp_normalize("abcdef"), "abcdef", "fp: lowercase passthrough");
+    assert_streq(sandhi_fp_normalize("ABCDEF"), "abcdef", "fp: uppercase → lower");
+    assert_streq(sandhi_fp_normalize("AbCdEf"), "abcdef", "fp: mixed case");
+    return 0;
+}
+
+fn test_fp_normalize_delimiters() {
+    assert_streq(sandhi_fp_normalize("ab:cd:ef"), "abcdef", "fp: colons stripped");
+    assert_streq(sandhi_fp_normalize("ab cd ef"), "abcdef", "fp: spaces stripped");
+    assert_streq(sandhi_fp_normalize("ab\tcd"), "abcd", "fp: tabs stripped");
+    assert_streq(sandhi_fp_normalize("ab:CD ef"), "abcdef", "fp: mixed delimiters + case");
+    return 0;
+}
+
+fn test_fp_normalize_rejects_invalid() {
+    assert_eq(sandhi_fp_normalize("xyz"), 0, "fp: non-hex rejected");
+    assert_eq(sandhi_fp_normalize("ab!cd"), 0, "fp: punctuation rejected");
+    assert_eq(sandhi_fp_normalize(0), 0, "fp: null passthrough");
+    return 0;
+}
+
+fn test_fp_eq() {
+    assert_eq(sandhi_fp_eq("abcdef", "AB:CD:EF"), 1, "fp_eq: case + delimiter insensitive");
+    assert_eq(sandhi_fp_eq("abcdef", "abcdee"), 0, "fp_eq: different");
+    assert_eq(sandhi_fp_eq("abcdef", ""), 0, "fp_eq: one empty");
+    assert_eq(sandhi_fp_eq(0, "abc"), 0, "fp_eq: null never matches");
+    assert_eq(sandhi_fp_eq("abc", 0), 0, "fp_eq: null never matches (rhs)");
+    return 0;
+}
+
+fn test_fp_byte_length() {
+    # 64 hex chars = 32 bytes = SHA-256
+    assert_eq(sandhi_fp_byte_length("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), 32, "fp: SHA-256 length");
+    # With colons.
+    assert_eq(sandhi_fp_byte_length("e3:b0:c4:42:98:fc:1c:14:9a:fb:f4:c8:99:6f:b9:24:27:ae:41:e4:64:9b:93:4c:a4:95:99:1b:78:52:b8:55"), 32, "fp: SHA-256 with colons");
+    # SHA-1 (legacy — 40 chars = 20 bytes)
+    assert_eq(sandhi_fp_byte_length("da39a3ee5e6b4b0d3255bfef95601890afd80709"), 20, "fp: SHA-1 length");
+    # Odd — malformed
+    assert_eq(sandhi_fp_byte_length("abc"), 0, "fp: odd nibble → 0");
+    assert_eq(sandhi_fp_byte_length("xyz"), 0, "fp: invalid → 0");
+    return 0;
+}
+
+fn test_fp_encode_bytes() {
+    var buf[4];
+    store8(&buf + 0, 0xDE);
+    store8(&buf + 1, 0xAD);
+    store8(&buf + 2, 0xBE);
+    store8(&buf + 3, 0xEF);
+    assert_streq(sandhi_fp_encode_bytes(&buf, 4), "deadbeef", "fp: encode raw bytes");
+    return 0;
+}
+
+fn test_tls_enforcement_flag() {
+    # Surface shipped but enforcement-available flag reflects the stub state.
+    assert_eq(sandhi_tls_policy_enforcement_available(), 0, "tls: enforcement stubbed today");
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -987,6 +1243,84 @@ fn main() {
 
     test_group("rpc/mcp/id_monotonic");
     test_mcp_id_is_monotonic();
+
+    test_group("discovery/service");
+    test_discovery_service_accessors();
+
+    test_group("discovery/chain/empty");
+    test_discovery_chain_empty();
+
+    test_group("discovery/chain/all_miss");
+    test_discovery_chain_all_miss();
+
+    test_group("discovery/chain/first_hit");
+    test_discovery_chain_first_hit();
+
+    test_group("discovery/chain/fallthrough");
+    test_discovery_chain_fallthrough();
+
+    test_group("discovery/chain/nested");
+    test_discovery_chain_as_resolver_nested();
+
+    test_group("discovery/daimon/url");
+    test_discovery_daimon_url_building();
+
+    test_group("discovery/daimon/parse");
+    test_discovery_daimon_parse_service_roundtrip();
+
+    test_group("discovery/daimon/parse_address");
+    test_discovery_daimon_parse_service_with_address();
+
+    test_group("discovery/daimon/parse_rejects");
+    test_discovery_daimon_parse_service_rejects_malformed();
+
+    test_group("discovery/local/stub");
+    test_discovery_local_stub_always_misses();
+
+    test_group("discovery/register/bad_input");
+    test_discovery_register_rejects_bad_inputs();
+
+    test_group("tls_policy/default");
+    test_tls_policy_default();
+
+    test_group("tls_policy/pinned");
+    test_tls_policy_pinned();
+
+    test_group("tls_policy/mtls");
+    test_tls_policy_mtls();
+
+    test_group("tls_policy/trust_store");
+    test_tls_policy_trust_store();
+
+    test_group("tls_policy/combine_additive");
+    test_tls_policy_combine_additive();
+
+    test_group("tls_policy/combine_right_wins");
+    test_tls_policy_combine_right_wins();
+
+    test_group("tls_policy/combine_null_safe");
+    test_tls_policy_combine_null_safe();
+
+    test_group("tls_policy/fp/normalize");
+    test_fp_normalize_basic();
+
+    test_group("tls_policy/fp/delimiters");
+    test_fp_normalize_delimiters();
+
+    test_group("tls_policy/fp/invalid");
+    test_fp_normalize_rejects_invalid();
+
+    test_group("tls_policy/fp/eq");
+    test_fp_eq();
+
+    test_group("tls_policy/fp/byte_length");
+    test_fp_byte_length();
+
+    test_group("tls_policy/fp/encode");
+    test_fp_encode_bytes();
+
+    test_group("tls_policy/enforcement_flag");
+    test_tls_enforcement_flag();
 
     return assert_summary();
 }

@@ -1,22 +1,24 @@
-# sandhi/discovery — service discovery for AGNOS.
+# sandhi/discovery — service discovery index.
 #
-# The genuinely new surface that didn't exist anywhere before sandhi.
-# Stdlib has net.cyr for sockets but no discovery layer; daimon has
-# agent-registration but that's higher-level and agent-scoped.
+# Composes:
+#   discovery/service   — service struct + resolver (fn-ptr + ctx) shape
+#   discovery/chain     — fallback sequence of resolvers
+#   discovery/daimon    — HTTP-backed resolver against daimon's registry
+#   discovery/local     — mDNS resolver (interface only; impl deferred — see file)
+#   discovery/register  — publish/withdraw against daimon
 #
-# Planned verbs (scaffold stubs):
-#   sandhi_discover_local(service_name)  — mDNS / local-link discovery
-#   sandhi_discover_daimon(service_name) — query daimon's registered services
-#   sandhi_discover_chain(chain, service) — fallback sequence through multiple
-#                                           resolvers in order
-#   sandhi_discover_register(name, endpoint, meta) — publish a service
-#   sandhi_discover_deregister(name)     — withdraw a service
+# Typical consumer shape:
+#   var c = sandhi_discovery_chain_new();
+#   sandhi_discovery_chain_add(c, sandhi_discovery_daimon_resolver("http://127.0.0.1:9000"));
+#   sandhi_discovery_chain_add(c, sandhi_discovery_local_resolver());
+#   var svc = sandhi_discovery_chain_resolve(c, "yantra-worker");
+#   if (svc != 0) {
+#       # svc_host(svc) / svc_port(svc) / svc_ipv4(svc)
+#   }
 #
-# Design note: discovery is deliberately pluggable. The chain resolver
-# lets a consumer try local-mDNS → daimon-registered → DNS → static
-# fallback without any single point of failure being load-bearing.
-# See ADR 0002 (to be written when discovery lands real implementation).
+# No resolver in the chain is load-bearing — a missing daimon falls
+# through to the next backend silently.
 
 fn sandhi_discovery_version() {
-    return "0.1.0-scaffold";
+    return "0.5.0";
 }

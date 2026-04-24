@@ -4,6 +4,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-04-24
+
+M5 close. TLS-policy surface — SPKI cert pinning, mTLS client certs, custom trust store, policy composition. Surface fully shipped + unit-tested; runtime enforcement stubbed pending the stdlib TLS-init fix. 291 assertions green (+41 for tls_policy).
+
+### Added
+- **tls_policy/policy** (`src/tls_policy/policy.cyr`): policy struct `{flags, pinned_spki_hex, mtls_cert, mtls_key, trust_store_path}` + constructors (`new_default` / `new_pinned` / `new_mtls` / `new_trust_store`) + `combine` (additive, right-wins on field conflict, null-safe). Flags are a bitmask (`PINNED | MTLS | CUSTOM_TRUST`) so composition just ORs them together.
+- **tls_policy/fingerprint** (`src/tls_policy/fingerprint.cyr`): SPKI hash format helpers. `sandhi_fp_normalize` (strip `:`/space/tab + lowercase), `sandhi_fp_eq` (null-safe case + delimiter-insensitive compare), `sandhi_fp_byte_length` (returns 32 for SHA-256, 20 for SHA-1), `sandhi_fp_encode_bytes` (raw → hex). Accepts all the common SPKI string shapes callers will plausibly hand us.
+- **tls_policy/apply** (`src/tls_policy/apply.cyr`): `sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy)` — public surface ready, enforcement stubbed. Delegates to `sandhi_conn_open` today while reading policy fields so the call-site shape is stable. `sandhi_tls_policy_enforcement_available() == 0` signals stub state; callers requiring hard enforcement can refuse to run.
+
+### Changed
+- **tls_policy/mod.cyr**: scaffold → real dialect-index with a complete usage example and the "enforcement pending" pointer to the issues doc.
+- **cyrius.cyml `[lib].modules`**: tls_policy modules moved after http/client so `apply.cyr` can reference `sandhi_conn_open`. Composition order now foundation → http/net → tls_policy → rpc → discovery → server → main.
+- **src/main.cyr**: `sandhi_version()` → 0.6.0.
+
+### Deferred with explicit path forward
+- **Live enforcement** — the TODO list in `apply.cyr` enumerates exactly the OpenSSL calls needed (`SSL_CTX_load_verify_locations`, `SSL_CTX_use_certificate_file`, `SSL_CTX_use_PrivateKey_file`, `SSL_get_peer_certificate`, `X509_get_pubkey`, `i2d_PUBKEY`). When stdlib TLS-init stabilizes (issue doc `2026-04-24-fdlopen-getaddrinfo-blocked.md`), wiring these is a ~50-line follow-up with no API shape change.
+- **SPKI extraction from peer certificate** — same gate. `sandhi_fp_encode_bytes` already handles the output-side formatting, so the fill-in is: resolve the two additional OpenSSL symbols, call them, hash with `sha256_hex`, compare via `sandhi_fp_eq`.
+
+## [0.5.0] — 2026-04-24
+
+M4 close. Service discovery — daimon-backed resolver, chain-resolver with fallthrough, mDNS interface stub, register/deregister. 250 assertions green (+35 for discovery).
+
+### Added
+- **discovery/service** (`src/discovery/service.cyr`): service struct `{name, host, port, ipv4}` + resolver struct `{lookup_fn, ctx}` + `sandhi_resolver_lookup(r, name)` dispatcher. The type vocabulary every resolver shares.
+- **discovery/chain** (`src/discovery/chain.cyr`): `sandhi_discovery_chain_new` / `_add` / `_count` / `_resolve` / `_as_resolver`. Iterates resolvers in insertion order, returns first non-null hit. Supports nesting a chain as a resolver inside another chain.
+- **discovery/daimon** (`src/discovery/daimon.cyr`): HTTP-backed resolver against daimon's registry. Contract documented inline (`GET /services/{name}` → `{"host","port","address"?}`). Missing daimon = miss = chain fallthrough; no crash on outage.
+- **discovery/local** (`src/discovery/local.cyr`): **mDNS interface only** — resolver struct constructs cleanly and integrates with the chain, but lookup always misses today. Reason documented: stdlib `net.cyr` doesn't expose the multicast-UDP socket primitives (`IP_ADD_MEMBERSHIP`, `IP_MULTICAST_TTL`) needed for the 224.0.0.251:5353 query path. `sandhi_discovery_local_available() == 0` signals the stub state. Real impl lands when `net.cyr` gains multicast helpers or a consumer asks.
+- **discovery/register** (`src/discovery/register.cyr`): `sandhi_discovery_register(base, name, host, port)` + `_deregister(base, name)`. Daimon-backed publish/withdraw; mDNS publishing deferred with the local resolver.
+
+### Changed
+- **discovery/mod.cyr**: scaffold → real dialect-index comment with typical consumer usage + `sandhi_discovery_version() → "0.5.0"`.
+- **cyrius.cyml `[lib].modules`**: discovery submodules added in dependency order (service → chain → daimon → local → register → mod).
+- **src/main.cyr**: `sandhi_version()` → 0.5.0.
+
+### Deferred (documented in code + roadmap)
+- **mDNS lookup**. Stub resolver shipped today; real impl blocked on multicast primitives in stdlib `net.cyr`.
+- **mDNS publishing** (continuous responder loop). Not in scope until multicast + thread-lifecycle story firms up.
+
 ## [0.4.0] — 2026-04-24
 
 M3 close. JSON-RPC dialect layer — WebDriver, Appium, MCP-over-HTTP. 215 assertions green.

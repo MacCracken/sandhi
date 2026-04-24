@@ -1,0 +1,75 @@
+# sandhi/discovery/service — types shared across resolvers.
+#
+# A `service` names an endpoint inside an AGNOS deployment. Any
+# resolver that claims to resolve returns one of these (or 0 on miss).
+#
+# Struct layout (32 bytes):
+#   +0   name  (cstr — logical service name, may be 0 for unnamed)
+#   +8   host  (cstr — hostname OR dotted-quad IP; non-0)
+#   +16  port  (int — 1..65535)
+#   +24  ipv4  (int — pre-resolved address in sock_connect format, or 0
+#               if the caller should resolve the host themselves)
+
+enum SandhiServiceOff {
+    SANDHI_SERVICE_OFF_NAME = 0;
+    SANDHI_SERVICE_OFF_HOST = 8;
+    SANDHI_SERVICE_OFF_PORT = 16;
+    SANDHI_SERVICE_OFF_IPV4 = 24;
+}
+
+var SANDHI_SERVICE_STRUCT_SIZE = 32;
+
+fn sandhi_service_new(name, host, port, ipv4) {
+    var s = alloc(SANDHI_SERVICE_STRUCT_SIZE);
+    store64(s + SANDHI_SERVICE_OFF_NAME, name);
+    store64(s + SANDHI_SERVICE_OFF_HOST, host);
+    store64(s + SANDHI_SERVICE_OFF_PORT, port);
+    store64(s + SANDHI_SERVICE_OFF_IPV4, ipv4);
+    return s;
+}
+
+fn sandhi_service_name(s) { return load64(s + SANDHI_SERVICE_OFF_NAME); }
+fn sandhi_service_host(s) { return load64(s + SANDHI_SERVICE_OFF_HOST); }
+fn sandhi_service_port(s) { return load64(s + SANDHI_SERVICE_OFF_PORT); }
+fn sandhi_service_ipv4(s) { return load64(s + SANDHI_SERVICE_OFF_IPV4); }
+
+# ================================================================
+# Resolver — a function pointer + opaque context.
+# ================================================================
+#
+# Contract: `lookup_fn(ctx, name)` returns an alloc'd sandhi_service or 0 on miss.
+# Resolvers MUST NOT abort on network failure — return 0 so the chain
+# can try the next backend.
+#
+# Struct layout (16 bytes):
+#   +0   lookup_fn  (fn pointer, matches fncall2 signature: (ctx, name))
+#   +8   ctx        (ptr, resolver-specific)
+
+enum SandhiResolverOff {
+    SANDHI_RESOLVER_OFF_FN  = 0;
+    SANDHI_RESOLVER_OFF_CTX = 8;
+}
+
+var SANDHI_RESOLVER_STRUCT_SIZE = 16;
+
+fn sandhi_resolver_new(lookup_fn, ctx) {
+    var r = alloc(SANDHI_RESOLVER_STRUCT_SIZE);
+    store64(r + SANDHI_RESOLVER_OFF_FN, lookup_fn);
+    store64(r + SANDHI_RESOLVER_OFF_CTX, ctx);
+    return r;
+}
+
+fn sandhi_resolver_fn(r)  { return load64(r + SANDHI_RESOLVER_OFF_FN); }
+fn sandhi_resolver_ctx(r) { return load64(r + SANDHI_RESOLVER_OFF_CTX); }
+
+# Invoke a resolver directly. Chain + consumers use this shape.
+fn sandhi_resolver_lookup(r, name) {
+    if (r == 0) { return 0; }
+    var fp = sandhi_resolver_fn(r);
+    if (fp == 0) { return 0; }
+    return fncall2(fp, sandhi_resolver_ctx(r), name);
+}
+
+fn sandhi_discovery_service_version() {
+    return "0.5.0";
+}

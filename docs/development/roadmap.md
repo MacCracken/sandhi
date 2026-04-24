@@ -56,27 +56,32 @@
 
 **Acceptance**: all four dialect modules compile clean and unit tests verify URL shape + envelope shape + error extraction. Live `yantra_web_open("firefox")` needs yantra M2 work + a running geckodriver — sandhi side is complete, consumer-side integration happens in the yantra repo.
 
-### M4 — `sandhi::discovery` (v0.5.0)
+### M4 — `sandhi::discovery` (v0.5.0) — ✅ shipped 2026-04-24
 
 *The genuinely new surface.*
 
-- `sandhi::discovery::local` — mDNS / local-link resolution
-- `sandhi::discovery::daimon` — query daimon's registered-service map
-- `sandhi::discovery::chain` — fallback sequence (try backends in order, accept first hit)
-- `sandhi::discovery::register` / `deregister` — publish / withdraw a service
-- Design: pluggable, no single resolver is load-bearing; chain-resolvers let consumers tolerate resolver outages
+- `sandhi::discovery::service` + `resolver` — shared type vocabulary (service struct, fn-ptr-based resolvers) ✅
+- `sandhi::discovery::chain` — fallback sequence, first-hit wins, nesting supported ✅
+- `sandhi::discovery::daimon` — HTTP-backed resolver against daimon registry (GET /services/{name}) ✅
+- `sandhi::discovery::register` / `deregister` — publish/withdraw via daimon ✅
+- `sandhi::discovery::local` — **interface only** for M4. mDNS multicast impl deferred because stdlib `net.cyr` doesn't expose `IP_ADD_MEMBERSHIP` / `IP_MULTICAST_TTL` yet. Stub resolver integrates with the chain today and starts resolving the day the real impl lands — no API churn.
+- Design: pluggable, no single resolver load-bearing; `chain_as_resolver` lets a chain act as one backend within another chain ✅
 
-**Acceptance**: service registered via daimon is discoverable via `sandhi::discovery::daimon` lookup; chain resolver falls through gracefully when the first resolver is absent.
+**Acceptance**: chain resolver falls through gracefully when the first resolver misses or is unreachable (verified via unit tests with stub resolvers); daimon HTTP contract is the reference doc + unit-tested against synthetic response bodies. Live daimon round-trip acceptance waits for daimon itself to implement the registry endpoints — sandhi side is complete.
 
-### M5 — `sandhi::tls_policy` (v0.6.0)
+### M5 — `sandhi::tls_policy` (v0.6.0) — ✅ surface shipped 2026-04-24 (enforcement stubbed)
 
-- `sandhi::tls_policy::default` — standard trust store, cert verification on
-- `sandhi::tls_policy::pinned(fp)` — SPKI fingerprint pinning
-- `sandhi::tls_policy::mtls(cert, key)` — mTLS client certificates
-- `sandhi::tls_policy::trust_store` — custom CA bundle management
-- Wraps `lib/tls.cyr` FFI today; transitions to native TLS when Cyrius v5.9.x ships (no sandhi-side change needed when that happens — same policy surface, different underlying TLS impl)
+- `sandhi_tls_policy_new_default` — standard trust store, cert verification on ✅
+- `sandhi_tls_policy_new_pinned(fp)` — SPKI fingerprint pinning ✅ (constructor + fingerprint helpers)
+- `sandhi_tls_policy_new_mtls(cert, key)` — mTLS client certificates ✅ (constructor)
+- `sandhi_tls_policy_new_trust_store(bundle)` — custom CA bundle ✅ (constructor)
+- `sandhi_tls_policy_combine` — additive, right-wins, null-safe ✅
+- `sandhi_conn_open_with_policy` — integration point ✅ (delegates to `sandhi_conn_open` until stdlib TLS-init stabilizes; API is stable, enforcement is the only part that fills in later)
+- Wraps `lib/tls.cyr` FFI today; transitions to native TLS when Cyrius v5.9.x ships (no sandhi-side change needed — same policy surface, different underlying TLS impl)
 
-**Acceptance**: pinned-cert tcyr test rejects a cert with wrong fingerprint; mTLS tcyr test authenticates with a client cert; trust-store override works.
+**Acceptance** (surface): policy constructors + combine + fingerprint normalization unit-tested (41 assertions covering every constructor, composition semantics, fingerprint format tolerance, byte-length decoding, encoding).
+
+**Acceptance (live enforcement) — pending**: the pinned-cert-rejects test and mTLS-authenticates test both need live HTTPS to work, which is blocked on the stdlib TLS-init issue (`docs/issues/2026-04-24-fdlopen-getaddrinfo-blocked.md`). The TODO list at the top of `src/tls_policy/apply.cyr` enumerates the exact OpenSSL calls to fill in — ~50 lines once TLS-init stabilizes, no API change.
 
 ### M6 — Fold into Cyrius stdlib (v1.0.0) — clean-break at v5.7.0
 
