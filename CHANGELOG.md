@@ -4,6 +4,77 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### 0.8.0 work in progress
+
+**Bite 1 — Connection pool + HTTP/1.1 keep-alive** (this commit). 438
+test assertions green (+27 pool). Pool stays unused until a caller
+attaches one via `sandhi_http_options_pool(opts, pool)`; existing
+`Connection: close` paths are unchanged so this is a strictly
+additive patch.
+
+#### Added
+- New `src/http/pool.cyr` (~330 lines).
+  - `sandhi_http_pool_new(max_per_host, idle_timeout_ms)` →
+    `sandhi_http_pool_close` / `_idle_count` / `_max_per_host` /
+    `_idle_timeout_ms` accessors.
+  - Internal `_sandhi_pool_take(pool, host, port, tls)` (LIFO,
+    skip-stale, recurse) and `_sandhi_pool_put(...)` (FIFO eviction
+    when at cap).
+  - Map keyed by `host:port:tls` cstr → vec of idle_conn{conn,
+    last_used_ms} via stdlib `map_new` + `vec_*`.
+  - `_sandhi_http_recv_framed(conn, buf, cap, deadline_ms)` — drains
+    headers incrementally, parses `Content-Length` or detects
+    `Transfer-Encoding: chunked`, reads exactly that much body so the
+    socket survives for the next request. Returns `0 - 2` sentinel
+    when the server sent `Connection: close` so the caller skips
+    pool-put.
+  - `_sandhi_pool_chunked_complete(buf, body_start, blen)` — detector
+    used by the framed-recv loop to know when a chunked body has
+    fully arrived.
+- **http/client**: `sandhi_http_options_pool(opts, pool)` setter +
+  `sandhi_http_options_get_pool(opts)` accessor. Options struct
+  56→64 bytes.
+- **http/client**: `_sandhi_client_build_request_v` variant accepts
+  a `keep_alive` flag — when set, omits the trailing `Connection:
+  close` header (HTTP/1.1 default is keep-alive). Existing
+  `_sandhi_client_build_request` is now a `keep_alive=0` wrapper.
+- **http/client**: `_sandhi_http_exchange_keepalive(conn, req, body,
+  body_len, max_bytes, deadline_ms, pool, host, port, use_tls)` —
+  framed-recv variant that returns the conn to the pool on
+  success (2xx/3xx, no server-Connection-close) or closes it
+  otherwise.
+
+#### Changed
+- **http/client `_sandhi_http_do_impl`** signature gained `pool`
+  parameter. When attached, tries `_sandhi_pool_take` first to skip
+  the connect phase entirely; falls through to
+  `sandhi_conn_open_fully_timed` on miss. Uses
+  `_sandhi_http_exchange_keepalive` instead of the close-delimited
+  `_sandhi_http_exchange` when keep_alive is on.
+- **http/client `_sandhi_http_follow`** + `_sandhi_http_dispatch`
+  thread `pool` through. Per-hop reuse — each redirect hop tries
+  the pool independently; non-2xx responses (301/302/etc.) still
+  put back since they're successful HTTP exchanges.
+- **cyrius.cyml `[lib].modules`**: `pool.cyr` registered between
+  `client.cyr` and `retry.cyr` (pool depends on client's
+  `_sandhi_http_clamp_ms` indirectly via the recv-framed deadline
+  path; alphabetical dep order respected).
+- **programs/smoke.cyr**: pool added to keep the smoke link parity
+  with the test build.
+
+#### Notes
+- This bite is the foundation for both HTTP/1.1 keep-alive (now
+  available) and h2 stream multiplex (Bite 6 — same checkout shape,
+  per-stream rather than per-connection).
+- No version bump — staged on 0.7.3 until 0.8.0 ships fully (after
+  Bite 7).
+- Pool is single-threaded today (matches the rest of the client).
+  When a multi-threaded request dispatch lands, a per-pool mutex
+  goes here.
+- `_sandhi_http_recv_framed` does NOT parse `Trailer:` headers or
+  trailer chunks per RFC 7230 §4.4 robustness — they're discarded.
+  Will revisit only if a consumer asks.
+
 ## [0.7.3] — 2026-04-24
 
 Closes the two timeout knobs deferred from 0.7.2: `connect_ms` (non-

@@ -81,7 +81,14 @@ fn _sandhi_client_host_header(url_struct) {
 
 # Construct the wire-format request as a Str. user_headers may be 0.
 # Body is sent separately — the builder emits headers + blank line only.
+# `keep_alive` controls the trailing Connection header — 1 omits it
+# (HTTP/1.1 default is keep-alive); 0 emits "Connection: close" so the
+# peer drops the conn after the response.
 fn _sandhi_client_build_request(method, full_path, host_header, user_headers, body_len) {
+    return _sandhi_client_build_request_v(method, full_path, host_header, user_headers, body_len, 0);
+}
+
+fn _sandhi_client_build_request_v(method, full_path, host_header, user_headers, body_len, keep_alive) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, method);
     str_builder_add_cstr(sb, " ");
@@ -126,7 +133,14 @@ fn _sandhi_client_build_request(method, full_path, host_header, user_headers, bo
         sandhi_headers_serialize(user_headers, sb);
     }
 
-    str_builder_add_cstr(sb, "Connection: close\r\n\r\n");
+    if (keep_alive == 1) {
+        # HTTP/1.1 default — omit Connection altogether. Some old
+        # proxies infer keep-alive only when "Keep-Alive" is explicit;
+        # the tradeoff is wire bytes. Default behavior: omit.
+        str_builder_add_cstr(sb, "\r\n");
+    } else {
+        str_builder_add_cstr(sb, "Connection: close\r\n\r\n");
+    }
     return str_builder_build(sb);
 }
 
@@ -136,10 +150,11 @@ fn _sandhi_client_build_request(method, full_path, host_header, user_headers, bo
 
 # Outer trace wrapper — opt-in span via sandhi_trace_enable(1). Span
 # no-op by default; the inner does all the work either way.
-fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes, connect_ms, read_ms, write_ms, total_ms) {
+fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes,
+                    connect_ms, read_ms, write_ms, total_ms, pool) {
     sandhi_trace_begin("sandhi.http");
     var r = _sandhi_http_do_impl(method, url, user_headers, body, body_len,
-                                  max_bytes, connect_ms, read_ms, write_ms, total_ms);
+                                  max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
     sandhi_trace_end();
     return r;
 }
@@ -158,7 +173,8 @@ fn _sandhi_http_clamp_ms(raw_ms, deadline_ms) {
 
 # Keep this function compact — Cyrius 5.6.22 aliases locals on crowded
 # frames. Everything meaningful lives in helpers.
-fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes, connect_ms, read_ms, write_ms, total_ms) {
+fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
+                         connect_ms, read_ms, write_ms, total_ms, pool) {
     var u = sandhi_url_parse(url);
     if (u == 0) { return _sandhi_resp_err(SANDHI_ERR_PARSE); }
 
@@ -172,24 +188,43 @@ fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes, co
     var deadline_ms = 0;
     if (total_ms > 0) { deadline_ms = clock_now_ms() + total_ms; }
 
-    var eff_connect = _sandhi_http_clamp_ms(connect_ms, deadline_ms);
-    if (eff_connect == 0 - 1) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
-
     var use_tls = 0;
     if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { use_tls = 1; }
-    var conn = sandhi_conn_open_fully_timed(addr, sandhi_url_port(u), use_tls,
-                                             sandhi_url_host(u), eff_connect, read_ms, write_ms);
+    var port = sandhi_url_port(u);
+    var host = sandhi_url_host(u);
+
+    # Try the pool first when attached. A taken conn skips the connect
+    # phase entirely (and its timeout). Failure on a pooled conn falls
+    # back to opening a fresh one — peer may have closed since put-back.
+    var keep_alive = 0;
+    var conn = 0;
+    if (pool != 0) {
+        keep_alive = 1;
+        conn = _sandhi_pool_take(pool, host, port, use_tls);
+    }
+
     if (conn == 0) {
-        var oe = sandhi_conn_last_open_err();
-        if (oe == SANDHI_CONN_OPEN_TIMEOUT) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
-        if (oe == SANDHI_CONN_OPEN_TLS)     { return _sandhi_resp_err(SANDHI_ERR_TLS); }
-        return _sandhi_resp_err(SANDHI_ERR_CONNECT);
+        var eff_connect = _sandhi_http_clamp_ms(connect_ms, deadline_ms);
+        if (eff_connect == 0 - 1) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
+        conn = sandhi_conn_open_fully_timed(addr, port, use_tls, host,
+                                             eff_connect, read_ms, write_ms);
+        if (conn == 0) {
+            var oe = sandhi_conn_last_open_err();
+            if (oe == SANDHI_CONN_OPEN_TIMEOUT) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
+            if (oe == SANDHI_CONN_OPEN_TLS)     { return _sandhi_resp_err(SANDHI_ERR_TLS); }
+            return _sandhi_resp_err(SANDHI_ERR_CONNECT);
+        }
     }
 
     var full_path = _sandhi_client_full_path(u);
     var host_hdr = _sandhi_client_host_header(u);
-    var req = _sandhi_client_build_request(method, full_path, host_hdr, user_headers, body_len);
+    var req = _sandhi_client_build_request_v(method, full_path, host_hdr,
+                                              user_headers, body_len, keep_alive);
 
+    if (keep_alive == 1) {
+        return _sandhi_http_exchange_keepalive(conn, req, body, body_len, max_bytes,
+                                                 deadline_ms, pool, host, port, use_tls);
+    }
     return _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms);
 }
 
@@ -234,6 +269,76 @@ fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms) {
     return sandhi_http_response_parse(rbuf, nread);
 }
 
+# Keep-alive variant — does framed recv (Content-Length or chunked
+# detected from response headers) so the conn stays alive past the
+# response. On success (2xx/3xx, no server-Connection-close) the conn
+# is returned to the pool; otherwise it's closed. Bite 1 of 0.8.0.
+fn _sandhi_http_exchange_keepalive(conn, req, body, body_len, max_bytes,
+                                     deadline_ms, pool, host, port, use_tls) {
+    if (deadline_ms > 0 && clock_now_ms() >= deadline_ms) {
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err(SANDHI_ERR_TIMEOUT);
+    }
+    var req_data = str_data(req);
+    var req_len = strlen(req_data);
+    var sw = sandhi_conn_send_all(conn, req_data, req_len);
+    if (sw == 0 - _SANDHI_EAGAIN) {
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err(SANDHI_ERR_TIMEOUT);
+    }
+    if (sw < 0) {
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err(SANDHI_ERR_CONNECT);
+    }
+    if (body_len > 0 && body != 0) {
+        var sb = sandhi_conn_send_all(conn, body, body_len);
+        if (sb == 0 - _SANDHI_EAGAIN) {
+            sandhi_conn_close(conn);
+            return _sandhi_resp_err(SANDHI_ERR_TIMEOUT);
+        }
+        if (sb < 0) {
+            sandhi_conn_close(conn);
+            return _sandhi_resp_err(SANDHI_ERR_CONNECT);
+        }
+    }
+    var cap = max_bytes;
+    if (cap <= 0) { cap = _SANDHI_HTTP_RESP_BUF_SIZE; }
+    var rbuf = alloc(cap + 1);
+    var nread = _sandhi_http_recv_framed(conn, rbuf, cap, deadline_ms);
+    if (nread == 0 - _SANDHI_EAGAIN) {
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err(SANDHI_ERR_TIMEOUT);
+    }
+    if (nread < 0 && nread != 0 - 2) {
+        # 0 - 2 is the must-close sentinel — we still got the response.
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err(SANDHI_ERR_CONNECT);
+    }
+    var server_sent_close = 0;
+    var actual_n = nread;
+    if (nread == 0 - 2) {
+        # Server told us close; read whatever we have, then close.
+        # _sandhi_http_recv_framed null-terminates buf at the bytes
+        # actually read; recompute via strlen-style scan up to cap.
+        actual_n = strlen(rbuf);
+        server_sent_close = 1;
+    }
+    var resp = sandhi_http_response_parse(rbuf, actual_n);
+    var status = sandhi_http_status(resp);
+    var ek = sandhi_http_err_kind(resp);
+    var put_back = 0;
+    if (ek == SANDHI_OK && server_sent_close == 0
+        && status >= 200 && status < 400) {
+        put_back = 1;
+    }
+    if (put_back == 1) {
+        _sandhi_pool_put(pool, host, port, use_tls, conn);
+    } else {
+        sandhi_conn_close(conn);
+    }
+    return resp;
+}
+
 # ================================================================
 # Redirect following (opt-in, bounded)
 # ================================================================
@@ -245,7 +350,7 @@ fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms) {
 # Location may be absolute ("https://other.example.com/x") or relative
 # ("/x" — resolve against the current URL's scheme+authority).
 
-# Options struct (56 bytes):
+# Options struct (64 bytes):
 #   +0   follow_redirects   (int: 0 default, 1 to enable)
 #   +8   max_hops           (int: default 5)
 #   +16  max_response_bytes (int: default 262144 = 256 KB; applies to
@@ -262,6 +367,12 @@ fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms) {
 #                            Bounds connect_ms + recv loop but not
 #                            redirect-follow chain (each hop gets a
 #                            fresh deadline). Added 0.7.3.
+#   +56  pool               (ptr: sandhi_http_pool* or 0). When
+#                            attached: emit Connection: keep-alive,
+#                            try-take from pool before opening new,
+#                            put-back on 2xx/3xx with no
+#                            server-Connection-close. Added 0.8.0
+#                            (Bite 1).
 enum SandhiHttpOptOff {
     SANDHI_HTTP_OPT_OFF_FOLLOW     = 0;
     SANDHI_HTTP_OPT_OFF_MAX_HOPS   = 8;
@@ -270,9 +381,10 @@ enum SandhiHttpOptOff {
     SANDHI_HTTP_OPT_OFF_WRITE_MS   = 32;
     SANDHI_HTTP_OPT_OFF_CONNECT_MS = 40;
     SANDHI_HTTP_OPT_OFF_TOTAL_MS   = 48;
+    SANDHI_HTTP_OPT_OFF_POOL       = 56;
 }
 
-var SANDHI_HTTP_OPT_STRUCT_SIZE = 56;
+var SANDHI_HTTP_OPT_STRUCT_SIZE = 64;
 var SANDHI_HTTP_DEFAULT_MAX_HOPS = 5;
 var SANDHI_HTTP_DEFAULT_MAX_BYTES = 262144;
 
@@ -285,6 +397,7 @@ fn sandhi_http_options_new() {
     store64(o + SANDHI_HTTP_OPT_OFF_WRITE_MS, 0);
     store64(o + SANDHI_HTTP_OPT_OFF_CONNECT_MS, 0);
     store64(o + SANDHI_HTTP_OPT_OFF_TOTAL_MS, 0);
+    store64(o + SANDHI_HTTP_OPT_OFF_POOL, 0);
     return o;
 }
 
@@ -323,6 +436,11 @@ fn sandhi_http_options_total_ms(opts, ms) {
     return 0;
 }
 
+fn sandhi_http_options_pool(opts, pool) {
+    store64(opts + SANDHI_HTTP_OPT_OFF_POOL, pool);
+    return 0;
+}
+
 fn sandhi_http_options_follow(opts) {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_FOLLOW);
@@ -356,6 +474,11 @@ fn sandhi_http_options_get_connect_ms(opts) {
 fn sandhi_http_options_get_total_ms(opts) {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_TOTAL_MS);
+}
+
+fn sandhi_http_options_get_pool(opts) {
+    if (opts == 0) { return 0; }
+    return load64(opts + SANDHI_HTTP_OPT_OFF_POOL);
 }
 
 # 1 if the status code indicates a redirect we follow.
@@ -410,13 +533,14 @@ fn _sandhi_resolve_location(base_url, location) {
 # destination gets its own request budget); if a tighter end-to-end
 # bound is needed, the caller should lower max_hops or pre-compute.
 fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
-                        max_bytes, connect_ms, read_ms, write_ms, total_ms) {
+                        max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
     var m = method;
     var u = url;
     var b = body;
     var bl = body_len;
     var hops = 0;
-    var r = _sandhi_http_do(m, u, headers, b, bl, max_bytes, connect_ms, read_ms, write_ms, total_ms);
+    var r = _sandhi_http_do(m, u, headers, b, bl, max_bytes,
+                             connect_ms, read_ms, write_ms, total_ms, pool);
     while (hops < max_hops) {
         if (_sandhi_is_redirect(sandhi_http_status(r)) == 0) { return r; }
         var loc = sandhi_headers_get(sandhi_http_headers(r), "Location");
@@ -426,7 +550,8 @@ fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
         if (sandhi_http_status(r) == 303) { m = "GET"; b = 0; bl = 0; }
         u = next;
         hops = hops + 1;
-        r = _sandhi_http_do(m, u, headers, b, bl, max_bytes, connect_ms, read_ms, write_ms, total_ms);
+        r = _sandhi_http_do(m, u, headers, b, bl, max_bytes,
+                             connect_ms, read_ms, write_ms, total_ms, pool);
     }
     return r;
 }
@@ -443,13 +568,14 @@ fn _sandhi_http_dispatch(method, url, headers, body, body_len, opts) {
     var write_ms = sandhi_http_options_get_write_ms(opts);
     var connect_ms = sandhi_http_options_get_connect_ms(opts);
     var total_ms = sandhi_http_options_get_total_ms(opts);
+    var pool = sandhi_http_options_get_pool(opts);
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
         return _sandhi_http_follow(method, url, headers, body, body_len, hops,
-                                    max_bytes, connect_ms, read_ms, write_ms, total_ms);
+                                    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
     }
     return _sandhi_http_do(method, url, headers, body, body_len,
-                            max_bytes, connect_ms, read_ms, write_ms, total_ms);
+                            max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
 }
 
 # Simple verbs — no redirect following. Pass user_headers = 0 for none.

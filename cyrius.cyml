@@ -53,6 +53,7 @@ modules = [
     "src/http/response.cyr",
     "src/net/resolve.cyr",
     "src/http/client.cyr",
+    "src/http/pool.cyr",
     "src/http/retry.cyr",
     "src/http/sse.cyr",
     "src/http/stream.cyr",

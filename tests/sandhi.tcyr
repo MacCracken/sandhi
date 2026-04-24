@@ -9,6 +9,7 @@ include "src/http/conn.cyr"
 include "src/http/response.cyr"
 include "src/net/resolve.cyr"
 include "src/http/client.cyr"
+include "src/http/pool.cyr"
 include "src/http/retry.cyr"
 include "src/http/sse.cyr"
 include "src/http/stream.cyr"
@@ -619,6 +620,149 @@ fn test_total_ms_blackhole_returns_timeout() {
     var elapsed = clock_now_ms() - t0;
     assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_TIMEOUT, "total_ms blackhole: TIMEOUT raised");
     assert_eq(elapsed < 5000, 1, "total_ms blackhole: returned within budget");
+    return 0;
+}
+
+# ================================================================
+# Connection pool tests (Bite 1 of 0.8.0)
+# ================================================================
+#
+# Fake-conn fixture: /dev/null fd so sandhi_conn_close is real but
+# harmless. Pool API runs end-to-end with no actual network.
+
+fn _test_pool_fake_conn() {
+    var fd = syscall(2, "/dev/null", 0, 0);  # open(O_RDONLY)
+    var c = alloc(SANDHI_CONN_STRUCT_SIZE);
+    store64(c + SANDHI_CONN_OFF_KIND, SANDHI_CONN_PLAIN);
+    store64(c + SANDHI_CONN_OFF_FD, fd);
+    store64(c + SANDHI_CONN_OFF_TLS_CTX, 0);
+    return c;
+}
+
+fn test_pool_new_defaults() {
+    var p = sandhi_http_pool_new(0, 0);
+    assert_eq(sandhi_http_pool_max_per_host(p), 8, "pool: default max_per_host=8");
+    assert_eq(sandhi_http_pool_idle_timeout_ms(p), 90000, "pool: default idle_timeout=90s");
+    assert_eq(sandhi_http_pool_idle_count(p), 0, "pool: starts empty");
+    return 0;
+}
+
+fn test_pool_new_explicit() {
+    var p = sandhi_http_pool_new(4, 30000);
+    assert_eq(sandhi_http_pool_max_per_host(p), 4, "pool: max_per_host=4 sticks");
+    assert_eq(sandhi_http_pool_idle_timeout_ms(p), 30000, "pool: idle_timeout=30s sticks");
+    return 0;
+}
+
+fn test_pool_take_empty_returns_zero() {
+    var p = sandhi_http_pool_new(8, 90000);
+    var c = _sandhi_pool_take(p, "example.com", 80, 0);
+    assert_eq(c, 0, "pool: take from empty → 0");
+    return 0;
+}
+
+fn test_pool_put_then_take_returns_same_conn() {
+    var p = sandhi_http_pool_new(8, 90000);
+    var fc = _test_pool_fake_conn();
+    _sandhi_pool_put(p, "example.com", 80, 0, fc);
+    assert_eq(sandhi_http_pool_idle_count(p), 1, "pool: count=1 after put");
+    var taken = _sandhi_pool_take(p, "example.com", 80, 0);
+    assert_eq(taken, fc, "pool: take returns the same conn");
+    assert_eq(sandhi_http_pool_idle_count(p), 0, "pool: count=0 after take");
+    sandhi_conn_close(fc);  # cleanup
+    return 0;
+}
+
+fn test_pool_routes_isolated() {
+    # Putting on host A doesn't affect host B's queue.
+    var p = sandhi_http_pool_new(8, 90000);
+    var c1 = _test_pool_fake_conn();
+    _sandhi_pool_put(p, "alpha.example", 80, 0, c1);
+    var taken_b = _sandhi_pool_take(p, "beta.example", 80, 0);
+    assert_eq(taken_b, 0, "pool: route B miss when only A populated");
+    var taken_a = _sandhi_pool_take(p, "alpha.example", 80, 0);
+    assert_eq(taken_a, c1, "pool: route A hit");
+    sandhi_conn_close(c1);
+    return 0;
+}
+
+fn test_pool_route_distinguishes_tls() {
+    # http://host:80 and https://host:80 are different routes.
+    var p = sandhi_http_pool_new(8, 90000);
+    var c_plain = _test_pool_fake_conn();
+    _sandhi_pool_put(p, "example", 80, 0, c_plain);
+    var taken_tls = _sandhi_pool_take(p, "example", 80, 1);
+    assert_eq(taken_tls, 0, "pool: TLS=1 doesn't pick TLS=0 conn");
+    var taken_plain = _sandhi_pool_take(p, "example", 80, 0);
+    assert_eq(taken_plain, c_plain, "pool: TLS=0 picks the matching conn");
+    sandhi_conn_close(c_plain);
+    return 0;
+}
+
+fn test_pool_cap_evicts_oldest() {
+    # max_per_host=2 → on the third put, the OLDEST is closed and dropped.
+    var p = sandhi_http_pool_new(2, 90000);
+    var c1 = _test_pool_fake_conn();
+    var c2 = _test_pool_fake_conn();
+    var c3 = _test_pool_fake_conn();
+    _sandhi_pool_put(p, "host", 80, 0, c1);
+    _sandhi_pool_put(p, "host", 80, 0, c2);
+    assert_eq(sandhi_http_pool_idle_count(p), 2, "pool: at cap=2 after 2 puts");
+    _sandhi_pool_put(p, "host", 80, 0, c3);  # evicts c1
+    assert_eq(sandhi_http_pool_idle_count(p), 2, "pool: still at cap=2 after evict-and-put");
+    # LIFO take → c3 (most-recent put), then c2.
+    var t1 = _sandhi_pool_take(p, "host", 80, 0);
+    assert_eq(t1, c3, "pool: LIFO take returns c3 (most-recent)");
+    var t2 = _sandhi_pool_take(p, "host", 80, 0);
+    assert_eq(t2, c2, "pool: next take returns c2");
+    var t3 = _sandhi_pool_take(p, "host", 80, 0);
+    assert_eq(t3, 0, "pool: empty after both pops");
+    sandhi_conn_close(c2);
+    sandhi_conn_close(c3);
+    return 0;
+}
+
+fn test_pool_close_drops_all_idle() {
+    var p = sandhi_http_pool_new(8, 90000);
+    var c1 = _test_pool_fake_conn();
+    var c2 = _test_pool_fake_conn();
+    _sandhi_pool_put(p, "host-a", 80, 0, c1);
+    _sandhi_pool_put(p, "host-b", 443, 1, c2);
+    assert_eq(sandhi_http_pool_idle_count(p), 2, "pool: 2 idle pre-close");
+    sandhi_http_pool_close(p);
+    assert_eq(sandhi_http_pool_idle_count(p), 0, "pool: 0 idle post-close");
+    # Subsequent take from an empty pool still works (map_clear left it usable).
+    var taken = _sandhi_pool_take(p, "host-a", 80, 0);
+    assert_eq(taken, 0, "pool: take from closed-then-emptied → 0");
+    return 0;
+}
+
+fn test_pool_options_attach() {
+    var p = sandhi_http_pool_new(4, 30000);
+    var o = sandhi_http_options_new();
+    assert_eq(sandhi_http_options_get_pool(o), 0, "options: pool default 0");
+    sandhi_http_options_pool(o, p);
+    assert_eq(sandhi_http_options_get_pool(o), p, "options: pool attaches");
+    return 0;
+}
+
+fn test_pool_chunked_complete_detector() {
+    # Buffer with header + complete chunked body: "5\r\nhello\r\n0\r\n\r\n"
+    # body_start=0 in the test (we're testing the detector in isolation).
+    var raw = "5\r\nhello\r\n0\r\n\r\n";
+    assert_eq(_sandhi_pool_chunked_complete(raw, 0, strlen(raw)), 1, "chunked: complete detected");
+
+    # Truncated — missing trailing CRLF after 0-chunk.
+    var raw2 = "5\r\nhello\r\n0\r\n";
+    assert_eq(_sandhi_pool_chunked_complete(raw2, 0, strlen(raw2)), 0, "chunked: incomplete");
+
+    # Mid-chunk truncation.
+    var raw3 = "5\r\nhel";
+    assert_eq(_sandhi_pool_chunked_complete(raw3, 0, strlen(raw3)), 0, "chunked: data truncated");
+
+    # Multi-chunk before terminal.
+    var raw4 = "3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n";
+    assert_eq(_sandhi_pool_chunked_complete(raw4, 0, strlen(raw4)), 1, "chunked: multi-chunk complete");
     return 0;
 }
 
@@ -1752,6 +1896,36 @@ fn main() {
 
     test_group("http/total_ms/blackhole");
     test_total_ms_blackhole_returns_timeout();
+
+    test_group("http/pool/new_defaults");
+    test_pool_new_defaults();
+
+    test_group("http/pool/new_explicit");
+    test_pool_new_explicit();
+
+    test_group("http/pool/take_empty");
+    test_pool_take_empty_returns_zero();
+
+    test_group("http/pool/put_then_take");
+    test_pool_put_then_take_returns_same_conn();
+
+    test_group("http/pool/routes_isolated");
+    test_pool_routes_isolated();
+
+    test_group("http/pool/route_tls_distinct");
+    test_pool_route_distinguishes_tls();
+
+    test_group("http/pool/cap_evict");
+    test_pool_cap_evicts_oldest();
+
+    test_group("http/pool/close_drops_idle");
+    test_pool_close_drops_all_idle();
+
+    test_group("http/pool/options_attach");
+    test_pool_options_attach();
+
+    test_group("http/pool/chunked_detect");
+    test_pool_chunked_complete_detector();
 
     test_group("http/retry/defaults");
     test_retry_defaults();

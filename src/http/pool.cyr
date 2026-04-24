@@ -1,0 +1,373 @@
+# sandhi/http/pool — connection pool for HTTP/1.1 keep-alive (and h2
+# stream-multiplex once Bite 6 lands).
+#
+# Why this exists: every request through `sandhi_http_get` etc.
+# without a pool pays a full TCP handshake + TLS handshake. For a
+# yantra/daimon RPC loop hitting the same host 100×/sec, that's
+# 100× the round-trip cost it needs to be. A small pool with a
+# generous idle timeout amortizes those handshakes across many
+# requests at trivial memory cost.
+#
+# Pool struct (32 bytes):
+#   +0   map               (host:port:tls cstr → vec<idle_conn>)
+#   +8   max_per_host      (int: cap on idle conns per route)
+#   +16  idle_timeout_ms   (int: stale-conn evict threshold)
+#   +24  total_idle        (int: sum of all vec lens; observability)
+#
+# idle_conn struct (16 bytes):
+#   +0   conn              (ptr to sandhi_conn struct)
+#   +8   last_used_ms      (clock_now_ms() at put time)
+#
+# Lifecycle: take / put / close.
+#   - take(host, port, tls) returns the freshest idle conn for the
+#     route, or 0 if none. Stale conns (now - last_used >
+#     idle_timeout_ms) are closed and discarded; take recurses.
+#   - put(host, port, tls, conn) stores the conn for reuse. If the
+#     vec is at max_per_host, the OLDEST entry is evicted (FIFO
+#     across the cap; LIFO take order keeps the freshest hot).
+#   - close drops every idle conn (calls sock_close + tls_close).
+#
+# Single-threaded today. Multi-threaded clients would need a
+# per-pool mutex; flagged as a follow-up when concurrent request
+# dispatch lands (no consumer asking yet).
+
+enum SandhiPoolOff {
+    SANDHI_POOL_OFF_MAP             = 0;
+    SANDHI_POOL_OFF_MAX_PER_HOST    = 8;
+    SANDHI_POOL_OFF_IDLE_TIMEOUT    = 16;
+    SANDHI_POOL_OFF_TOTAL_IDLE      = 24;
+}
+
+enum SandhiIdleConnOff {
+    SANDHI_IDLE_OFF_CONN     = 0;
+    SANDHI_IDLE_OFF_LAST_MS  = 8;
+}
+
+var SANDHI_POOL_STRUCT_SIZE      = 32;
+var SANDHI_IDLE_CONN_STRUCT_SIZE = 16;
+var SANDHI_POOL_DEFAULT_MAX_PER_HOST     = 8;
+var SANDHI_POOL_DEFAULT_IDLE_TIMEOUT_MS  = 90000;  # 90 s — Go default
+
+# ================================================================
+# Public API
+# ================================================================
+
+fn sandhi_http_pool_new(max_per_host, idle_timeout_ms) {
+    var p = alloc(SANDHI_POOL_STRUCT_SIZE);
+    store64(p + SANDHI_POOL_OFF_MAP, map_new());
+    var mph = max_per_host;
+    if (mph <= 0) { mph = SANDHI_POOL_DEFAULT_MAX_PER_HOST; }
+    var ito = idle_timeout_ms;
+    if (ito <= 0) { ito = SANDHI_POOL_DEFAULT_IDLE_TIMEOUT_MS; }
+    store64(p + SANDHI_POOL_OFF_MAX_PER_HOST, mph);
+    store64(p + SANDHI_POOL_OFF_IDLE_TIMEOUT, ito);
+    store64(p + SANDHI_POOL_OFF_TOTAL_IDLE, 0);
+    return p;
+}
+
+fn sandhi_http_pool_max_per_host(p) {
+    if (p == 0) { return SANDHI_POOL_DEFAULT_MAX_PER_HOST; }
+    return load64(p + SANDHI_POOL_OFF_MAX_PER_HOST);
+}
+
+fn sandhi_http_pool_idle_timeout_ms(p) {
+    if (p == 0) { return SANDHI_POOL_DEFAULT_IDLE_TIMEOUT_MS; }
+    return load64(p + SANDHI_POOL_OFF_IDLE_TIMEOUT);
+}
+
+fn sandhi_http_pool_idle_count(p) {
+    if (p == 0) { return 0; }
+    return load64(p + SANDHI_POOL_OFF_TOTAL_IDLE);
+}
+
+# Drop every idle conn (closes fds + TLS contexts). Pool struct stays
+# allocated and reusable; map is cleared.
+fn sandhi_http_pool_close(p) {
+    if (p == 0) { return 0; }
+    var m = load64(p + SANDHI_POOL_OFF_MAP);
+    var keys = map_keys(m);
+    var i = 0;
+    var n = vec_len(keys);
+    while (i < n) {
+        var key = vec_get(keys, i);
+        var v = map_get(m, key);
+        if (v != 0) {
+            var j = 0;
+            var jn = vec_len(v);
+            while (j < jn) {
+                var ic = vec_get(v, j);
+                if (ic != 0) {
+                    var c = load64(ic + SANDHI_IDLE_OFF_CONN);
+                    if (c != 0) { sandhi_conn_close(c); }
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    map_clear(m);
+    store64(p + SANDHI_POOL_OFF_TOTAL_IDLE, 0);
+    return 0;
+}
+
+# ================================================================
+# Internal: route key + idle_conn helpers
+# ================================================================
+
+# Build a route key "host:port:tls" as a NUL-terminated cstr that
+# map_get/map_set can use directly. tls is "0" or "1".
+fn _sandhi_pool_route_key(host, port, tls) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, host);
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_int(sb, port);
+    str_builder_add_cstr(sb, ":");
+    if (tls == 1) { str_builder_add_cstr(sb, "1"); }
+    else          { str_builder_add_cstr(sb, "0"); }
+    return str_data(str_builder_build(sb));
+}
+
+fn _sandhi_pool_idle_conn_new(conn, now_ms) {
+    var ic = alloc(SANDHI_IDLE_CONN_STRUCT_SIZE);
+    store64(ic + SANDHI_IDLE_OFF_CONN, conn);
+    store64(ic + SANDHI_IDLE_OFF_LAST_MS, now_ms);
+    return ic;
+}
+
+# ================================================================
+# Take / put — the hot path
+# ================================================================
+
+# Fish a conn out of the pool for the given route. Returns 0 if the
+# pool is empty for that route. Stale conns (idle > idle_timeout_ms)
+# are closed and skipped before returning a fresh one. take is LIFO
+# over the per-route vec (freshest first) — keeps the most-recently-
+# used conn hot in the kernel buffer cache.
+fn _sandhi_pool_take(pool, host, port, tls) {
+    if (pool == 0) { return 0; }
+    var key = _sandhi_pool_route_key(host, port, tls);
+    var m = load64(pool + SANDHI_POOL_OFF_MAP);
+    var v = map_get(m, key);
+    if (v == 0) { return 0; }
+    var idle_to = load64(pool + SANDHI_POOL_OFF_IDLE_TIMEOUT);
+    var now = clock_now_ms();
+    var picked = 0;
+    while (picked == 0 && vec_len(v) > 0) {
+        var ic = vec_pop(v);
+        if (ic == 0) { return 0; }  # defensive; vec_pop shouldn't yield 0
+        var conn = load64(ic + SANDHI_IDLE_OFF_CONN);
+        var last = load64(ic + SANDHI_IDLE_OFF_LAST_MS);
+        store64(pool + SANDHI_POOL_OFF_TOTAL_IDLE,
+                load64(pool + SANDHI_POOL_OFF_TOTAL_IDLE) - 1);
+        if (now - last > idle_to) {
+            # Stale — peer may have closed it. Close + try next.
+            if (conn != 0) { sandhi_conn_close(conn); }
+        } else {
+            return conn;
+        }
+    }
+    return 0;
+}
+
+# Return a conn to the pool. If the per-route vec is at max_per_host,
+# the oldest (front of vec) is evicted to make room — bounded memory.
+# Caller guarantees the conn is still usable (2xx/3xx response, no
+# server-sent Connection: close).
+fn _sandhi_pool_put(pool, host, port, tls, conn) {
+    if (pool == 0 || conn == 0) {
+        if (conn != 0) { sandhi_conn_close(conn); }
+        return 0;
+    }
+    var key = _sandhi_pool_route_key(host, port, tls);
+    var m = load64(pool + SANDHI_POOL_OFF_MAP);
+    var v = map_get(m, key);
+    if (v == 0) {
+        v = vec_new();
+        map_set(m, key, v);
+    }
+    var cap = load64(pool + SANDHI_POOL_OFF_MAX_PER_HOST);
+    if (vec_len(v) >= cap) {
+        # Evict oldest (index 0). vec_remove shifts the rest.
+        var oldest = vec_get(v, 0);
+        if (oldest != 0) {
+            var oc = load64(oldest + SANDHI_IDLE_OFF_CONN);
+            if (oc != 0) { sandhi_conn_close(oc); }
+        }
+        vec_remove(v, 0);
+        store64(pool + SANDHI_POOL_OFF_TOTAL_IDLE,
+                load64(pool + SANDHI_POOL_OFF_TOTAL_IDLE) - 1);
+    }
+    var ic = _sandhi_pool_idle_conn_new(conn, clock_now_ms());
+    vec_push(v, ic);
+    store64(pool + SANDHI_POOL_OFF_TOTAL_IDLE,
+            load64(pool + SANDHI_POOL_OFF_TOTAL_IDLE) + 1);
+    return 0;
+}
+
+# ================================================================
+# Framing-aware response read for keep-alive
+# ================================================================
+#
+# When the connection is going back to the pool we cannot read-to-EOF
+# (the peer is keeping the socket open for the next request). Read
+# incrementally until we have a complete response per its declared
+# framing — Content-Length or chunked. HTTP/1.0 / no-framing
+# responses always close the connection per RFC 7230 §3.3.3 ("connection
+# closed by server"); the caller treats that as no-keep-alive.
+#
+# Returns:
+#   - bytes-read on success (≥ 0)
+#   - 0 - _SANDHI_EAGAIN on read deadline
+#   - 0 - 1 on protocol error or buffer exhaustion
+#   - 0 - 2 if the response declares Connection: close (caller must
+#         not put back into the pool; we read what we can and stop)
+#
+# Status: this function is the keep-alive correctness boundary. It
+# does NOT enforce a `Trailer:` header sweep or trailer-chunk parse —
+# trailers are dropped silently per RFC 7230 §4.4 robustness ("MAY
+# discard"). If a consumer ever needs trailers, they ask.
+
+fn _sandhi_pool_chunked_complete(buf, body_start, blen) {
+    # Walk the chunked body looking for terminal 0-chunk. Returns 1
+    # if a complete chunked stream is present in [body_start, blen),
+    # 0 if more bytes are needed, (0 - 1) on malformed chunk-size.
+    var off = body_start;
+    var going = 1;
+    while (going == 1) {
+        if (off >= blen) { return 0; }
+        # Parse chunk-size hex digits.
+        var size = 0;
+        var seen = 0;
+        var scan = 1;
+        while (scan == 1 && off < blen) {
+            var c = load8(buf + off);
+            if (c >= 48 && c <= 57)      { size = size * 16 + (c - 48); seen = 1; off = off + 1; }
+            elif (c >= 97 && c <= 102)   { size = size * 16 + (c - 87); seen = 1; off = off + 1; }
+            elif (c >= 65 && c <= 70)    { size = size * 16 + (c - 55); seen = 1; off = off + 1; }
+            else { scan = 0; }
+        }
+        if (seen == 0 && off >= blen) { return 0; }
+        if (seen == 0) { return 0 - 1; }
+        # Skip chunk-extension up to CR or LF.
+        while (off < blen && load8(buf + off) != 13 && load8(buf + off) != 10) {
+            off = off + 1;
+        }
+        if (off >= blen) { return 0; }
+        # Eat CRLF.
+        if (load8(buf + off) == 13) {
+            if (off + 1 >= blen) { return 0; }
+            off = off + 2;
+        } else {
+            off = off + 1;
+        }
+        if (size == 0) {
+            # Terminal — need trailing CRLF (skipping any trailers).
+            # We accept 0\r\n\r\n as "done" without parsing trailers.
+            if (off + 1 >= blen) { return 0; }
+            return 1;
+        }
+        # Skip data + trailing CRLF.
+        if (off + size + 2 > blen) { return 0; }
+        off = off + size + 2;
+    }
+    return 0;
+}
+
+# Receive a framed response into a scratch buffer that the caller
+# allocated (`buf`, capacity `cap`). Returns total bytes read, or
+# negative sentinel per top-of-section. `deadline_ms` (0 = none)
+# bounds the total recv loop. Reads in 4 KB chunks for sane progress.
+fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms) {
+    var have = 0;
+    var headers_end = 0 - 1;
+    var body_start = 0;
+    var content_length = 0 - 1;  # -1 = not yet parsed
+    var is_chunked = 0;
+    var must_close = 0;
+
+    var step = 4096;
+    var scratch_done = 0;
+
+    var going = 1;
+    while (going == 1) {
+        if (have >= cap) { return 0 - 1; }
+        if (deadline_ms > 0 && clock_now_ms() >= deadline_ms) {
+            return 0 - _SANDHI_EAGAIN;
+        }
+        var room = cap - have;
+        var ask = step;
+        if (ask > room) { ask = room; }
+        var n = sandhi_conn_recv(conn, buf + have, ask);
+        if (n == 0 - _SANDHI_EAGAIN) { return 0 - _SANDHI_EAGAIN; }
+        if (n < 0) { return 0 - 1; }
+        if (n == 0) {
+            # EOF before framing satisfied — could be HTTP/1.0 close-
+            # delimited OR a broken connection. Caller decides.
+            store8(buf + have, 0);
+            return have;
+        }
+        have = have + n;
+        store8(buf + have, 0);
+
+        if (headers_end < 0) {
+            headers_end = _sandhi_resp_headers_end(buf, have);
+            if (headers_end >= 0) {
+                body_start = headers_end + 4;
+                if (load8(buf + headers_end) == 10) { body_start = headers_end + 2; }
+                if (body_start > have) { body_start = have; }
+                # Parse headers to figure out framing.
+                var sline_end = _sandhi_resp_eol(buf, 0, headers_end);
+                var hstart = sline_end;
+                if (hstart < headers_end && load8(buf + hstart) == 13) { hstart = hstart + 1; }
+                if (hstart < headers_end && load8(buf + hstart) == 10) { hstart = hstart + 1; }
+                var hblock_len = headers_end - hstart;
+                if (hblock_len < 0) { hblock_len = 0; }
+                var headers = sandhi_headers_parse(buf + hstart, hblock_len);
+                if (_sandhi_resp_is_chunked(headers) == 1) {
+                    is_chunked = 1;
+                } else {
+                    var clv = sandhi_headers_get(headers, "Content-Length");
+                    if (clv != 0) {
+                        content_length = _sandhi_resp_parse_clen(clv);
+                    }
+                }
+                # Detect server-sent Connection: close.
+                var conn_hdr = sandhi_headers_get(headers, "Connection");
+                if (conn_hdr != 0) {
+                    var i = 0;
+                    var matches = 1;
+                    while (i < 5 && matches == 1) {
+                        var ch = load8(conn_hdr + i);
+                        # case-insensitive compare to "close"
+                        if (ch >= 65 && ch <= 90) { ch = ch + 32; }
+                        var want = load8("close" + i);
+                        if (ch != want) { matches = 0; }
+                        i = i + 1;
+                    }
+                    if (matches == 1) { must_close = 1; }
+                }
+                scratch_done = 1;
+            }
+        }
+
+        if (scratch_done == 1) {
+            if (is_chunked == 1) {
+                var done = _sandhi_pool_chunked_complete(buf, body_start, have);
+                if (done == 0 - 1) { return 0 - 1; }
+                if (done == 1) { going = 0; }
+            } elif (content_length >= 0) {
+                if (have - body_start >= content_length) { going = 0; }
+            } else {
+                # No framing declared — HTTP/1.0 close-delimited. Read
+                # until EOF (handled by the n==0 branch above).
+                must_close = 1;
+            }
+        }
+    }
+    if (must_close == 1) { return 0 - 2; }
+    return have;
+}
+
+fn sandhi_pool_version() {
+    return "0.7.4";  # Bite 1 of 0.8.0; staged on 0.7.x until 0.8.0 ships.
+}
