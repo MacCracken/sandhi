@@ -4,6 +4,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.8] — 2026-04-25
+
+**HPACK Huffman encode.** Wire-size optimization for outgoing h2
+header blocks — text-heavy headers (cookies, JSON Authorization
+tokens, ASCII paths) now ship 25-30% smaller. Deferred from 0.8.x
+on the "wait for bandwidth-pressure evidence" rule; landing now as
+part of the pre-fold completeness pass since fold timing precludes
+landing it later as a 1.0.x patch. ADR 0005 surface freeze
+respected (no new public verbs; the new encoder symbols are HPACK
+internals consumers never touch directly).
+
+**649 assertions green** (482 sandhi + 167 h2 — +14 from the new
+encoder reference test). Two existing literal-encode tests had
+their wire-byte counts updated from raw to Huffman.
+
+### http/h2/huffman
+
+- `src/http/h2/huffman.cyr` — encode landed alongside the existing
+  decode (Bite 2b of 0.8.0). Init now also builds a parallel
+  `_hpack_huffman_codes` lookup table — 257 × 16-byte entries
+  indexed by symbol, populated from the same hex blob the decode
+  tree reads. New helpers `_hpack_huffman_code_of` /
+  `_hpack_huffman_bits_of` for symbol → (code, bit-length).
+- New `sandhi_hpack_huffman_encoded_len(s)` — walks `s`, sums
+  each byte's bit-length from the table, returns `(bits + 7) >> 3`.
+  Used by the size-vs-raw choice in `_hpack_string_encode`.
+- New `sandhi_hpack_huffman_encode(out, off, s)` — packs codes
+  MSB-first into a bit accumulator, drains 8-bit chunks to
+  `out`, pads the final partial byte with EOS-prefix 1-bits per
+  RFC 7541 §5.2 so the existing decoder's padding check accepts
+  the output. Accumulator is i64 (max code 30 bits + ≤7 leftover
+  → 37 bits, well within bounds).
+
+### http/h2/hpack
+
+- `src/http/h2/hpack.cyr::_hpack_string_encode` — probes
+  `sandhi_hpack_huffman_encoded_len(s)` first, picks Huffman
+  (H=1 in the length prefix) when strictly shorter than raw.
+  Tie → raw, since the savings are zero and raw is simpler. The
+  decoder side already supported H=1 (Bite 2b), so the wire is
+  fully roundtrip-correct without any other change.
+
+### Verification
+
+- New `test_hpack_huffman_encode_www_example` (h2.tcyr) asserts
+  byte-exact output against the RFC 7541 C.4.1 reference vector:
+  `"www.example.com"` → `f1 e3 c2 e5 f2 3a 6b a0 ab 90 f4 ff`
+  (12 bytes, vs. 15 raw). All 12 bytes match plus the
+  `sandhi_hpack_huffman_encoded_len` probe.
+- `test_hpack_encode_decode_literal_inline` updated: `("x-foo",
+  "bar")` now ships in 10 bytes (Huffman 4 + raw 3) instead of
+  the previous 11 (raw 5 + raw 3). Roundtrip-decode still asserts
+  the original strings come back unchanged.
+- `test_hpack_encode_decode_no_index` updated: `("x-no", "ok")`
+  now ships in 8 bytes (Huffman 3 + raw 2) instead of 9 (raw 4 +
+  raw 2). Same roundtrip property.
+
 ## [0.9.7] — 2026-04-25
 
 **`TE: trailers` request signaling.** Outgoing-side counterpart to

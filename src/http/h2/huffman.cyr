@@ -22,14 +22,14 @@
 #     all-1 bits (the most-significant bits of the EOS code, which
 #     is 0x3FFFFFFF). Anything else is malformed.
 #
-# Encode is NOT implemented — sandhi always emits raw strings (H=0).
-# Per RFC 7541 §5.2 servers must accept both, so this is purely a
-# wire-size optimization we choose not to take. If a consumer ever
-# wants Huffman encode for outbound traffic, ~150 lines: walk the
-# same tree top-down per character to produce code+bits, pack into
-# bytes.
+# Encode landed at 0.9.8 — `sandhi_hpack_huffman_encoded_len` probes
+# the encoded byte count, `sandhi_hpack_huffman_encode` packs bits
+# MSB-first into a caller-supplied buffer, EOS-prefix-padding the
+# final byte per §5.2. The encoder is wired into hpack.cyr's string
+# emit path (`_hpack_string_encode`) which now picks Huffman when
+# strictly shorter than raw and sets the H bit accordingly.
 #
-# Bite 2b of 0.8.0.
+# Decode landed as Bite 2b of 0.8.0; encode followed at 0.9.8.
 
 # ================================================================
 # Tree node layout (24 bytes)
@@ -64,11 +64,20 @@ fn _hpack_huffman_node_new() {
 var _hpack_huffman_blob = "00001ff80d007fffd8170fffffe21c0fffffe31c0fffffe41c0fffffe51c0fffffe61c0fffffe71c0fffffe81c00ffffea183ffffffc1e0fffffe91c0fffffea1c3ffffffd1e0fffffeb1c0fffffec1c0fffffed1c0fffffee1c0fffffef1c0ffffff01c0ffffff11c0ffffff21c3ffffffe1e0ffffff31c0ffffff41c0ffffff51c0ffffff61c0ffffff71c0ffffff81c0ffffff91c0ffffffa1c0ffffffb1c0000001406000003f80a000003f90a00000ffa0c00001ff90d0000001506000000f808000007fa0b000003fa0a000003fb0a000000f908000007fb0b000000fa0800000016060000001706000000180600000000050000000105000000020500000019060000001a060000001b060000001c060000001d060000001e060000001f060000005c07000000fb0800007ffc0f000000200600000ffb0c000003fc0a00001ffa0d00000021060000005d070000005e070000005f0700000060070000006107000000620700000063070000006407000000650700000066070000006707000000680700000069070000006a070000006b070000006c070000006d070000006e070000006f07000000700700000071070000007207000000fc080000007307000000fd0800001ffb0d0007fff01300001ffc0d00003ffc0e000000220600007ffd0f00000003050000002306000000040500000024060000000505000000250600000026060000002706000000060500000074070000007507000000280600000029060000002a0600000007050000002b0600000076070000002c06000000080500000009050000002d060000007707000000780700000079070000007a070000007b0700007ffe0f000007fc0b00003ffd0e00001ffd0d0ffffffc1c000fffe614003fffd216000fffe714000fffe814003fffd316003fffd416003fffd516007fffd917003fffd616007fffda17007fffdb17007fffdc17007fffdd17007fffde1700ffffeb18007fffdf1700ffffec1800ffffed18003fffd716007fffe01700ffffee18007fffe117007fffe217007fffe317007fffe417001fffdc15003fffd816007fffe517003fffd916007fffe617007fffe71700ffffef18003fffda16001fffdd15000fffe914003fffdb16003fffdc16007fffe817007fffe917001fffde15007fffea17003fffdd16003fffde1600fffff018001fffdf15003fffdf16007fffeb17007fffec17001fffe015001fffe115003fffe016001fffe215007fffed17003fffe116007fffee17007fffef17000fffea14003fffe216003fffe316003fffe416007ffff017003fffe516003fffe616007ffff11703ffffe01a03ffffe11a000fffeb140007fff113003fffe716007ffff217003fffe81601ffffec1903ffffe21a03ffffe31a03ffffe41a07ffffde1b07ffffdf1b03ffffe51a00fffff11801ffffed190007fff213001fffe31503ffffe61a07ffffe01b07ffffe11b03ffffe71a07ffffe21b00fffff218001fffe415001fffe51503ffffe81a03ffffe91a0ffffffd1c07ffffe31b07ffffe41b07ffffe51b000fffec1400fffff318000fffed14001fffe615003fffe916001fffe715001fffe815007ffff317003fffea16003fffeb1601ffffee1901ffffef1900fffff41800fffff51803ffffea1a007ffff41703ffffeb1a07ffffe61b03ffffec1a03ffffed1a07ffffe71b07ffffe81b07ffffe91b07ffffea1b07ffffeb1b0ffffffe1c07ffffec1b07ffffed1b07ffffee1b07ffffef1b07fffff01b03ffffee1a3fffffff1e";
 
 # ================================================================
-# Init — build the tree from the blob
+# Init — build the tree from the blob (and the symbol→code table
+# for encode, 0.9.8)
 # ================================================================
+#
+# Encode-side table: array of 257 × 16-byte entries indexed by
+# symbol (0..256). Each entry holds:
+#   +0  code  (i64) — the variable-bit code, right-aligned in u64
+#   +8  bits  (i64) — code length in bits (5..30)
+# Allocated lazily inside `_hpack_huffman_init` from the same blob
+# that builds the decode tree.
 
 var _hpack_huffman_inited = 0;
 var _hpack_huffman_root = 0;
+var _hpack_huffman_codes = 0;
 
 fn _hpack_hex_digit(c) {
     if (c >= 48 && c <= 57)  { return c - 48; }   # 0-9
@@ -113,16 +122,27 @@ fn _hpack_huffman_add(code, length, sym) {
 fn _hpack_huffman_init() {
     if (_hpack_huffman_inited == 1) { return 0; }
     _hpack_huffman_root = _hpack_huffman_node_new();
+    _hpack_huffman_codes = alloc(257 * 16);
     var i = 0;
     while (i < 257) {
         var off = i * 10;
         var code   = _hpack_parse_hex(_hpack_huffman_blob, off, 8);
         var length = _hpack_parse_hex(_hpack_huffman_blob, off + 8, 2);
         _hpack_huffman_add(code, length, i);
+        store64(_hpack_huffman_codes + i * 16,     code);
+        store64(_hpack_huffman_codes + i * 16 + 8, length);
         i = i + 1;
     }
     _hpack_huffman_inited = 1;
     return 0;
+}
+
+fn _hpack_huffman_code_of(symbol) {
+    return load64(_hpack_huffman_codes + symbol * 16);
+}
+
+fn _hpack_huffman_bits_of(symbol) {
+    return load64(_hpack_huffman_codes + symbol * 16 + 8);
 }
 
 # ================================================================
@@ -181,5 +201,71 @@ fn sandhi_hpack_huffman_decode(buf, start, nbytes) {
     }
     store8(out + out_len, 0);
     return out;
+}
+
+# ================================================================
+# Encode (RFC 7541 §5.2 + Appendix B) — landed 0.9.8
+# ================================================================
+#
+# Encoded byte count for `s`: walk each byte, sum bit-lengths, divide
+# by 8 rounding up. Used by `_hpack_string_encode` in hpack.cyr to
+# compare against raw size and pick the shorter representation —
+# Huffman only wins on text-shaped strings (cookie blobs, JSON
+# payloads, ASCII URLs); short binary tokens often round-trip larger
+# under Huffman, in which case we keep the raw form.
+
+fn sandhi_hpack_huffman_encoded_len(s) {
+    _hpack_huffman_init();
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    var bits = 0;
+    var i = 0;
+    while (i < n) {
+        var ch = load8(s + i) & 0xFF;
+        bits = bits + _hpack_huffman_bits_of(ch);
+        i = i + 1;
+    }
+    return (bits + 7) >> 3;
+}
+
+# Encode `s` into `out` starting at offset `off`. Caller has already
+# emitted the H=1 length prefix and sized `out` with room for at
+# least `sandhi_hpack_huffman_encoded_len(s)` bytes after `off`.
+# Returns the new write offset.
+#
+# Bit packing is MSB-first per §5.2. The accumulator holds up to
+# ~37 bits at once (max code length 30 + up to 7 leftover bits) —
+# fits in i64 with room to spare. After the input is exhausted, the
+# final partial byte is padded with the most-significant bits of the
+# EOS code (all 1s up to 7 bits), which is the canonical pad pattern
+# the decoder accepts.
+fn sandhi_hpack_huffman_encode(out, off, s) {
+    _hpack_huffman_init();
+    if (s == 0) { return off; }
+    var n = strlen(s);
+    var p = off;
+    var acc = 0;
+    var nbits = 0;
+    var i = 0;
+    while (i < n) {
+        var ch = load8(s + i) & 0xFF;
+        var code = _hpack_huffman_code_of(ch);
+        var clen = _hpack_huffman_bits_of(ch);
+        acc = (acc << clen) | code;
+        nbits = nbits + clen;
+        while (nbits >= 8) {
+            nbits = nbits - 8;
+            store8(out + p, (acc >> nbits) & 0xFF);
+            p = p + 1;
+        }
+        i = i + 1;
+    }
+    if (nbits > 0) {
+        var pad_bits = 8 - nbits;
+        var pad_mask = (1 << pad_bits) - 1;
+        store8(out + p, ((acc << pad_bits) | pad_mask) & 0xFF);
+        p = p + 1;
+    }
+    return p;
 }
 

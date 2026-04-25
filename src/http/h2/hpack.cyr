@@ -368,19 +368,31 @@ fn _hpack_int_decode(buf, blen, off_cell, prefix_bits, value_out) {
 # String encoding (RFC 7541 §5.2)
 # ================================================================
 #
-# Encode: H bit = 0 (no Huffman), length in 7-bit prefix int, then
-# raw bytes. Decode: reject H=1 with HUFFMAN error sentinel until
-# Bite 2b lands.
+# Encode: 7-bit length prefix with the H bit (high bit of the prefix
+# byte) set per representation choice. Since 0.9.8, the encoder
+# probes the Huffman size first and picks Huffman when strictly
+# smaller than raw. `huffman.cyr`'s `sandhi_hpack_huffman_encoded_len`
+# answers the probe; `sandhi_hpack_huffman_encode` writes the bytes
+# (MSB-first packing, EOS-prefix padding on the final byte).
+#
+# Wire-size impact: ~25-30% smaller for ASCII text headers, matching
+# the canonical RFC 7541 Appendix C.4 examples. Binary / short tokens
+# often round-trip larger under Huffman — we keep raw for those.
 
 fn _hpack_string_encode(out, off, s) {
-    var n = strlen(s);
-    var p = _hpack_int_encode(out, off, 0, 7, n);  # H=0
+    var raw_len = strlen(s);
+    var huff_len = sandhi_hpack_huffman_encoded_len(s);
+    if (huff_len < raw_len) {
+        var ph = _hpack_int_encode(out, off, 0x80, 7, huff_len);  # H=1
+        return sandhi_hpack_huffman_encode(out, ph, s);
+    }
+    var p = _hpack_int_encode(out, off, 0, 7, raw_len);  # H=0
     var i = 0;
-    while (i < n) {
+    while (i < raw_len) {
         store8(out + p + i, load8(s + i));
         i = i + 1;
     }
-    return p + n;
+    return p + raw_len;
 }
 
 # Decode a string. Returns 0 on success and writes a freshly-alloc'd
