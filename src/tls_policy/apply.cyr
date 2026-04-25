@@ -225,7 +225,7 @@ fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
     if (trust_store != 0) { demands_enforcement = 1; }
 
     if (demands_enforcement == 1
-     && sandhi_tls_policy_enforcement_available() == 0) {
+    && sandhi_tls_policy_enforcement_available() == 0) {
         _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
         return 0;
     }

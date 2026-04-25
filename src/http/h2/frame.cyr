@@ -133,15 +133,15 @@ fn _h2_write_u32(out, off, v) {
 
 fn _h2_read_u24(buf, off) {
     return (load8(buf + off + 0) << 16)
-         | (load8(buf + off + 1) <<  8)
-         |  load8(buf + off + 2);
+    | (load8(buf + off + 1) <<  8)
+    |  load8(buf + off + 2);
 }
 
 fn _h2_read_u32(buf, off) {
     return (load8(buf + off + 0) << 24)
-         | (load8(buf + off + 1) << 16)
-         | (load8(buf + off + 2) <<  8)
-         |  load8(buf + off + 3);
+    | (load8(buf + off + 1) << 16)
+    | (load8(buf + off + 2) <<  8)
+    |  load8(buf + off + 3);
 }
 
 # Build a frame header into out[off..off+9]. Returns off+9 or

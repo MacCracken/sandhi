@@ -204,7 +204,7 @@ fn sandhi_h2_conn_apply_settings_payload(c, payload, payload_len) {
 # the peer's SETTINGS.
 fn sandhi_h2_conn_send_settings_ack(c) {
     return sandhi_h2_conn_send_frame(c,
-        SANDHI_H2_FRAME_SETTINGS, SANDHI_H2_FLAG_ACK, 0, 0, 0);
+    SANDHI_H2_FRAME_SETTINGS, SANDHI_H2_FLAG_ACK, 0, 0, 0);
 }
 
 # Receive the peer's first frame, expect it to be a non-ACK SETTINGS

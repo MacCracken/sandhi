@@ -44,8 +44,8 @@ fn _sandhi_local_qname(name) {
         # Lowercase compare on the suffix.
         if (c0 == 46) {  # '.'
             if ((c1 == 108 || c1 == 76) && (c2 == 111 || c2 == 79)
-             && (c3 == 99 || c3 == 67) && (c4 == 97 || c4 == 65)
-             && (c5 == 108 || c5 == 76)) {
+            && (c3 == 99 || c3 == 67) && (c4 == 97 || c4 == 65)
+            && (c5 == 108 || c5 == 76)) {
                 has_suffix = 1;
             }
         }

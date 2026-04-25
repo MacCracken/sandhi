@@ -243,7 +243,7 @@ fn _sandhi_sse_apply_line(ctx, buf, line_start, line_end) {
     } elif (streq(name, "data") == 1) {
         var prev_data = load64(ctx + _SANDHI_SSE_CTX_OFF_DATA);
         store64(ctx + _SANDHI_SSE_CTX_OFF_DATA,
-                _sandhi_sse_data_append(prev_data, value));
+        _sandhi_sse_data_append(prev_data, value));
     } elif (streq(name, "id") == 1) {
         # 0.9.1 P1 — WHATWG: "If the field name is 'id' and the
         # field value does not contain U+0000 NULL, then set the
@@ -282,9 +282,9 @@ fn sandhi_sse_parse(buf, blen, remaining_out) {
                     var d = load64(ctx + _SANDHI_SSE_CTX_OFF_DATA);
                     if (d == 0) { d = _sandhi_sse_dup(""); }
                     var ev = sandhi_sse_event_new(
-                        load64(ctx + _SANDHI_SSE_CTX_OFF_EVENT), d,
-                        load64(ctx + _SANDHI_SSE_CTX_OFF_ID),
-                        load64(ctx + _SANDHI_SSE_CTX_OFF_RETRY));
+                    load64(ctx + _SANDHI_SSE_CTX_OFF_EVENT), d,
+                    load64(ctx + _SANDHI_SSE_CTX_OFF_ID),
+                    load64(ctx + _SANDHI_SSE_CTX_OFF_RETRY));
                     vec_push(events, ev);
                     _sandhi_sse_ctx_reset(ctx);
                 }

@@ -108,7 +108,7 @@ fn _sandhi_stream_headers_end(sb) {
     var i = 0;
     while (i + 3 < n) {
         if (load8(p + i) == 13 && load8(p + i + 1) == 10
-         && load8(p + i + 2) == 13 && load8(p + i + 3) == 10) {
+        && load8(p + i + 2) == 13 && load8(p + i + 3) == 10) {
             return i + 4;
         }
         i = i + 1;
@@ -249,7 +249,8 @@ fn sandhi_http_stream_opts(url, method, user_headers, body, body_len, cb, ctx, o
     if (eff_connect == 0 - 1) {
         return _sandhi_stream_result(0, 0, SANDHI_ERR_TIMEOUT, 0);
     }
-    var conn = sandhi_conn_open_fully_timed(addr, sandhi_url_port(u), use_tls, sandhi_url_host(u), eff_connect, read_ms, write_ms);
+    var conn = sandhi_conn_open_fully_timed(addr, sandhi_url_port(u), use_tls, sandhi_url_host(u),
+    eff_connect, read_ms, write_ms);
     if (conn == 0) {
         var oe = sandhi_conn_last_open_err();
         if (oe == SANDHI_CONN_OPEN_TIMEOUT) { return _sandhi_stream_result(0, 0, SANDHI_ERR_TIMEOUT, 0); }
@@ -376,7 +377,9 @@ fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, ca
                 return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_TIMEOUT, 0);
             }
             var n = sandhi_conn_recv(conn, scratch, _SANDHI_STREAM_READ_CHUNK);
-            if (n == 0 - _SANDHI_EAGAIN) { return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_TIMEOUT, 0); }
+            if (n == 0 - _SANDHI_EAGAIN) {
+                return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_TIMEOUT, 0);
+            }
             if (n < 0) { return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_CONNECT, 0); }
             if (n == 0) { going = 0; }
             else {

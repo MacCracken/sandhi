@@ -56,9 +56,9 @@ fn _sandhi_json_dup(s) {
 
 fn sandhi_json_add_string(o, key, value) {
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        _sandhi_json_dup(value),
-        SANDHI_JSON_STRING));
+    _sandhi_json_dup(key),
+    _sandhi_json_dup(value),
+    SANDHI_JSON_STRING));
     return 0;
 }
 
@@ -69,9 +69,9 @@ fn sandhi_json_add_int(o, key, value) {
     memcpy(out, &tmp, n);
     store8(out + n, 0);
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        out,
-        SANDHI_JSON_RAW));
+    _sandhi_json_dup(key),
+    out,
+    SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -79,17 +79,17 @@ fn sandhi_json_add_bool(o, key, value) {
     var raw = "false";
     if (value == 1) { raw = "true"; }
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        _sandhi_json_dup(raw),
-        SANDHI_JSON_RAW));
+    _sandhi_json_dup(key),
+    _sandhi_json_dup(raw),
+    SANDHI_JSON_RAW));
     return 0;
 }
 
 fn sandhi_json_add_null(o, key) {
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        _sandhi_json_dup("null"),
-        SANDHI_JSON_RAW));
+    _sandhi_json_dup(key),
+    _sandhi_json_dup("null"),
+    SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -98,9 +98,9 @@ fn sandhi_json_add_null(o, key) {
 fn sandhi_json_add_object(o, key, child) {
     var rendered = sandhi_json_build(child);
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        rendered,
-        SANDHI_JSON_RAW));
+    _sandhi_json_dup(key),
+    rendered,
+    SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -108,9 +108,9 @@ fn sandhi_json_add_object(o, key, child) {
 # structures). No escaping — caller vouches for the syntax.
 fn sandhi_json_add_raw(o, key, raw_cstr) {
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        _sandhi_json_dup(raw_cstr),
-        SANDHI_JSON_RAW));
+    _sandhi_json_dup(key),
+    _sandhi_json_dup(raw_cstr),
+    SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -161,26 +161,26 @@ fn sandhi_json_build(o) {
     if (o == 0) { return _sandhi_json_dup("{}"); }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{");
-    var n = vec_len(o);
-    var i = 0;
-    while (i < n) {
-        if (i > 0) { str_builder_add_cstr(sb, ","); }
-        var e = vec_get(o, i);
-        var ekey = load64(e);
-        var eval = load64(e + 8);
-        var ekind = load64(e + 16);
-        var escaped_key = sandhi_json_escape(ekey);
-        str_builder_add_cstr(sb, escaped_key);
-        str_builder_add_cstr(sb, ":");
-        if (ekind == SANDHI_JSON_STRING) {
-            var escaped_val = sandhi_json_escape(eval);
-            str_builder_add_cstr(sb, escaped_val);
-        } else {
-            str_builder_add_cstr(sb, eval);
+        var n = vec_len(o);
+        var i = 0;
+        while (i < n) {
+            if (i > 0) { str_builder_add_cstr(sb, ","); }
+            var e = vec_get(o, i);
+            var ekey = load64(e);
+            var eval = load64(e + 8);
+            var ekind = load64(e + 16);
+            var escaped_key = sandhi_json_escape(ekey);
+            str_builder_add_cstr(sb, escaped_key);
+            str_builder_add_cstr(sb, ":");
+            if (ekind == SANDHI_JSON_STRING) {
+                var escaped_val = sandhi_json_escape(eval);
+                str_builder_add_cstr(sb, escaped_val);
+            } else {
+                str_builder_add_cstr(sb, eval);
+            }
+            i = i + 1;
         }
-        i = i + 1;
-    }
-    str_builder_add_cstr(sb, "}");
+        str_builder_add_cstr(sb, "}");
     return str_data(str_builder_build(sb));
 }
 
@@ -204,7 +204,7 @@ fn _sandhi_json_find_key(body, blen, start, key, key_len) {
         if (load8(body + i) == 34) {
             # At a quote — check if it starts the target key.
             if (memeq(body + i + 1, key, key_len) == 1
-             && load8(body + i + 1 + key_len) == 34) {
+            && load8(body + i + 1 + key_len) == 34) {
                 # Skip "key"
                 var p = i + 2 + key_len;
                 # Skip whitespace + colon.
@@ -222,7 +222,7 @@ fn _sandhi_json_find_key(body, blen, start, key, key_len) {
 }
 
 # Skip past balanced braces starting at `start` (buf[start] == '{').
-# Returns the offset just past the matching '}'.
+    # Returns the offset just past the matching '}'.
 fn _sandhi_json_skip_object(body, blen, start) {
     if (start >= blen || load8(body + start) != 123) { return 0 - 1; }
     var depth = 1;
@@ -314,18 +314,18 @@ fn _sandhi_json_value_range(body, blen, start) {
         return (start << 32) | lenO;
     }
     # Numeric / true / false / null — until ',' '}' ']' or whitespace.
-    var ps = start;
-    var pe = start;
-    while (pe < blen) {
-        var ce = load8(body + pe);
-        if (ce == 44 || ce == 125 || ce == 93 || ce == 32 || ce == 10 || ce == 13 || ce == 9) {
-            var lenN = pe - ps;
-            return (ps << 32) | lenN;
-        }
-        pe = pe + 1;
+var ps = start;
+var pe = start;
+while (pe < blen) {
+    var ce = load8(body + pe);
+    if (ce == 44 || ce == 125 || ce == 93 || ce == 32 || ce == 10 || ce == 13 || ce == 9) {
+        var lenN = pe - ps;
+        return (ps << 32) | lenN;
     }
-    var lenT = pe - ps;
-    return (ps << 32) | lenT;
+    pe = pe + 1;
+}
+var lenT = pe - ps;
+return (ps << 32) | lenT;
 }
 
 # Extract a string value at a dotted path. Returns an alloc'd cstr

@@ -51,7 +51,7 @@ fn _h2_emit_method(h2c, method, hbuf, off) {
     }
     # PUT / DELETE / PATCH / HEAD — emit literal with name idx 2 + value.
     return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-        _SANDHI_H2_REQ_IDX_METHOD_GET, ":method", method);
+    _SANDHI_H2_REQ_IDX_METHOD_GET, ":method", method);
 }
 
 fn _h2_emit_scheme(h2c, scheme, hbuf, off) {
@@ -63,7 +63,7 @@ fn _h2_emit_scheme(h2c, scheme, hbuf, off) {
     }
     var enc = sandhi_h2_conn_enc_table(h2c);
     return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-        _SANDHI_H2_REQ_IDX_SCHEME_HTTP, ":scheme", scheme);
+    _SANDHI_H2_REQ_IDX_SCHEME_HTTP, ":scheme", scheme);
 }
 
 fn _h2_emit_path(h2c, path, hbuf, off) {
@@ -72,13 +72,13 @@ fn _h2_emit_path(h2c, path, hbuf, off) {
     }
     var enc = sandhi_h2_conn_enc_table(h2c);
     return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-        _SANDHI_H2_REQ_IDX_PATH_ROOT, ":path", path);
+    _SANDHI_H2_REQ_IDX_PATH_ROOT, ":path", path);
 }
 
 fn _h2_emit_authority(h2c, authority, hbuf, off) {
     var enc = sandhi_h2_conn_enc_table(h2c);
     return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-        _SANDHI_H2_REQ_IDX_AUTHORITY, ":authority", authority);
+    _SANDHI_H2_REQ_IDX_AUTHORITY, ":authority", authority);
 }
 
 # Emit one user header. Names get lowercased into a fresh alloc so
@@ -109,7 +109,7 @@ fn _h2_emit_user_header(h2c, name, value, hbuf, off) {
 # emitted in that exact order per RFC 7540 §8.1.2.1.
 
 fn sandhi_h2_request_encode_headers(h2c, method, scheme, path, authority,
-                                      user_headers, hbuf) {
+user_headers, hbuf) {
     var off = 0;
     off = _h2_emit_method(h2c, method, hbuf, off);
     off = _h2_emit_scheme(h2c, scheme, hbuf, off);
@@ -176,10 +176,10 @@ fn _h2_streq_ci(a, b) {
 # `_SANDHI_H2_ERR_*` sentinel on failure.
 
 fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
-                           user_headers, body, body_len) {
+user_headers, body, body_len) {
     var hbuf = alloc(_SANDHI_H2_REQ_HBUF_CAP);
     var hlen = sandhi_h2_request_encode_headers(h2c, method, scheme, path,
-                                                  authority, user_headers, hbuf);
+    authority, user_headers, hbuf);
     if (hlen <= 0) { return _SANDHI_H2_ERR_MALFORMED; }
 
     var stream_id = sandhi_h2_conn_next_stream_id(h2c);
@@ -189,7 +189,7 @@ fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
     var hflags = SANDHI_H2_FLAG_END_HEADERS;
     if (has_body == 0) { hflags = hflags | SANDHI_H2_FLAG_END_STREAM; }
     var hr = sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_HEADERS,
-                                         hflags, stream_id, hbuf, hlen);
+    hflags, stream_id, hbuf, hlen);
     if (hr < 0) { return hr; }
 
     if (has_body == 1) {
@@ -201,8 +201,8 @@ fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
             return _SANDHI_H2_ERR_BAD_LENGTH;
         }
         var dr = sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_DATA,
-                                             SANDHI_H2_FLAG_END_STREAM,
-                                             stream_id, body, body_len);
+        SANDHI_H2_FLAG_END_STREAM,
+        stream_id, body, body_len);
         if (dr < 0) { return dr; }
     }
     return stream_id;

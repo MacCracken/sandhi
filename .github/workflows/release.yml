@@ -2,7 +2,11 @@ name: Release
 
 on:
   push:
-    tags: ['[0-9]*']
+    # Accept both `v1.2.3` and `1.2.3` tag styles. The version-verify
+    # step below enforces semver shape + match against VERSION file.
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: write
@@ -12,8 +16,8 @@ jobs:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
 
-  release:
-    name: Build & Release
+  build:
+    name: Build Release
     needs: [ci]
     runs-on: ubuntu-latest
     steps:
@@ -22,31 +26,112 @@ jobs:
       - name: Verify version
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          TAG_VERSION="${GITHUB_REF_NAME}"
-          test "$FILE_VERSION" = "$TAG_VERSION" || { echo "VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"; exit 1; }
+          SRC_VERSION=$(grep '^var SANDHI_VERSION' src/main.cyr | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          TAG="${GITHUB_REF_NAME#v}"   # strip optional leading 'v' so v1.3.0 == 1.3.0
+          echo "$TAG" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "tag ($TAG) is not semver x.y.z"; exit 1; }
+          [ "$FILE_VERSION" = "$TAG" ] || {
+            echo "VERSION ($FILE_VERSION) != tag ($TAG)"; exit 1; }
+          [ "$SRC_VERSION"  = "$TAG" ] || {
+            echo "src/main.cyr SANDHI_VERSION ($SRC_VERSION) != tag ($TAG)"; exit 1; }
+          echo "Version verified: $TAG (cyrius.cyml pulls from VERSION via \${file:VERSION})"
 
       - name: Install Cyrius toolchain
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep 'cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
           echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
           mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
           cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp "$CYRIUS_DIR/scripts/cyrius" "$HOME/.cyrius/bin/cyrius" 2>/dev/null || true
           cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
-      - name: Build
-        run: |
-          cyrius deps
-          mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+      - name: Resolve deps
+        run: cyrius deps
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
+      - name: Build (DCE)
+        # sandhi is a library — programs/smoke.cyr is the link proof
+        # and the only thing that produces an actual ELF binary.
+        run: |
+          mkdir -p build
+          CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke
+          echo "sandhi-smoke: $(wc -c < build/sandhi-smoke) bytes"
+
+      - name: Cross-build aarch64 (best-effort)
+        run: |
+          if [ -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
+            CYRIUS_DCE=1 cyrius build --aarch64 programs/smoke.cyr build/sandhi-smoke-aarch64
+            echo "sandhi-smoke-aarch64: $(wc -c < build/sandhi-smoke-aarch64) bytes"
+          else
+            echo "::warning::cc5_aarch64 not in toolchain — aarch64 binary skipped in release"
+          fi
+
+      - name: Test
+        run: |
+          cyrius test tests/sandhi.tcyr
+          cyrius test tests/h2.tcyr
+
+      - name: Regenerate dist bundle
+        run: cyrius distlib
+
+      - name: Clean toolchain artifacts
+        run: rm -f cyrius-*.tar.gz
+
+      - name: Archive
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="sandhi-${TAG}/" -o "sandhi-${TAG}-src.tar.gz" HEAD
+          cp dist/sandhi.cyr "sandhi-${TAG}.cyr"
+          # Ship prebuilt smoke binaries so consumers can verify
+          # link-shape against a known-good build per arch.
+          if [ -f build/sandhi-smoke ]; then
+            cp build/sandhi-smoke "sandhi-${TAG}-smoke-x86_64-linux"
+          fi
+          if [ -f build/sandhi-smoke-aarch64 ]; then
+            cp build/sandhi-smoke-aarch64 "sandhi-${TAG}-smoke-aarch64-linux"
+          fi
+          sha256sum sandhi-*.tar.gz sandhi-*.cyr sandhi-*-linux 2>/dev/null > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
         with:
-          generate_release_notes: true
-          files: build/*
+          name: release-artifacts
+          path: |
+            sandhi-*.tar.gz
+            sandhi-*.cyr
+            sandhi-*-linux
+            SHA256SUMS
+
+  release:
+    name: Create GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+      - name: Extract changelog body for tag
+        # Pull the `## [TAG]` section out of CHANGELOG.md so the GH
+        # Release body matches what's in the source-of-truth changelog.
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > /tmp/body.md
+          if [ ! -s /tmp/body.md ]; then
+            echo "::warning::no ## [${TAG}] section in CHANGELOG.md — release body will be empty"
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: "sandhi ${{ github.ref_name }}"
+          body_path: /tmp/body.md
+          # 0.x tags are pre-releases per semver; flip to non-prerelease at 1.0.0.
+          prerelease: ${{ startsWith(github.ref_name, '0.') || startsWith(github.ref_name, 'v0.') }}
+          files: |
+            sandhi-*.tar.gz
+            sandhi-*.cyr
+            sandhi-*-linux
+            SHA256SUMS

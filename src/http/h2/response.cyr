@@ -127,7 +127,7 @@ fn _h2_handle_ping(h2c, hdr, payload) {
     var flags = sandhi_h2_hdr_flags(hdr);
     if ((flags & SANDHI_H2_FLAG_ACK) != 0) { return 0; }
     return sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_PING,
-        SANDHI_H2_FLAG_ACK, 0, payload, 8);
+    SANDHI_H2_FLAG_ACK, 0, payload, 8);
 }
 
 # ================================================================

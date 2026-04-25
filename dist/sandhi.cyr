@@ -216,8 +216,8 @@ fn sandhi_headers_add(h, name, value) {
     if (_sandhi_hdr_has_unsafe_byte(name) == 1)  { return 0 - 1; }
     if (_sandhi_hdr_has_unsafe_byte(value) == 1) { return 0 - 1; }
     var e = _sandhi_hdr_entry_new(
-        _sandhi_hdr_cstr_dup(name),
-        _sandhi_hdr_cstr_dup(value));
+    _sandhi_hdr_cstr_dup(name),
+    _sandhi_hdr_cstr_dup(value));
     vec_push(h, e);
     return 0;
 }
@@ -1782,13 +1782,13 @@ fn _sandhi_resolve_read_resolv_conf() {
             while (i < n && load8(buf + i) != 10) { i = i + 1; }
             i = i + 1;
         } elif (i + 10 < n && memeq(buf + i, "nameserver", 10) == 1
-                && (load8(buf + i + 10) == 32 || load8(buf + i + 10) == 9)) {
+        && (load8(buf + i + 10) == 32 || load8(buf + i + 10) == 9)) {
             # Found "nameserver" — advance past whitespace, read up to ws/EOL.
             i = i + 10;
             while (i < n && (load8(buf + i) == 32 || load8(buf + i) == 9)) { i = i + 1; }
             var ns_start = i;
             while (i < n && load8(buf + i) != 32 && load8(buf + i) != 9
-                         && load8(buf + i) != 13 && load8(buf + i) != 10) {
+            && load8(buf + i) != 13 && load8(buf + i) != 10) {
                 i = i + 1;
             }
             var nlen = i - ns_start;
@@ -2380,10 +2380,10 @@ fn _sandhi_client_build_request_v(method, full_path, host_header, user_headers, 
 # Outer trace wrapper — opt-in span via sandhi_trace_enable(1). Span
 # no-op by default; the inner does all the work either way.
 fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes,
-                    connect_ms, read_ms, write_ms, total_ms, pool) {
+connect_ms, read_ms, write_ms, total_ms, pool) {
     sandhi_trace_begin("sandhi.http");
     var r = _sandhi_http_do_impl(method, url, user_headers, body, body_len,
-                                  max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
     sandhi_trace_end();
     return r;
 }
@@ -2403,7 +2403,7 @@ fn _sandhi_http_clamp_ms(raw_ms, deadline_ms) {
 # Keep this function compact — Cyrius 5.6.22 aliases locals on crowded
 # frames. Everything meaningful lives in helpers.
 fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
-                         connect_ms, read_ms, write_ms, total_ms, pool) {
+connect_ms, read_ms, write_ms, total_ms, pool) {
     var u = sandhi_url_parse(url);
     if (u == 0) { return _sandhi_resp_err(SANDHI_ERR_PARSE); }
 
@@ -2445,10 +2445,10 @@ fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
         if (eff_connect == 0 - 1) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
         if (addr6 != 0) {
             conn = _sandhi_conn_open_v6_fully_timed(addr6, port, use_tls, host,
-                                                      eff_connect, read_ms, write_ms);
+            eff_connect, read_ms, write_ms);
         } else {
             conn = sandhi_conn_open_fully_timed(addr, port, use_tls, host,
-                                                  eff_connect, read_ms, write_ms);
+            eff_connect, read_ms, write_ms);
         }
         if (conn == 0) {
             var oe = sandhi_conn_last_open_err();
@@ -2461,11 +2461,11 @@ fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
     var full_path = _sandhi_client_full_path(u);
     var host_hdr = _sandhi_client_host_header(u);
     var req = _sandhi_client_build_request_v(method, full_path, host_hdr,
-                                              user_headers, body_len, keep_alive);
+    user_headers, body_len, keep_alive);
 
     if (keep_alive == 1) {
         return _sandhi_http_exchange_keepalive(conn, req, body, body_len, max_bytes,
-                                                 deadline_ms, pool, host, port, use_tls);
+        deadline_ms, pool, host, port, use_tls);
     }
     return _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms);
 }
@@ -2516,7 +2516,7 @@ fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms) {
 # response. On success (2xx/3xx, no server-Connection-close) the conn
 # is returned to the pool; otherwise it's closed. Bite 1 of 0.8.0.
 fn _sandhi_http_exchange_keepalive(conn, req, body, body_len, max_bytes,
-                                     deadline_ms, pool, host, port, use_tls) {
+deadline_ms, pool, host, port, use_tls) {
     if (deadline_ms > 0 && clock_now_ms() >= deadline_ms) {
         sandhi_conn_close(conn);
         return _sandhi_resp_err(SANDHI_ERR_TIMEOUT);
@@ -2570,7 +2570,7 @@ fn _sandhi_http_exchange_keepalive(conn, req, body, body_len, max_bytes,
     var ek = sandhi_http_err_kind(resp);
     var put_back = 0;
     if (ek == SANDHI_OK && server_sent_close == 0
-        && status >= 200 && status < 400) {
+    && status >= 200 && status < 400) {
         put_back = 1;
     }
     if (put_back == 1) {
@@ -2739,7 +2739,7 @@ fn _sandhi_resolve_location(base_url, location) {
     if (location == 0) { return 0; }
     # Absolute — starts with scheme. Just dup.
     if (_sandhi_url_sceq(location, "http://", 7) == 1
-     || _sandhi_url_sceq(location, "https://", 8) == 1) {
+    || _sandhi_url_sceq(location, "https://", 8) == 1) {
         var llen = strlen(location);
         var out = alloc(llen + 1);
         memcpy(out, location, llen);
@@ -2807,7 +2807,7 @@ fn _sandhi_url_is_https_downgrade(prev_url, next_url) {
     var nu = sandhi_url_parse(next_url);
     if (pu == 0 || nu == 0) { return 0; }
     if (sandhi_url_scheme(pu) == SANDHI_URL_HTTPS
-     && sandhi_url_scheme(nu) == SANDHI_URL_HTTP) { return 1; }
+    && sandhi_url_scheme(nu) == SANDHI_URL_HTTP) { return 1; }
     return 0;
 }
 
@@ -2852,7 +2852,7 @@ fn _sandhi_strip_sensitive_headers(src) {
 #     the same; matches RFC 7235 §2.2 spirit even though the spec
 #     doesn't mandate.)
 fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
-                        max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
+max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
     var m = method;
     var u = url;
     var b = body;
@@ -2860,7 +2860,7 @@ fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
     var h = headers;
     var hops = 0;
     var r = _sandhi_http_do(m, u, h, b, bl, max_bytes,
-                             connect_ms, read_ms, write_ms, total_ms, pool);
+    connect_ms, read_ms, write_ms, total_ms, pool);
     while (hops < max_hops) {
         if (_sandhi_is_redirect(sandhi_http_status(r)) == 0) { return r; }
         var loc = sandhi_headers_get(sandhi_http_headers(r), "Location");
@@ -2885,7 +2885,7 @@ fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
         u = next;
         hops = hops + 1;
         r = _sandhi_http_do(m, u, h, b, bl, max_bytes,
-                             connect_ms, read_ms, write_ms, total_ms, pool);
+        connect_ms, read_ms, write_ms, total_ms, pool);
     }
     return r;
 }
@@ -2906,10 +2906,10 @@ fn _sandhi_http_dispatch(method, url, headers, body, body_len, opts) {
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
         return _sandhi_http_follow(method, url, headers, body, body_len, hops,
-                                    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+        max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
     }
     return _sandhi_http_do(method, url, headers, body, body_len,
-                            max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
 }
 
 # Simple verbs — no redirect following. Pass user_headers = 0 for none.
@@ -3124,7 +3124,7 @@ fn _sandhi_pool_take(pool, host, port, tls) {
         var conn = load64(ic + SANDHI_IDLE_OFF_CONN);
         var last = load64(ic + SANDHI_IDLE_OFF_LAST_MS);
         store64(pool + SANDHI_POOL_OFF_TOTAL_IDLE,
-                load64(pool + SANDHI_POOL_OFF_TOTAL_IDLE) - 1);
+        load64(pool + SANDHI_POOL_OFF_TOTAL_IDLE) - 1);
         if (now - last > idle_to) {
             # Stale — peer may have closed it. Close + try next.
             if (conn != 0) { sandhi_conn_close(conn); }
@@ -3161,12 +3161,12 @@ fn _sandhi_pool_put(pool, host, port, tls, conn) {
         }
         vec_remove(v, 0);
         store64(pool + SANDHI_POOL_OFF_TOTAL_IDLE,
-                load64(pool + SANDHI_POOL_OFF_TOTAL_IDLE) - 1);
+        load64(pool + SANDHI_POOL_OFF_TOTAL_IDLE) - 1);
     }
     var ic = _sandhi_pool_idle_conn_new(conn, clock_now_ms());
     vec_push(v, ic);
     store64(pool + SANDHI_POOL_OFF_TOTAL_IDLE,
-            load64(pool + SANDHI_POOL_OFF_TOTAL_IDLE) + 1);
+    load64(pool + SANDHI_POOL_OFF_TOTAL_IDLE) + 1);
     return 0;
 }
 
@@ -3351,7 +3351,7 @@ fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms) {
 #     (left-padded with zeros) + 2 for the bit length.
 #   - At first use, the blob is parsed and a binary decode tree is
 #     built. Each tree node is 24 bytes: { left_ptr, right_ptr,
-#     symbol_or_minus_1 }. Internal nodes have symbol = -1; leaves
+    #     symbol_or_minus_1 }. Internal nodes have symbol = -1; leaves
 #     hold the symbol value 0..256.
 #   - Decode walks the tree bit-by-bit. On reaching a leaf, the
 #     symbol is emitted (or rejected if it's the EOS, symbol 256 —
@@ -3798,7 +3798,7 @@ fn sandhi_hpack_table_add(t, name, value) {
     store64(t + SANDHI_HPACK_TBL_OFF_NAMES, new_names);
     store64(t + SANDHI_HPACK_TBL_OFF_VALUES, new_values);
     store64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE,
-            load64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE) + sz);
+    load64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE) + sz);
     return 0;
 }
 
@@ -4237,15 +4237,15 @@ fn _h2_write_u32(out, off, v) {
 
 fn _h2_read_u24(buf, off) {
     return (load8(buf + off + 0) << 16)
-         | (load8(buf + off + 1) <<  8)
-         |  load8(buf + off + 2);
+    | (load8(buf + off + 1) <<  8)
+    |  load8(buf + off + 2);
 }
 
 fn _h2_read_u32(buf, off) {
     return (load8(buf + off + 0) << 24)
-         | (load8(buf + off + 1) << 16)
-         | (load8(buf + off + 2) <<  8)
-         |  load8(buf + off + 3);
+    | (load8(buf + off + 1) << 16)
+    | (load8(buf + off + 2) <<  8)
+    |  load8(buf + off + 3);
 }
 
 # Build a frame header into out[off..off+9]. Returns off+9 or
@@ -4592,7 +4592,7 @@ fn sandhi_h2_conn_apply_settings_payload(c, payload, payload_len) {
 # the peer's SETTINGS.
 fn sandhi_h2_conn_send_settings_ack(c) {
     return sandhi_h2_conn_send_frame(c,
-        SANDHI_H2_FRAME_SETTINGS, SANDHI_H2_FLAG_ACK, 0, 0, 0);
+    SANDHI_H2_FRAME_SETTINGS, SANDHI_H2_FLAG_ACK, 0, 0, 0);
 }
 
 # Receive the peer's first frame, expect it to be a non-ACK SETTINGS
@@ -4675,7 +4675,7 @@ fn _h2_emit_method(h2c, method, hbuf, off) {
     }
     # PUT / DELETE / PATCH / HEAD — emit literal with name idx 2 + value.
     return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-        _SANDHI_H2_REQ_IDX_METHOD_GET, ":method", method);
+    _SANDHI_H2_REQ_IDX_METHOD_GET, ":method", method);
 }
 
 fn _h2_emit_scheme(h2c, scheme, hbuf, off) {
@@ -4687,7 +4687,7 @@ fn _h2_emit_scheme(h2c, scheme, hbuf, off) {
     }
     var enc = sandhi_h2_conn_enc_table(h2c);
     return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-        _SANDHI_H2_REQ_IDX_SCHEME_HTTP, ":scheme", scheme);
+    _SANDHI_H2_REQ_IDX_SCHEME_HTTP, ":scheme", scheme);
 }
 
 fn _h2_emit_path(h2c, path, hbuf, off) {
@@ -4696,13 +4696,13 @@ fn _h2_emit_path(h2c, path, hbuf, off) {
     }
     var enc = sandhi_h2_conn_enc_table(h2c);
     return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-        _SANDHI_H2_REQ_IDX_PATH_ROOT, ":path", path);
+    _SANDHI_H2_REQ_IDX_PATH_ROOT, ":path", path);
 }
 
 fn _h2_emit_authority(h2c, authority, hbuf, off) {
     var enc = sandhi_h2_conn_enc_table(h2c);
     return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-        _SANDHI_H2_REQ_IDX_AUTHORITY, ":authority", authority);
+    _SANDHI_H2_REQ_IDX_AUTHORITY, ":authority", authority);
 }
 
 # Emit one user header. Names get lowercased into a fresh alloc so
@@ -4733,7 +4733,7 @@ fn _h2_emit_user_header(h2c, name, value, hbuf, off) {
 # emitted in that exact order per RFC 7540 §8.1.2.1.
 
 fn sandhi_h2_request_encode_headers(h2c, method, scheme, path, authority,
-                                      user_headers, hbuf) {
+user_headers, hbuf) {
     var off = 0;
     off = _h2_emit_method(h2c, method, hbuf, off);
     off = _h2_emit_scheme(h2c, scheme, hbuf, off);
@@ -4800,10 +4800,10 @@ fn _h2_streq_ci(a, b) {
 # `_SANDHI_H2_ERR_*` sentinel on failure.
 
 fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
-                           user_headers, body, body_len) {
+user_headers, body, body_len) {
     var hbuf = alloc(_SANDHI_H2_REQ_HBUF_CAP);
     var hlen = sandhi_h2_request_encode_headers(h2c, method, scheme, path,
-                                                  authority, user_headers, hbuf);
+    authority, user_headers, hbuf);
     if (hlen <= 0) { return _SANDHI_H2_ERR_MALFORMED; }
 
     var stream_id = sandhi_h2_conn_next_stream_id(h2c);
@@ -4813,7 +4813,7 @@ fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
     var hflags = SANDHI_H2_FLAG_END_HEADERS;
     if (has_body == 0) { hflags = hflags | SANDHI_H2_FLAG_END_STREAM; }
     var hr = sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_HEADERS,
-                                         hflags, stream_id, hbuf, hlen);
+    hflags, stream_id, hbuf, hlen);
     if (hr < 0) { return hr; }
 
     if (has_body == 1) {
@@ -4825,8 +4825,8 @@ fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
             return _SANDHI_H2_ERR_BAD_LENGTH;
         }
         var dr = sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_DATA,
-                                             SANDHI_H2_FLAG_END_STREAM,
-                                             stream_id, body, body_len);
+        SANDHI_H2_FLAG_END_STREAM,
+        stream_id, body, body_len);
         if (dr < 0) { return dr; }
     }
     return stream_id;
@@ -4964,7 +4964,7 @@ fn _h2_handle_ping(h2c, hdr, payload) {
     var flags = sandhi_h2_hdr_flags(hdr);
     if ((flags & SANDHI_H2_FLAG_ACK) != 0) { return 0; }
     return sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_PING,
-        SANDHI_H2_FLAG_ACK, 0, payload, 8);
+    SANDHI_H2_FLAG_ACK, 0, payload, 8);
 }
 
 # ================================================================
@@ -5220,8 +5220,8 @@ fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len) {
     }
 
     var stream_id = sandhi_h2_request_send(h2c, method, scheme, full_path,
-                                             authority, user_headers,
-                                             body, body_len);
+    authority, user_headers,
+    body, body_len);
     if (stream_id < 0) { return _sandhi_resp_err(SANDHI_ERR_PROTOCOL); }
     return sandhi_h2_response_recv(h2c, stream_id);
 }
@@ -5689,7 +5689,7 @@ fn _sandhi_sse_apply_line(ctx, buf, line_start, line_end) {
     } elif (streq(name, "data") == 1) {
         var prev_data = load64(ctx + _SANDHI_SSE_CTX_OFF_DATA);
         store64(ctx + _SANDHI_SSE_CTX_OFF_DATA,
-                _sandhi_sse_data_append(prev_data, value));
+        _sandhi_sse_data_append(prev_data, value));
     } elif (streq(name, "id") == 1) {
         # 0.9.1 P1 — WHATWG: "If the field name is 'id' and the
         # field value does not contain U+0000 NULL, then set the
@@ -5728,9 +5728,9 @@ fn sandhi_sse_parse(buf, blen, remaining_out) {
                     var d = load64(ctx + _SANDHI_SSE_CTX_OFF_DATA);
                     if (d == 0) { d = _sandhi_sse_dup(""); }
                     var ev = sandhi_sse_event_new(
-                        load64(ctx + _SANDHI_SSE_CTX_OFF_EVENT), d,
-                        load64(ctx + _SANDHI_SSE_CTX_OFF_ID),
-                        load64(ctx + _SANDHI_SSE_CTX_OFF_RETRY));
+                    load64(ctx + _SANDHI_SSE_CTX_OFF_EVENT), d,
+                    load64(ctx + _SANDHI_SSE_CTX_OFF_ID),
+                    load64(ctx + _SANDHI_SSE_CTX_OFF_RETRY));
                     vec_push(events, ev);
                     _sandhi_sse_ctx_reset(ctx);
                 }
@@ -5859,7 +5859,7 @@ fn _sandhi_stream_headers_end(sb) {
     var i = 0;
     while (i + 3 < n) {
         if (load8(p + i) == 13 && load8(p + i + 1) == 10
-         && load8(p + i + 2) == 13 && load8(p + i + 3) == 10) {
+        && load8(p + i + 2) == 13 && load8(p + i + 3) == 10) {
             return i + 4;
         }
         i = i + 1;
@@ -6000,7 +6000,8 @@ fn sandhi_http_stream_opts(url, method, user_headers, body, body_len, cb, ctx, o
     if (eff_connect == 0 - 1) {
         return _sandhi_stream_result(0, 0, SANDHI_ERR_TIMEOUT, 0);
     }
-    var conn = sandhi_conn_open_fully_timed(addr, sandhi_url_port(u), use_tls, sandhi_url_host(u), eff_connect, read_ms, write_ms);
+    var conn = sandhi_conn_open_fully_timed(addr, sandhi_url_port(u), use_tls, sandhi_url_host(u),
+    eff_connect, read_ms, write_ms);
     if (conn == 0) {
         var oe = sandhi_conn_last_open_err();
         if (oe == SANDHI_CONN_OPEN_TIMEOUT) { return _sandhi_stream_result(0, 0, SANDHI_ERR_TIMEOUT, 0); }
@@ -6127,7 +6128,9 @@ fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, ca
                 return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_TIMEOUT, 0);
             }
             var n = sandhi_conn_recv(conn, scratch, _SANDHI_STREAM_READ_CHUNK);
-            if (n == 0 - _SANDHI_EAGAIN) { return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_TIMEOUT, 0); }
+            if (n == 0 - _SANDHI_EAGAIN) {
+                return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_TIMEOUT, 0);
+            }
             if (n < 0) { return _sandhi_stream_result(status, load64(total_events_cell), SANDHI_ERR_CONNECT, 0); }
             if (n == 0) { going = 0; }
             else {
@@ -6721,7 +6724,7 @@ fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
     if (trust_store != 0) { demands_enforcement = 1; }
 
     if (demands_enforcement == 1
-     && sandhi_tls_policy_enforcement_available() == 0) {
+    && sandhi_tls_policy_enforcement_available() == 0) {
         _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
         return 0;
     }
@@ -6944,9 +6947,9 @@ fn _sandhi_json_dup(s) {
 
 fn sandhi_json_add_string(o, key, value) {
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        _sandhi_json_dup(value),
-        SANDHI_JSON_STRING));
+    _sandhi_json_dup(key),
+    _sandhi_json_dup(value),
+    SANDHI_JSON_STRING));
     return 0;
 }
 
@@ -6957,9 +6960,9 @@ fn sandhi_json_add_int(o, key, value) {
     memcpy(out, &tmp, n);
     store8(out + n, 0);
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        out,
-        SANDHI_JSON_RAW));
+    _sandhi_json_dup(key),
+    out,
+    SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -6967,17 +6970,17 @@ fn sandhi_json_add_bool(o, key, value) {
     var raw = "false";
     if (value == 1) { raw = "true"; }
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        _sandhi_json_dup(raw),
-        SANDHI_JSON_RAW));
+    _sandhi_json_dup(key),
+    _sandhi_json_dup(raw),
+    SANDHI_JSON_RAW));
     return 0;
 }
 
 fn sandhi_json_add_null(o, key) {
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        _sandhi_json_dup("null"),
-        SANDHI_JSON_RAW));
+    _sandhi_json_dup(key),
+    _sandhi_json_dup("null"),
+    SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -6986,9 +6989,9 @@ fn sandhi_json_add_null(o, key) {
 fn sandhi_json_add_object(o, key, child) {
     var rendered = sandhi_json_build(child);
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        rendered,
-        SANDHI_JSON_RAW));
+    _sandhi_json_dup(key),
+    rendered,
+    SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -6996,9 +6999,9 @@ fn sandhi_json_add_object(o, key, child) {
 # structures). No escaping — caller vouches for the syntax.
 fn sandhi_json_add_raw(o, key, raw_cstr) {
     vec_push(o, _sandhi_json_entry_new(
-        _sandhi_json_dup(key),
-        _sandhi_json_dup(raw_cstr),
-        SANDHI_JSON_RAW));
+    _sandhi_json_dup(key),
+    _sandhi_json_dup(raw_cstr),
+    SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -7049,26 +7052,26 @@ fn sandhi_json_build(o) {
     if (o == 0) { return _sandhi_json_dup("{}"); }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{");
-    var n = vec_len(o);
-    var i = 0;
-    while (i < n) {
-        if (i > 0) { str_builder_add_cstr(sb, ","); }
-        var e = vec_get(o, i);
-        var ekey = load64(e);
-        var eval = load64(e + 8);
-        var ekind = load64(e + 16);
-        var escaped_key = sandhi_json_escape(ekey);
-        str_builder_add_cstr(sb, escaped_key);
-        str_builder_add_cstr(sb, ":");
-        if (ekind == SANDHI_JSON_STRING) {
-            var escaped_val = sandhi_json_escape(eval);
-            str_builder_add_cstr(sb, escaped_val);
-        } else {
-            str_builder_add_cstr(sb, eval);
+        var n = vec_len(o);
+        var i = 0;
+        while (i < n) {
+            if (i > 0) { str_builder_add_cstr(sb, ","); }
+            var e = vec_get(o, i);
+            var ekey = load64(e);
+            var eval = load64(e + 8);
+            var ekind = load64(e + 16);
+            var escaped_key = sandhi_json_escape(ekey);
+            str_builder_add_cstr(sb, escaped_key);
+            str_builder_add_cstr(sb, ":");
+            if (ekind == SANDHI_JSON_STRING) {
+                var escaped_val = sandhi_json_escape(eval);
+                str_builder_add_cstr(sb, escaped_val);
+            } else {
+                str_builder_add_cstr(sb, eval);
+            }
+            i = i + 1;
         }
-        i = i + 1;
-    }
-    str_builder_add_cstr(sb, "}");
+        str_builder_add_cstr(sb, "}");
     return str_data(str_builder_build(sb));
 }
 
@@ -7092,7 +7095,7 @@ fn _sandhi_json_find_key(body, blen, start, key, key_len) {
         if (load8(body + i) == 34) {
             # At a quote — check if it starts the target key.
             if (memeq(body + i + 1, key, key_len) == 1
-             && load8(body + i + 1 + key_len) == 34) {
+            && load8(body + i + 1 + key_len) == 34) {
                 # Skip "key"
                 var p = i + 2 + key_len;
                 # Skip whitespace + colon.
@@ -7110,7 +7113,7 @@ fn _sandhi_json_find_key(body, blen, start, key, key_len) {
 }
 
 # Skip past balanced braces starting at `start` (buf[start] == '{').
-# Returns the offset just past the matching '}'.
+    # Returns the offset just past the matching '}'.
 fn _sandhi_json_skip_object(body, blen, start) {
     if (start >= blen || load8(body + start) != 123) { return 0 - 1; }
     var depth = 1;
@@ -7202,18 +7205,18 @@ fn _sandhi_json_value_range(body, blen, start) {
         return (start << 32) | lenO;
     }
     # Numeric / true / false / null — until ',' '}' ']' or whitespace.
-    var ps = start;
-    var pe = start;
-    while (pe < blen) {
-        var ce = load8(body + pe);
-        if (ce == 44 || ce == 125 || ce == 93 || ce == 32 || ce == 10 || ce == 13 || ce == 9) {
-            var lenN = pe - ps;
-            return (ps << 32) | lenN;
-        }
-        pe = pe + 1;
+var ps = start;
+var pe = start;
+while (pe < blen) {
+    var ce = load8(body + pe);
+    if (ce == 44 || ce == 125 || ce == 93 || ce == 32 || ce == 10 || ce == 13 || ce == 9) {
+        var lenN = pe - ps;
+        return (ps << 32) | lenN;
     }
-    var lenT = pe - ps;
-    return (ps << 32) | lenT;
+    pe = pe + 1;
+}
+var lenT = pe - ps;
+return (ps << 32) | lenT;
 }
 
 # Extract a string value at a dotted path. Returns an alloc'd cstr
@@ -7692,7 +7695,7 @@ fn sandhi_wd_execute_script(base_url, session_id, script, args_json) {
 #
 # The body shape is the W3C-compatible one Appium 2.x expects:
 #   {"capabilities":{"alwaysMatch":{"platformName":"Android",
-#    "appium:automationName":"UiAutomator2", ...}}}
+            #    "appium:automationName":"UiAutomator2", ...}}}
 fn sandhi_ap_new_session(base_url, platform_name, automation_name, extra_caps_json) {
     var always = sandhi_json_obj_new();
     sandhi_json_add_string(always, "platformName", platform_name);
@@ -8249,8 +8252,8 @@ fn _sandhi_local_qname(name) {
         # Lowercase compare on the suffix.
         if (c0 == 46) {  # '.'
             if ((c1 == 108 || c1 == 76) && (c2 == 111 || c2 == 79)
-             && (c3 == 99 || c3 == 67) && (c4 == 97 || c4 == 65)
-             && (c5 == 108 || c5 == 76)) {
+            && (c3 == 99 || c3 == 67) && (c4 == 97 || c4 == 65)
+            && (c5 == 108 || c5 == 76)) {
                 has_suffix = 1;
             }
         }
@@ -8436,8 +8439,8 @@ fn sandhi_discovery_deregister(base_url, name) {
 #   sandhi_discovery_chain_add(c, sandhi_discovery_local_resolver());
 #   var svc = sandhi_discovery_chain_resolve(c, "yantra-worker");
 #   if (svc != 0) {
-#       # svc_host(svc) / svc_port(svc) / svc_ipv4(svc)
-#   }
+    #       # svc_host(svc) / svc_port(svc) / svc_ipv4(svc)
+    #   }
 #
 # No resolver in the chain is load-bearing — a missing daimon falls
 # through to the next backend silently.

@@ -271,7 +271,7 @@ fn sandhi_hpack_table_add(t, name, value) {
     store64(t + SANDHI_HPACK_TBL_OFF_NAMES, new_names);
     store64(t + SANDHI_HPACK_TBL_OFF_VALUES, new_values);
     store64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE,
-            load64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE) + sz);
+    load64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE) + sz);
     return 0;
 }
 

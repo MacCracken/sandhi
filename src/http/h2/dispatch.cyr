@@ -68,8 +68,8 @@ fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len) {
     }
 
     var stream_id = sandhi_h2_request_send(h2c, method, scheme, full_path,
-                                             authority, user_headers,
-                                             body, body_len);
+    authority, user_headers,
+    body, body_len);
     if (stream_id < 0) { return _sandhi_resp_err(SANDHI_ERR_PROTOCOL); }
     return sandhi_h2_response_recv(h2c, stream_id);
 }

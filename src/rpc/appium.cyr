@@ -22,7 +22,7 @@
 #
 # The body shape is the W3C-compatible one Appium 2.x expects:
 #   {"capabilities":{"alwaysMatch":{"platformName":"Android",
-#    "appium:automationName":"UiAutomator2", ...}}}
+            #    "appium:automationName":"UiAutomator2", ...}}}
 fn sandhi_ap_new_session(base_url, platform_name, automation_name, extra_caps_json) {
     var always = sandhi_json_obj_new();
     sandhi_json_add_string(always, "platformName", platform_name);

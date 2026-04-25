@@ -13,8 +13,8 @@
 #   sandhi_discovery_chain_add(c, sandhi_discovery_local_resolver());
 #   var svc = sandhi_discovery_chain_resolve(c, "yantra-worker");
 #   if (svc != 0) {
-#       # svc_host(svc) / svc_port(svc) / svc_ipv4(svc)
-#   }
+    #       # svc_host(svc) / svc_port(svc) / svc_ipv4(svc)
+    #   }
 #
 # No resolver in the chain is load-bearing — a missing daimon falls
 # through to the next backend silently.
