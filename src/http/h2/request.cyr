@@ -142,9 +142,13 @@ fn _h2_header_is_forbidden(name) {
     if (_h2_streq_ci(name, "proxy-connection") == 1)  { return 1; }
     if (_h2_streq_ci(name, "transfer-encoding") == 1) { return 1; }
     if (_h2_streq_ci(name, "upgrade") == 1)           { return 1; }
-    # `te` is conditionally allowed (only "te: trailers" is OK in h2);
-    # for first cut we drop all `te` headers and let the caller use a
-    # different mechanism if they need trailers (no consumer asks).
+    # `te` is conditionally allowed in h2 — RFC 7540 §8.1.2.2 permits
+    # only "te: trailers". Sandhi response-side trailer parsing landed
+    # at 0.9.4 (see `src/http/response.cyr::_sandhi_resp_merge_trailers`),
+    # so receiving trailers works regardless of whether we send TE.
+    # Outgoing TE: trailers signaling is a separate item — currently we
+    # drop all te headers because the dialect callers (WebDriver / MCP)
+    # don't request trailers.
     if (_h2_streq_ci(name, "te") == 1)                { return 1; }
     return 0;
 }

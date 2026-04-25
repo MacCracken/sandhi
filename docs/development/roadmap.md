@@ -294,20 +294,102 @@ post-fold (only-on-second-consumer-ask).*
   hoosh / ifran / sit / ark / mela to pin 0.9.2 tags for their
   v5.7.0-compatible cuts.
 
-### Carried beyond 0.9.x (only when blockers clear)
+### 0.9.3 — Stub-elimination + CI hardening — ✅ shipped 2026-04-25
 
-- **ALPN runtime hookup** — needs the `lib/tls.cyr` SSL_CTX hook
-  per `docs/issues/2026-04-24-stdlib-tls-alpn-hook.md`. When
-  upstream lands, ~30 lines of sandhi-side changes.
-- **Live HTTPS** — needs the libssl-pthread-deadlock fix per
-  `docs/issues/2026-04-24-libssl-pthread-deadlock.md`.
-- **Huffman encode** — wire-size optimization only (raw is
-  spec-permitted). Add when a consumer reports bandwidth
-  pressure.
-- **HTTP/2 redirects + retry** — h2 dispatch path skips both
-  today; auto-selection falls through to 1.1 when redirects/retry
-  are needed via the existing `*_opts` variants. Bundle if a
-  consumer wants h2-with-redirects.
+*All upstream TLS-stack blockers cleared (Cyrius v5.6.39 → 5.6.40 →
+5.6.41). Every runtime stub in `src/` replaced with a working
+implementation. Internal wire-up only — public surface stays frozen
+at 0.9.2 per ADR 0005.*
+
+**Upstream resolutions** (issue docs moved to `docs/issues/archive/`):
+- `libssl-pthread-deadlock` — closed at Cyrius v5.6.39. `tls_connect`
+  round-trips real HTTPS bytes.
+- `stdlib-tls-alpn-hook` — closed at Cyrius v5.6.40. New
+  `tls_connect_with_ctx_hook` + `tls_dlsym` in stdlib.
+- `cyrius-7arg-frame-tls-connect-segfault` — surfaced 2026-04-25 once
+  libssl-pthread cleared, closed same day at Cyrius v5.6.41.
+
+**Sandhi-side stub kills:**
+- **ALPN runtime** wired in `src/http/conn.cyr` — `tls_connect_with_ctx_hook`
+  callback advertises `http/1.1` (or `h2,http/1.1` when the toggle is
+  set), `SSL_get0_alpn_selected` populates a new
+  `SANDHI_CONN_OFF_ALPN_DATA` slot. `sandhi_conn_alpn_selected` /
+  `_is_h2` accessors return real values.
+- **TLS policy enforcement** wired in `src/tls_policy/apply.cyr` —
+  resolves nine libssl/libcrypto symbols via `tls_dlsym`, applies
+  trust-store override + mTLS cert/key load through the SSL_CTX
+  hook, post-handshake SPKI extraction (`X509_get_pubkey` +
+  `i2d_PUBKEY` → SHA-256 → constant-time hex compare). Mismatch
+  closes the conn with `err=TLS` per ADR 0004.
+- **mDNS resolver** wired in `src/discovery/local.cyr` — RFC 6762
+  unicast-response (QU bit) A query against 224.0.0.251:5353 with
+  500 ms recv timeout. `sandhi_discovery_local_available()` flipped
+  to 1.
+- **IPv6 client integration** wired in `src/http/conn.cyr` +
+  `src/http/client.cyr` — `_sandhi_conn_open_v6_fully_timed` opens
+  via raw `socket(AF_INET6) + connect(sockaddr_in6)`; `_sandhi_http_do_impl`
+  falls back to v6 when v4 misses. Internal helpers only (ADR 0005
+  preserves the public open verbs as v4-shape; the v6 fallback is
+  routed through them transparently).
+- **Bracketed IPv6 URLs** in `src/http/url.cyr` — `http://[::1]:8080/`
+  parses correctly, brackets stripped from the stored host.
+- **Retry jitter** in `src/http/retry.cyr` — AWS-style "full jitter"
+  (uniform random in `[0, backoff_capped]`) replaces the prior
+  fixed-exponential sleep. Prevents thundering-herd alignment.
+
+**Versioning collapsed to one source of truth:**
+- 35 dead per-module `sandhi_*_version()` accessors removed (only
+  `sandhi_version()` was ever called).
+- `src/main.cyr` declares `var SANDHI_VERSION = "X.Y.Z"` once;
+  comment notes it must match the VERSION file.
+- `tests/sandhi.tcyr` `test_sandhi_identity` reads VERSION at test
+  time and asserts equality with `sandhi_version()` — fails the
+  suite if drift exists. Tests build expected User-Agent strings
+  dynamically via a `_expected_with_version` helper instead of
+  hardcoding `sandhi/X.Y.Z` literals.
+- `.github/workflows/ci.yml` re-checks the same equality at the
+  shell level on every PR before tests even run.
+
+**CI hardening** — adopted yukti's CI shape. Strict lint (warn-as-fail
+on `src/`, with `src/http/h2/huffman.cyr` allowlisted per architecture/001),
+`cyrius fmt --check` enforcement, `cyrius vet`, dist drift check
+(`git diff --quiet dist/sandhi.cyr` after `cyrius distlib`), DCE
+build of `programs/smoke.cyr`, ELF magic verification, best-effort
+aarch64 cross-build. Separate Security Scan job (no raw exec/fork,
+no writes to system paths, no large stack buffers). Separate Docs
+job (required files + `## [VERSION]` section in CHANGELOG). Release
+workflow extends to verify three-way version sync (VERSION ↔
+SANDHI_VERSION ↔ git tag) and auto-extracts the matching CHANGELOG
+section as the release body.
+
+### 0.9.4 — Internal wire-up follow-up
+
+*All scoped, no upstream gates, no public surface impact.*
+
+- **HTTP/2 redirect-following** — the 1.1 path does it via
+  `_sandhi_http_follow`; `sandhi_http_request_auto`'s h2 branch
+  skips it. Mirror the redirect logic (cred-strip on cross-authority,
+  https→http refusal, 303→GET) routed through `sandhi_h2_request`.
+- **HTTP/2 retry-with-backoff** — `sandhi_http_get_retry` etc.
+  currently call `_sandhi_http_dispatch` directly, bypassing the
+  auto-h2 path. Route them through `sandhi_http_request_auto` so
+  retries inherit h2 selection where available.
+- **Chunked response trailers** — `src/http/pool.cyr:242` and
+  `src/http/h2/request.cyr:147` document the gap. RFC 7230 §4.1.2
+  trailer parse, exposed via a `sandhi_http_trailers(resp)`
+  accessor. Internal addition only — frozen surface stays clean
+  because no new public *verb* (the accessor pattern matches
+  existing `sandhi_http_headers` shape and was conceptually
+  reserved when the response struct shipped).
+- **ALPN-driven h2 auto-promotion** — full version of the auto
+  dispatcher: open the conn (advertise both protocols), check
+  `sandhi_conn_alpn_is_h2`, if yes do the h2 preface/SETTINGS
+  exchange and cache an `sandhi_h2_conn` in the pool, dispatch the
+  request via `sandhi_h2_request`. Builds on the ALPN runtime
+  shipped at 0.9.3.
+- **Huffman encode** (deferred from 0.8.x) — wire-size optimization,
+  raw byte literal is spec-permitted. Add only on bandwidth-pressure
+  evidence.
 
 ### M6 — Fold into Cyrius stdlib (v1.0.0) — clean-break at v5.7.0
 

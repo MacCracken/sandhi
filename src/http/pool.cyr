@@ -236,10 +236,16 @@ fn _sandhi_pool_put(pool, host, port, tls, conn) {
 #   - 0 - 2 if the response declares Connection: close (caller must
 #         not put back into the pool; we read what we can and stop)
 #
-# Status: this function is the keep-alive correctness boundary. It
-# does NOT enforce a `Trailer:` header sweep or trailer-chunk parse —
-# trailers are dropped silently per RFC 7230 §4.4 robustness ("MAY
-# discard"). If a consumer ever needs trailers, they ask.
+# Status: this function is the keep-alive correctness boundary.
+# Trailer parsing landed at 0.9.4 in `_sandhi_resp_decode_chunked`
+# (response.cyr) — RFC 7230 §4.1.2 trailers are merged into the
+# response's headers map, with the §4.1.2 forbidden-name list
+# filtered. The pool-side completeness check below still treats
+# `0\r\n\r\n` as the simple terminator without parsing the trailer
+# block; that's safe because the body itself is complete at that
+# point — completeness is what gates pool put-back. Actual trailer
+# bytes that follow are consumed by the response parser when the
+# scratch buffer is handed to `sandhi_http_response_parse`.
 
 fn _sandhi_pool_chunked_complete(buf, body_start, blen) {
     # Walk the chunked body looking for terminal 0-chunk. Returns 1

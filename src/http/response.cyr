@@ -193,7 +193,7 @@ fn _sandhi_resp_chunk_size(buf, blen, offset_ptr) {
 # truncation) as success. This silently truncated bodies. Now we
 # track `saw_terminal` and propagate `_BAD` from chunk_size, so a
 # clean stream end is the only way to claim success.
-fn _sandhi_resp_decode_chunked(buf, blen, start, body_out_ptr, body_len_ptr) {
+fn _sandhi_resp_decode_chunked(buf, blen, start, body_out_ptr, body_len_ptr, headers) {
     var cap = blen - start;
     if (cap < 1) { cap = 1; }
     var out = alloc(cap + 1);
@@ -231,6 +231,114 @@ fn _sandhi_resp_decode_chunked(buf, blen, start, body_out_ptr, body_len_ptr) {
     store64(body_len_ptr, out_len);
     if (malformed == 1) { return 0 - 1; }
     if (saw_terminal == 0) { return 0 - 1; }
+    # RFC 7230 §4.1.2 trailer-part. The terminal 0-chunk is followed
+    # by zero or more trailer header-fields and then a final empty
+    # CRLF. Parse + merge allowed trailers into `headers` so they
+    # surface via sandhi_http_headers; drain forbidden ones silently
+    # (filtering matches the smuggling-protection list).
+    if (headers != 0) {
+        _sandhi_resp_merge_trailers(buf, blen, load64(off_cell), headers);
+    }
+    return 0;
+}
+
+# Case-insensitive cstr equality. Local to response.cyr because
+# client.cyr's identical helper sits later in the build order.
+fn _sandhi_resp_streq_ci(a, b) {
+    if (a == 0 || b == 0) { return 0; }
+    var i = 0;
+    while (1 == 1) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
+        if (cb >= 65 && cb <= 90) { cb = cb + 32; }
+        if (ca != cb) { return 0; }
+        if (ca == 0)  { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# RFC 7230 §4.1.2 forbids these field names in trailers because
+# either (a) they affect framing/routing/auth (would defeat the
+# fact that the recipient already committed to a body framing) or
+# (b) they modify the trailer parsing itself. Returns 1 if `name`
+# (case-insensitive) is on the forbidden list, 0 otherwise.
+fn _sandhi_resp_trailer_forbidden(name) {
+    if (_sandhi_resp_streq_ci(name, "Transfer-Encoding") == 1) { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Content-Length") == 1)    { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Host") == 1)              { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Cache-Control") == 1)     { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Expect") == 1)            { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Max-Forwards") == 1)      { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Pragma") == 1)            { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Range") == 1)             { return 1; }
+    if (_sandhi_resp_streq_ci(name, "TE") == 1)                { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Trailer") == 1)           { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Authorization") == 1)     { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Set-Cookie") == 1)        { return 1; }
+    return 0;
+}
+
+# Walk forward from `start` parsing trailer header-fields ("Name:
+# value\r\n") until an empty line (CRLF on its own). Adds allowed
+# fields to `headers` via sandhi_headers_add (preserves order; lets
+# multi-value trailers like Server-Timing show up multiple times).
+# Tolerant: returns silently on malformed bytes — trailer parsing
+# is best-effort. The body has already been delivered correctly;
+# trailer drops only affect metadata visibility.
+fn _sandhi_resp_merge_trailers(buf, blen, start, headers) {
+    var off = start;
+    var safety = 0;
+    while (off < blen && safety < 256) {
+        # Empty line (CRLF or LF alone) terminates the trailer block.
+        if (off < blen && load8(buf + off) == 13) {
+            if (off + 1 < blen && load8(buf + off + 1) == 10) { return 0; }
+        }
+        if (off < blen && load8(buf + off) == 10) { return 0; }
+        # Find ':' separating name from value.
+        var colon = off;
+        while (colon < blen && load8(buf + colon) != 58
+        && load8(buf + colon) != 13
+        && load8(buf + colon) != 10) {
+            colon = colon + 1;
+        }
+        if (colon >= blen || load8(buf + colon) != 58) { return 0; }
+        # Name = [off, colon). Trim — header names per RFC 7230 are
+        # tokens, no whitespace allowed.
+        var name_len = colon - off;
+        if (name_len <= 0) { return 0; }
+        var name = alloc(name_len + 1);
+        memcpy(name, buf + off, name_len);
+        store8(name + name_len, 0);
+        # Skip ':' + leading OWS on value.
+        var vstart = colon + 1;
+        while (vstart < blen && (load8(buf + vstart) == 32 || load8(buf + vstart) == 9)) {
+            vstart = vstart + 1;
+        }
+        # Value runs to CR/LF.
+        var vend = vstart;
+        while (vend < blen && load8(buf + vend) != 13 && load8(buf + vend) != 10) {
+            vend = vend + 1;
+        }
+        # Trim trailing OWS.
+        while (vend > vstart && (load8(buf + vend - 1) == 32 || load8(buf + vend - 1) == 9)) {
+            vend = vend - 1;
+        }
+        var val_len = vend - vstart;
+        var value = alloc(val_len + 1);
+        if (val_len > 0) { memcpy(value, buf + vstart, val_len); }
+        store8(value + val_len, 0);
+        # Filter forbidden names; merge the rest.
+        if (_sandhi_resp_trailer_forbidden(name) == 0) {
+            sandhi_headers_add(headers, name, value);
+        }
+        # Consume CR/LF and advance past line terminator.
+        off = vend;
+        if (off < blen && load8(buf + off) == 13) { off = off + 1; }
+        if (off < blen && load8(buf + off) == 10) { off = off + 1; }
+        safety = safety + 1;
+    }
     return 0;
 }
 
@@ -326,7 +434,7 @@ fn _sandhi_resp_frame(buf, blen, status, headers, body_start) {
     if (chunked == 1) {
         var outp_cell = alloc(8);
         var outl_cell = alloc(8);
-        var dr = _sandhi_resp_decode_chunked(buf, blen, body_start, outp_cell, outl_cell);
+        var dr = _sandhi_resp_decode_chunked(buf, blen, body_start, outp_cell, outl_cell, headers);
         if (dr < 0) {
             return _sandhi_resp_err(SANDHI_ERR_PROTOCOL);
         }
