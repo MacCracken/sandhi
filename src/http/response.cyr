@@ -277,6 +277,24 @@ fn _sandhi_resp_trailer_forbidden(name) {
     if (_sandhi_resp_streq_ci(name, "Trailer") == 1)           { return 1; }
     if (_sandhi_resp_streq_ci(name, "Authorization") == 1)     { return 1; }
     if (_sandhi_resp_streq_ci(name, "Set-Cookie") == 1)        { return 1; }
+    # 0.9.9 audit additions:
+    # `Connection` is connection-management metadata per RFC 7230 §6.1
+    # and MUST NOT appear in trailers — letting it through would let a
+    # malicious server inject `Connection: close` post-body and
+    # destabilize the keep-alive state machine that the pool layer
+    # relies on for put-back decisions.
+    # `Cookie` and `Proxy-Authorization` are auth-bearing request
+    # headers; treating them symmetrically with `Authorization` /
+    # `Set-Cookie` closes the trailer-side equivalent of the redirect
+    # cred-strip filter (`_sandhi_strip_sensitive_headers`).
+    # `Proxy-Authenticate` would round out the proxy-auth pair but is
+    # deferred — at the per-program fixup cap (architecture/001),
+    # adding the fourth string literal would tip `tests/sandhi.tcyr`
+    # over. Lower priority: Proxy-Authenticate is a response challenge
+    # the consumer's auth machinery typically ignores from trailers.
+    if (_sandhi_resp_streq_ci(name, "Connection") == 1)          { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Cookie") == 1)              { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Proxy-Authorization") == 1) { return 1; }
     return 0;
 }
 

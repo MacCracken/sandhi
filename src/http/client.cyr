@@ -150,6 +150,15 @@ fn _sandhi_client_build_request_v(method, full_path, host_header, user_headers, 
     }
 
     # User headers (after auto headers).
+    #
+    # Caller-supplied Host / Content-Length / Transfer-Encoding /
+    # Connection here would emit alongside the auto-injected
+    # versions and create a dup-header smuggling vector. The
+    # builder-side filter for these is documented as a 0.9.9 audit
+    # finding and deferred to the 1.0.x stdlib-patch window — the
+    # equivalent server-side dup-detection landed at 0.9.1 (see
+    # `sandhi_headers_smuggle_dup`). Caller currently owns the
+    # contract: do not pass these in `user_headers`.
     if (user_headers != 0) {
         sandhi_headers_serialize(user_headers, sb);
     }

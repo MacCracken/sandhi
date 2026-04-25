@@ -4,6 +4,102 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.9] — 2026-04-25
+
+**Internal P1 self-audit.** Final security pass before the v5.7.0
+fold makes the public surface permanent. Audited every code path
+added since the 0.9.0/0.9.1 P0/P1 sweeps. ADR 0005 freeze respected
+(no new public verbs). One fix landed; two findings deferred to the
+1.0.x stdlib-patch window for fixup-cap reasons (architecture/001);
+the rest of the audit surface is sound.
+
+**649 assertions green** (482 sandhi + 167 h2; no regression — same
+coverage as 0.9.8).
+
+### Fix — chunked trailer forbidden list
+
+`src/http/response.cyr::_sandhi_resp_trailer_forbidden` gains three
+names: `Connection`, `Cookie`, `Proxy-Authorization`.
+
+- `Connection` is connection-management metadata per RFC 7230 §6.1
+  and MUST NOT appear in trailers. Without filtering, a malicious
+  server could inject `Connection: close` in the trailer block
+  after the body has been consumed; the response parser would
+  surface it via `sandhi_http_headers(r)`, and the keep-alive /
+  pool put-back logic that consults the response's Connection
+  value would mis-classify a perfectly reusable conn as "must
+  close." Real-world exploit: a spec-deviating CDN could induce
+  TLS-handshake churn on every keep-alive batch.
+- `Cookie` and `Proxy-Authorization` are auth-bearing request
+  headers; they're now treated symmetrically with `Authorization`
+  and `Set-Cookie` (which were already on the list). Closes the
+  trailer-side equivalent of the 0.9.0 redirect cred-strip
+  filter (`_sandhi_strip_sensitive_headers`), which strips the
+  same three on cross-authority hops.
+
+### Audited and sound
+
+- **ALPN advertise-toggle restoration** — `_sandhi_alpn_advertise_h2`
+  is reset to 0 on every exit path of `_sandhi_http_try_h2_promote`
+  including the connect-failure case. Single-threaded model means
+  the toggle can never persist across a request boundary.
+- **Huffman encoder bit-handling** — traced multi-byte cases
+  (3+3+3-bit codes filling and emitting across 8-bit boundaries)
+  plus padding (1..7 unemitted bits with EOS-prefix all-1s pad).
+  Bit accumulator stays within i64 (max 30-bit code + ≤7 leftover
+  = 37 bits). Encoder produces byte-exact RFC 7541 C.4.1 reference
+  output (verified by `test_hpack_huffman_encode_www_example`).
+- **h2 forbidden-headers filter** — `_h2_header_is_forbidden`
+  matches RFC 7540 §8.1.2.2 exactly: connection / keep-alive /
+  proxy-connection / transfer-encoding / upgrade dropped; te
+  conditionally allowed iff value is "trailers" (the one spec
+  exception, validated whitespace-tolerantly).
+- **Redirect cred-strip filter** — `_sandhi_strip_sensitive_headers`
+  drops Authorization / Cookie / Proxy-Authorization on cross-
+  authority hops. Matches the auth-header set RFC 7235 + 6265
+  define; the pair is now also reflected in the trailer filter
+  above.
+
+### Audited, optimization-grade only
+
+- `_sandhi_pool_has_idle` (shipped 0.9.6) doesn't skip stale
+  (>idle_timeout_ms-old) conns when deciding whether to attempt
+  ALPN promotion. If a route's only idle 1.1 conns are stale,
+  promotion is skipped and `_sandhi_http_do` opens a fresh conn
+  via the 1.1 path — missing the h2-promotion opportunity until
+  the stale conns are reaped. Not a security issue; deferred as
+  a 1.0.x optimization patch if a consumer measures the hit.
+
+### Deferred to 1.0.x stdlib-patch window
+
+The per-program fixup cap (architecture/001) makes the
+following two finishing strokes unfit for 0.9.9 — they would push
+`tests/sandhi.tcyr` over the 32768 limit.
+
+1. **Trailer filter `Proxy-Authenticate`** — would round out the
+   proxy-auth pair by analogy with the new `Proxy-Authorization`
+   entry. Lower priority than the three landed names: it's a
+   response challenge to the client, not an injectable
+   credential vector. Single name = single string-literal fixup
+   away from landing.
+2. **Request-builder dup-prevention** — caller-supplied `Host` /
+   `Content-Length` / `Transfer-Encoding` / `Connection` in
+   `user_headers` currently emit alongside the auto-injected
+   versions, creating dup-header smuggling vectors. The
+   server-side counterpart (`sandhi_headers_smuggle_dup`)
+   landed at 0.9.1; the client-side filter applies the same
+   idea to the build path. Implementation was prototyped as a
+   hand-rolled byte compare in `_sandhi_client_name_is_reserved`
+   to avoid string-literal pressure, but the per-character bit
+   ops (~50 of them across four name checks) tipped the cap.
+   Caller currently owns the contract — the builder accepts
+   the user's headers as given.
+
+Both deferrals are tracked for the post-fold patch sequence; once
+sandhi is folded into stdlib at v5.7.0, the per-program cap
+re-baselines (`tests/sandhi.tcyr` no longer concatenates all of
+src/), and the headroom returns.
+
 ## [0.9.8] — 2026-04-25
 
 **HPACK Huffman encode.** Wire-size optimization for outgoing h2
