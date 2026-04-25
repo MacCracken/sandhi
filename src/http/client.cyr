@@ -121,14 +121,21 @@ fn _sandhi_client_build_request_v(method, full_path, host_header, user_headers, 
         str_builder_add_cstr(sb, "\r\n");
     }
 
-    # Default User-Agent + Accept-Encoding — only if caller didn't set one.
-    # Some servers 403 on missing UA; explicit `identity` guards against
-    # servers that return `Content-Encoding: gzip` we can't decode.
+    # Default User-Agent + Accept-Encoding + TE — only if caller didn't
+    # set them. Some servers 403 on missing UA; explicit `identity`
+    # guards against `Content-Encoding: gzip` we can't decode. `TE:
+    # trailers` lets spec-compliant servers emit response trailers
+    # (RFC 7230 §4.4 — "a server SHOULD NOT generate trailer fields
+    # ... unless the request includes a TE header field indicating
+    # 'trailers' is acceptable"); the response-side trailer parser
+    # landed at 0.9.4, this signal landed at 0.9.7.
     var have_ua = 0;
     var have_ae = 0;
+    var have_te = 0;
     if (user_headers != 0) {
         if (sandhi_headers_has(user_headers, "User-Agent") == 1)      { have_ua = 1; }
         if (sandhi_headers_has(user_headers, "Accept-Encoding") == 1) { have_ae = 1; }
+        if (sandhi_headers_has(user_headers, "TE") == 1)              { have_te = 1; }
     }
     if (have_ua == 0) {
         str_builder_add_cstr(sb, "User-Agent: sandhi/");
@@ -137,6 +144,9 @@ fn _sandhi_client_build_request_v(method, full_path, host_header, user_headers, 
     }
     if (have_ae == 0) {
         str_builder_add_cstr(sb, "Accept-Encoding: identity\r\n");
+    }
+    if (have_te == 0) {
+        str_builder_add_cstr(sb, "TE: trailers\r\n");
     }
 
     # User headers (after auto headers).

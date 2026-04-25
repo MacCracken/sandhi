@@ -4,6 +4,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.7] — 2026-04-25
+
+**`TE: trailers` request signaling.** Outgoing-side counterpart to
+the response-trailer parser that landed at 0.9.4. ADR 0005 surface
+freeze respected (no new public verbs). RFC 7230 §4.4 says servers
+SHOULD NOT generate trailer fields unless the request includes a
+TE header field indicating "trailers" is acceptable; this release
+sends that signal by default on both the 1.1 and h2 paths.
+
+**635 assertions green** (482 sandhi + 153 h2; no regression).
+Five existing 1.1 builder-test expected strings updated to reflect
+the new TE line in the wire bytes.
+
+### http (1.1)
+
+- `src/http/client.cyr` — `_sandhi_client_build_request_v`
+  auto-injects `TE: trailers\r\n` after `Accept-Encoding:
+  identity\r\n` and before user headers. Override-preserving:
+  `sandhi_headers_has(user_headers, "TE") == 1` skips the auto-
+  inject and lets the caller's value through unchanged. Same
+  shape as the existing User-Agent / Accept-Encoding defaults
+  (0.7.1).
+
+### http/h2
+
+- `src/http/h2/request.cyr` — `_h2_header_is_forbidden(name)` →
+  `_h2_header_is_forbidden(name, value)`. The `te` header is now
+  conditionally allowed: `te: trailers` (whitespace-tolerant,
+  case-insensitive) passes the filter; any other TE value
+  (`te: gzip`, `te: deflate;q=0.5`, etc.) is dropped per RFC 7540
+  §8.1.2.2 — the spec says a request with TE != "trailers" is
+  malformed; we drop instead of erroring so the request still
+  ships.
+- `sandhi_h2_request_encode_headers` — auto-emits `te: trailers`
+  after the four pseudo-headers and before user headers, when
+  the caller didn't set TE. Mirrors the 1.1 builder's behavior;
+  same `sandhi_headers_has`-based override gate.
+- New `_h2_te_value_is_trailers(value)` — strict matcher used by
+  the forbidden filter for the te-conditional rule. Skips
+  leading whitespace, requires the literal "trailers" (ci),
+  allows trailing whitespace.
+
+### Verification
+
+- 1.1 wire bytes: five existing tests in `tests/sandhi.tcyr`
+  (`test_client_build_request_get` / `_post` / `_post_empty_body`
+  / `_user_headers` / `_override_ua_and_ae`) now assert the
+  presence of `TE: trailers\r\n` in the expected output. Default
+  injection + correct ordering (after AE, before user headers,
+  before Connection-close) verified.
+- 1.1 override + h2 paths: standalone
+  `programs/_te_trailers_probe.cyr` covers the four cases the
+  test suite has no fixup-table room for (per architecture/001):
+  caller TE suppresses 1.1 default; h2 drops `te: gzip`; h2
+  auto-emits `te: trailers` by default; h2 lets caller-set
+  `te: trailers` flow through. All four PASS.
+
 ## [0.9.6] — 2026-04-25
 
 **ALPN-driven HTTP/2 auto-promotion.** First release where live h2

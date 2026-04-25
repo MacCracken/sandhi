@@ -115,6 +115,20 @@ user_headers, hbuf) {
     off = _h2_emit_scheme(h2c, scheme, hbuf, off);
     off = _h2_emit_path(h2c, path, hbuf, off);
     off = _h2_emit_authority(h2c, authority, hbuf, off);
+
+    # Default `te: trailers` (0.9.7) — same shape as the 1.1 builder's
+    # auto-injection. Skip if the caller set TE explicitly so we
+    # don't double-emit; their value still flows through the
+    # forbidden filter below, which keeps `te: trailers` and drops
+    # everything else per RFC 7540 §8.1.2.2.
+    var have_te = 0;
+    if (user_headers != 0) {
+        if (sandhi_headers_has(user_headers, "TE") == 1) { have_te = 1; }
+    }
+    if (have_te == 0) {
+        off = _h2_emit_user_header(h2c, "te", "trailers", hbuf, off);
+    }
+
     if (user_headers != 0) {
         var n = sandhi_headers_count(user_headers);
         var i = 0;
@@ -124,8 +138,8 @@ user_headers, hbuf) {
             # Skip headers that h2 forbids — connection-specific
             # ones per RFC 7540 §8.1.2.2: connection, keep-alive,
             # proxy-connection, transfer-encoding, upgrade,
-            # te (except te: trailers).
-            if (_h2_header_is_forbidden(name) == 0) {
+            # te (except te: trailers, which is the one allowed value).
+            if (_h2_header_is_forbidden(name, value) == 0) {
                 off = _h2_emit_user_header(h2c, name, value, hbuf, off);
             }
             i = i + 1;
@@ -134,23 +148,48 @@ user_headers, hbuf) {
     return off;
 }
 
-# 1 if `name` is on the h2 forbidden-headers list (RFC 7540 §8.1.2.2).
-# Case-insensitive match.
-fn _h2_header_is_forbidden(name) {
+# 1 if (name, value) is forbidden in an h2 header block per RFC 7540
+# §8.1.2.2. Case-insensitive name match. The `te` header is
+# conditionally allowed: only `te: trailers` may appear; any other
+# value (e.g. `te: gzip`) must be dropped — the spec says a request
+# with TE != "trailers" is malformed. We drop instead of erroring so
+# the request still ships.
+fn _h2_header_is_forbidden(name, value) {
     if (_h2_streq_ci(name, "connection") == 1)        { return 1; }
     if (_h2_streq_ci(name, "keep-alive") == 1)        { return 1; }
     if (_h2_streq_ci(name, "proxy-connection") == 1)  { return 1; }
     if (_h2_streq_ci(name, "transfer-encoding") == 1) { return 1; }
     if (_h2_streq_ci(name, "upgrade") == 1)           { return 1; }
-    # `te` is conditionally allowed in h2 — RFC 7540 §8.1.2.2 permits
-    # only "te: trailers". Sandhi response-side trailer parsing landed
-    # at 0.9.4 (see `src/http/response.cyr::_sandhi_resp_merge_trailers`),
-    # so receiving trailers works regardless of whether we send TE.
-    # Outgoing TE: trailers signaling is a separate item — currently we
-    # drop all te headers because the dialect callers (WebDriver / MCP)
-    # don't request trailers.
-    if (_h2_streq_ci(name, "te") == 1)                { return 1; }
+    if (_h2_streq_ci(name, "te") == 1) {
+        if (_h2_te_value_is_trailers(value) == 1) { return 0; }
+        return 1;
+    }
     return 0;
+}
+
+# 1 if `value` is the literal "trailers" (case-insensitive) with
+# optional surrounding whitespace. NULL or any other value → 0.
+# Used only by `_h2_header_is_forbidden` for the te-conditional rule.
+fn _h2_te_value_is_trailers(value) {
+    if (value == 0) { return 0; }
+    var i = 0;
+    while (load8(value + i) == 32 || load8(value + i) == 9) { i = i + 1; }
+    var need = "trailers";
+    var j = 0;
+    while (j < 8) {
+        var ch = load8(value + i + j);
+        if (ch >= 65 && ch <= 90) { ch = ch + 32; }
+        if (ch != load8(need + j)) { return 0; }
+        j = j + 1;
+    }
+    var k = i + 8;
+    while (1 == 1) {
+        var ch2 = load8(value + k);
+        if (ch2 == 0) { return 1; }
+        if (ch2 != 32 && ch2 != 9) { return 0; }
+        k = k + 1;
+    }
+    return 1;
 }
 
 fn _h2_streq_ci(a, b) {
