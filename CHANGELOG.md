@@ -6,6 +6,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.8.0 work in progress
 
+**Bite 5c — h2 response decode + stream state**. New
+`src/http/h2/response.cyr` (~210 lines). 592 total assertions across
+both files (446 sandhi + 146 h2; +9 response). With this bite the h2
+protocol stack is functionally complete end-to-end; Bite 6 (multiplex
+via pool) and Bite 7 (auto-selection + ship) wrap up.
+
+#### Added
+- `sandhi_h2_response_recv(h2c, stream_id)` — reads frames in a
+  loop, dispatches by type and stream-id, returns a
+  `sandhi_response` struct (the same shape `_sandhi_http_dispatch`
+  produces) so callers stay protocol-agnostic.
+- Connection-level frame handlers:
+  - SETTINGS (non-ACK): apply via Bite 5a's settings-payload
+    parser, then ACK back.
+  - SETTINGS (ACK): record + continue.
+  - PING (non-ACK): echo with the ACK flag.
+  - GOAWAY: set conn flag, surface as `SANDHI_ERR_REMOTE`.
+  - PRIORITY / WINDOW_UPDATE: silently ignored. Bite 6 will track
+    flow control once multiplex needs it.
+- Stream-level frame handlers (only on our `stream_id`):
+  - HEADERS: append to header block; END_HEADERS triggers HPACK
+    decode; END_STREAM finishes (empty-body case).
+  - CONTINUATION: append; END_HEADERS triggers decode.
+  - DATA: append to body, honoring the PADDED flag (1-byte pad
+    length + that many trailing bytes stripped per §6.1).
+  - RST_STREAM: surface as `SANDHI_ERR_REMOTE`.
+- Frames on other stream-ids are dropped — first-cut single-
+  stream-per-connection client.
+- `_h2_decode_response_headers(h2c, hblock, hblock_len, headers_out)`
+  — walks the HPACK-encoded block, extracts `:status`, drops other
+  pseudo-headers, populates `headers_out` with non-pseudo response
+  headers.
+- `_h2_parse_status(s)` — parses `:status` value to int. Empty or
+  non-digit returns 0 (caller treats as malformed).
+
+#### Tests (3 new in tests/h2.tcyr)
+- `parse_status` — 200 / 404 / 503 + edge cases (empty, non-digit).
+- `decode_headers` — synthesized header block with `:status 200` +
+  `content-type: text/plain` decodes correctly.
+- `pseudo_dropped` — `:status 404` populates the int but leaves the
+  user-visible headers struct empty.
+
+#### Notes
+- The frame loop itself isn't tested against a live socket — that
+  needs a mock or fixture. Frame send/recv plumbing is already
+  covered in Bites 3 + 5a; this bite tests the decode-side
+  semantics on synthesized inputs.
+- Body / header buffers are static-size (`_SANDHI_H2_HBLOCK_CAP =
+  16 KB`, `_SANDHI_H2_BODY_CAP = 1 MB`). Bigger needs surface as
+  Bite 7 options or a follow-up. Both fit typical RPC traffic
+  comfortably.
+- Bite 6 turns this single-stream client into a per-connection
+  stream-multiplex via the pool from Bite 1. Bite 7 wires
+  `sandhi_http_get` etc. to dispatch on ALPN selection.
+
 **Bite 5b — HEADERS encoding + request send**. New
 `src/http/h2/request.cyr` (~170 lines). 583 total assertions across
 both files (446 sandhi + 137 h2; +14 request). Composes Bite 2/2b

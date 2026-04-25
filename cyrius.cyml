@@ -59,6 +59,7 @@ modules = [
     "src/http/h2/frame.cyr",
     "src/http/h2/conn.cyr",
     "src/http/h2/request.cyr",
+    "src/http/h2/response.cyr",
     "src/http/retry.cyr",
     "src/http/sse.cyr",
     "src/http/stream.cyr",

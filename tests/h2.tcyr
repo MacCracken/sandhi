@@ -16,6 +16,7 @@ include "src/http/h2/hpack.cyr"
 include "src/http/h2/frame.cyr"
 include "src/http/h2/conn.cyr"
 include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
 
 # ================================================================
 # HPACK tests (Bite 2 of 0.8.0) — RFC 7541 Appendix C
@@ -545,6 +546,47 @@ fn test_h2_request_encode_decode_roundtrip() {
     return 0;
 }
 
+fn test_h2_parse_status() {
+    assert_eq(_h2_parse_status("200"), 200, "status 200");
+    assert_eq(_h2_parse_status("404"), 404, "status 404");
+    assert_eq(_h2_parse_status("503"), 503, "status 503");
+    assert_eq(_h2_parse_status(""),    0,   "empty → 0");
+    assert_eq(_h2_parse_status("xyz"), 0,   "non-digit → 0");
+    return 0;
+}
+
+fn test_h2_response_decode_headers() {
+    # Synthesize a response header block: :status 200 + content-type text/plain.
+    var t_enc = sandhi_hpack_table_new(0);
+    var hbuf = alloc(256);
+    var off = 0;
+    # :status 200 = static idx 8
+    off = sandhi_hpack_encode_indexed(hbuf, off, 8);
+    # content-type = static idx 31, value "text/plain"
+    off = sandhi_hpack_encode_literal_indexed_name(t_enc, hbuf, off,
+        31, "content-type", "text/plain");
+
+    # Decode side: fresh h2 conn (whose dec table starts empty).
+    var h2c = sandhi_h2_conn_new(0);
+    var headers = sandhi_headers_new();
+    var status = _h2_decode_response_headers(h2c, hbuf, off, headers);
+    assert_eq(status, 200, "decoded status");
+    assert_streq(sandhi_headers_get(headers, "content-type"), "text/plain", "ct header");
+    return 0;
+}
+
+fn test_h2_response_pseudo_dropped_from_user_headers() {
+    # :status should land in `status`, not in the headers struct.
+    var hbuf = alloc(64);
+    var off = sandhi_hpack_encode_indexed(hbuf, 0, 13);  # :status 404
+    var h2c = sandhi_h2_conn_new(0);
+    var headers = sandhi_headers_new();
+    var status = _h2_decode_response_headers(h2c, hbuf, off, headers);
+    assert_eq(status, 404, "404 status");
+    assert_eq(sandhi_headers_count(headers), 0, "no user headers");
+    return 0;
+}
+
 fn test_h2_request_drops_forbidden_headers() {
     # Connection: close MUST NOT appear in the encoded block.
     var h = sandhi_headers_new();
@@ -692,6 +734,15 @@ fn main() {
 
     test_group("h2/request/drops_forbidden");
     test_h2_request_drops_forbidden_headers();
+
+    test_group("h2/response/parse_status");
+    test_h2_parse_status();
+
+    test_group("h2/response/decode_headers");
+    test_h2_response_decode_headers();
+
+    test_group("h2/response/pseudo_dropped");
+    test_h2_response_pseudo_dropped_from_user_headers();
 
     return assert_summary();
 }
