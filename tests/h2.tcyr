@@ -9,6 +9,7 @@
 # stay under the per-program fixup-table cap (32768).
 include "src/error.cyr"
 include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
 
 # ================================================================
 # HPACK tests (Bite 2 of 0.8.0) — RFC 7541 Appendix C
@@ -271,6 +272,136 @@ fn test_hpack_rfc_c31_request_decode() {
     return 0;
 }
 
+# ================================================================
+# h2/frame tests (Bite 3 of 0.8.0) — RFC 7540 §4.1, §6
+# ================================================================
+
+fn test_h2_hdr_roundtrip() {
+    # length=42, type=DATA, flags=END_STREAM, stream_id=7
+    var out[16];
+    memset(&out, 0, 16);
+    var n = sandhi_h2_hdr_encode(&out, 0, 42, 0x0, 0x1, 7);
+    assert_eq(n, 9, "hdr enc: 9 bytes");
+    # length 24 BE: 00 00 2A
+    assert_eq(load8(&out + 0), 0x00, "byte 0");
+    assert_eq(load8(&out + 1), 0x00, "byte 1");
+    assert_eq(load8(&out + 2), 0x2A, "byte 2 = 42");
+    assert_eq(load8(&out + 3), 0x00, "type DATA");
+    assert_eq(load8(&out + 4), 0x01, "flags END_STREAM");
+    # stream_id 31 BE: 00 00 00 07
+    assert_eq(load8(&out + 8), 0x07, "sid byte 3 = 7");
+
+    var h = sandhi_h2_hdr_decode(&out, 9, 0);
+    assert_eq(sandhi_h2_hdr_length(h),    42, "dec length");
+    assert_eq(sandhi_h2_hdr_type(h),      0x0, "dec type");
+    assert_eq(sandhi_h2_hdr_flags(h),     0x1, "dec flags");
+    assert_eq(sandhi_h2_hdr_stream_id(h), 7,   "dec sid");
+    return 0;
+}
+
+fn test_h2_hdr_strips_reserved_bit() {
+    # Stream ID with high bit set MUST be ignored on read (§4.1).
+    var buf[9];
+    memset(&buf, 0, 9);
+    # length=0, type=PING, flags=0
+    store8(&buf + 5, 0xFF);  # high bit + 0x7F in next-most byte
+    store8(&buf + 6, 0xFF);
+    store8(&buf + 7, 0xFF);
+    store8(&buf + 8, 0xFF);
+    var h = sandhi_h2_hdr_decode(&buf, 9, 0);
+    # 0xFFFFFFFF & 0x7FFFFFFF = 0x7FFFFFFF
+    assert_eq(sandhi_h2_hdr_stream_id(h), 0x7FFFFFFF, "reserved bit stripped");
+    return 0;
+}
+
+fn test_h2_hdr_rejects_oversize_length() {
+    var out[16];
+    memset(&out, 0, 16);
+    var r = sandhi_h2_hdr_encode(&out, 0, 0x1000000, 0, 0, 0);
+    assert_eq(r, _SANDHI_H2_ERR_BAD_LENGTH, "length > 2^24-1 rejected");
+    return 0;
+}
+
+fn test_h2_hdr_rejects_high_bit_stream() {
+    var out[16];
+    memset(&out, 0, 16);
+    var r = sandhi_h2_hdr_encode(&out, 0, 0, 0, 0, 0x80000000);
+    assert_eq(r, _SANDHI_H2_ERR_BAD_STREAM, "stream_id high bit rejected");
+    return 0;
+}
+
+fn test_h2_settings_pair_roundtrip() {
+    var out[16];
+    memset(&out, 0, 16);
+    # SETTINGS_MAX_CONCURRENT_STREAMS = 100
+    var n = sandhi_h2_settings_pair_encode(&out, 0, 0x3, 100);
+    assert_eq(n, 6, "settings pair: 6 bytes");
+    # id 16 BE: 00 03
+    assert_eq(load8(&out + 0), 0x00, "id high");
+    assert_eq(load8(&out + 1), 0x03, "id low");
+    # value 32 BE: 00 00 00 64
+    assert_eq(load8(&out + 5), 0x64, "value low byte = 100");
+
+    var id_cell = alloc(8); var v_cell = alloc(8);
+    var off = sandhi_h2_settings_pair_decode(&out, 6, 0, id_cell, v_cell);
+    assert_eq(off, 6, "decode advanced 6");
+    assert_eq(load64(id_cell), 0x3, "decoded id");
+    assert_eq(load64(v_cell), 100, "decoded value");
+    return 0;
+}
+
+fn test_h2_window_update_roundtrip() {
+    var out[8];
+    memset(&out, 0, 8);
+    var n = sandhi_h2_window_update_encode(&out, 0, 65535);
+    assert_eq(n, 4, "window: 4 bytes");
+    var v = sandhi_h2_window_update_decode(&out, 4, 0);
+    assert_eq(v, 65535, "decoded increment");
+    return 0;
+}
+
+fn test_h2_window_update_rejects_zero() {
+    var out[8];
+    memset(&out, 0, 8);
+    var r = sandhi_h2_window_update_encode(&out, 0, 0);
+    assert_eq(r, _SANDHI_H2_ERR_MALFORMED, "increment 0 rejected");
+    return 0;
+}
+
+fn test_h2_rst_stream_roundtrip() {
+    var out[8];
+    memset(&out, 0, 8);
+    sandhi_h2_rst_stream_encode(&out, 0, 0x8);  # CANCEL
+    var ec = sandhi_h2_rst_stream_decode(&out, 4, 0);
+    assert_eq(ec, 0x8, "rst CANCEL");
+    return 0;
+}
+
+fn test_h2_goaway_roundtrip() {
+    var out[16];
+    memset(&out, 0, 16);
+    # last_stream_id=42, error=PROTOCOL_ERROR, no debug
+    var n = sandhi_h2_goaway_encode(&out, 0, 42, 0x1, 0, 0);
+    assert_eq(n, 8, "goaway: 8 bytes (no debug)");
+    var sid_cell = alloc(8); var err_cell = alloc(8);
+    var r = sandhi_h2_goaway_decode(&out, 8, 0, sid_cell, err_cell);
+    assert_eq(r, 0, "goaway decode ok");
+    assert_eq(load64(sid_cell), 42,  "last_stream");
+    assert_eq(load64(err_cell), 0x1, "error PROTOCOL");
+    return 0;
+}
+
+fn test_h2_ping_roundtrip() {
+    var payload = "abcdefgh";  # 8 bytes
+    var out[16];
+    memset(&out, 0, 16);
+    var n = sandhi_h2_ping_encode(&out, 0, payload);
+    assert_eq(n, 8, "ping: 8 bytes");
+    assert_eq(load8(&out + 0), 97, "ping byte 0 = 'a'");
+    assert_eq(load8(&out + 7), 104, "ping byte 7 = 'h'");
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -318,6 +449,36 @@ fn main() {
 
     test_group("h2/hpack/rfc_c31");
     test_hpack_rfc_c31_request_decode();
+
+    test_group("h2/frame/hdr_roundtrip");
+    test_h2_hdr_roundtrip();
+
+    test_group("h2/frame/hdr_strips_reserved");
+    test_h2_hdr_strips_reserved_bit();
+
+    test_group("h2/frame/hdr_oversize");
+    test_h2_hdr_rejects_oversize_length();
+
+    test_group("h2/frame/hdr_high_bit_stream");
+    test_h2_hdr_rejects_high_bit_stream();
+
+    test_group("h2/frame/settings_pair");
+    test_h2_settings_pair_roundtrip();
+
+    test_group("h2/frame/window_update");
+    test_h2_window_update_roundtrip();
+
+    test_group("h2/frame/window_update_zero");
+    test_h2_window_update_rejects_zero();
+
+    test_group("h2/frame/rst_stream");
+    test_h2_rst_stream_roundtrip();
+
+    test_group("h2/frame/goaway");
+    test_h2_goaway_roundtrip();
+
+    test_group("h2/frame/ping");
+    test_h2_ping_roundtrip();
 
     return assert_summary();
 }

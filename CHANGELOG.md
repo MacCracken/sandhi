@@ -6,6 +6,78 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.8.0 work in progress
 
+**Bite 3 — HTTP/2 frame layer (RFC 7540 §4.1, §6)**. New
+`src/http/h2/frame.cyr` (~280 lines). 545 total assertions across
+both test files (438 sandhi + 107 h2; +32 frame on top of Bite 2.5).
+
+#### Added
+- Frame header (`SandhiH2Hdr` 32-byte struct: length, type, flags,
+  stream_id) + `_encode` / `_decode` honoring RFC 7540 §4.1 wire
+  format. Reserved high bit of stream_id is masked off on decode
+  per spec; encode rejects sources that try to set it. Length cap
+  at 2^24-1 (`SANDHI_H2_MAX_FRAME_SIZE`); default frame ceiling
+  16384 (`SANDHI_H2_DEFAULT_MAX_FRAME` — matches the spec default
+  for `SETTINGS_MAX_FRAME_SIZE`).
+- Frame-type constants (DATA, HEADERS, PRIORITY, RST_STREAM,
+  SETTINGS, PUSH_PROMISE, PING, GOAWAY, WINDOW_UPDATE,
+  CONTINUATION).
+- Flag constants (END_STREAM, ACK, END_HEADERS, PADDED, PRIORITY)
+  with the intentional ACK/END_STREAM = 0x1 overlap per §6.
+- Error codes (NO_ERROR through HTTP_1_1_REQUIRED, all 14 from
+  §7).
+- SETTINGS parameter identifiers (HEADER_TABLE_SIZE through
+  MAX_HEADER_LIST_SIZE).
+- Per-frame payload codecs:
+  - `sandhi_h2_settings_pair_encode` / `_decode` — id+value pair
+    layout (§6.5).
+  - `sandhi_h2_ping_encode` — 8 octets opaque (§6.7).
+  - `sandhi_h2_window_update_encode` / `_decode` — high-bit-
+    reserved 31-bit increment (§6.9). Encode rejects increment=0
+    per spec.
+  - `sandhi_h2_rst_stream_encode` / `_decode` — 32-bit error code
+    (§6.4).
+  - `sandhi_h2_goaway_encode` / `_decode` — last_stream_id +
+    error_code + optional debug data (§6.8).
+- Big-endian write helpers (`_h2_write_u24`, `_h2_write_u32`,
+  matching reads). h2 wire is BE end-to-end.
+
+#### Tests (10 new in tests/h2.tcyr)
+- Header round-trip on a DATA/END_STREAM frame.
+- Reserved-bit stripping on stream_id decode (0xFFFFFFFF →
+  0x7FFFFFFF).
+- Length-overflow rejection (encode of 2^24 fails with
+  `_BAD_LENGTH`).
+- Stream-id high-bit rejection on encode (`_BAD_STREAM`).
+- SETTINGS pair round-trip (id + value).
+- WINDOW_UPDATE round-trip + zero-increment rejection.
+- RST_STREAM error code round-trip.
+- GOAWAY round-trip (last_stream_id + error_code, no debug).
+- PING 8-byte opaque pass-through.
+
+#### Notes
+- DATA / HEADERS / CONTINUATION payloads are intentionally NOT
+  parsed here — those are passthrough of HPACK-encoded bytes
+  (HEADERS / CONTINUATION) or arbitrary octets (DATA). HPACK
+  decode happens in `src/http/h2/hpack.cyr`; Bite 5 wires the
+  two layers together.
+- PUSH_PROMISE is enumerated but sandhi never originates it and
+  rejects incoming push (Bite 5 will set
+  `SETTINGS_ENABLE_PUSH=0`). Server push was retired by major
+  browsers anyway.
+- A struct-layout bug crept in during the first draft (8-byte
+  field stride collapsed to 4-byte for type/flags, causing
+  `store64` writes to overlap). Caught immediately by the round-
+  trip test — flagging as a Cyrius-idiom note: every struct
+  field should be 8-byte aligned when accessed via `store64`/
+  `load64`. Already true everywhere else in sandhi.
+
+**Bite 2.5 — Test split + fixup-cap proposal + CI fix**. Earlier in
+this work-stream — see commit `82e24ef`. Split sandhi.tcyr → core
+(438) + h2 (75 at that time, now 107). Fixed CI workflow that
+referenced a nonexistent `src/test.cyr`. Filed
+`docs/proposals/2026-04-24-cyrius-fixup-table-cap.md` for the
+upstream-investigation question.
+
 **Bite 2 — HPACK encoder/decoder (RFC 7541)**. 464 test assertions
 green (+26 over Bite 1's 438). Pure protocol code; no network. New
 `src/http/h2/hpack.cyr` (~530 lines).

@@ -1,0 +1,284 @@
+# sandhi/http/h2/frame — HTTP/2 frame layer (RFC 7540 §4.1, §6).
+#
+# Every h2 message is a frame. Frames have a fixed 9-byte header
+# followed by a type-specific payload. This module parses + builds
+# frame headers, plus the payloads of each frame type sandhi cares
+# about. HEADERS payload is opaque here (the HPACK module handles
+# it; bite 5 wires them together).
+#
+# Frame header (9 bytes, RFC 7540 §4.1):
+#   +0  length      (24 bits big-endian, payload size)
+#   +3  type        (8 bits)
+#   +4  flags       (8 bits)
+#   +5  stream_id   (31 bits BE; high bit reserved, MUST be 0)
+#
+# Default max payload size = 16384 (SETTINGS_MAX_FRAME_SIZE default).
+# Peer can negotiate higher via SETTINGS, capped at 16777215.
+#
+# Bite 3 of 0.8.0.
+
+# ================================================================
+# Constants
+# ================================================================
+
+# Frame types (§11.2)
+enum SandhiH2FrameType {
+    SANDHI_H2_FRAME_DATA          = 0x0;
+    SANDHI_H2_FRAME_HEADERS       = 0x1;
+    SANDHI_H2_FRAME_PRIORITY      = 0x2;
+    SANDHI_H2_FRAME_RST_STREAM    = 0x3;
+    SANDHI_H2_FRAME_SETTINGS      = 0x4;
+    SANDHI_H2_FRAME_PUSH_PROMISE  = 0x5;
+    SANDHI_H2_FRAME_PING          = 0x6;
+    SANDHI_H2_FRAME_GOAWAY        = 0x7;
+    SANDHI_H2_FRAME_WINDOW_UPDATE = 0x8;
+    SANDHI_H2_FRAME_CONTINUATION  = 0x9;
+}
+
+# Frame flags (§6 — interpretation depends on frame type)
+enum SandhiH2Flag {
+    SANDHI_H2_FLAG_END_STREAM   = 0x1;   # DATA, HEADERS
+    SANDHI_H2_FLAG_ACK          = 0x1;   # SETTINGS, PING (overlap is intentional per spec)
+    SANDHI_H2_FLAG_END_HEADERS  = 0x4;   # HEADERS, CONTINUATION, PUSH_PROMISE
+    SANDHI_H2_FLAG_PADDED       = 0x8;   # DATA, HEADERS, PUSH_PROMISE
+    SANDHI_H2_FLAG_PRIORITY     = 0x20;  # HEADERS
+}
+
+# Error codes (§7)
+enum SandhiH2Err {
+    SANDHI_H2_ERR_NO_ERROR            = 0x0;
+    SANDHI_H2_ERR_PROTOCOL_ERROR      = 0x1;
+    SANDHI_H2_ERR_INTERNAL_ERROR      = 0x2;
+    SANDHI_H2_ERR_FLOW_CONTROL_ERROR  = 0x3;
+    SANDHI_H2_ERR_SETTINGS_TIMEOUT    = 0x4;
+    SANDHI_H2_ERR_STREAM_CLOSED       = 0x5;
+    SANDHI_H2_ERR_FRAME_SIZE_ERROR    = 0x6;
+    SANDHI_H2_ERR_REFUSED_STREAM      = 0x7;
+    SANDHI_H2_ERR_CANCEL              = 0x8;
+    SANDHI_H2_ERR_COMPRESSION_ERROR   = 0x9;
+    SANDHI_H2_ERR_CONNECT_ERROR       = 0xA;
+    SANDHI_H2_ERR_ENHANCE_YOUR_CALM   = 0xB;
+    SANDHI_H2_ERR_INADEQUATE_SECURITY = 0xC;
+    SANDHI_H2_ERR_HTTP_1_1_REQUIRED   = 0xD;
+}
+
+# SETTINGS parameter identifiers (§6.5.2)
+enum SandhiH2Setting {
+    SANDHI_H2_SETTINGS_HEADER_TABLE_SIZE      = 0x1;
+    SANDHI_H2_SETTINGS_ENABLE_PUSH            = 0x2;
+    SANDHI_H2_SETTINGS_MAX_CONCURRENT_STREAMS = 0x3;
+    SANDHI_H2_SETTINGS_INITIAL_WINDOW_SIZE    = 0x4;
+    SANDHI_H2_SETTINGS_MAX_FRAME_SIZE         = 0x5;
+    SANDHI_H2_SETTINGS_MAX_HEADER_LIST_SIZE   = 0x6;
+}
+
+var SANDHI_H2_FRAME_HEADER_SIZE = 9;
+var SANDHI_H2_DEFAULT_MAX_FRAME = 16384;
+var SANDHI_H2_MAX_FRAME_SIZE    = 16777215;  # 2^24 - 1
+
+# Internal-error sentinels (negative)
+var _SANDHI_H2_ERR_TRUNCATED  = 0 - 1;
+var _SANDHI_H2_ERR_BAD_LENGTH = 0 - 2;
+var _SANDHI_H2_ERR_BAD_STREAM = 0 - 3;
+var _SANDHI_H2_ERR_BAD_TYPE   = 0 - 4;
+var _SANDHI_H2_ERR_MALFORMED  = 0 - 5;
+
+# ================================================================
+# Frame header struct (32 bytes — 8-byte stride per field)
+# ================================================================
+#
+#   +0   length      (int)
+#   +8   type        (int)
+#   +16  flags       (int)
+#   +24  stream_id   (int)
+
+enum SandhiH2HdrOff {
+    SANDHI_H2_HDR_OFF_LENGTH    = 0;
+    SANDHI_H2_HDR_OFF_TYPE      = 8;
+    SANDHI_H2_HDR_OFF_FLAGS     = 16;
+    SANDHI_H2_HDR_OFF_STREAM_ID = 24;
+}
+
+var SANDHI_H2_HDR_STRUCT_SIZE = 32;
+
+fn sandhi_h2_hdr_new(length, type, flags, stream_id) {
+    var h = alloc(SANDHI_H2_HDR_STRUCT_SIZE);
+    store64(h + SANDHI_H2_HDR_OFF_LENGTH, length);
+    store64(h + SANDHI_H2_HDR_OFF_TYPE, type);
+    store64(h + SANDHI_H2_HDR_OFF_FLAGS, flags);
+    store64(h + SANDHI_H2_HDR_OFF_STREAM_ID, stream_id);
+    return h;
+}
+
+fn sandhi_h2_hdr_length(h)    { return load64(h + SANDHI_H2_HDR_OFF_LENGTH); }
+fn sandhi_h2_hdr_type(h)      { return load64(h + SANDHI_H2_HDR_OFF_TYPE); }
+fn sandhi_h2_hdr_flags(h)     { return load64(h + SANDHI_H2_HDR_OFF_FLAGS); }
+fn sandhi_h2_hdr_stream_id(h) { return load64(h + SANDHI_H2_HDR_OFF_STREAM_ID); }
+
+# Big-endian write helpers — h2 wire is BE end-to-end (§4.1).
+fn _h2_write_u24(out, off, v) {
+    store8(out + off + 0, (v >> 16) & 0xFF);
+    store8(out + off + 1, (v >>  8) & 0xFF);
+    store8(out + off + 2,  v        & 0xFF);
+    return 0;
+}
+
+fn _h2_write_u32(out, off, v) {
+    store8(out + off + 0, (v >> 24) & 0xFF);
+    store8(out + off + 1, (v >> 16) & 0xFF);
+    store8(out + off + 2, (v >>  8) & 0xFF);
+    store8(out + off + 3,  v        & 0xFF);
+    return 0;
+}
+
+fn _h2_read_u24(buf, off) {
+    return (load8(buf + off + 0) << 16)
+         | (load8(buf + off + 1) <<  8)
+         |  load8(buf + off + 2);
+}
+
+fn _h2_read_u32(buf, off) {
+    return (load8(buf + off + 0) << 24)
+         | (load8(buf + off + 1) << 16)
+         | (load8(buf + off + 2) <<  8)
+         |  load8(buf + off + 3);
+}
+
+# Build a frame header into out[off..off+9]. Returns off+9 or
+# negative sentinel on bad input (length too large, stream_id high
+# bit set).
+fn sandhi_h2_hdr_encode(out, off, length, type, flags, stream_id) {
+    if (length < 0 || length > SANDHI_H2_MAX_FRAME_SIZE) { return _SANDHI_H2_ERR_BAD_LENGTH; }
+    if ((stream_id >> 31) != 0) { return _SANDHI_H2_ERR_BAD_STREAM; }
+    _h2_write_u24(out, off + 0, length);
+    store8(out + off + 3, type & 0xFF);
+    store8(out + off + 4, flags & 0xFF);
+    # Stream ID: explicitly clear reserved high bit on write per §4.1.
+    _h2_write_u32(out, off + 5, stream_id & 0x7FFFFFFF);
+    return off + SANDHI_H2_FRAME_HEADER_SIZE;
+}
+
+# Parse a frame header starting at buf[off]. Caller must have ≥ 9
+# bytes available. Returns a freshly-alloc'd hdr struct (caller owns)
+# or 0 on truncation / over-length.
+fn sandhi_h2_hdr_decode(buf, blen, off) {
+    if (off + SANDHI_H2_FRAME_HEADER_SIZE > blen) { return 0; }
+    var length = _h2_read_u24(buf, off + 0);
+    var type   = load8(buf + off + 3);
+    var flags  = load8(buf + off + 4);
+    # Read stream_id, mask off reserved high bit per §4.1.
+    var sid_raw = _h2_read_u32(buf, off + 5);
+    var stream_id = sid_raw & 0x7FFFFFFF;
+    return sandhi_h2_hdr_new(length, type, flags, stream_id);
+}
+
+# ================================================================
+# SETTINGS frame (§6.5)
+# ================================================================
+#
+# Payload is a sequence of (id: u16, value: u32) pairs. The ACK flag
+# variant has no payload.
+
+# Encode a single SETTINGS pair into out[off..off+6]. Returns off+6.
+fn sandhi_h2_settings_pair_encode(out, off, id, value) {
+    store8(out + off + 0, (id >> 8) & 0xFF);
+    store8(out + off + 1, id & 0xFF);
+    _h2_write_u32(out, off + 2, value);
+    return off + 6;
+}
+
+fn sandhi_h2_settings_pair_decode(buf, blen, off, id_out, value_out) {
+    if (off + 6 > blen) { return _SANDHI_H2_ERR_TRUNCATED; }
+    var id = (load8(buf + off + 0) << 8) | load8(buf + off + 1);
+    var v  = _h2_read_u32(buf, off + 2);
+    store64(id_out, id);
+    store64(value_out, v);
+    return off + 6;
+}
+
+# ================================================================
+# PING frame (§6.7)
+# ================================================================
+#
+# 8 octets of opaque data. ACK flag echoes data back. Stream id MUST
+# be 0 (connection-level frame).
+
+fn sandhi_h2_ping_encode(out, off, opaque8) {
+    var i = 0;
+    while (i < 8) {
+        store8(out + off + i, load8(opaque8 + i));
+        i = i + 1;
+    }
+    return off + 8;
+}
+
+# ================================================================
+# WINDOW_UPDATE frame (§6.9)
+# ================================================================
+#
+# Payload: 4 octets, high bit reserved + 31-bit window-size-increment.
+# Increment MUST be > 0.
+
+fn sandhi_h2_window_update_encode(out, off, increment) {
+    if (increment <= 0 || (increment >> 31) != 0) {
+        return _SANDHI_H2_ERR_MALFORMED;
+    }
+    _h2_write_u32(out, off, increment & 0x7FFFFFFF);
+    return off + 4;
+}
+
+fn sandhi_h2_window_update_decode(buf, blen, off) {
+    if (off + 4 > blen) { return _SANDHI_H2_ERR_TRUNCATED; }
+    var v = _h2_read_u32(buf, off);
+    return v & 0x7FFFFFFF;
+}
+
+# ================================================================
+# RST_STREAM frame (§6.4)
+# ================================================================
+#
+# Payload: 4-octet error code.
+
+fn sandhi_h2_rst_stream_encode(out, off, error_code) {
+    _h2_write_u32(out, off, error_code);
+    return off + 4;
+}
+
+fn sandhi_h2_rst_stream_decode(buf, blen, off) {
+    if (off + 4 > blen) { return _SANDHI_H2_ERR_TRUNCATED; }
+    return _h2_read_u32(buf, off);
+}
+
+# ================================================================
+# GOAWAY frame (§6.8)
+# ================================================================
+#
+# Payload: last_stream_id (4) + error_code (4) + optional debug data.
+# Reserved bit on last_stream_id must be 0.
+
+fn sandhi_h2_goaway_encode(out, off, last_stream_id, error_code, debug, debug_len) {
+    if ((last_stream_id >> 31) != 0) { return _SANDHI_H2_ERR_BAD_STREAM; }
+    _h2_write_u32(out, off + 0, last_stream_id & 0x7FFFFFFF);
+    _h2_write_u32(out, off + 4, error_code);
+    if (debug_len > 0 && debug != 0) {
+        var i = 0;
+        while (i < debug_len) {
+            store8(out + off + 8 + i, load8(debug + i));
+            i = i + 1;
+        }
+    }
+    return off + 8 + debug_len;
+}
+
+fn sandhi_h2_goaway_decode(buf, blen, off, last_stream_out, error_out) {
+    if (off + 8 > blen) { return _SANDHI_H2_ERR_TRUNCATED; }
+    var sid = _h2_read_u32(buf, off + 0) & 0x7FFFFFFF;
+    var ec  = _h2_read_u32(buf, off + 4);
+    store64(last_stream_out, sid);
+    store64(error_out, ec);
+    return 0;
+}
+
+fn sandhi_h2_frame_version() {
+    return "0.7.4-bite3";
+}
