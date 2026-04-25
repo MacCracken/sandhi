@@ -882,19 +882,24 @@ fn test_p0_redirect_strip_sensitive() {
 }
 
 fn test_p0_tls_policy_fail_closed() {
-    # Originally guarded the fail-closed gate when enforcement was
-    # stubbed (sandhi_tls_policy_enforcement_available() == 0 →
-    # err=TLS pre-emptively). With enforcement wired since cyrius
-    # v5.6.41 the gate code still exists in apply.cyr but never
-    # fires in normal operation. We retain the smoke for the open
-    # path executing under a pinned policy: the call runs, the
-    # connection fails (port 1 has no listener), and last_err is a
-    # legitimate CONNECT classification (the SPKI check never gets
-    # to run because we never handshook).
+    # Smoke that an enforcement-demanding policy (pinned) refuses to
+    # produce a usable conn against a dead destination. Two valid
+    # fail-closed paths:
+    #   - libssl loadable → enforcement_available() = 1 → gate
+    #     passes, real TCP connect to port 1 fails → err=CONNECT.
+    #   - libssl not loadable (some CI sandboxes) →
+    #     enforcement_available() = 0 → fail-closed gate fires
+    #     preemptively → err=TLS.
+    # Either way the conn is 0 and last_err is a TLS-class refusal
+    # (CONNECT or TLS — never OK).
     var p = sandhi_tls_policy_new_pinned("aabb");
     var c = sandhi_conn_open_with_policy(0x0100007F, 1, 1, "x", p);
-    assert_eq(c, 0, "policy path fails on dead port");
-    assert_eq(sandhi_conn_last_open_err(), SANDHI_CONN_OPEN_CONNECT, "err=CONNECT");
+    assert_eq(c, 0, "policy path returns 0");
+    var oe = sandhi_conn_last_open_err();
+    var ok = 0;
+    if (oe == SANDHI_CONN_OPEN_CONNECT) { ok = 1; }
+    if (oe == SANDHI_CONN_OPEN_TLS)     { ok = 1; }
+    assert_eq(ok, 1, "err is CONNECT or TLS (not OK / TIMEOUT)");
     return 0;
 }
 
