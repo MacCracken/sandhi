@@ -1,0 +1,82 @@
+# docs/examples/01-simple-get.cyr
+#
+# Fetch http://example.com/ and print status + body length.
+#
+# Build:  cyrius build docs/examples/01-simple-get.cyr build/01-simple-get
+# Run:    ./build/01-simple-get
+#
+# This is the smallest useful sandhi program. No options, no headers,
+# no pool — just "get this URL, tell me what came back."
+
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn main() {
+    alloc_init();
+
+    var url = "http://example.com/";
+    syscall(1, 1, "GET ", 4);
+    syscall(1, 1, url, strlen(url));
+    syscall(1, 1, "\n", 1);
+
+    # Fire the request. user_headers = 0 → sandhi auto-emits Host /
+    # User-Agent / Accept-Encoding / Connection: close for us.
+    var r = sandhi_http_get(url, 0);
+
+    # Always check err_kind first. On transport failure, status/body are 0.
+    var ek = sandhi_http_err_kind(r);
+    if (ek != SANDHI_OK) {
+        syscall(1, 1, "error: ", 7);
+        var name = sandhi_err_kind_name(ek);
+        syscall(1, 1, name, strlen(name));
+        syscall(1, 1, "\n", 1);
+        return 1;
+    }
+
+    # Parse OK → surface what came back.
+    syscall(1, 1, "status: ", 8);
+    fmt_int(sandhi_http_status(r));
+    syscall(1, 1, "\nbody_len: ", 11);
+    fmt_int(sandhi_http_body_len(r));
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

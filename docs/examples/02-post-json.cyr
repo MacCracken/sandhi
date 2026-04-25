@@ -1,0 +1,86 @@
+# docs/examples/02-post-json.cyr
+#
+# POST a JSON body with custom headers (User-Agent / Content-Type /
+# Authorization). Print the response status.
+#
+# Build:  cyrius build docs/examples/02-post-json.cyr build/02-post-json
+# Run:    ./build/02-post-json   (expects something listening at 127.0.0.1:8080)
+#
+# Pattern: build a sandhi_headers block, set the headers you care about,
+# hand it + the body to sandhi_http_post.
+
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn main() {
+    alloc_init();
+
+    var url = "http://127.0.0.1:8080/api/things";
+    var body = "{\"name\":\"widget\",\"qty\":3}";
+    var body_len = strlen(body);
+
+    # Build a header block. Multiple headers → use _add to preserve order;
+    # single-value semantics → use _set (which replaces any prior value).
+    var h = sandhi_headers_new();
+    sandhi_headers_set(h, "User-Agent", "my-consumer/1.0");
+    sandhi_headers_set(h, "Content-Type", "application/json");
+    sandhi_headers_set(h, "Authorization", "Bearer secret-token-123");
+    # NB: sandhi refuses CR/LF/NUL inside header values — injection-safe
+    # by construction. _set returns 0 - 1 on rejection; we skip the check
+    # here because our values are all literals.
+
+    var r = sandhi_http_post(url, h, body, body_len);
+
+    var ek = sandhi_http_err_kind(r);
+    if (ek != SANDHI_OK) {
+        syscall(1, 1, "error: ", 7);
+        var name = sandhi_err_kind_name(ek);
+        syscall(1, 1, name, strlen(name));
+        syscall(1, 1, "\n", 1);
+        return 1;
+    }
+
+    syscall(1, 1, "response status: ", 17);
+    fmt_int(sandhi_http_status(r));
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

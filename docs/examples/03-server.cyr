@@ -1,0 +1,95 @@
+# docs/examples/03-server.cyr
+#
+# Minimal HTTP server bound to 127.0.0.1:8080 with a /hello GET handler
+# that returns "hello ${name}" when the request is GET /hello?name=X.
+#
+# Build:  cyrius build docs/examples/03-server.cyr build/03-server
+# Run:    ./build/03-server
+# Test:   curl 'http://127.0.0.1:8080/hello?name=world'
+#
+# Pattern: write a handler with the fixed signature
+#   fn h(ctx, cfd, req_buf, req_len) → 0
+# then hand a function pointer to sandhi_server_run.
+
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+# The handler. Signature is fixed — the server passes (ctx, cfd,
+# req_buf, req_len) and expects a return of 0.
+fn handle_request(ctx, cfd, req_buf, req_len) {
+    var method = sandhi_server_get_method(req_buf, req_len);
+    var path   = sandhi_server_get_path(req_buf, req_len);   # "/hello?name=..."
+    var path_only = sandhi_server_path_only(path);           # "/hello"
+
+    # Route: GET /hello → build a hello body.
+    if (streq(method, "GET") == 1 && streq(path_only, "/hello") == 1) {
+        # Read the ?name= query parameter (already percent-decoded).
+        var name = sandhi_server_get_param(path, "name");
+        if (name == 0) { name = "world"; }
+
+        # Build "hello ${name}" into a str_builder.
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "hello ");
+        str_builder_add_cstr(sb, name);
+        str_builder_add_cstr(sb, "\n");
+        var body = str_data(str_builder_build(sb));
+        var blen = strlen(body);
+
+        sandhi_server_send_response(cfd, 200, "OK",
+            "text/plain; charset=utf-8", body, blen, 0);
+        return 0;
+    }
+
+    # Anything else — 404.
+    sandhi_server_send_status(cfd, 404, "Not Found");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    syscall(1, 1, "listening on 127.0.0.1:8080\n", 28);
+
+    # Never returns on success — loops accepting forever.
+    # Returns 1 if bind/listen fails.
+    return sandhi_server_run(INADDR_LOOPBACK(), 8080, &handle_request, 0);
+}
+
+var exit_code = main();
+syscall(60, exit_code);

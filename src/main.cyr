@@ -14,14 +14,28 @@
 
 # --- Public surface ---------------------------------------------------------
 # Each sub-module exposes a small, documented verb set:
-#   sandhi::http            — full HTTP client (GET/POST/PUT/DELETE/PATCH/
-#                             HEAD, custom headers, HTTPS via tls, opt-in
-#                             bounded redirect following, configurable
-#                             response-size cap). Keep-alive / connection
-#                             pooling are 0.7.2 roadmap items.
+#   sandhi::http            — HTTP/1.1 + HTTP/2 client. Full method
+#                             surface (GET/POST/PUT/DELETE/PATCH/HEAD),
+#                             custom headers, HTTPS via tls, opt-in
+#                             bounded redirect following, full timeout
+#                             matrix (connect/read/write/total),
+#                             retry-with-backoff for idempotent
+#                             methods. Auto-selection between h2 and
+#                             1.1 via `sandhi_http_request_auto`.
+#   sandhi::http::pool      — per-route connection pool. Backs
+#                             HTTP/1.1 keep-alive + HTTP/2 stream
+#                             multiplex from the same struct (ADR
+#                             0003). Opt-in via `sandhi_http_options_pool`.
+#   sandhi::http::h2        — full HTTP/2 protocol stack: frames
+#                             (RFC 7540 §6), HPACK header compression
+#                             with Huffman decode (RFC 7541), per-call
+#                             reentrant connection lifecycle.
+#                             `sandhi_h2_request` is the manual entry
+#                             point; auto-selection wires it through
+#                             the pool.
 #   sandhi::http::stream    — streaming HTTP + WHATWG SSE parser +
 #                             incremental chunked decode + callback-per-
-#                             event dispatch (0.7.0).
+#                             event dispatch.
 #   sandhi::rpc             — JSON-RPC dialects (W3C WebDriver wire,
 #                             Appium extensions, MCP-over-HTTP + SSE).
 #                             Transport only per ADR 0001 — protocol
@@ -30,18 +44,20 @@
 #                             lookup, chain-fallback composition, mDNS
 #                             interface (lookup stubbed pending stdlib
 #                             net.cyr multicast primitives).
-#   sandhi::tls_policy      — cert pinning (SPKI), mTLS, custom trust
-#                             store, policy composition. Wraps stdlib
-#                             tls.cyr today; transitions to native TLS
-#                             at Cyrius v5.9.x. Runtime enforcement
+#   sandhi::tls_policy      — cert pinning (SPKI, constant-time
+#                             compare), mTLS, custom trust store,
+#                             policy composition, ALPN advertise list.
+#                             Surface complete; runtime enforcement
 #                             stubbed pending libssl-pthread-deadlock
-#                             resolution (see docs/issues/).
-#   sandhi::server          — HTTP/1.1 server lifted from stdlib
-#                             http_server.cyr at M1 (v0.2.0). Routing +
-#                             middleware layer deferred until a consumer
-#                             asks. Symbol prefix (`http_*`) still matches
-#                             the stdlib origin; 0.9.x closeout renames
-#                             to `sandhi_server_*` before the v5.7.0 fold.
+#                             + stdlib tls.cyr SSL_CTX hook (see
+#                             docs/issues/). Fail-closed when a policy
+#                             demands enforcement that isn't wired.
+#   sandhi::server          — HTTP/1.1 server. Canonical names are
+#                             `sandhi_server_*` (post-0.9.2 rename);
+#                             `http_*` aliases retained as transitional
+#                             wrappers, retire at the v5.7.0 fold.
+#                             Built-in 400-on-smuggling guards (CL+TE,
+#                             dup Host/CL/TE).
 
 fn sandhi_version() {
     return "0.9.2";

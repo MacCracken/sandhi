@@ -1,0 +1,101 @@
+# docs/examples/04-sse-consumer.cyr
+#
+# Consume a local Server-Sent Events stream. Print each event's `data`
+# field. Stop after 10 events.
+#
+# Build:  cyrius build docs/examples/04-sse-consumer.cyr build/04-sse-consumer
+# Run:    ./build/04-sse-consumer
+#
+# Pattern: sandhi_http_stream opens the conn, sends the request, and
+# calls your callback once per parsed SSE event. Callback returns 1 to
+# keep consuming; 0 to stop the stream early.
+
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+# Shared counter — we bump it each event; stop at 10.
+# Module-level because the callback has the fixed (ctx, event) signature
+# and we don't want to marshal state through a ctx struct for a 40-line example.
+var _count = 0;
+
+# Callback: return 1 to keep consuming, 0 to stop the stream.
+fn on_event(ctx, event) {
+    _count = _count + 1;
+
+    syscall(1, 1, "event #", 7);
+    fmt_int(_count);
+    syscall(1, 1, ": ", 2);
+
+    var data = sandhi_sse_event_data(event);
+    if (data != 0) {
+        syscall(1, 1, data, strlen(data));
+    }
+    syscall(1, 1, "\n", 1);
+
+    if (_count >= 10) { return 0; }  # stop after 10 events
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+
+    var url = "http://127.0.0.1:8080/events";
+
+    # sandhi_http_stream opens the conn, sends GET, parses SSE events
+    # out of the chunked (or close-delimited) body, fires on_event per
+    # event. Returns a stream-result struct.
+    var r = sandhi_http_stream(url, "GET", 0, 0, 0, &on_event, 0);
+
+    var ek = sandhi_stream_err(r);
+    if (ek != SANDHI_OK) {
+        syscall(1, 1, "stream error: ", 14);
+        var name = sandhi_err_kind_name(ek);
+        syscall(1, 1, name, strlen(name));
+        syscall(1, 1, "\n", 1);
+        return 1;
+    }
+
+    syscall(1, 1, "stream ended cleanly after ", 27);
+    fmt_int(sandhi_stream_events(r));
+    syscall(1, 1, " events\n", 8);
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);
