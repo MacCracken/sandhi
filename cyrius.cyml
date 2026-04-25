@@ -45,6 +45,11 @@ output = "build/sandhi-smoke"
 # (discovery) → server surface (server) → public API (main).
 [lib]
 modules = [
+    # version_str.cyr is auto-generated from VERSION by
+    # scripts/version-bump.sh and must come first so every later
+    # module can reference SANDHI_VERSION (e.g. the User-Agent
+    # builder in src/http/client.cyr). Mirrors the cyrius pattern.
+    "src/version_str.cyr",
     "src/error.cyr",
     "src/obs/trace.cyr",
     "src/http/headers.cyr",

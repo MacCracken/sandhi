@@ -1,6 +1,7 @@
 # programs/dynlib-ldso-probe.cyr — minimum repro for the ld-linux open
 # re-entry symptom. Opens ld-linux via dynlib_open and prints before/after.
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/http/headers.cyr"
 include "src/http/url.cyr"

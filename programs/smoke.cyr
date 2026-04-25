@@ -10,6 +10,7 @@
 # folded into Cyrius stdlib) or `include "lib/sandhi.cyr"` vendored from
 # `dist/sandhi.cyr` via `[deps.sandhi]` in their cyrius.cyml.
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"
 include "src/http/headers.cyr"

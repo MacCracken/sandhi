@@ -4,6 +4,65 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-04-25
+
+**Versioning refactor + chunked response trailers.** No new public
+verbs (ADR 0005 freeze respected); existing accessors gain new data,
+nothing changes shape.
+
+**635 assertions green** (482 sandhi + 153 h2). Trailer-parser
+verification lives in `programs/_trailers_probe.cyr` rather than
+the test suite — `tests/sandhi.tcyr` is at the per-program fixup
+cap (architecture/001).
+
+### Versioning — single source of truth via auto-generated file
+
+Mirrors the cyrius repo's own pattern (`cyrius/src/version_str.cyr`
++ `cyrius/scripts/version-bump.sh`). Before this release, the
+version literal was duplicated: once in `VERSION`, once in
+`src/main.cyr` as `var SANDHI_VERSION = "..."`. A shell-level CI
+check was the only thing keeping them in sync.
+
+- **`scripts/version-bump.sh`** — new. Reads VERSION; regenerates
+  `src/version_str.cyr` (which contains exactly one line:
+  `var SANDHI_VERSION = "X.Y.Z"`); inserts a CHANGELOG section
+  header on a real bump. Same-version invocation is the documented
+  "regenerate without bumping" path used by CI for drift detection.
+- **`src/version_str.cyr`** — new, auto-generated, committed. The
+  ONLY place `SANDHI_VERSION` is declared. Registered first in
+  `cyrius.cyml [lib].modules` so every later module sees it.
+- **`src/main.cyr`** — `var SANDHI_VERSION = ...` removed.
+  `sandhi_version()` still delegates to `SANDHI_VERSION` (defined
+  upstream in the build order).
+- **CI / release** — `Verify version sync` step now re-runs
+  `scripts/version-bump.sh "$(cat VERSION)"` and `git diff --quiet
+  src/version_str.cyr` instead of grep+sed-ing the literal out of
+  source. Same drift detection, less brittle parsing.
+- All probe programs and test files updated to `include
+  "src/version_str.cyr"` ahead of `src/error.cyr` so they pick up
+  the var.
+
+Bump flow now: `sh scripts/version-bump.sh 0.9.5` → regen dist
+(`cyrius distlib`) → fill in CHANGELOG entries → commit.
+
+### http
+- `src/http/response.cyr` — chunked-body decoder parses RFC 7230
+  §4.1.2 trailers after the terminal 0-chunk and merges allowed
+  fields into the response headers (visible via the existing
+  `sandhi_http_headers(r)` accessor — no new public verb). The
+  RFC's forbidden-trailer list is filtered: `Transfer-Encoding`,
+  `Content-Length`, `Host`, `Authorization`, `Set-Cookie`,
+  `Cache-Control`, `Expect`, `Max-Forwards`, `Pragma`, `Range`,
+  `TE`, `Trailer` — those are smuggling vectors. Allowed trailers
+  (`Server-Timing`, custom `X-*` etc.) appear in headers naturally.
+- Stale "no consumer asks" framing removed from
+  `src/http/pool.cyr` and `src/http/h2/request.cyr`.
+
+### Verification
+- `programs/_trailers_probe.cyr` — confirms allowed trailers
+  surface in headers, forbidden trailers are filtered, plain
+  chunked (no trailer block) still works. All five scenarios PASS.
+
 ## [0.9.3] — 2026-04-25
 
 **Stub-elimination pass** — every runtime stub in `src/` shipped in

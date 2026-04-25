@@ -5,6 +5,7 @@
 # Example:
 #   cyrius run programs/dns-probe.cyr example.com
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/tls_policy/mod.cyr"
 include "src/http/headers.cyr"

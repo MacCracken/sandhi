@@ -1,0 +1,13 @@
+# src/version_str.cyr — AUTO-GENERATED from `VERSION` by
+# `scripts/version-bump.sh`. Do NOT edit by hand; the next bump
+# will overwrite. To regenerate without bumping, run:
+#
+#   sh scripts/version-bump.sh "$(cat VERSION)"
+#
+# This file is the single source of truth for `SANDHI_VERSION`
+# at runtime. Every module that needs the version reads this var
+# (e.g. the User-Agent builder in `src/http/client.cyr`). Bump
+# the literal here ONLY by running version-bump.sh; CI's drift
+# check fails if VERSION and this file disagree.
+
+var SANDHI_VERSION = "0.9.4";

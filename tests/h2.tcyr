@@ -8,6 +8,7 @@
 # Bite 5a's h2/conn.cyr depends on http/conn.cyr (sandhi_conn_*) and
 # http/headers.cyr (used transitively). Trim aggressively to stay
 # under the per-program fixup-table cap (32768).
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/http/headers.cyr"
 include "src/http/url.cyr"

@@ -1,5 +1,6 @@
 # programs/cpu-features-probe.cyr — bisect inside dynlib_bootstrap_cpu_features.
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/http/headers.cyr"
 include "src/http/url.cyr"

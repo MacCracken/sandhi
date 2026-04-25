@@ -18,13 +18,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify version sync (VERSION ↔ src/main.cyr SANDHI_VERSION)
+      - name: Verify version sync (VERSION ↔ src/version_str.cyr)
+        # `src/version_str.cyr` is auto-generated from VERSION by
+        # `scripts/version-bump.sh`. Re-running the script with the
+        # current VERSION is the canonical regen-without-bump path:
+        # if version_str.cyr drifted, `git diff` shows it and we fail.
+        # Mirrors the cyrius repo's own pattern.
         run: |
-          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          SRC_VERSION=$(grep '^var SANDHI_VERSION' src/main.cyr | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          test "$FILE_VERSION" = "$SRC_VERSION" \
-            || { echo "VERSION ($FILE_VERSION) != src/main.cyr SANDHI_VERSION ($SRC_VERSION)"; exit 1; }
-          echo "version sync OK: $FILE_VERSION"
+          sh scripts/version-bump.sh "$(cat VERSION | tr -d '[:space:]')"
+          if ! git diff --quiet src/version_str.cyr; then
+            echo "ERROR: src/version_str.cyr is stale. Run 'scripts/version-bump.sh \"\$(cat VERSION)\"' and commit."
+            git --no-pager diff src/version_str.cyr | head -20
+            exit 1
+          fi
+          echo "version sync OK: $(cat VERSION | tr -d '[:space:]')"
 
       - name: Install Cyrius toolchain
         run: |

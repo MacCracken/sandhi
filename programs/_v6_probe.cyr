@@ -4,6 +4,7 @@
 # resolver misses, the v6 path takes over and connects via raw
 # socket(AF_INET6).
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"
 include "src/http/headers.cyr"

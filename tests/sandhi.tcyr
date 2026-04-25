@@ -1,6 +1,7 @@
 # sandhi test suite
 # Stdlib auto-included via cyrius.cyml; sandhi modules included below.
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"
 include "src/http/headers.cyr"

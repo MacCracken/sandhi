@@ -2,6 +2,7 @@
 # parse + forbidden-field filtering. Standalone probe (not in the
 # test suite — tests/sandhi.tcyr is at the per-program fixup cap).
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"
 include "src/http/headers.cyr"

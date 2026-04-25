@@ -5,6 +5,7 @@
 # Example:
 #   cyrius run programs/http-probe.cyr https://example.com/
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"
 include "src/http/headers.cyr"

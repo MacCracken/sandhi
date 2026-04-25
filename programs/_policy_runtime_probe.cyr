@@ -1,6 +1,7 @@
 # programs/_policy_runtime_probe.cyr — verify TLS policy enforcement
 # wire-up against live HTTPS.
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"
 include "src/http/headers.cyr"

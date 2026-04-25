@@ -1,3 +1,4 @@
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/http/headers.cyr"
 include "src/http/url.cyr"

@@ -5,6 +5,7 @@
 # This probe calls them in isolation and flushes stdout between each so the
 # coredump tells us exactly which stage.
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/http/headers.cyr"
 include "src/http/url.cyr"

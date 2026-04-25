@@ -59,15 +59,12 @@
 #                             Built-in 400-on-smuggling guards (CL+TE,
 #                             dup Host/CL/TE).
 
-# Single source of truth for the crate version. **Must match the
-# top-level `VERSION` file** at the repository root — `cyrius.cyml`
-# reads VERSION via `${file:VERSION}` for package metadata; this
-# constant is the runtime-side mirror. CI checks the two for drift
-# at build time. Bump them together; never hardcode the version
-# string anywhere else in the source — every `*_version()` accessor
-# delegates here.
-var SANDHI_VERSION = "0.9.3";
-
+# `SANDHI_VERSION` is declared in `src/version_str.cyr`, which is
+# auto-generated from the top-level `VERSION` file via
+# `scripts/version-bump.sh` (mirrors the cyrius pattern in
+# `cyrius/src/version_str.cyr`). VERSION is the only place a
+# developer edits the version string; the bump script regenerates
+# version_str.cyr in lockstep and CI fails the build if they drift.
 fn sandhi_version() {
     return SANDHI_VERSION;
 }

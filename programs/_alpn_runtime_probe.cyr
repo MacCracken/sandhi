@@ -4,6 +4,7 @@
 # http/1.1 (or nothing). With _sandhi_alpn_advertise_h2 flipped on,
 # server should pick h2 against an h2-capable origin.
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"
 include "src/http/headers.cyr"

@@ -1,5 +1,6 @@
 # programs/_mdns_probe.cyr — exercise the live mDNS resolver path.
 
+include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"
 include "src/http/headers.cyr"
