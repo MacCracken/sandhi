@@ -1,0 +1,213 @@
+# sandhi/http/h2/request — encode + send an HTTP/2 request.
+#
+# Composes Bite 2 (HPACK), Bite 3 (frames), and Bite 5a (h2 conn) to
+# produce + send a complete HEADERS frame for one h2 request.
+#
+# Wire shape (RFC 7540 §8.1.2):
+#   1. Pseudo-headers in fixed order: :method, :scheme, :path,
+#      :authority.
+#   2. Regular headers — names MUST be lowercase per §8.1.2; we
+#      lowercase on emit so callers can keep using the existing
+#      mixed-case `sandhi_headers_*` API unchanged.
+#   3. Empty body for GET/HEAD/DELETE: HEADERS frame with
+#      END_HEADERS | END_STREAM. For request bodies: HEADERS without
+#      END_STREAM, then DATA frame(s) with the body, last DATA has
+#      END_STREAM.
+#
+# Static-table optimization: we use the obvious pre-baked indices
+# for `:method GET`/`POST`, `:scheme http`/`https`, `:path /`, and
+# `:authority` (name-only). Everything else emits as literal-with-
+# incremental-indexing with inline name + value. That trades a few
+# extra wire bytes for code simplicity; the HPACK dynamic table
+# absorbs repeated headers across requests on the same connection
+# anyway, so it amortizes.
+#
+# Bite 5b of 0.8.0.
+
+# Static-table indices we hardcode (RFC 7541 Appendix A).
+var _SANDHI_H2_REQ_IDX_AUTHORITY     = 1;
+var _SANDHI_H2_REQ_IDX_METHOD_GET    = 2;
+var _SANDHI_H2_REQ_IDX_METHOD_POST   = 3;
+var _SANDHI_H2_REQ_IDX_PATH_ROOT     = 4;
+var _SANDHI_H2_REQ_IDX_SCHEME_HTTP   = 6;
+var _SANDHI_H2_REQ_IDX_SCHEME_HTTPS  = 7;
+
+# Default HEADERS-frame buffer cap. For typical RPC requests the
+# HPACK-encoded block is well under 1 KB. Caller-overridable in a
+# follow-up if a consumer ships absurdly large header sets.
+var _SANDHI_H2_REQ_HBUF_CAP = 8192;
+
+# ================================================================
+# Pseudo-header emit helpers
+# ================================================================
+
+fn _h2_emit_method(h2c, method, hbuf, off) {
+    var enc = sandhi_h2_conn_enc_table(h2c);
+    if (streq(method, "GET") == 1)  {
+        return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_METHOD_GET);
+    }
+    if (streq(method, "POST") == 1) {
+        return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_METHOD_POST);
+    }
+    # PUT / DELETE / PATCH / HEAD — emit literal with name idx 2 + value.
+    return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
+        _SANDHI_H2_REQ_IDX_METHOD_GET, ":method", method);
+}
+
+fn _h2_emit_scheme(h2c, scheme, hbuf, off) {
+    if (streq(scheme, "https") == 1) {
+        return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_SCHEME_HTTPS);
+    }
+    if (streq(scheme, "http") == 1) {
+        return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_SCHEME_HTTP);
+    }
+    var enc = sandhi_h2_conn_enc_table(h2c);
+    return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
+        _SANDHI_H2_REQ_IDX_SCHEME_HTTP, ":scheme", scheme);
+}
+
+fn _h2_emit_path(h2c, path, hbuf, off) {
+    if (streq(path, "/") == 1) {
+        return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_PATH_ROOT);
+    }
+    var enc = sandhi_h2_conn_enc_table(h2c);
+    return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
+        _SANDHI_H2_REQ_IDX_PATH_ROOT, ":path", path);
+}
+
+fn _h2_emit_authority(h2c, authority, hbuf, off) {
+    var enc = sandhi_h2_conn_enc_table(h2c);
+    return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
+        _SANDHI_H2_REQ_IDX_AUTHORITY, ":authority", authority);
+}
+
+# Emit one user header. Names get lowercased into a fresh alloc so
+# the `sandhi_headers_*` API doesn't have to enforce case.
+fn _h2_emit_user_header(h2c, name, value, hbuf, off) {
+    var nlen = strlen(name);
+    var lower = alloc(nlen + 1);
+    var i = 0;
+    while (i < nlen) {
+        var ch = load8(name + i);
+        if (ch >= 65 && ch <= 90) { ch = ch + 32; }
+        store8(lower + i, ch);
+        i = i + 1;
+    }
+    store8(lower + nlen, 0);
+    var enc = sandhi_h2_conn_enc_table(h2c);
+    return sandhi_hpack_encode_literal_indexed(enc, hbuf, off, lower, value);
+}
+
+# ================================================================
+# Build a complete header block for a request
+# ================================================================
+#
+# Returns the byte length of the encoded block. Caller-allocated
+# `hbuf` MUST hold ≥ _SANDHI_H2_REQ_HBUF_CAP bytes (encoder lacks
+# overflow checking — caller's responsibility). `user_headers` may
+# be 0 for "no extras." `:method`/`:scheme`/`:path`/`:authority` are
+# emitted in that exact order per RFC 7540 §8.1.2.1.
+
+fn sandhi_h2_request_encode_headers(h2c, method, scheme, path, authority,
+                                      user_headers, hbuf) {
+    var off = 0;
+    off = _h2_emit_method(h2c, method, hbuf, off);
+    off = _h2_emit_scheme(h2c, scheme, hbuf, off);
+    off = _h2_emit_path(h2c, path, hbuf, off);
+    off = _h2_emit_authority(h2c, authority, hbuf, off);
+    if (user_headers != 0) {
+        var n = sandhi_headers_count(user_headers);
+        var i = 0;
+        while (i < n) {
+            var name = sandhi_headers_name_at(user_headers, i);
+            var value = sandhi_headers_value_at(user_headers, i);
+            # Skip headers that h2 forbids — connection-specific
+            # ones per RFC 7540 §8.1.2.2: connection, keep-alive,
+            # proxy-connection, transfer-encoding, upgrade,
+            # te (except te: trailers).
+            if (_h2_header_is_forbidden(name) == 0) {
+                off = _h2_emit_user_header(h2c, name, value, hbuf, off);
+            }
+            i = i + 1;
+        }
+    }
+    return off;
+}
+
+# 1 if `name` is on the h2 forbidden-headers list (RFC 7540 §8.1.2.2).
+# Case-insensitive match.
+fn _h2_header_is_forbidden(name) {
+    if (_h2_streq_ci(name, "connection") == 1)        { return 1; }
+    if (_h2_streq_ci(name, "keep-alive") == 1)        { return 1; }
+    if (_h2_streq_ci(name, "proxy-connection") == 1)  { return 1; }
+    if (_h2_streq_ci(name, "transfer-encoding") == 1) { return 1; }
+    if (_h2_streq_ci(name, "upgrade") == 1)           { return 1; }
+    # `te` is conditionally allowed (only "te: trailers" is OK in h2);
+    # for first cut we drop all `te` headers and let the caller use a
+    # different mechanism if they need trailers (no consumer asks).
+    if (_h2_streq_ci(name, "te") == 1)                { return 1; }
+    return 0;
+}
+
+fn _h2_streq_ci(a, b) {
+    var i = 0;
+    while (1 == 1) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
+        if (cb >= 65 && cb <= 90) { cb = cb + 32; }
+        if (ca != cb) { return 0; }
+        if (ca == 0)  { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Send a complete request
+# ================================================================
+#
+# For body-less methods (GET/HEAD/DELETE): one HEADERS frame with
+# END_HEADERS | END_STREAM. For body-bearing (POST/PUT/PATCH):
+# HEADERS frame with END_HEADERS only, then a DATA frame with the
+# body and END_STREAM.
+#
+# Returns the allocated stream-id on success (≥ 1), or a negative
+# `_SANDHI_H2_ERR_*` sentinel on failure.
+
+fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
+                           user_headers, body, body_len) {
+    var hbuf = alloc(_SANDHI_H2_REQ_HBUF_CAP);
+    var hlen = sandhi_h2_request_encode_headers(h2c, method, scheme, path,
+                                                  authority, user_headers, hbuf);
+    if (hlen <= 0) { return _SANDHI_H2_ERR_MALFORMED; }
+
+    var stream_id = sandhi_h2_conn_next_stream_id(h2c);
+    var has_body = 0;
+    if (body_len > 0 && body != 0) { has_body = 1; }
+
+    var hflags = SANDHI_H2_FLAG_END_HEADERS;
+    if (has_body == 0) { hflags = hflags | SANDHI_H2_FLAG_END_STREAM; }
+    var hr = sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_HEADERS,
+                                         hflags, stream_id, hbuf, hlen);
+    if (hr < 0) { return hr; }
+
+    if (has_body == 1) {
+        # First cut: send the entire body in one DATA frame. If
+        # body_len > peer_max_frame, we need to fragment — that's a
+        # follow-up. Reject explicitly until then so we don't ship a
+        # silently-truncated request.
+        if (body_len > sandhi_h2_conn_peer_max_frame(h2c)) {
+            return _SANDHI_H2_ERR_BAD_LENGTH;
+        }
+        var dr = sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_DATA,
+                                             SANDHI_H2_FLAG_END_STREAM,
+                                             stream_id, body, body_len);
+        if (dr < 0) { return dr; }
+    }
+    return stream_id;
+}
+
+fn sandhi_h2_request_version() {
+    return "0.7.4-bite5b";
+}

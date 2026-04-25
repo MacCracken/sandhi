@@ -6,6 +6,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.8.0 work in progress
 
+**Bite 5b — HEADERS encoding + request send**. New
+`src/http/h2/request.cyr` (~170 lines). 583 total assertions across
+both files (446 sandhi + 137 h2; +14 request). Composes Bite 2/2b
+(HPACK + Huffman decode), Bite 3 (frames), and Bite 5a's frame
+plumbing into a one-shot send-a-request function.
+
+#### Added
+- `sandhi_h2_request_encode_headers(h2c, method, scheme, path,
+  authority, user_headers, hbuf)` — produces the HPACK-encoded
+  HEADERS frame body. Pseudo-headers in fixed order
+  (`:method`/`:scheme`/`:path`/`:authority`) per RFC 7540 §8.1.2.1,
+  then user headers with names lowercased per §8.1.2.
+- Static-table optimization for the common pseudo-headers:
+  - `:method GET` → indexed 2 (1 byte)
+  - `:method POST` → indexed 3 (1 byte)
+  - `:scheme http` / `https` → indexed 6 / 7 (1 byte)
+  - `:path /` → indexed 4 (1 byte)
+  - `:authority` → literal-incremental name idx 1 (efficient reuse
+    via dynamic table on subsequent requests to the same authority)
+  - Other methods + non-root paths fall back to literal-incremental
+    with name index. Trades a few wire bytes for code simplicity.
+- `sandhi_h2_request_send(h2c, method, scheme, path, authority,
+  user_headers, body, body_len)` — builds the header block, sends a
+  HEADERS frame (with END_HEADERS + END_STREAM for body-less
+  methods, END_HEADERS only when a body follows), then sends a
+  single DATA frame with END_STREAM if there's a body. Returns the
+  allocated stream-id on success.
+- Forbidden-headers filter per RFC 7540 §8.1.2.2 — drops
+  `Connection`, `Keep-Alive`, `Proxy-Connection`, `Transfer-Encoding`,
+  `Upgrade`, `TE` headers. h2 carries connection control via SETTINGS
+  + WINDOW_UPDATE, not header values; sending them is a stream
+  protocol error.
+- `_h2_streq_ci` helper — case-insensitive cstr compare. Internal
+  use; the existing `sandhi_headers_*` API stays mixed-case.
+
+#### Tests (3 new in tests/h2.tcyr)
+- `encode_simple_get` — `GET https://www.example.com/` produces the
+  expected first 4 bytes (`82 87 84 41` = three indexed pseudo-
+  headers + literal-with-name-idx-1 for `:authority`).
+- `roundtrip` — encode then decode through a fresh HPACK table;
+  recover all four pseudo-headers in order.
+- `drops_forbidden` — `Connection: close` is silently dropped from
+  the encoded block; user `X-Custom` passes through (lowercased).
+
+#### Notes
+- One-DATA-frame body limit for now: if `body_len > peer_max_frame`,
+  request fails with `_BAD_LENGTH`. Multi-frame body fragmentation
+  is a follow-up — no consumer asks for huge h2 request bodies yet.
+- HEADERS+CONTINUATION fragmentation isn't handled either — if the
+  encoded block exceeds `_SANDHI_H2_REQ_HBUF_CAP` (8 KB) we'd
+  overflow the buffer (caller-allocated, no overflow check today).
+  Real headers don't get that big in practice; if a consumer ever
+  hits this we add a CONTINUATION emitter.
+- Bite 5c receives + decodes the response. Until then, this send
+  side is testable through round-trip-with-decode but doesn't talk
+  to a real server.
+
 **Bite 5a — HTTP/2 connection lifecycle scaffolding**. New
 `src/http/h2/conn.cyr` (~210 lines). 569 total assertions across
 both files (446 sandhi + 123 h2; +12 conn). Bite 5 is split into

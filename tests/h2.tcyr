@@ -15,6 +15,7 @@ include "src/http/h2/huffman.cyr"
 include "src/http/h2/hpack.cyr"
 include "src/http/h2/frame.cyr"
 include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
 
 # ================================================================
 # HPACK tests (Bite 2 of 0.8.0) — RFC 7541 Appendix C
@@ -493,6 +494,90 @@ fn test_h2_conn_apply_settings_payload() {
     return 0;
 }
 
+fn test_h2_request_encode_simple_get() {
+    # GET https://www.example.com/ with no user headers.
+    # All four pseudo-headers, no extras. Should emit:
+    #   :method GET     → indexed 2  (1 byte: 0x82)
+    #   :scheme https   → indexed 7  (1 byte: 0x87)
+    #   :path /         → indexed 4  (1 byte: 0x84)
+    #   :authority X    → literal-with-incremental (name idx 1)
+    var h2c = sandhi_h2_conn_new(0);
+    var hbuf = alloc(8192);
+    var n = sandhi_h2_request_encode_headers(h2c, "GET", "https", "/",
+                                               "www.example.com", 0, hbuf);
+    assert_eq(load8(hbuf + 0), 0x82, "byte 0 = indexed :method GET");
+    assert_eq(load8(hbuf + 1), 0x87, "byte 1 = indexed :scheme https");
+    assert_eq(load8(hbuf + 2), 0x84, "byte 2 = indexed :path /");
+    # Byte 3 starts the literal-with-incremental for :authority
+    # (name idx 1 → 0x40 | 1 = 0x41).
+    assert_eq(load8(hbuf + 3), 0x41, "byte 3 = literal-incr name idx 1");
+    return 0;
+}
+
+fn test_h2_request_encode_decode_roundtrip() {
+    # Encode then decode (using a fresh dynamic-table) and verify
+    # we recover the original pseudo-headers in order.
+    var h2c = sandhi_h2_conn_new(0);
+    var hbuf = alloc(8192);
+    var n = sandhi_h2_request_encode_headers(h2c, "GET", "http", "/",
+                                               "api.example", 0, hbuf);
+
+    # Decode side: fresh HPACK table.
+    var t = sandhi_hpack_table_new(0);
+    var off = alloc(8); store64(off, 0);
+    var no = alloc(8); var vo = alloc(8);
+
+    sandhi_hpack_decode_field(t, hbuf, n, off, no, vo);
+    assert_streq(load64(no), ":method", "field 1 name");
+    assert_streq(load64(vo), "GET",     "field 1 value");
+
+    sandhi_hpack_decode_field(t, hbuf, n, off, no, vo);
+    assert_streq(load64(no), ":scheme", "field 2 name");
+    assert_streq(load64(vo), "http",    "field 2 value");
+
+    sandhi_hpack_decode_field(t, hbuf, n, off, no, vo);
+    assert_streq(load64(no), ":path",   "field 3 name");
+    assert_streq(load64(vo), "/",       "field 3 value");
+
+    sandhi_hpack_decode_field(t, hbuf, n, off, no, vo);
+    assert_streq(load64(no), ":authority", "field 4 name");
+    assert_streq(load64(vo), "api.example","field 4 value");
+    return 0;
+}
+
+fn test_h2_request_drops_forbidden_headers() {
+    # Connection: close MUST NOT appear in the encoded block.
+    var h = sandhi_headers_new();
+    sandhi_headers_set(h, "Connection", "close");
+    sandhi_headers_set(h, "X-Custom", "ok");
+    var h2c = sandhi_h2_conn_new(0);
+    var hbuf = alloc(8192);
+    var n = sandhi_h2_request_encode_headers(h2c, "GET", "https", "/",
+                                               "x", h, hbuf);
+    # Decode and verify Connection isn't there but X-Custom is.
+    var t = sandhi_hpack_table_new(0);
+    var off = alloc(8); store64(off, 0);
+    var no = alloc(8); var vo = alloc(8);
+    var saw_connection = 0;
+    var saw_custom = 0;
+    var i = 0;
+    while (i < 6) {
+        if (load64(off) >= n) { i = 6; }
+        else {
+            sandhi_hpack_decode_field(t, hbuf, n, off, no, vo);
+            var name = load64(no);
+            if (name != 0) {
+                if (_h2_streq_ci(name, "connection") == 1) { saw_connection = 1; }
+                if (_h2_streq_ci(name, "x-custom") == 1)   { saw_custom = 1; }
+            }
+            i = i + 1;
+        }
+    }
+    assert_eq(saw_connection, 0, "Connection: close was dropped");
+    assert_eq(saw_custom, 1, "X-Custom passed through (lowercased)");
+    return 0;
+}
+
 fn test_h2_conn_apply_settings_malformed() {
     # Payload length not a multiple of 6 = malformed.
     var pl[8];
@@ -598,6 +683,15 @@ fn main() {
 
     test_group("h2/conn/apply_settings_malformed");
     test_h2_conn_apply_settings_malformed();
+
+    test_group("h2/request/encode_simple_get");
+    test_h2_request_encode_simple_get();
+
+    test_group("h2/request/roundtrip");
+    test_h2_request_encode_decode_roundtrip();
+
+    test_group("h2/request/drops_forbidden");
+    test_h2_request_drops_forbidden_headers();
 
     return assert_summary();
 }
