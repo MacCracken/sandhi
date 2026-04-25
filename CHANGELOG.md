@@ -4,6 +4,102 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-04-24
+
+**Phase 1 security sweep** — five P0 fixes from the 0.7.0 external
+audit. Every fix has a focused regression test. **615 total
+assertions green** (462 sandhi + 153 h2; +16 over 0.8.1's 599).
+
+Minor-version bump rather than patch because two of the fixes
+change observable behavior:
+
+- Redirects across origins **now strip** `Authorization` /
+  `Cookie` / `Proxy-Authorization` (curl CVE-2025-0167 / 14524
+  cluster). Existing callers that relied on credentials following
+  cross-origin redirects need to re-architect (per-domain auth or
+  refuse-and-re-issue).
+- Pinned / mTLS / custom-trust-store policies **now fail-closed**
+  when enforcement isn't actually wired (which it isn't yet —
+  libssl + stdlib hook blockers). Previously the silent downgrade
+  to default verify gave a false sense the pinned policy was
+  enforced. Use `sandhi_tls_policy_new_default()` for the previous
+  best-effort behavior; that has no enforcement requirements.
+
+The other three fixes are protocol-correctness — visible only to
+malformed peers (servers + smuggling-relayed traffic). Behavior
+changes only relative to the previously-too-lenient parser.
+
+### P0 #1 — Chunked decoder hardening
+
+`src/http/response.cyr`. `_sandhi_resp_chunk_size` returns a
+`_SANDHI_RESP_CHUNK_BAD = -1` sentinel when no hex digit is present
+(previously fell through with `size=0` and got treated as the
+terminal chunk — silent body truncation). `_sandhi_resp_decode_chunked`
+tracks `saw_terminal`; missing terminal 0-chunk → `SANDHI_ERR_PROTOCOL`.
+
+### P0 #2 — CL + TE coexistence rejected
+
+`src/http/response.cyr::_sandhi_resp_frame` returns `SANDHI_ERR_PROTOCOL`
+when both `Content-Length` and `Transfer-Encoding: chunked` are
+present. New `src/server/mod.cyr::http_request_has_cl_te_conflict`
+detects the same on requests; the accept loop replies 400 before
+the user handler runs. Closes the classic CL.TE / TE.CL request /
+response smuggling vector per RFC 7230 §3.3.3.
+
+### P0 #3 — Chunk-size overflow guard
+
+`_sandhi_resp_chunk_size` rejects sizes > `_SANDHI_RESP_CHUNK_MAX
+= 0x7FFFFFFF` (i31). Previously a 17-hex-char chunk-size could
+overflow the signed-64-bit accumulator into a negative value that
+bypassed the `off + size > blen` bounds check.
+
+### P0 #4 — Redirect credential strip + downgrade refusal
+
+`src/http/client.cyr::_sandhi_http_follow`. Three new helpers:
+`_sandhi_url_same_authority` (scheme + host + port match),
+`_sandhi_url_is_https_downgrade` (https→http detection),
+`_sandhi_strip_sensitive_headers` (drops Authorization / Cookie /
+Proxy-Authorization). Plus `_sandhi_streq_ci` for case-insensitive
+header-name match.
+
+On each redirect hop:
+- HTTPS→HTTP downgrade refused — return the redirect response with
+  `err_kind = SANDHI_ERR_TLS`, don't follow.
+- Cross-authority hop strips sensitive headers from the request on
+  the next hop. Per-hop semantics — bouncing back to the original
+  authority restores full headers.
+
+Private-IP / link-local SSRF guard stays opt-in for a future
+option. This fix focuses on always-on credential / scheme protection.
+
+### P0 #5 — TLS-policy fail-closed
+
+`src/tls_policy/apply.cyr::sandhi_conn_open_with_policy`. When the
+supplied policy demands enforcement (any of `pinned_hash` /
+`mtls_cert` / `trust_store` set) AND
+`sandhi_tls_policy_enforcement_available() == 0`, refuse the
+connection — return 0 with `_sandhi_conn_last_err =
+SANDHI_CONN_OPEN_TLS`. Previous silent downgrade is gone.
+
+### Tests added (9 in `tests/sandhi.tcyr`)
+
+`p0/chunked_complete`, `p0/chunked_no_terminal`, `p0/chunked_no_digit`,
+`p0/cl_te_rejected`, `p0/chunk_overflow`, `p0/redirect_authority`,
+`p0/redirect_downgrade`, `p0/redirect_strip`, `p0/tls_fail_closed`.
+Each exercises the precise bug class the fix addresses.
+
+### Notes
+
+- Server-side P0 #2 reuses the existing `http_send_status(cfd, 400,
+  ...)` helper; no new server response surface.
+- The 400 dispatch happens before the user-handler call so smuggled
+  requests can't slip past via custom routing logic.
+- 0.9.1 picks up the P1 sweep (~7 items: SSE re-entrance, header
+  dup-detect, SPKI constant-time, CL strict parse, URL port
+  overflow, JSON escape state, header CRLF validation). 0.9.2 is
+  closeout (server rename + surface freeze + first
+  `dist/sandhi.cyr`). 1.0.0 = fold event at Cyrius v5.7.0.
+
 ## [0.8.1] — 2026-04-24
 
 Auto-selection wiring + upstream-ask filed for the ALPN advertise
