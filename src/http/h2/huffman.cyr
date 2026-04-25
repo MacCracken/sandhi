@@ -1,0 +1,188 @@
+# sandhi/http/h2/huffman — HPACK Huffman code (RFC 7541 Appendix B).
+#
+# HPACK strings on the wire are length-prefixed with an H bit
+# indicating Huffman encoding. Real h2 servers always Huffman-encode
+# response headers, so HPACK without a Huffman decoder cannot decode
+# real-world traffic. This module supplies that decoder.
+#
+# Implementation:
+#   - The 257-entry code table from RFC 7541 Appendix B is embedded
+#     as a single 2570-character hex blob (one string literal = one
+#     fixup). Each entry occupies 10 hex chars: 8 for the code value
+#     (left-padded with zeros) + 2 for the bit length.
+#   - At first use, the blob is parsed and a binary decode tree is
+#     built. Each tree node is 24 bytes: { left_ptr, right_ptr,
+#     symbol_or_minus_1 }. Internal nodes have symbol = -1; leaves
+#     hold the symbol value 0..256.
+#   - Decode walks the tree bit-by-bit. On reaching a leaf, the
+#     symbol is emitted (or rejected if it's the EOS, symbol 256 —
+#     EOS in payload is a decoding error per §5.2).
+#   - Padding handling per §5.2: after consuming all bits, if not
+#     at root, the partial path MUST be ≤ 7 bits AND consist of
+#     all-1 bits (the most-significant bits of the EOS code, which
+#     is 0x3FFFFFFF). Anything else is malformed.
+#
+# Encode is NOT implemented — sandhi always emits raw strings (H=0).
+# Per RFC 7541 §5.2 servers must accept both, so this is purely a
+# wire-size optimization we choose not to take. If a consumer ever
+# wants Huffman encode for outbound traffic, ~150 lines: walk the
+# same tree top-down per character to produce code+bits, pack into
+# bytes.
+#
+# Bite 2b of 0.8.0.
+
+# ================================================================
+# Tree node layout (24 bytes)
+# ================================================================
+#
+#   +0   left   (ptr to child node, or 0)
+#   +8   right  (ptr to child node, or 0)
+#   +16  symbol (i64: 0..256 on leaf, -1 on internal node)
+
+var _SANDHI_HPACK_HUFFMAN_INTERNAL = 0 - 1;
+
+fn _hpack_huffman_node_new() {
+    var n = alloc(24);
+    store64(n + 0, 0);
+    store64(n + 8, 0);
+    store64(n + 16, _SANDHI_HPACK_HUFFMAN_INTERNAL);
+    return n;
+}
+
+# ================================================================
+# Table blob — RFC 7541 Appendix B, all 257 entries, 10 hex chars each
+# ================================================================
+#
+# Format per entry: 8 hex chars for code (left-zero-padded to fit
+# the 30-bit max) + 2 hex chars for the bit length. Symbols are
+# implicit by index (0..256). Total: 257 × 10 = 2570 chars.
+#
+# Single literal so the per-program fixup count stays low. Each line
+# below covers 16 symbols × 10 chars = 160 chars; concatenated by
+# the lexer into one blob.
+
+var _hpack_huffman_blob = "00001ff80d007fffd8170fffffe21c0fffffe31c0fffffe41c0fffffe51c0fffffe61c0fffffe71c0fffffe81c00ffffea183ffffffc1e0fffffe91c0fffffea1c3ffffffd1e0fffffeb1c0fffffec1c0fffffed1c0fffffee1c0fffffef1c0ffffff01c0ffffff11c0ffffff21c3ffffffe1e0ffffff31c0ffffff41c0ffffff51c0ffffff61c0ffffff71c0ffffff81c0ffffff91c0ffffffa1c0ffffffb1c0000001406000003f80a000003f90a00000ffa0c00001ff90d0000001506000000f808000007fa0b000003fa0a000003fb0a000000f908000007fb0b000000fa0800000016060000001706000000180600000000050000000105000000020500000019060000001a060000001b060000001c060000001d060000001e060000001f060000005c07000000fb0800007ffc0f000000200600000ffb0c000003fc0a00001ffa0d00000021060000005d070000005e070000005f0700000060070000006107000000620700000063070000006407000000650700000066070000006707000000680700000069070000006a070000006b070000006c070000006d070000006e070000006f07000000700700000071070000007207000000fc080000007307000000fd0800001ffb0d0007fff01300001ffc0d00003ffc0e000000220600007ffd0f00000003050000002306000000040500000024060000000505000000250600000026060000002706000000060500000074070000007507000000280600000029060000002a0600000007050000002b0600000076070000002c06000000080500000009050000002d060000007707000000780700000079070000007a070000007b0700007ffe0f000007fc0b00003ffd0e00001ffd0d0ffffffc1c000fffe614003fffd216000fffe714000fffe814003fffd316003fffd416003fffd516007fffd917003fffd616007fffda17007fffdb17007fffdc17007fffdd17007fffde1700ffffeb18007fffdf1700ffffec1800ffffed18003fffd716007fffe01700ffffee18007fffe117007fffe217007fffe317007fffe417001fffdc15003fffd816007fffe517003fffd916007fffe617007fffe71700ffffef18003fffda16001fffdd15000fffe914003fffdb16003fffdc16007fffe817007fffe917001fffde15007fffea17003fffdd16003fffde1600fffff018001fffdf15003fffdf16007fffeb17007fffec17001fffe015001fffe115003fffe016001fffe215007fffed17003fffe116007fffee17007fffef17000fffea14003fffe216003fffe316003fffe416007ffff017003fffe516003fffe616007ffff11703ffffe01a03ffffe11a000fffeb140007fff113003fffe716007ffff217003fffe81601ffffec1903ffffe21a03ffffe31a03ffffe41a07ffffde1b07ffffdf1b03ffffe51a00fffff11801ffffed190007fff213001fffe31503ffffe61a07ffffe01b07ffffe11b03ffffe71a07ffffe21b00fffff218001fffe415001fffe51503ffffe81a03ffffe91a0ffffffd1c07ffffe31b07ffffe41b07ffffe51b000fffec1400fffff318000fffed14001fffe615003fffe916001fffe715001fffe815007ffff317003fffea16003fffeb1601ffffee1901ffffef1900fffff41800fffff51803ffffea1a007ffff41703ffffeb1a07ffffe61b03ffffec1a03ffffed1a07ffffe71b07ffffe81b07ffffe91b07ffffea1b07ffffeb1b0ffffffe1c07ffffec1b07ffffed1b07ffffee1b07ffffef1b07fffff01b03ffffee1a3fffffff1e";
+
+# ================================================================
+# Init — build the tree from the blob
+# ================================================================
+
+var _hpack_huffman_inited = 0;
+var _hpack_huffman_root = 0;
+
+fn _hpack_hex_digit(c) {
+    if (c >= 48 && c <= 57)  { return c - 48; }   # 0-9
+    if (c >= 97 && c <= 102) { return c - 87; }   # a-f
+    if (c >= 65 && c <= 70)  { return c - 55; }   # A-F
+    return 0 - 1;
+}
+
+fn _hpack_parse_hex(blob, off, n) {
+    var v = 0;
+    var i = 0;
+    while (i < n) {
+        v = v * 16 + _hpack_hex_digit(load8(blob + off + i));
+        i = i + 1;
+    }
+    return v;
+}
+
+# Insert (code, length, sym) into the tree. Walks from root, taking
+# left/right by each bit of `code` from MSB to LSB; creates internal
+# nodes as needed; sets the leaf symbol at depth=length.
+fn _hpack_huffman_add(code, length, sym) {
+    var node = _hpack_huffman_root;
+    var bit = length - 1;
+    while (bit >= 0) {
+        var b = (code >> bit) & 1;
+        var next = 0;
+        if (b == 0) { next = load64(node + 0); }
+        else        { next = load64(node + 8); }
+        if (next == 0) {
+            next = _hpack_huffman_node_new();
+            if (b == 0) { store64(node + 0, next); }
+            else        { store64(node + 8, next); }
+        }
+        node = next;
+        bit = bit - 1;
+    }
+    store64(node + 16, sym);
+    return 0;
+}
+
+fn _hpack_huffman_init() {
+    if (_hpack_huffman_inited == 1) { return 0; }
+    _hpack_huffman_root = _hpack_huffman_node_new();
+    var i = 0;
+    while (i < 257) {
+        var off = i * 10;
+        var code   = _hpack_parse_hex(_hpack_huffman_blob, off, 8);
+        var length = _hpack_parse_hex(_hpack_huffman_blob, off + 8, 2);
+        _hpack_huffman_add(code, length, i);
+        i = i + 1;
+    }
+    _hpack_huffman_inited = 1;
+    return 0;
+}
+
+# ================================================================
+# Decode
+# ================================================================
+#
+# Walk the tree bit-by-bit through `nbytes` of input starting at
+# `buf+start`. Returns a freshly-allocated NUL-terminated cstr, or 0
+# on malformed input (EOS in payload, padding > 7 bits, padding not
+# all-1s, no edge for taken bit).
+
+fn sandhi_hpack_huffman_decode(buf, start, nbytes) {
+    _hpack_huffman_init();
+    if (nbytes < 0) { return 0; }
+    var out_cap = nbytes * 8 + 1;     # max ratio: shortest code is 5 bits
+    if (out_cap < 1) { out_cap = 1; }
+    var out = alloc(out_cap);
+    var out_len = 0;
+    var node = _hpack_huffman_root;
+    var partial_bits = 0;
+    var partial_all_ones = 1;
+    var byte_idx = 0;
+    var bit_idx = 0;
+    var bits_left = nbytes * 8;
+    while (bits_left > 0) {
+        var byte = load8(buf + start + byte_idx);
+        var b = (byte >> (7 - bit_idx)) & 1;
+        var next = 0;
+        if (b == 0) { next = load64(node + 0); partial_all_ones = 0; }
+        else        { next = load64(node + 8); }
+        if (next == 0) { return 0; }    # bit had no edge — malformed
+        node = next;
+        partial_bits = partial_bits + 1;
+        var sym = load64(node + 16);
+        if (sym != _SANDHI_HPACK_HUFFMAN_INTERNAL) {
+            if (sym == 256) { return 0; }   # EOS in payload — error
+            store8(out + out_len, sym);
+            out_len = out_len + 1;
+            node = _hpack_huffman_root;
+            partial_bits = 0;
+            partial_all_ones = 1;
+        }
+        bit_idx = bit_idx + 1;
+        if (bit_idx == 8) {
+            bit_idx = 0;
+            byte_idx = byte_idx + 1;
+        }
+        bits_left = bits_left - 1;
+    }
+    # Padding check: if not at root, partial path must be ≤ 7 bits
+    # AND all bits must be 1 (MSBs of EOS code 0x3FFFFFFF). Otherwise
+    # malformed per RFC 7541 §5.2.
+    if (node != _hpack_huffman_root) {
+        if (partial_bits > 7) { return 0; }
+        if (partial_all_ones != 1) { return 0; }
+    }
+    store8(out + out_len, 0);
+    return out;
+}
+
+fn sandhi_hpack_huffman_version() {
+    return "0.7.4-bite2b";
+}

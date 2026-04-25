@@ -54,6 +54,7 @@ modules = [
     "src/net/resolve.cyr",
     "src/http/client.cyr",
     "src/http/pool.cyr",
+    "src/http/h2/huffman.cyr",
     "src/http/h2/hpack.cyr",
     "src/http/h2/frame.cyr",
     "src/http/retry.cyr",

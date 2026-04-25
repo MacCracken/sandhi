@@ -399,10 +399,15 @@ fn _hpack_string_decode(buf, blen, off_cell, out_cell) {
     var soff = load64(off_cell);
     if (soff + slen > blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     if (huffman == 1) {
-        # Bite 2b will implement decode here. For now, advance past
-        # so the caller can recover byte position, then signal error.
+        # Bite 2b: decode via the HPACK Huffman tree.
+        var dec = sandhi_hpack_huffman_decode(buf, soff, slen);
+        if (dec == 0) {
+            store64(off_cell, soff + slen);
+            return _SANDHI_HPACK_ERR_HUFFMAN;
+        }
         store64(off_cell, soff + slen);
-        return _SANDHI_HPACK_ERR_HUFFMAN;
+        store64(out_cell, dec);
+        return 0;
     }
     var s = alloc(slen + 1);
     var i = 0;

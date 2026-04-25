@@ -8,6 +8,7 @@
 # h2/frame and h2/conn as later bites land. Trim aggressively to
 # stay under the per-program fixup-table cap (32768).
 include "src/error.cyr"
+include "src/http/h2/huffman.cyr"
 include "src/http/h2/hpack.cyr"
 include "src/http/h2/frame.cyr"
 
@@ -216,17 +217,63 @@ fn test_hpack_dynamic_size_update_decode() {
     return 0;
 }
 
-fn test_hpack_huffman_decode_rejected() {
-    var buf[8];
-    memset(&buf, 0, 8);
-    store8(&buf + 0, 0x40);
-    store8(&buf + 1, 0x83);
-    store8(&buf + 2, 0x00); store8(&buf + 3, 0x00); store8(&buf + 4, 0x00);
-    var t = sandhi_hpack_table_new(0);
+fn test_hpack_huffman_decode_www_example() {
+    # RFC 7541 C.4.1 — "www.example.com" Huffman-encoded as 12 bytes:
+    #   f1 e3 c2 e5 f2 3a 6b a0 ab 90 f4 ff
+    var buf[16];
+    memset(&buf, 0, 16);
+    store8(&buf + 0, 0xf1);
+    store8(&buf + 1, 0xe3);
+    store8(&buf + 2, 0xc2);
+    store8(&buf + 3, 0xe5);
+    store8(&buf + 4, 0xf2);
+    store8(&buf + 5, 0x3a);
+    store8(&buf + 6, 0x6b);
+    store8(&buf + 7, 0xa0);
+    store8(&buf + 8, 0xab);
+    store8(&buf + 9, 0x90);
+    store8(&buf + 10, 0xf4);
+    store8(&buf + 11, 0xff);
+    var s = sandhi_hpack_huffman_decode(&buf, 0, 12);
+    assert_neq(s, 0, "huffman: decoded non-null");
+    assert_streq(s, "www.example.com", "huffman: www.example.com");
+    return 0;
+}
+
+fn test_hpack_huffman_decode_malformed() {
+    # Padding that's not all-1s — must reject. 0x00 = 8 zero bits.
+    # First 5 bits = '0' (sym 48), then 3 trailing zeros = bad padding.
+    var buf[2];
+    store8(&buf + 0, 0x00);
+    var s = sandhi_hpack_huffman_decode(&buf, 0, 1);
+    assert_eq(s, 0, "huffman: bad padding rejected");
+    return 0;
+}
+
+fn test_hpack_huffman_via_string_decode() {
+    # End-to-end: feed a Huffman-encoded string through HPACK's
+    # _hpack_string_decode (no longer returns HUFFMAN error).
+    # 0x8c = string with H=1, length 12, then the 12 huffman bytes.
+    var buf[16];
+    memset(&buf, 0, 16);
+    store8(&buf + 0, 0x8c);
+    store8(&buf + 1, 0xf1);
+    store8(&buf + 2, 0xe3);
+    store8(&buf + 3, 0xc2);
+    store8(&buf + 4, 0xe5);
+    store8(&buf + 5, 0xf2);
+    store8(&buf + 6, 0x3a);
+    store8(&buf + 7, 0x6b);
+    store8(&buf + 8, 0xa0);
+    store8(&buf + 9, 0xab);
+    store8(&buf + 10, 0x90);
+    store8(&buf + 11, 0xf4);
+    store8(&buf + 12, 0xff);
     var off = alloc(8); store64(off, 0);
-    var no = alloc(8); var vo = alloc(8);
-    var r = sandhi_hpack_decode_field(t, &buf, 5, off, no, vo);
-    assert_eq(r, _SANDHI_HPACK_ERR_HUFFMAN, "Huffman rejected");
+    var out_cell = alloc(8);
+    var r = _hpack_string_decode(&buf, 13, off, out_cell);
+    assert_eq(r, 0, "string decode huffman ok");
+    assert_streq(load64(out_cell), "www.example.com", "string decode value");
     return 0;
 }
 
@@ -444,8 +491,14 @@ fn main() {
     test_group("h2/hpack/size_update");
     test_hpack_dynamic_size_update_decode();
 
-    test_group("h2/hpack/huffman_rejected");
-    test_hpack_huffman_decode_rejected();
+    test_group("h2/hpack/huffman_www");
+    test_hpack_huffman_decode_www_example();
+
+    test_group("h2/hpack/huffman_malformed");
+    test_hpack_huffman_decode_malformed();
+
+    test_group("h2/hpack/huffman_via_string");
+    test_hpack_huffman_via_string_decode();
 
     test_group("h2/hpack/rfc_c31");
     test_hpack_rfc_c31_request_decode();

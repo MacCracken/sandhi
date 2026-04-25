@@ -6,6 +6,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.8.0 work in progress
 
+**Bite 2b — HPACK Huffman decode (RFC 7541 §5.2 + Appendix B)**. New
+`src/http/h2/huffman.cyr` (~150 lines + 2570-char data blob). 557
+total assertions across both files (446 sandhi + 111 h2; +4
+Huffman). Real h2 servers always Huffman-encode response headers,
+so this unblocks Bite 5 (live h2 talk).
+
+#### Added
+- 257-entry RFC 7541 Appendix B code table embedded as a single
+  hex blob — one string literal, one fixup. Each entry is 10 hex
+  chars: 8 for the code (left-zero-padded to fit the 30-bit max)
+  + 2 for the bit length. Symbols are implicit by index 0..256
+  (256 is EOS). Total blob: 2570 chars. Verified entry-by-entry
+  via a one-shot Python generator against the spec, then dropped
+  in.
+- Lazy-init builder `_hpack_huffman_init` parses the blob into a
+  binary tree (24-byte nodes: `{left, right, symbol_or_-1}`). Each
+  entry walks from root taking left/right per bit (MSB→LSB) of
+  its code, creating internal nodes as needed; the leaf at depth
+  = bit-length is tagged with the symbol.
+- `sandhi_hpack_huffman_decode(buf, start, nbytes)` — walks the
+  tree bit-by-bit through `nbytes` of input. Emits each symbol on
+  reaching a leaf; resets to root and continues. Returns a
+  freshly-allocated NUL-terminated cstr, or 0 on malformed input.
+- Padding handling per RFC 7541 §5.2:
+  - EOS (symbol 256) in payload → reject (decoding error).
+  - Trailing partial path > 7 bits → reject.
+  - Trailing partial path with any 0 bit → reject (padding MUST
+    be the most-significant bits of the EOS code, which are all
+    1s).
+  - Trailing partial path ≤ 7 bits and all-1s → accept (legal
+    padding).
+
+#### Changed
+- `_hpack_string_decode` in `src/http/h2/hpack.cyr` no longer
+  rejects Huffman-encoded input with `_SANDHI_HPACK_ERR_HUFFMAN`.
+  Now it calls `sandhi_hpack_huffman_decode` and returns the
+  decoded cstr. Error sentinel still fires when the Huffman input
+  itself is malformed (bad padding, EOS in payload, bit with no
+  edge).
+
+#### Tests (3 new in tests/h2.tcyr)
+- `huffman_www_example` — RFC 7541 C.4.1's 12-byte Huffman-encoded
+  `www.example.com` round-trips through `sandhi_hpack_huffman_decode`.
+- `huffman_malformed` — 0x00 (8 zero bits) decodes the first 5
+  bits as `'0'` then leaves 3 trailing zeros as bad padding;
+  rejected.
+- `huffman_via_string` — full HPACK `_hpack_string_decode` path
+  with H=1 bit + length + Huffman bytes round-trips end-to-end.
+
+#### Notes
+- Encode side is **not** implemented — sandhi continues to emit
+  raw strings (H=0), which RFC 7541 §5.2 requires servers to
+  accept. Adding Huffman encode is a wire-size optimization (~30%
+  smaller for typical headers), not a correctness need; can land
+  if/when a consumer asks.
+- The blob string lives on a single line (2570 chars) because
+  Cyrius's lexer doesn't auto-concatenate adjacent string literals
+  the way C does. Lint flags it as line-too-long (expected); not
+  worth disabling the lint rule globally over.
+- Generator script at the time of creation:
+  `/tmp/build_huffman_blob.py` — kept for reference but not
+  checked in. The blob is the artifact; regenerate from the RFC
+  table if anything ever needs to change.
+- Bite 5 (h2 connection lifecycle) is now unblocked — it can
+  decode response HEADERS frames from real h2 servers.
+
 **Bite 4 — ALPN surface (RFC 7301)**. New `src/tls_policy/alpn.cyr`
 (~75 lines). Wire-format encoder + selection accessor. 553 total
 assertions across both test files (446 sandhi + 107 h2; +8 ALPN).
