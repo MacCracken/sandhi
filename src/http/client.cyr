@@ -527,19 +527,97 @@ fn _sandhi_resolve_location(base_url, location) {
     return str_data(str_builder_build(sb));
 }
 
+# 0.9.0 P0 #4 — case-insensitive cstr compare. Used by the redirect
+# follower for header-name filtering. Inlined here rather than in
+# headers.cyr because the only consumer is right below.
+fn _sandhi_streq_ci(a, b) {
+    if (a == 0 || b == 0) { return 0; }
+    var i = 0;
+    while (1 == 1) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
+        if (cb >= 65 && cb <= 90) { cb = cb + 32; }
+        if (ca != cb) { return 0; }
+        if (ca == 0)  { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 if `next_url` has the same scheme+host+port as `prev_url`. Used
+# to decide whether to forward sensitive headers across a redirect.
+fn _sandhi_url_same_authority(prev_url, next_url) {
+    var pu = sandhi_url_parse(prev_url);
+    var nu = sandhi_url_parse(next_url);
+    if (pu == 0 || nu == 0) { return 0; }
+    if (sandhi_url_scheme(pu) != sandhi_url_scheme(nu)) { return 0; }
+    if (sandhi_url_port(pu) != sandhi_url_port(nu)) { return 0; }
+    if (streq(sandhi_url_host(pu), sandhi_url_host(nu)) != 1) { return 0; }
+    return 1;
+}
+
+# 1 if `prev_url` was HTTPS and `next_url` is HTTP — a security
+# downgrade we refuse to follow per the curl CVE-2025-0167 /
+# 14524 cluster lessons.
+fn _sandhi_url_is_https_downgrade(prev_url, next_url) {
+    var pu = sandhi_url_parse(prev_url);
+    var nu = sandhi_url_parse(next_url);
+    if (pu == 0 || nu == 0) { return 0; }
+    if (sandhi_url_scheme(pu) == SANDHI_URL_HTTPS
+     && sandhi_url_scheme(nu) == SANDHI_URL_HTTP) { return 1; }
+    return 0;
+}
+
+# Return a fresh sandhi_headers struct that's a copy of `src` with
+# `Authorization`, `Cookie`, and `Proxy-Authorization` stripped.
+# Used when a redirect crosses authorities — the caller's secret
+# wasn't intended for the new origin.
+fn _sandhi_strip_sensitive_headers(src) {
+    if (src == 0) { return 0; }
+    var out = sandhi_headers_new();
+    var n = sandhi_headers_count(src);
+    var i = 0;
+    while (i < n) {
+        var name = sandhi_headers_name_at(src, i);
+        var value = sandhi_headers_value_at(src, i);
+        var keep = 1;
+        if (_sandhi_streq_ci(name, "authorization") == 1)        { keep = 0; }
+        if (_sandhi_streq_ci(name, "cookie") == 1)               { keep = 0; }
+        if (_sandhi_streq_ci(name, "proxy-authorization") == 1)  { keep = 0; }
+        if (keep == 1) { sandhi_headers_add(out, name, value); }
+        i = i + 1;
+    }
+    return out;
+}
+
 # Redirect-following driver. Keep compact — each iteration reassigns
 # locals rather than allocating new ones, so the function stays under
 # the Cyrius local-count threshold. total_ms resets per hop (each
 # destination gets its own request budget); if a tighter end-to-end
 # bound is needed, the caller should lower max_hops or pre-compute.
+#
+# 0.9.0 P0 #4 — security-aware redirect handling:
+#   - Refuse https→http downgrades (return the prior response with
+#     `SANDHI_ERR_TLS` rather than silently leaking creds in
+#     plaintext to an attacker-controlled `Location:`).
+#   - Strip `Authorization` / `Cookie` / `Proxy-Authorization` from
+#     headers when the redirect crosses authorities (different
+#     scheme / host / port). The caller's secret was bound to the
+#     original origin; the redirect target may be hostile.
+#   - Both apply per-hop, so a chain that bounces back to the
+#     original authority gets the full headers again. (curl does
+#     the same; matches RFC 7235 §2.2 spirit even though the spec
+#     doesn't mandate.)
 fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
                         max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
     var m = method;
     var u = url;
     var b = body;
     var bl = body_len;
+    var h = headers;
     var hops = 0;
-    var r = _sandhi_http_do(m, u, headers, b, bl, max_bytes,
+    var r = _sandhi_http_do(m, u, h, b, bl, max_bytes,
                              connect_ms, read_ms, write_ms, total_ms, pool);
     while (hops < max_hops) {
         if (_sandhi_is_redirect(sandhi_http_status(r)) == 0) { return r; }
@@ -547,10 +625,24 @@ fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
         if (loc == 0) { return r; }
         var next = _sandhi_resolve_location(u, loc);
         if (next == 0) { return r; }
+
+        # Refuse https→http downgrade — surface the redirect response
+        # with err_kind=TLS so the caller sees the refusal rather
+        # than transparently following.
+        if (_sandhi_url_is_https_downgrade(u, next) == 1) {
+            store64(r + SANDHI_RESP_OFF_ERR_KIND, SANDHI_ERR_TLS);
+            return r;
+        }
+
+        # Strip sensitive headers if crossing authorities.
+        if (_sandhi_url_same_authority(u, next) == 0) {
+            h = _sandhi_strip_sensitive_headers(h);
+        }
+
         if (sandhi_http_status(r) == 303) { m = "GET"; b = 0; bl = 0; }
         u = next;
         hops = hops + 1;
-        r = _sandhi_http_do(m, u, headers, b, bl, max_bytes,
+        r = _sandhi_http_do(m, u, h, b, bl, max_bytes,
                              connect_ms, read_ms, write_ms, total_ms, pool);
     }
     return r;

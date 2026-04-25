@@ -39,8 +39,18 @@
 # + `use_tls` + `sni_host` match `sandhi_conn_open`. `policy` may be
 # 0 — equivalent to `sandhi_tls_policy_new_default()`.
 #
-# Returns the conn struct on success (with policy-enforcement status
-# recorded in the reserved slot), or 0 on failure.
+# Returns the conn struct on success, or 0 on failure.
+#
+# 0.9.0 P0 #5 — fail-closed when policy demands enforcement we
+# can't deliver. If the caller built a `_pinned()` / `_mtls()` /
+# `_trust_store()` policy AND `enforcement_available()` is 0 (i.e.,
+# the libssl-pthread-deadlock + missing-symbol blockers haven't
+# cleared yet), we refuse the connection rather than silently
+# downgrade to the default verify path. Previous behavior — silent
+# downgrade — was surface-only-shipped scaffolding from 0.6.0; that
+# mode is now gone. Callers wanting the old "best effort" behavior
+# can pass `sandhi_tls_policy_new_default()` explicitly, which has
+# no enforcement requirements.
 fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
     # Plain TCP — policy is irrelevant but we still return the conn
     # so caller code doesn't branch on use_tls at the call site.
@@ -48,32 +58,30 @@ fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
         return sandhi_conn_open(addr, port, 0, sni_host);
     }
 
-    # For TLS connections: today we pass through to the default
-    # tls.cyr flow. Policy fields are read here so the enforcement
-    # path can be wired without rearchitecting the call site.
-    var pinned = sandhi_tls_policy_pinned_hash(policy);
-    var mtls_cert = sandhi_tls_policy_mtls_cert(policy);
-    var mtls_key = sandhi_tls_policy_mtls_key(policy);
-    var trust_store = sandhi_tls_policy_trust_store(policy);
+    # Read policy fields. NULL policy is equivalent to the default
+    # (no enforcement requirements); skip the fail-closed gate.
+    if (policy != 0) {
+        var pinned = sandhi_tls_policy_pinned_hash(policy);
+        var mtls_cert = sandhi_tls_policy_mtls_cert(policy);
+        var trust_store = sandhi_tls_policy_trust_store(policy);
+        var demands_enforcement = 0;
+        if (pinned != 0)      { demands_enforcement = 1; }
+        if (mtls_cert != 0)   { demands_enforcement = 1; }
+        if (trust_store != 0) { demands_enforcement = 1; }
+        if (demands_enforcement == 1
+         && sandhi_tls_policy_enforcement_available() == 0) {
+            # Set the conn-open last-err so the http client's
+            # path-failure mapping surfaces TLS rather than CONNECT.
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+            return 0;
+        }
+    }
 
-    # TODO: when stdlib TLS-init lands, replace the line below with
-    # a policy-aware variant that:
-    #   1. Allocates a fresh SSL_CTX via _fn_SSL_CTX_new.
-    #   2. If trust_store != 0: SSL_CTX_load_verify_locations(ctx, trust_store, 0).
-    #      Else: SSL_CTX_set_default_verify_paths(ctx).
-    #   3. SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, 0).
-    #   4. If mtls_cert != 0 && mtls_key != 0:
-    #        SSL_CTX_use_certificate_file(ctx, mtls_cert, SSL_FILETYPE_PEM);
-    #        SSL_CTX_use_PrivateKey_file(ctx, mtls_key, SSL_FILETYPE_PEM);
-    #   5. SSL_new(ctx) / SSL_set_fd(ssl, fd) / SSL_ctrl SNI / SSL_connect.
-    #   6. After SSL_connect succeeds, if pinned != 0:
-    #        SSL_get_peer_certificate(ssl) → X509*;
-    #        X509_get_pubkey + i2d_PUBKEY → DER bytes;
-    #        sha256_hex over DER → actual_hex;
-    #        sandhi_fp_eq(actual_hex, pinned) or abort.
-    #   7. Return conn with policy recorded.
-    #
-    # For now, delegate to the default path.
+    # Otherwise delegate to the default tls.cyr flow. Policy
+    # enforcement (the SSL_CTX_set_* calls listed previously) lands
+    # when stdlib `tls.cyr` exposes a context hook — see
+    # docs/issues/2026-04-24-stdlib-tls-alpn-hook.md for the same
+    # ask, since ALPN runtime needs the same hook.
     return sandhi_conn_open(addr, port, 1, sni_host);
 }
 

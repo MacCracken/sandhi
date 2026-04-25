@@ -148,6 +148,37 @@ fn http_content_length(buf, blen) {
     return n;
 }
 
+# 0.9.0 P0 #2 — 1 if the request carries both `Content-Length` AND
+# `Transfer-Encoding: chunked`, which is malformed per RFC 7230
+# §3.3.3 and the canonical CL.TE smuggling vector. The accept-loop
+# in `http_server_run_opts` checks this and replies 400 before
+# handing the request to the user's handler.
+fn http_request_has_cl_te_conflict(buf, blen) {
+    if (http_find_header(buf, blen, "Content-Length") == 0) { return 0; }
+    var te = http_find_header(buf, blen, "Transfer-Encoding");
+    if (te == 0) { return 0; }
+    # Tolerant case-insensitive substring match for "chunked".
+    var i = 0;
+    while (load8(te + i) != 0) {
+        var c0 = load8(te + i);
+        if (c0 >= 65 && c0 <= 90) { c0 = c0 + 32; }
+        if (c0 == 99) {
+            var j = 1;
+            var matched = 1;
+            var want = "hunked";
+            while (matched == 1 && j < 7) {
+                var ch = load8(te + i + j);
+                if (ch >= 65 && ch <= 90) { ch = ch + 32; }
+                if (ch != load8(want + j - 1)) { matched = 0; }
+                j = j + 1;
+            }
+            if (matched == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # ================================================================
 # Path + query helpers
 # ================================================================
@@ -528,7 +559,14 @@ fn http_server_run_opts(addr, port, handler_fp, ctx, opts) {
             }
             var n = http_recv_request(cfd, _hsv_req_buf, HSV_REQ_BUF_SIZE - 1);
             if (n > 0) {
-                fncall4(handler_fp, ctx, cfd, _hsv_req_buf, n);
+                # 0.9.0 P0 #2 — reject CL+TE coexistence with 400
+                # before handing to the user handler. Smuggling
+                # vector per RFC 7230 §3.3.3.
+                if (http_request_has_cl_te_conflict(_hsv_req_buf, n) == 1) {
+                    http_send_status(cfd, 400, "Bad Request");
+                } else {
+                    fncall4(handler_fp, ctx, cfd, _hsv_req_buf, n);
+                }
             }
             sock_close(cfd);
         }

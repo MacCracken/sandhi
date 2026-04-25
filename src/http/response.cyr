@@ -144,17 +144,34 @@ fn _sandhi_resp_eol(buf, start, end) {
 # Parse chunk-size line (hex digits, CRLF-terminated). Returns the
 # decoded size. Ignores chunk extensions (";name=value" after the hex).
 # Walks `*offset_ptr` past the CRLF.
+#
+# 0.9.0 P0 #1 + #3 — hardened in two ways:
+#   - Requires at least one hex digit (no-digit input returns the
+#     `_SANDHI_RESP_CHUNK_BAD` sentinel rather than silently
+#     succeeding with size=0). The streaming variant in stream.cyr
+#     had this guard; the buffered variant did not, allowing a
+#     malformed chunk to be misread as the terminal 0-chunk.
+#   - Rejects sizes > 2^31. RFC 7230 doesn't cap chunk-size, but
+#     anything that large overflows the signed-64-bit accumulator
+#     long before it lands in a real response. Capping at i31 keeps
+#     `off + size > blen` comparisons always-positive even if blen
+#     itself approached i63.
+var _SANDHI_RESP_CHUNK_BAD     = 0 - 1;
+var _SANDHI_RESP_CHUNK_MAX     = 0x7FFFFFFF;
 fn _sandhi_resp_chunk_size(buf, blen, offset_ptr) {
     var p = load64(offset_ptr);
     var size = 0;
+    var seen_digit = 0;
     var scan = 1;
     while (scan == 1 && p < blen) {
         var c = load8(buf + p);
-        if (c >= 48 && c <= 57)      { size = size * 16 + (c - 48); p = p + 1; }
-        elif (c >= 97 && c <= 102)   { size = size * 16 + (c - 87); p = p + 1; }
-        elif (c >= 65 && c <= 70)    { size = size * 16 + (c - 55); p = p + 1; }
+        if (c >= 48 && c <= 57)      { size = size * 16 + (c - 48); seen_digit = 1; p = p + 1; }
+        elif (c >= 97 && c <= 102)   { size = size * 16 + (c - 87); seen_digit = 1; p = p + 1; }
+        elif (c >= 65 && c <= 70)    { size = size * 16 + (c - 55); seen_digit = 1; p = p + 1; }
         else { scan = 0; }
+        if (size > _SANDHI_RESP_CHUNK_MAX) { return _SANDHI_RESP_CHUNK_BAD; }
     }
+    if (seen_digit == 0) { return _SANDHI_RESP_CHUNK_BAD; }
     # Skip chunk extensions ";..." up to CRLF.
     while (p < blen && load8(buf + p) != 13 && load8(buf + p) != 10) {
         p = p + 1;
@@ -165,9 +182,17 @@ fn _sandhi_resp_chunk_size(buf, blen, offset_ptr) {
     return size;
 }
 
-# Decode a chunked body starting at `start` within `buf`. Returns an
-# allocated contiguous body buffer + length via out-params. On error
-# (truncated chunk / bad hex) returns body_len 0.
+# Decode a chunked body starting at `start` within `buf`. Returns 0
+# on success (writing body via out-params) or `0 - 1` on malformed
+# input (bad chunk-size, truncated mid-chunk, or stream ending
+# without the terminal 0-chunk). Out-params are also written on
+# error to keep them initialized for the caller.
+#
+# 0.9.0 P0 #1 — previously the decoder treated ANY size==0 (including
+# the no-hex-digit malformed case from chunk_size + early-stop on
+# truncation) as success. This silently truncated bodies. Now we
+# track `saw_terminal` and propagate `_BAD` from chunk_size, so a
+# clean stream end is the only way to claim success.
 fn _sandhi_resp_decode_chunked(buf, blen, start, body_out_ptr, body_len_ptr) {
     var cap = blen - start;
     if (cap < 1) { cap = 1; }
@@ -176,12 +201,20 @@ fn _sandhi_resp_decode_chunked(buf, blen, start, body_out_ptr, body_len_ptr) {
     var off_cell = alloc(8);
     store64(off_cell, start);
     var going = 1;
+    var saw_terminal = 0;
+    var malformed = 0;
     while (going == 1) {
         var size = _sandhi_resp_chunk_size(buf, blen, off_cell);
         var off = load64(off_cell);
-        if (size == 0) { going = 0; }
-        else {
+        if (size == _SANDHI_RESP_CHUNK_BAD) {
+            malformed = 1;
+            going = 0;
+        } elif (size == 0) {
+            saw_terminal = 1;
+            going = 0;
+        } else {
             if (off + size > blen) {
+                malformed = 1;
                 going = 0;
             } else {
                 memcpy(out + out_len, buf + off, size);
@@ -196,6 +229,8 @@ fn _sandhi_resp_decode_chunked(buf, blen, start, body_out_ptr, body_len_ptr) {
     store8(out + out_len, 0);
     store64(body_out_ptr, out);
     store64(body_len_ptr, out_len);
+    if (malformed == 1) { return 0 - 1; }
+    if (saw_terminal == 0) { return 0 - 1; }
     return 0;
 }
 
@@ -245,14 +280,32 @@ fn _sandhi_resp_body_copy(buf, start, len) {
 # the original split was prompted by a silent-local-zeroing symptom
 # that's since been re-attributed to sandhi's missing stdlib deps
 # (see top-of-file NOTE). The small-function shape stays regardless.
+#
+# 0.9.0 P0 #2 — reject responses that carry both `Content-Length`
+# AND `Transfer-Encoding: chunked` per RFC 7230 §3.3.3 ("the message
+# is malformed and the recipient MUST treat it as such"). Two
+# upstream parsers picking different framings is the classic
+# CL.TE / TE.CL request/response smuggling vector. We return
+# SANDHI_ERR_PROTOCOL on the response struct so callers see the
+# refusal rather than a silently-truncated or silently-extended body.
 fn _sandhi_resp_frame(buf, blen, status, headers, body_start) {
     var body_ptr = 0;
     var body_len = 0;
+    var chunked = _sandhi_resp_is_chunked(headers);
+    var has_clen = 0;
+    if (sandhi_headers_get(headers, "Content-Length") != 0) { has_clen = 1; }
 
-    if (_sandhi_resp_is_chunked(headers) == 1) {
+    if (chunked == 1 && has_clen == 1) {
+        return _sandhi_resp_err(SANDHI_ERR_PROTOCOL);
+    }
+
+    if (chunked == 1) {
         var outp_cell = alloc(8);
         var outl_cell = alloc(8);
-        _sandhi_resp_decode_chunked(buf, blen, body_start, outp_cell, outl_cell);
+        var dr = _sandhi_resp_decode_chunked(buf, blen, body_start, outp_cell, outl_cell);
+        if (dr < 0) {
+            return _sandhi_resp_err(SANDHI_ERR_PROTOCOL);
+        }
         body_ptr = load64(outp_cell);
         body_len = load64(outl_cell);
     } else {

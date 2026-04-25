@@ -44,5 +44,5 @@
 #                             to `sandhi_server_*` before the v5.7.0 fold.
 
 fn sandhi_version() {
-    return "0.8.1";
+    return "0.9.0";
 }
