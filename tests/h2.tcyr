@@ -4,13 +4,17 @@
 # tests piled up. See docs/proposals/2026-04-24-cyrius-fixup-table-cap.md
 # for the upstream-investigation note.
 
-# h2 tests only need the modules they exercise — h2/hpack today,
-# h2/frame and h2/conn as later bites land. Trim aggressively to
-# stay under the per-program fixup-table cap (32768).
+# h2 tests include the modules they exercise + their dependencies.
+# Bite 5a's h2/conn.cyr depends on http/conn.cyr (sandhi_conn_*) and
+# http/headers.cyr (used transitively). Trim aggressively to stay
+# under the per-program fixup-table cap (32768).
 include "src/error.cyr"
+include "src/http/headers.cyr"
+include "src/http/conn.cyr"
 include "src/http/h2/huffman.cyr"
 include "src/http/h2/hpack.cyr"
 include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
 
 # ================================================================
 # HPACK tests (Bite 2 of 0.8.0) — RFC 7541 Appendix C
@@ -449,6 +453,56 @@ fn test_h2_ping_roundtrip() {
     return 0;
 }
 
+# ================================================================
+# h2 conn tests (Bite 5a of 0.8.0)
+# ================================================================
+
+fn test_h2_conn_defaults() {
+    var h2c = sandhi_h2_conn_new(0);  # NULL underlying — fine for state checks
+    assert_eq(sandhi_h2_conn_peer_max_frame(h2c), 16384, "default frame=16384");
+    assert_eq(sandhi_h2_conn_peer_max_streams(h2c), 0, "default streams=unlimited");
+    assert_eq(sandhi_h2_conn_peer_init_window(h2c), 65535, "default window=65535");
+    assert_eq(sandhi_h2_conn_goaway_received(h2c), 0, "default goaway=no");
+    return 0;
+}
+
+fn test_h2_conn_stream_id_allocation() {
+    # Client streams are odd, monotonically increasing.
+    var h2c = sandhi_h2_conn_new(0);
+    assert_eq(sandhi_h2_conn_next_stream_id(h2c), 1, "first sid=1");
+    assert_eq(sandhi_h2_conn_next_stream_id(h2c), 3, "next sid=3");
+    assert_eq(sandhi_h2_conn_next_stream_id(h2c), 5, "next sid=5");
+    return 0;
+}
+
+fn test_h2_conn_apply_settings_payload() {
+    # Synthesize a SETTINGS payload with 3 pairs:
+    #   MAX_FRAME_SIZE=32768, MAX_CONCURRENT_STREAMS=100,
+    #   INITIAL_WINDOW_SIZE=131072
+    var pl[24];
+    memset(&pl, 0, 24);
+    sandhi_h2_settings_pair_encode(&pl, 0, 0x5, 32768);
+    sandhi_h2_settings_pair_encode(&pl, 6, 0x3, 100);
+    sandhi_h2_settings_pair_encode(&pl, 12, 0x4, 131072);
+    var h2c = sandhi_h2_conn_new(0);
+    var r = sandhi_h2_conn_apply_settings_payload(h2c, &pl, 18);
+    assert_eq(r, 0, "apply settings ok");
+    assert_eq(sandhi_h2_conn_peer_max_frame(h2c),   32768,  "frame applied");
+    assert_eq(sandhi_h2_conn_peer_max_streams(h2c), 100,    "streams applied");
+    assert_eq(sandhi_h2_conn_peer_init_window(h2c), 131072, "window applied");
+    return 0;
+}
+
+fn test_h2_conn_apply_settings_malformed() {
+    # Payload length not a multiple of 6 = malformed.
+    var pl[8];
+    memset(&pl, 0, 8);
+    var h2c = sandhi_h2_conn_new(0);
+    var r = sandhi_h2_conn_apply_settings_payload(h2c, &pl, 5);
+    assert_eq(r, _SANDHI_H2_ERR_MALFORMED, "non-multiple-of-6 rejected");
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -532,6 +586,18 @@ fn main() {
 
     test_group("h2/frame/ping");
     test_h2_ping_roundtrip();
+
+    test_group("h2/conn/defaults");
+    test_h2_conn_defaults();
+
+    test_group("h2/conn/stream_id_alloc");
+    test_h2_conn_stream_id_allocation();
+
+    test_group("h2/conn/apply_settings");
+    test_h2_conn_apply_settings_payload();
+
+    test_group("h2/conn/apply_settings_malformed");
+    test_h2_conn_apply_settings_malformed();
 
     return assert_summary();
 }

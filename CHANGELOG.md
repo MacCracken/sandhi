@@ -6,6 +6,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.8.0 work in progress
 
+**Bite 5a — HTTP/2 connection lifecycle scaffolding**. New
+`src/http/h2/conn.cyr` (~210 lines). 569 total assertions across
+both files (446 sandhi + 123 h2; +12 conn). Bite 5 is split into
+three sub-bites because the full lifecycle is too big for one
+commit: 5a (this) is conn struct + handshake + frame plumbing; 5b
+will encode requests; 5c will decode responses + manage stream
+state.
+
+#### Added
+- `sandhi_h2_conn` struct (80 bytes) wrapping a `sandhi_conn` with
+  h2-specific state: HPACK encode + decode tables, next stream-id
+  counter, settings-acked flags, peer's MAX_FRAME_SIZE /
+  MAX_CONCURRENT_STREAMS / INITIAL_WINDOW_SIZE (defaulted per
+  RFC 7540 §6.5.2), GOAWAY received flag.
+- `sandhi_h2_conn_new(sandhi_conn_ptr)` constructor + accessors:
+  `_underlying`, `_enc_table`, `_dec_table`, `_peer_max_frame`,
+  `_peer_max_streams`, `_peer_init_window`, `_goaway_received`.
+- `sandhi_h2_conn_next_stream_id` — RFC 7540 §5.1.1 client-side
+  odd-id allocation (1, 3, 5, ...).
+- `sandhi_h2_conn_send_frame(c, type, flags, sid, payload, plen)`
+  — frame-level send: 9-byte header + payload as one logical
+  frame, two `send_all` syscalls.
+- `sandhi_h2_conn_recv_frame(c, result_out)` — frame-level recv
+  into a 16-byte result struct `{hdr_ptr, payload_ptr}`. Handles
+  truncation; returns negative sentinel.
+- `sandhi_h2_conn_send_preface_and_settings(c)` — emits the
+  24-byte client preface (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`)
+  followed by an empty SETTINGS frame.
+- `sandhi_h2_conn_recv_peer_settings(c)` — reads the peer's first
+  frame (expected SETTINGS), applies its parameters, and ACKs.
+- `sandhi_h2_conn_apply_settings_payload(c, payload, len)` —
+  parses SETTINGS pairs and applies each via `_h2_conn_apply_setting`.
+  Handles MAX_FRAME_SIZE, MAX_CONCURRENT_STREAMS, INITIAL_WINDOW_SIZE,
+  HEADER_TABLE_SIZE (resizes the HPACK decode table). ENABLE_PUSH
+  + MAX_HEADER_LIST_SIZE silently ignored — Bite 5c may want them.
+- `sandhi_h2_conn_send_settings_ack` — empty SETTINGS+ACK frame.
+
+#### Tests (4 new in tests/h2.tcyr)
+- `defaults` — initial state matches spec defaults.
+- `stream_id_alloc` — first three allocations are 1, 3, 5.
+- `apply_settings` — synthesized 3-pair SETTINGS payload updates
+  conn state correctly.
+- `apply_settings_malformed` — non-multiple-of-6 length rejected
+  with `_SANDHI_H2_ERR_MALFORMED`.
+
+#### Notes
+- Live send/recv tests need a real socket fixture or a mock; not
+  attempted in 5a. The frame wire format is already covered by
+  Bite 3's `frame.cyr` round-trip tests; this bite tests state
+  transitions on synthetic settings payloads.
+- Bites 5b and 5c are next. 5b encodes a request via HPACK + this
+  send_frame plumbing; 5c reads frames, decodes responses, manages
+  stream state.
+
 **Bite 2b — HPACK Huffman decode (RFC 7541 §5.2 + Appendix B)**. New
 `src/http/h2/huffman.cyr` (~150 lines + 2570-char data blob). 557
 total assertions across both files (446 sandhi + 111 h2; +4

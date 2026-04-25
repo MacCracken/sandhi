@@ -1,0 +1,236 @@
+# sandhi/http/h2/conn — HTTP/2 connection lifecycle scaffolding.
+#
+# This module owns the per-h2-connection state and the frame-level
+# send/recv plumbing. It does NOT yet originate requests (Bite 5b)
+# or interpret response stream lifecycle (Bite 5c) — those layer on
+# top.
+#
+# Layering recap:
+#   sandhi_conn        — TCP / TLS bytes (src/http/conn.cyr)
+#   sandhi_h2_conn     — h2 framing + handshake state (this file)
+#   sandhi_h2_stream   — per-request lifecycle (Bite 5c)
+#
+# h2 connection struct (80 bytes):
+#   +0    conn                  (sandhi_conn ptr — owned by us once attached)
+#   +8    hpack_enc_table       (sandhi_hpack_table — outbound dynamic)
+#   +16   hpack_dec_table       (sandhi_hpack_table — inbound dynamic)
+#   +24   next_stream_id        (int — odd, starts at 1)
+#   +32   our_settings_acked    (int — 0 until peer ACKs ours)
+#   +40   peer_settings_seen    (int — 0 until we receive theirs)
+#   +48   peer_max_frame_size   (int — peer's MAX_FRAME_SIZE, default 16384)
+#   +56   peer_max_streams      (int — peer's MAX_CONCURRENT_STREAMS, 0 = unlimited)
+#   +64   peer_init_window      (int — peer's INITIAL_WINDOW_SIZE, default 65535)
+#   +72   goaway_received       (int — 1 if peer sent GOAWAY)
+#
+# Bite 5a of 0.8.0.
+
+enum SandhiH2ConnOff {
+    SANDHI_H2_CONN_OFF_CONN          = 0;
+    SANDHI_H2_CONN_OFF_HPACK_ENC     = 8;
+    SANDHI_H2_CONN_OFF_HPACK_DEC     = 16;
+    SANDHI_H2_CONN_OFF_NEXT_SID      = 24;
+    SANDHI_H2_CONN_OFF_OUR_ACKED     = 32;
+    SANDHI_H2_CONN_OFF_PEER_SEEN     = 40;
+    SANDHI_H2_CONN_OFF_PEER_FRAME    = 48;
+    SANDHI_H2_CONN_OFF_PEER_STREAMS  = 56;
+    SANDHI_H2_CONN_OFF_PEER_WINDOW   = 64;
+    SANDHI_H2_CONN_OFF_GOAWAY        = 72;
+}
+
+var SANDHI_H2_CONN_STRUCT_SIZE = 80;
+
+# Spec defaults — RFC 7540 §6.5.2.
+var _SANDHI_H2_DEFAULT_PEER_FRAME   = 16384;
+var _SANDHI_H2_DEFAULT_PEER_STREAMS = 0;       # 0 = unlimited
+var _SANDHI_H2_DEFAULT_PEER_WINDOW  = 65535;
+
+# Connection preface — first 24 octets the client MUST send. RFC 7540
+# §3.5. Spelled out so it stays a single literal.
+var _SANDHI_H2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+# ================================================================
+# Construction / accessors
+# ================================================================
+
+# Attach an h2 conn to an already-connected sandhi_conn. Caller has
+# done TCP+TLS+ALPN already; we just wrap and initialize state.
+fn sandhi_h2_conn_new(sandhi_conn_ptr) {
+    var c = alloc(SANDHI_H2_CONN_STRUCT_SIZE);
+    store64(c + SANDHI_H2_CONN_OFF_CONN, sandhi_conn_ptr);
+    store64(c + SANDHI_H2_CONN_OFF_HPACK_ENC, sandhi_hpack_table_new(0));
+    store64(c + SANDHI_H2_CONN_OFF_HPACK_DEC, sandhi_hpack_table_new(0));
+    store64(c + SANDHI_H2_CONN_OFF_NEXT_SID, 1);
+    store64(c + SANDHI_H2_CONN_OFF_OUR_ACKED, 0);
+    store64(c + SANDHI_H2_CONN_OFF_PEER_SEEN, 0);
+    store64(c + SANDHI_H2_CONN_OFF_PEER_FRAME,   _SANDHI_H2_DEFAULT_PEER_FRAME);
+    store64(c + SANDHI_H2_CONN_OFF_PEER_STREAMS, _SANDHI_H2_DEFAULT_PEER_STREAMS);
+    store64(c + SANDHI_H2_CONN_OFF_PEER_WINDOW,  _SANDHI_H2_DEFAULT_PEER_WINDOW);
+    store64(c + SANDHI_H2_CONN_OFF_GOAWAY, 0);
+    return c;
+}
+
+fn sandhi_h2_conn_underlying(c) { return load64(c + SANDHI_H2_CONN_OFF_CONN); }
+fn sandhi_h2_conn_enc_table(c)  { return load64(c + SANDHI_H2_CONN_OFF_HPACK_ENC); }
+fn sandhi_h2_conn_dec_table(c)  { return load64(c + SANDHI_H2_CONN_OFF_HPACK_DEC); }
+fn sandhi_h2_conn_peer_max_frame(c)   { return load64(c + SANDHI_H2_CONN_OFF_PEER_FRAME); }
+fn sandhi_h2_conn_peer_max_streams(c) { return load64(c + SANDHI_H2_CONN_OFF_PEER_STREAMS); }
+fn sandhi_h2_conn_peer_init_window(c) { return load64(c + SANDHI_H2_CONN_OFF_PEER_WINDOW); }
+fn sandhi_h2_conn_goaway_received(c)  { return load64(c + SANDHI_H2_CONN_OFF_GOAWAY); }
+
+# Allocate the next odd stream-id for client-originated streams.
+# Returns the allocated id; advances the counter for next call. RFC
+# 7540 §5.1.1: client uses odd ids; ids monotonically increase.
+fn sandhi_h2_conn_next_stream_id(c) {
+    var id = load64(c + SANDHI_H2_CONN_OFF_NEXT_SID);
+    store64(c + SANDHI_H2_CONN_OFF_NEXT_SID, id + 2);
+    return id;
+}
+
+# ================================================================
+# Frame send/recv plumbing
+# ================================================================
+#
+# Send: build header into a 9-byte buf, fire as one `send_all`, then
+# fire payload (if any) as a second `send_all`. Two syscalls per
+# frame is fine — frames are infrequent compared to inner-byte work.
+#
+# Recv: read 9 bytes into a header buf, decode to learn payload
+# length, read the payload, return both.
+
+fn sandhi_h2_conn_send_frame(c, type, flags, stream_id, payload, payload_len) {
+    if (payload_len < 0) { return _SANDHI_H2_ERR_BAD_LENGTH; }
+    if (payload_len > sandhi_h2_conn_peer_max_frame(c)) {
+        return _SANDHI_H2_ERR_BAD_LENGTH;
+    }
+    var hdr = alloc(SANDHI_H2_FRAME_HEADER_SIZE);
+    var n = sandhi_h2_hdr_encode(hdr, 0, payload_len, type, flags, stream_id);
+    if (n < 0) { return n; }
+    var conn = sandhi_h2_conn_underlying(c);
+    if (sandhi_conn_send_all(conn, hdr, SANDHI_H2_FRAME_HEADER_SIZE) < 0) {
+        return _SANDHI_H2_ERR_TRUNCATED;
+    }
+    if (payload_len > 0 && payload != 0) {
+        if (sandhi_conn_send_all(conn, payload, payload_len) < 0) {
+            return _SANDHI_H2_ERR_TRUNCATED;
+        }
+    }
+    return 0;
+}
+
+# Read one frame header + payload. Caller passes a result struct
+# (16 bytes) into which we store {hdr_ptr, payload_ptr}. Returns the
+# total bytes consumed (always 9 + payload_len), or a negative
+# sentinel.
+#
+# Result struct layout (16 bytes):
+#   +0  hdr      (SandhiH2Hdr ptr)
+#   +8  payload  (alloc'd buf or 0; payload_len lives on the hdr)
+fn sandhi_h2_conn_recv_frame(c, result_out) {
+    var conn = sandhi_h2_conn_underlying(c);
+    var hbuf = alloc(SANDHI_H2_FRAME_HEADER_SIZE);
+    var nread = sandhi_conn_recv_all(conn, hbuf, SANDHI_H2_FRAME_HEADER_SIZE);
+    if (nread != SANDHI_H2_FRAME_HEADER_SIZE) { return _SANDHI_H2_ERR_TRUNCATED; }
+    var hdr = sandhi_h2_hdr_decode(hbuf, SANDHI_H2_FRAME_HEADER_SIZE, 0);
+    if (hdr == 0) { return _SANDHI_H2_ERR_MALFORMED; }
+    var plen = sandhi_h2_hdr_length(hdr);
+    var payload = 0;
+    if (plen > 0) {
+        payload = alloc(plen);
+        if (sandhi_conn_recv_all(conn, payload, plen) != plen) {
+            return _SANDHI_H2_ERR_TRUNCATED;
+        }
+    }
+    store64(result_out + 0, hdr);
+    store64(result_out + 8, payload);
+    return SANDHI_H2_FRAME_HEADER_SIZE + plen;
+}
+
+# ================================================================
+# Handshake — preface + SETTINGS exchange
+# ================================================================
+#
+# Per RFC 7540 §3.5 + §6.5.3:
+#   1. Client sends 24-byte preface ("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").
+#   2. Client sends a SETTINGS frame (may be empty — defaults are fine).
+#   3. Server sends its SETTINGS frame.
+#   4. Both sides ACK each other's SETTINGS with an empty SETTINGS+ACK.
+#
+# We send our preface + an empty SETTINGS, then wait for the server's
+# SETTINGS, ACK it. The server will subsequently ACK ours (which we
+# observe in the regular frame loop, not synchronously here).
+
+fn sandhi_h2_conn_send_preface_and_settings(c) {
+    var conn = sandhi_h2_conn_underlying(c);
+    if (sandhi_conn_send_all(conn, _SANDHI_H2_PREFACE, 24) < 0) {
+        return _SANDHI_H2_ERR_TRUNCATED;
+    }
+    # Empty SETTINGS frame (no parameters; spec says this is valid).
+    return sandhi_h2_conn_send_frame(c, SANDHI_H2_FRAME_SETTINGS, 0, 0, 0, 0);
+}
+
+# Apply a single peer-SETTINGS pair. Updates h2 conn state per §6.5.2.
+fn _h2_conn_apply_setting(c, id, value) {
+    if (id == SANDHI_H2_SETTINGS_MAX_FRAME_SIZE) {
+        store64(c + SANDHI_H2_CONN_OFF_PEER_FRAME, value);
+    } elif (id == SANDHI_H2_SETTINGS_MAX_CONCURRENT_STREAMS) {
+        store64(c + SANDHI_H2_CONN_OFF_PEER_STREAMS, value);
+    } elif (id == SANDHI_H2_SETTINGS_INITIAL_WINDOW_SIZE) {
+        store64(c + SANDHI_H2_CONN_OFF_PEER_WINDOW, value);
+    } elif (id == SANDHI_H2_SETTINGS_HEADER_TABLE_SIZE) {
+        sandhi_hpack_table_set_max_size(sandhi_h2_conn_dec_table(c), value);
+    }
+    # ENABLE_PUSH + MAX_HEADER_LIST_SIZE: ignored for now. Bite 5c
+    # may want them; layered in when needed.
+    return 0;
+}
+
+# Parse a SETTINGS frame payload into pairs and apply each.
+fn sandhi_h2_conn_apply_settings_payload(c, payload, payload_len) {
+    if (payload_len % 6 != 0) { return _SANDHI_H2_ERR_MALFORMED; }
+    var off = 0;
+    var id_cell = alloc(8);
+    var v_cell = alloc(8);
+    while (off < payload_len) {
+        var n = sandhi_h2_settings_pair_decode(payload, payload_len, off, id_cell, v_cell);
+        if (n < 0) { return n; }
+        _h2_conn_apply_setting(c, load64(id_cell), load64(v_cell));
+        off = n;
+    }
+    store64(c + SANDHI_H2_CONN_OFF_PEER_SEEN, 1);
+    return 0;
+}
+
+# Send an empty SETTINGS frame with the ACK flag set — used to ACK
+# the peer's SETTINGS.
+fn sandhi_h2_conn_send_settings_ack(c) {
+    return sandhi_h2_conn_send_frame(c,
+        SANDHI_H2_FRAME_SETTINGS, SANDHI_H2_FLAG_ACK, 0, 0, 0);
+}
+
+# Receive the peer's first frame, expect it to be a non-ACK SETTINGS
+# (per RFC 7540 §3.5 the server's first frame is its SETTINGS). Apply
+# its parameters and ACK back. Returns 0 on success, negative on the
+# usual error sentinels.
+fn sandhi_h2_conn_recv_peer_settings(c) {
+    var result = alloc(16);
+    var n = sandhi_h2_conn_recv_frame(c, result);
+    if (n < 0) { return n; }
+    var hdr = load64(result + 0);
+    if (sandhi_h2_hdr_type(hdr) != SANDHI_H2_FRAME_SETTINGS) {
+        return _SANDHI_H2_ERR_MALFORMED;
+    }
+    if ((sandhi_h2_hdr_flags(hdr) & SANDHI_H2_FLAG_ACK) != 0) {
+        # Peer ACK'd our (empty) SETTINGS before sending its own — odd
+        # but legal. Mark our_acked and keep waiting.
+        store64(c + SANDHI_H2_CONN_OFF_OUR_ACKED, 1);
+        return sandhi_h2_conn_recv_peer_settings(c);
+    }
+    var payload = load64(result + 8);
+    var ar = sandhi_h2_conn_apply_settings_payload(c, payload, sandhi_h2_hdr_length(hdr));
+    if (ar < 0) { return ar; }
+    return sandhi_h2_conn_send_settings_ack(c);
+}
+
+fn sandhi_h2_conn_version() {
+    return "0.7.4-bite5a";
+}
