@@ -634,7 +634,6 @@ fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts) {
     return 0;
 }
 
-
 # ================================================================
 # sandhi-scoped identity
 # ================================================================
