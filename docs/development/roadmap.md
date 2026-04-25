@@ -44,6 +44,7 @@ details, state.md the current snapshot.
 - **0.9.7** — `TE: trailers` request signaling on both 1.1 and h2; te-conditional h2 forbidden filter
 - **0.9.8** — HPACK Huffman encode wired into `_hpack_string_encode`; byte-exact RFC 7541 C.4.1 reference
 - **0.9.9** — internal P1 self-audit: trailer forbidden list expanded; ALPN/Huffman/redirect/h2 filter audited sound
+- **0.9.10** — pool stale-skip hardening: `_sandhi_pool_has_idle` peek now ignores conns past `idle_timeout_ms` so ALPN promotion fires deterministically
 
 ## What's left
 
@@ -110,7 +111,6 @@ sandhi's src), so both land cleanly as 1.0.x patches.
 
 **Optimization-grade, profile first**:
 
-- **`_sandhi_pool_has_idle` stale-skip** — peek doesn't skip stale (>idle_timeout_ms) conns when deciding whether to attempt ALPN promotion. If a route's only idle 1.1 conns are stale, promotion is skipped and `_sandhi_http_do` opens a fresh conn via the 1.1 path — missing the h2 opportunity. Audited 0.9.9; not a security issue. Lands as a 1.0.x patch if a consumer measures the hit.
 - **HPACK Huffman encode for short binary tokens** — current encoder picks Huffman over raw when strictly shorter; ties go to raw. Some short cookies / opaque tokens could benefit from a tie-breaker that favors Huffman to keep dynamic-table state more compact. Wait for evidence.
 - **Arena-per-request allocator** — profile first; stdlib `alloc` may already be a bump allocator under the hood.
 - **SIMD / hot-path micro-optimization** — Cyrius has no SIMD intrinsics; byte-at-a-time is perfectly adequate at SSE / HTTP / HPACK parsing rates observed so far.

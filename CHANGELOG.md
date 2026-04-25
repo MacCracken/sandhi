@@ -4,6 +4,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.10] — 2026-04-25
+
+**Pool stale-skip hardening.** Closes the only "audited and noted,
+optimization-grade only" finding from the 0.9.9 audit. Promoting
+the fix into a hardening release because deterministic h2 selection
+across long client uptimes is the threshold for "worth the patch
+before fold." ADR 0005 surface freeze respected (no public-surface
+change).
+
+**649 assertions green** (482 sandhi + 167 h2; same coverage as
+0.9.9, no regression).
+
+### http/pool
+
+- `src/http/pool.cyr::_sandhi_pool_has_idle` — non-consuming peek
+  now walks the per-route 1.1 vec and returns 1 only if at least
+  one entry is within `idle_timeout_ms` (default 90 s) of
+  `clock_now_ms()`. Previously it returned 1 whenever the vec
+  had any entry, regardless of staleness.
+
+### Why this matters
+
+`_sandhi_pool_has_idle` is the gate the 0.9.6 ALPN auto-promoter
+uses to decide whether to attempt h2 promotion or just take the
+existing 1.1 conn. The 0.9.6 contract was *"if the route has 1.1
+conns, the previous request already learned the server speaks
+1.1; don't re-ALPN."* That's correct — except when "has 1.1 conns"
+in the bookkeeping doesn't match "has *usable* 1.1 conns" because
+the entries are all stale.
+
+Concretely: a process that talked to `https://api.example.com/`
+once, then sat idle for >90 s, then made a second request — under
+the old peek logic, the second request would skip ALPN promotion
+entirely, fall through to `_sandhi_http_do` (which correctly
+discards the stale conn and opens a fresh 1.1 one), and never
+attempt h2 negotiation. The fresh 1.1 conn lands in the pool, so
+the third request (still <90 s after the second) sees a *non-
+stale* idle entry and again skips promotion. The route is locked
+to 1.1 forever from one bad timing.
+
+After this fix, the second request's peek correctly reports "no
+non-stale idle conns" → ALPN promotion fires → if the server
+speaks h2, we get h2 from this point on, just as if the original
+request had hit a server-supports-h2 path.
+
+### Implementation notes
+
+- Walk is non-destructive — `_sandhi_pool_take` already does
+  stale-skip on its take path, so reaping happens naturally
+  on next take. No need to mutate the vec inside the peek.
+- Cost: one `clock_now_ms()` per peek + a vec walk bounded by
+  `max_per_host` (default 8). Negligible vs the saved TLS
+  handshake on h2 promotion.
+- The peek is only called from
+  `_sandhi_http_auto_once` in `src/http/h2/dispatch.cyr` —
+  no other callers, no API surface change.
+
 ## [0.9.9] — 2026-04-25
 
 **Internal P1 self-audit.** Final security pass before the v5.7.0

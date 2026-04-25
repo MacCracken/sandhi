@@ -149,19 +149,43 @@ fn _sandhi_pool_idle_conn_new(conn, now_ms) {
 }
 
 # Non-consuming peek: 1 if the route has at least one 1.1 idle conn
-# stored. Used by the h2 auto-promoter (`_sandhi_http_try_h2_promote`)
-# to decide whether to attempt ALPN promotion or just take the
-# existing 1.1 conn — without this, a server that picks http/1.1
-# during ALPN would cause every subsequent request to open a fresh
-# TLS conn instead of reusing the idle one.
+# that is NOT past idle_timeout_ms. Used by the h2 auto-promoter
+# (`_sandhi_http_try_h2_promote`) to decide whether to attempt ALPN
+# promotion or just take the existing 1.1 conn.
+#
+# 0.9.10 hardening: previously this peek returned 1 whenever the
+# per-route vec had any entry, regardless of staleness. Two
+# consequences for routes whose only entries had aged past
+# idle_timeout_ms:
+#   - ALPN promotion was incorrectly skipped, so h2 was never
+#     attempted on a route that previously got 1.1 — even after
+#     all those 1.1 conns went stale and would be discarded by
+#     `_sandhi_pool_take` on the very next request.
+#   - The fall-through `_sandhi_http_do` then opened a fresh
+#     TLS+1.1 conn (correct), but the chance to negotiate h2 was
+#     gone until something else reaped the stale entries.
+# The walk is non-destructive — `_sandhi_pool_take` already does
+# stale-skip on the take path, so reaping happens naturally.
 fn _sandhi_pool_has_idle(pool, host, port, tls) {
     if (pool == 0) { return 0; }
     var key = _sandhi_pool_route_key(host, port, tls);
     var m = load64(pool + SANDHI_POOL_OFF_MAP);
     var v = map_get(m, key);
     if (v == 0) { return 0; }
-    if (vec_len(v) == 0) { return 0; }
-    return 1;
+    var n = vec_len(v);
+    if (n == 0) { return 0; }
+    var idle_to = load64(pool + SANDHI_POOL_OFF_IDLE_TIMEOUT);
+    var now = clock_now_ms();
+    var i = 0;
+    while (i < n) {
+        var ic = vec_get(v, i);
+        if (ic != 0) {
+            var last = load64(ic + SANDHI_IDLE_OFF_LAST_MS);
+            if (now - last <= idle_to) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # ================================================================
