@@ -27,6 +27,7 @@ include "src/discovery/register.cyr"
 include "src/tls_policy/policy.cyr"
 include "src/tls_policy/fingerprint.cyr"
 include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
 include "src/server/mod.cyr"
 include "src/main.cyr"  # sandhi_version() used by the http client's default User-Agent (0.7.1)
 
@@ -764,6 +765,29 @@ fn test_pool_chunked_complete_detector() {
     # Multi-chunk before terminal.
     var raw4 = "3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n";
     assert_eq(_sandhi_pool_chunked_complete(raw4, 0, strlen(raw4)), 1, "chunked: multi-chunk complete");
+    return 0;
+}
+
+fn test_alpn_encode_default() {
+    # "h2,http/1.1" → 02 'h' '2' 08 'h' 't' 't' 'p' '/' '1' '.' '1'
+    # = 1 + 2 + 1 + 8 = 12 bytes total.
+    var out[32];
+    memset(&out, 0, 32);
+    var n = sandhi_alpn_encode_protos("h2,http/1.1", &out, 32);
+    assert_eq(n, 12, "alpn: 12 bytes");
+    assert_eq(load8(&out + 0), 2, "first len = 2");
+    assert_eq(load8(&out + 1), 104, "h");
+    assert_eq(load8(&out + 2), 50, "2");
+    assert_eq(load8(&out + 3), 8, "second len = 8");
+    assert_eq(load8(&out + 11), 49, "last byte = '1'");
+    return 0;
+}
+
+fn test_alpn_selected_stubbed() {
+    # Real ALPN runtime is gated on libssl fix — accessor returns 0 today.
+    var fake_conn = alloc(SANDHI_CONN_STRUCT_SIZE);
+    assert_eq(sandhi_conn_alpn_selected(fake_conn), 0, "stub returns 0");
+    assert_eq(sandhi_conn_alpn_is_h2(fake_conn), 0, "h2 check returns 0");
     return 0;
 }
 
@@ -1928,10 +1952,16 @@ fn main() {
     test_group("http/pool/chunked_detect");
     test_pool_chunked_complete_detector();
 
-    # h2/hpack tests live in tests/h2.tcyr — split off at 0.8.0
-    # Bite 2.5 because the per-program fixup-table cap (32768) made
-    # one-file tests impossible. See
+    # h2/hpack + h2/frame tests live in tests/h2.tcyr — split off at
+    # 0.8.0 Bite 2.5 because the per-program fixup-table cap (32768)
+    # made one-file tests impossible. See
     # docs/proposals/2026-04-24-cyrius-fixup-table-cap.md.
+
+    test_group("alpn/encode_default");
+    test_alpn_encode_default();
+
+    test_group("alpn/selected_stubbed");
+    test_alpn_selected_stubbed();
 
     test_group("http/retry/defaults");
     test_retry_defaults();

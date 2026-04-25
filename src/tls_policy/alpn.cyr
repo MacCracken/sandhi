@@ -1,0 +1,101 @@
+# sandhi/tls_policy/alpn — ALPN (RFC 7301) wire format + selection.
+#
+# ALPN lets the client and server agree on which app-layer protocol
+# to speak over a single TLS connection. For h2-over-TLS the client
+# advertises `h2` (HTTP/2) ahead of `http/1.1`, the server picks
+# one, and both sides know what to speak after the handshake.
+#
+# Wire format (RFC 7301 §3.1, ProtocolNameList in TLS extension 0x10):
+#   each protocol = 1-byte length-prefix + bytes (no NUL-term).
+#   list = concatenation of those entries.
+# Example for "h2, http/1.1":
+#   02 'h' '2' 08 'h' 't' 't' 'p' '/' '1' '.' '1'   (13 bytes)
+#
+# STATUS (Bite 4 of 0.8.0): wire-format encoding ships; runtime
+# negotiation is **stubbed** pending the libssl-pthread-deadlock
+# blocker (`docs/issues/2026-04-24-libssl-pthread-deadlock.md`).
+# Bite 7's auto-selection logic queries `sandhi_conn_alpn_selected`
+# which returns 0 (= "no h2 negotiated") today — auto-selection
+# correctly degrades to HTTP/1.1, which is the only protocol that
+# actually works right now.
+#
+# When libssl works, filling in the runtime path is ~30 lines:
+# resolve `SSL_CTX_set_alpn_protos` + `SSL_get0_alpn_selected` via
+# `_dynlib_resolve_global` (same pattern stdlib `tls.cyr` uses for
+# everything else), call them in `tls_connect`'s SSL_CTX setup, and
+# stash the selected protocol on the conn struct. No public-API
+# change.
+
+# Default ALPN proto list — h2 preferred, http/1.1 fallback. Most
+# h2-capable servers honor this preference.
+var SANDHI_ALPN_DEFAULT = "h2,http/1.1";
+
+# Encode a comma-separated proto list into the RFC 7301 wire format.
+# Writes into `out` (caller-owned, must hold ≥ list_len + N protos).
+# Returns the number of bytes written, or `0 - 1` on overflow.
+#
+# Example: "h2,http/1.1" → 13 bytes.
+fn sandhi_alpn_encode_protos(protos_csv, out, out_cap) {
+    if (protos_csv == 0) { return 0; }
+    var p = 0;        # input cursor
+    var w = 0;        # output cursor
+    var seg_start = 0;
+    var slen = strlen(protos_csv);
+    while (p <= slen) {
+        var c = 0;
+        if (p < slen) { c = load8(protos_csv + p); }
+        else          { c = 0; }  # treat NUL as a separator to flush trailer
+        if (c == 44 || (p == slen && c == 0)) {
+            # Comma or end — emit segment [seg_start, p).
+            var seg_len = p - seg_start;
+            if (seg_len > 0) {
+                if (seg_len > 255) { return 0 - 1; }
+                if (w + 1 + seg_len > out_cap) { return 0 - 1; }
+                store8(out + w, seg_len);
+                w = w + 1;
+                var i = 0;
+                while (i < seg_len) {
+                    store8(out + w + i, load8(protos_csv + seg_start + i));
+                    i = i + 1;
+                }
+                w = w + seg_len;
+            }
+            seg_start = p + 1;
+        }
+        p = p + 1;
+    }
+    return w;
+}
+
+# ================================================================
+# Selection accessor (stubbed until libssl-pthread-deadlock clears)
+# ================================================================
+#
+# Returns the negotiated ALPN protocol as a cstr ("h2", "http/1.1",
+# or 0 / empty if ALPN didn't fire on this connection). Today this
+# always returns 0 — sandhi can't actually run TLS yet, so ALPN
+# never negotiates anything. Bite 7 (auto-selection) handles 0 as
+# "use HTTP/1.1", which is correct degradation behavior.
+#
+# When real ALPN wires up, the conn struct gets an `alpn_selected`
+# slot populated post-handshake from `SSL_get0_alpn_selected`. This
+# accessor reads that slot; the stub is just `return 0`.
+fn sandhi_conn_alpn_selected(conn) {
+    if (conn == 0) { return 0; }
+    # Stubbed — see top-of-file STATUS.
+    return 0;
+}
+
+# Convenience: 1 if h2 was negotiated, 0 otherwise. Bite 7's
+# dispatch logic calls this directly.
+fn sandhi_conn_alpn_is_h2(conn) {
+    var sel = sandhi_conn_alpn_selected(conn);
+    if (sel == 0) { return 0; }
+    if (strlen(sel) != 2) { return 0; }
+    if (load8(sel + 0) == 104 && load8(sel + 1) == 50) { return 1; }  # 'h' '2'
+    return 0;
+}
+
+fn sandhi_alpn_version() {
+    return "0.7.4-bite4";
+}

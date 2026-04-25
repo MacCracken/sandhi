@@ -62,6 +62,7 @@ modules = [
     "src/tls_policy/policy.cyr",
     "src/tls_policy/fingerprint.cyr",
     "src/tls_policy/apply.cyr",
+    "src/tls_policy/alpn.cyr",
     "src/tls_policy/mod.cyr",
     "src/rpc/json.cyr",
     "src/rpc/dispatch.cyr",

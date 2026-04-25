@@ -6,6 +6,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.8.0 work in progress
 
+**Bite 4 — ALPN surface (RFC 7301)**. New `src/tls_policy/alpn.cyr`
+(~75 lines). Wire-format encoder + selection accessor. 553 total
+assertions across both test files (446 sandhi + 107 h2; +8 ALPN).
+
+#### Added
+- `sandhi_alpn_encode_protos(csv, out, cap)` — encodes a comma-
+  separated proto list into RFC 7301 ProtocolNameList wire format
+  (1-byte length-prefix per proto, concatenated). `"h2,http/1.1"`
+  → 12 bytes (`02 h 2 08 h t t p / 1 . 1`). Per-proto length cap
+  255; output overflow returns `0 - 1`.
+- `SANDHI_ALPN_DEFAULT = "h2,http/1.1"` — the canonical advertise
+  list.
+- `sandhi_conn_alpn_selected(conn)` — accessor for the negotiated
+  protocol post-handshake. **Stubbed** to return 0 today; real
+  hookup is gated on the libssl-pthread-deadlock blocker (same
+  reason `tls_policy/apply.cyr`'s pinning / mTLS / trust-store
+  enforcement is stubbed). Bite 7's auto-selection logic handles
+  0 as "negotiate to HTTP/1.1," which is the only protocol that
+  works today, so this degrades correctly.
+- `sandhi_conn_alpn_is_h2(conn)` — convenience predicate for the
+  Bite 7 dispatch decision.
+
+#### Notes
+- When libssl-pthread-deadlock clears, real ALPN runtime wires up
+  in ~30 lines: resolve `SSL_CTX_set_alpn_protos` +
+  `SSL_get0_alpn_selected` via `_dynlib_resolve_global` (matching
+  the pattern stdlib `tls.cyr` already uses for everything else),
+  call them in `tls_connect`'s SSL_CTX setup, stash the selected
+  protocol on the conn struct.
+- Wire-format encoding is fully tested today against the canonical
+  example. The runtime negotiation path runs the same encoder, so
+  when it lights up we just feed the bytes to OpenSSL.
+
 **Bite 3 — HTTP/2 frame layer (RFC 7540 §4.1, §6)**. New
 `src/http/h2/frame.cyr` (~280 lines). 545 total assertions across
 both test files (438 sandhi + 107 h2; +32 frame on top of Bite 2.5).
