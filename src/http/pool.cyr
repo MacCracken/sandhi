@@ -36,6 +36,7 @@ enum SandhiPoolOff {
     SANDHI_POOL_OFF_MAX_PER_HOST    = 8;
     SANDHI_POOL_OFF_IDLE_TIMEOUT    = 16;
     SANDHI_POOL_OFF_TOTAL_IDLE      = 24;
+    SANDHI_POOL_OFF_H2_MAP          = 32;   # added 0.8.0 Bite 6
 }
 
 enum SandhiIdleConnOff {
@@ -43,7 +44,7 @@ enum SandhiIdleConnOff {
     SANDHI_IDLE_OFF_LAST_MS  = 8;
 }
 
-var SANDHI_POOL_STRUCT_SIZE      = 32;
+var SANDHI_POOL_STRUCT_SIZE      = 40;
 var SANDHI_IDLE_CONN_STRUCT_SIZE = 16;
 var SANDHI_POOL_DEFAULT_MAX_PER_HOST     = 8;
 var SANDHI_POOL_DEFAULT_IDLE_TIMEOUT_MS  = 90000;  # 90 s — Go default
@@ -62,6 +63,11 @@ fn sandhi_http_pool_new(max_per_host, idle_timeout_ms) {
     store64(p + SANDHI_POOL_OFF_MAX_PER_HOST, mph);
     store64(p + SANDHI_POOL_OFF_IDLE_TIMEOUT, ito);
     store64(p + SANDHI_POOL_OFF_TOTAL_IDLE, 0);
+    # h2 multiplex (Bite 6): one h2 conn per route. h2_map keys are
+    # the same "host:port:tls" cstrs the 1.1 map uses; values are
+    # sandhi_h2_conn ptrs (not idle_conn wrappers — h2 is always
+    # active so last_used_ms isn't meaningful).
+    store64(p + SANDHI_POOL_OFF_H2_MAP, map_new());
     return p;
 }
 
@@ -107,6 +113,14 @@ fn sandhi_http_pool_close(p) {
     }
     map_clear(m);
     store64(p + SANDHI_POOL_OFF_TOTAL_IDLE, 0);
+    # The h2_map is cleared but its h2-conn values are NOT walked
+    # here — pool.cyr can't reference sandhi_h2_conn_underlying
+    # without violating the build order (Bite 6 added the h2_map
+    # field; tear-down lives in src/http/h2/pool_glue.cyr's
+    # `sandhi_http_pool_close_h2_conns` so consumers that opted into
+    # h2 explicitly tear those down before this generic close).
+    var h2m = load64(p + SANDHI_POOL_OFF_H2_MAP);
+    if (h2m != 0) { map_clear(h2m); }
     return 0;
 }
 

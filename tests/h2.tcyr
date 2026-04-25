@@ -10,13 +10,21 @@
 # under the per-program fixup-table cap (32768).
 include "src/error.cyr"
 include "src/http/headers.cyr"
+include "src/http/url.cyr"
 include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
 include "src/http/h2/huffman.cyr"
 include "src/http/h2/hpack.cyr"
 include "src/http/h2/frame.cyr"
 include "src/http/h2/conn.cyr"
 include "src/http/h2/request.cyr"
 include "src/http/h2/response.cyr"
+# Pool + h2 glue for Bite 6 — pool.cyr alone is fine, but h2 take/put
+# helpers live after h2/conn.cyr to dodge a forward-reference issue.
+include "src/http/pool.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
 
 # ================================================================
 # HPACK tests (Bite 2 of 0.8.0) — RFC 7541 Appendix C
@@ -630,6 +638,53 @@ fn test_h2_conn_apply_settings_malformed() {
     return 0;
 }
 
+# ================================================================
+# Bite 6 — h2 multiplex via pool
+# ================================================================
+
+fn test_h2_pool_take_empty() {
+    var p = sandhi_http_pool_new(8, 90000);
+    var h2c = sandhi_http_pool_take_h2(p, "example.com", 443, 1);
+    assert_eq(h2c, 0, "pool h2 take empty → 0");
+    return 0;
+}
+
+fn test_h2_pool_put_then_take() {
+    var p = sandhi_http_pool_new(8, 90000);
+    var h2c = sandhi_h2_conn_new(0);
+    sandhi_http_pool_put_h2(p, "example.com", 443, 1, h2c);
+    var taken = sandhi_http_pool_take_h2(p, "example.com", 443, 1);
+    assert_eq(taken, h2c, "pool h2 take returns same");
+    # Same route, second take still returns it (h2 is shared).
+    var taken2 = sandhi_http_pool_take_h2(p, "example.com", 443, 1);
+    assert_eq(taken2, h2c, "pool h2 take is non-exclusive");
+    return 0;
+}
+
+fn test_h2_pool_routes_isolated() {
+    var p = sandhi_http_pool_new(8, 90000);
+    var ha = sandhi_h2_conn_new(0);
+    sandhi_http_pool_put_h2(p, "alpha.example", 443, 1, ha);
+    var beta = sandhi_http_pool_take_h2(p, "beta.example", 443, 1);
+    assert_eq(beta, 0, "different host → miss");
+    var alpha = sandhi_http_pool_take_h2(p, "alpha.example", 443, 1);
+    assert_eq(alpha, ha, "alpha hits");
+    return 0;
+}
+
+fn test_h2_pool_goaway_evicts_on_take() {
+    var p = sandhi_http_pool_new(8, 90000);
+    var h2c = sandhi_h2_conn_new(0);
+    sandhi_http_pool_put_h2(p, "example", 443, 1, h2c);
+    # Mark goaway received; next take should evict + return 0.
+    store64(h2c + SANDHI_H2_CONN_OFF_GOAWAY, 1);
+    var taken = sandhi_http_pool_take_h2(p, "example", 443, 1);
+    assert_eq(taken, 0, "goaway → take returns 0");
+    var second = sandhi_http_pool_take_h2(p, "example", 443, 1);
+    assert_eq(second, 0, "evicted on first take");
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -743,6 +798,18 @@ fn main() {
 
     test_group("h2/response/pseudo_dropped");
     test_h2_response_pseudo_dropped_from_user_headers();
+
+    test_group("h2/pool/take_empty");
+    test_h2_pool_take_empty();
+
+    test_group("h2/pool/put_then_take");
+    test_h2_pool_put_then_take();
+
+    test_group("h2/pool/routes_isolated");
+    test_h2_pool_routes_isolated();
+
+    test_group("h2/pool/goaway_evicts");
+    test_h2_pool_goaway_evicts_on_take();
 
     return assert_summary();
 }

@@ -1,0 +1,75 @@
+# sandhi/http/h2/pool_glue — h2-multiplex helpers on top of the pool.
+#
+# The base `src/http/pool.cyr` ships an `h2_map` field (host:port:tls
+# → sandhi_h2_conn) but can't reference `sandhi_h2_conn_underlying`
+# directly because pool.cyr lives earlier in the build order than
+# `src/http/h2/conn.cyr`. This file lives after both and provides
+# the h2-aware helpers.
+#
+# h2 multiplex model: ONE h2 conn per route; many concurrent streams
+# per conn (peer's SETTINGS_MAX_CONCURRENT_STREAMS bounds it). The
+# pool stores the conn; callers allocate streams via
+# `sandhi_h2_conn_next_stream_id`. We don't track active stream
+# count here yet — first cut, the server enforces the cap by
+# returning REFUSED_STREAM, and the caller retries on a new conn.
+#
+# Bite 6 of 0.8.0.
+
+# Take the h2 conn for a route, or 0 if none. Doesn't remove from
+# the map — h2 conns are shared, not exclusive.
+fn sandhi_http_pool_take_h2(pool, host, port, tls) {
+    if (pool == 0) { return 0; }
+    var key = _sandhi_pool_route_key(host, port, tls);
+    var h2m = load64(pool + SANDHI_POOL_OFF_H2_MAP);
+    if (h2m == 0) { return 0; }
+    var h2c = map_get(h2m, key);
+    if (h2c == 0) { return 0; }
+    # Skip if peer sent GOAWAY — caller will open a fresh conn.
+    if (sandhi_h2_conn_goaway_received(h2c) == 1) {
+        map_delete(h2m, key);
+        return 0;
+    }
+    return h2c;
+}
+
+# Store an h2 conn for a route. Replaces any prior entry — h2 conns
+# are exclusive per route in our first-cut model. Caller is
+# responsible for closing the prior entry's underlying socket if
+# they care about leaks (no-op today since we only call this once
+# per route per process).
+fn sandhi_http_pool_put_h2(pool, host, port, tls, h2c) {
+    if (pool == 0 || h2c == 0) { return 0; }
+    var key = _sandhi_pool_route_key(host, port, tls);
+    var h2m = load64(pool + SANDHI_POOL_OFF_H2_MAP);
+    map_set(h2m, key, h2c);
+    return 0;
+}
+
+# Tear down all stored h2 conns. Closes each one's underlying
+# sandhi_conn. Consumers that called `pool_put_h2` should call this
+# before `sandhi_http_pool_close` to avoid fd leaks at process exit.
+# (Order matters because pool.cyr's close clears the map without
+# walking values.)
+fn sandhi_http_pool_close_h2_conns(pool) {
+    if (pool == 0) { return 0; }
+    var h2m = load64(pool + SANDHI_POOL_OFF_H2_MAP);
+    if (h2m == 0) { return 0; }
+    var keys = map_keys(h2m);
+    var i = 0;
+    var n = vec_len(keys);
+    while (i < n) {
+        var k = vec_get(keys, i);
+        var h2c = map_get(h2m, k);
+        if (h2c != 0) {
+            var underlying = sandhi_h2_conn_underlying(h2c);
+            if (underlying != 0) { sandhi_conn_close(underlying); }
+        }
+        i = i + 1;
+    }
+    map_clear(h2m);
+    return 0;
+}
+
+fn sandhi_http_pool_h2_glue_version() {
+    return "0.7.4-bite6";
+}

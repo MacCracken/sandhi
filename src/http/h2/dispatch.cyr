@@ -1,0 +1,79 @@
+# sandhi/http/h2/dispatch — public h2 request verb.
+#
+# Composes Bites 5a/5b/5c into one call: send a request and wait
+# for the response on the resulting stream. Returns the same
+# `sandhi_response` shape as the HTTP/1.1 path so callers stay
+# protocol-agnostic.
+#
+# This is the **manual** entry point. The library-level
+# `sandhi_http_get` etc. continues to use the HTTP/1.1 path because
+# there's no way to actually negotiate h2 today (libssl pthread
+# deadlock blocks live HTTPS, and ALPN selection is stubbed in
+# `src/tls_policy/alpn.cyr`). When the libssl side clears, a
+# follow-up bite will wire `sandhi_conn_alpn_is_h2` into
+# `_sandhi_http_dispatch` so consumers get auto-selection without
+# code change.
+#
+# Until then: consumers that want h2 today construct the conn
+# themselves (open sandhi_conn, do their own ALPN/h2c setup,
+# `sandhi_h2_conn_send_preface_and_settings` + `_recv_peer_settings`),
+# then call `sandhi_h2_request` per request. Tests in tests/h2.tcyr
+# exercise this end-to-end against synthetic byte streams.
+#
+# Bite 7 of 0.8.0.
+
+# Send a request on `h2c` and wait for the matching response.
+# Returns a sandhi_response (same shape as `_sandhi_http_dispatch`
+# produces; status/body/headers/err_kind/err_message accessors all
+# work the same way).
+#
+# Method must be one of GET/POST/PUT/DELETE/PATCH/HEAD. URL is
+# parsed for scheme/host/port/path. user_headers may be 0.
+fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len) {
+    var u = sandhi_url_parse(url);
+    if (u == 0) { return _sandhi_resp_err(SANDHI_ERR_PARSE); }
+
+    var scheme = "http";
+    if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { scheme = "https"; }
+    var host = sandhi_url_host(u);
+    var port = sandhi_url_port(u);
+    var path = sandhi_url_path(u);
+
+    # `:authority` per RFC 7540 §8.1.2.3 — like Host but for h2. We
+    # include the port only if non-default, matching how Bite 1's
+    # `_sandhi_client_host_header` handles the Host header.
+    var default_port = 80;
+    if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { default_port = 443; }
+    var authority = host;
+    if (port != default_port) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, host);
+        str_builder_add_cstr(sb, ":");
+        str_builder_add_int(sb, port);
+        authority = str_data(str_builder_build(sb));
+    }
+
+    # Path: encode like the 1.1 client — path + "?query" if present.
+    var query = sandhi_url_query(u);
+    var full_path = path;
+    if (query != 0) {
+        var pathlen = strlen(path);
+        var qlen = strlen(query);
+        var fp = alloc(pathlen + 1 + qlen + 1);
+        memcpy(fp, path, pathlen);
+        store8(fp + pathlen, 63);  # '?'
+        memcpy(fp + pathlen + 1, query, qlen);
+        store8(fp + pathlen + 1 + qlen, 0);
+        full_path = fp;
+    }
+
+    var stream_id = sandhi_h2_request_send(h2c, method, scheme, full_path,
+                                             authority, user_headers,
+                                             body, body_len);
+    if (stream_id < 0) { return _sandhi_resp_err(SANDHI_ERR_PROTOCOL); }
+    return sandhi_h2_response_recv(h2c, stream_id);
+}
+
+fn sandhi_h2_dispatch_version() {
+    return "0.8.0";
+}

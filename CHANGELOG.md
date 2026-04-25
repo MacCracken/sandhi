@@ -4,7 +4,133 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### 0.8.0 work in progress
+## [0.8.0] — 2026-04-24
+
+HTTP/2 + connection pool. Eight commit-sized "bites" landed in this
+release: pool + 1.1 keep-alive (Bite 1), HPACK + Huffman decode
+(Bites 2 + 2b), h2 frames (Bite 3), ALPN surface (Bite 4), h2
+connection lifecycle split into request send + response decode
+(Bites 5a/5b/5c), pool h2 glue (Bite 6), and the public h2 dispatch
+verb (Bite 7).
+
+**599 total test assertions** across two files (446 sandhi + 153 h2)
+— up from 0.7.3's 411. The h2 protocol stack is functionally
+complete (HEADERS/DATA/SETTINGS/PING/GOAWAY/RST_STREAM/CONTINUATION,
+HPACK encode + decode including Huffman, full RFC 7541 Appendix
+C.3.1 + C.4.1 round-trips verified).
+
+#### Two known limitations called out
+
+1. **Live h2 talk is blocked on libssl-pthread-deadlock**
+   (`docs/issues/2026-04-24-libssl-pthread-deadlock.md`). Until that
+   clears, the `sandhi_http_get` etc. public verbs continue to use
+   the HTTP/1.1 path. Consumers that want h2 today open the conn
+   themselves and call `sandhi_h2_request(h2c, method, url, ...)`
+   directly — full lifecycle covered, just no auto-negotiation.
+2. **ALPN runtime is stubbed** (`src/tls_policy/alpn.cyr` —
+   `sandhi_conn_alpn_selected` always returns 0). The wire-format
+   encoder is fully tested; the OpenSSL hookup
+   (`SSL_CTX_set_alpn_protos` + `SSL_get0_alpn_selected`) is ~30
+   lines and lands when the libssl blocker is gone. Bite 7's
+   `sandhi_http_get` auto-selection wiring lands at that same
+   moment, in a 0.8.1 patch.
+
+#### What's actually new since 0.7.3
+
+##### Connection pool + HTTP/1.1 keep-alive (Bite 1, 769 lines)
+- New `src/http/pool.cyr`. Pool struct keyed by `host:port:tls` →
+  vec of `idle_conn{conn, last_used_ms}`. LIFO take with stale-
+  skip; FIFO eviction at `max_per_host`. Default 8 conns/route,
+  90 s idle timeout (matches Go).
+- New `_sandhi_http_recv_framed` parses Content-Length / chunked
+  incrementally so the socket survives the request.
+- `sandhi_http_options_pool(opts, pool)` — opt-in attachment.
+  Caller flow unchanged; `Connection: close` is replaced with
+  HTTP/1.1 default keep-alive when a pool is attached.
+- Per-hop pool reuse for redirects.
+
+##### HPACK (Bite 2, ~530 lines)
+- Static table — RFC 7541 Appendix A, all 61 entries (split into
+  4 helper-fn chunks to dodge Cyrius's per-fn fixup cap).
+- Dynamic table with size-based tail eviction; oversized entries
+  empty the table per §4.4.
+- Integer encoder/decoder (§5.1, configurable prefix bits).
+- String encoder/decoder (§5.2 — encode always raw; decode handles
+  raw or Huffman-via-Bite-2b).
+- All 5 header-field representations (§6.1–§6.3).
+
+##### HPACK Huffman decode (Bite 2b, ~150 lines + 2570-char data blob)
+- Full RFC 7541 Appendix B 257-entry code table embedded as a
+  single hex blob (one fixup) and parsed at first use into a
+  binary decode tree.
+- Padding-rule enforcement per §5.2 (≤7 bits, all-1s, no EOS in
+  payload).
+- RFC C.4.1 `www.example.com` round-trips correctly.
+
+##### HTTP/2 frame layer (Bite 3, ~280 lines)
+- 32-byte frame-header struct + encode/decode honoring §4.1
+  (length cap 2^24-1, stream-id reserved-bit stripped).
+- Per-frame payload codecs for SETTINGS (§6.5), PING (§6.7),
+  WINDOW_UPDATE (§6.9), RST_STREAM (§6.4), GOAWAY (§6.8).
+- All 14 error codes (§7), all 6 SETTINGS parameters (§6.5.2),
+  flag constants for END_STREAM / ACK / END_HEADERS / PADDED /
+  PRIORITY.
+
+##### ALPN surface (Bite 4, ~75 lines)
+- Wire-format encoder for ProtocolNameList (RFC 7301 §3.1).
+- Default `h2,http/1.1` advertise list.
+- `sandhi_conn_alpn_selected` / `_is_h2` accessors (stubbed pending
+  libssl).
+
+##### h2 connection lifecycle (Bites 5a/5b/5c, ~590 lines combined)
+- 5a: 80-byte conn struct (HPACK enc/dec tables, peer settings,
+  stream-id counter, GOAWAY flag); frame send/recv plumbing;
+  preface + SETTINGS handshake.
+- 5b: HEADERS encoding via HPACK (4 pseudo-headers in spec order +
+  user headers, lowercased and forbidden-list filtered per
+  §8.1.2.2); HEADERS+optional-DATA frame send.
+- 5c: frame loop dispatching by type and stream-id, response decode
+  (HEADERS+CONTINUATION reassembly + HPACK decode, DATA accumulation
+  with PADDED handling, RST_STREAM/GOAWAY surface as REMOTE error),
+  returns `sandhi_response` shape.
+
+##### Pool h2 glue (Bite 6, ~60 lines)
+- New `src/http/h2/pool_glue.cyr` adds `sandhi_http_pool_take_h2` /
+  `_put_h2` / `_close_h2_conns`. h2 conns are shared per route (one
+  conn, many streams) — take is non-exclusive. GOAWAY conns are
+  evicted on next take.
+
+##### Public h2 dispatch verb (Bite 7, ~70 lines)
+- New `src/http/h2/dispatch.cyr`'s `sandhi_h2_request(h2c, method,
+  url, headers, body, body_len)` runs one full request/response
+  cycle on a caller-supplied h2 conn. Returns the same
+  `sandhi_response` shape as the HTTP/1.1 path.
+
+#### Test infrastructure (Bite 2.5)
+
+- Split `tests/sandhi.tcyr` (existing 446 assertions) and added
+  `tests/h2.tcyr` (153 h2-specific assertions). The Cyrius compiler
+  caps the per-program fixup table at 32768 — single-file tests
+  hit the cap once HPACK landed. CI runs both.
+- Filed `docs/proposals/2026-04-24-cyrius-fixup-table-cap.md` for
+  the upstream-investigation question.
+- Fixed `.github/workflows/ci.yml` (referenced a nonexistent
+  `src/test.cyr`; CI never actually tested anything until this fix).
+
+#### Notes / follow-ups
+
+- The libssl-pthread-deadlock + ALPN stubs together mean the
+  `sandhi_http_get` public verbs continue to use 1.1 even when h2
+  is fully ready in protocol code. This is the right state to ship
+  — no consumer is currently surprised by it because no consumer
+  is making live HTTPS calls anyway.
+- 0.8.1 will land auto-selection wiring + Huffman encode (currently
+  raw-only — RFC 7541 permits this; servers must accept).
+- Performance work (e.g., stream-multiplex flow-control tracking,
+  HPACK encode-side static table optimization beyond pseudo-headers)
+  is post-fold and only when a consumer reports a real bottleneck.
+
+### 0.8.0 work in progress (deprecated header — see [0.8.0] above)
 
 **Bite 5c — h2 response decode + stream state**. New
 `src/http/h2/response.cyr` (~210 lines). 592 total assertions across
