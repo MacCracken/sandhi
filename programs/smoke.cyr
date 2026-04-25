@@ -11,6 +11,7 @@
 # `dist/sandhi.cyr` via `[deps.sandhi]` in their cyrius.cyml.
 
 include "src/error.cyr"
+include "src/obs/trace.cyr"
 include "src/http/headers.cyr"
 include "src/http/url.cyr"
 include "src/http/conn.cyr"
@@ -18,6 +19,7 @@ include "src/http/response.cyr"
 include "src/net/resolve.cyr"
 include "src/http/client.cyr"
 include "src/http/pool.cyr"
+include "src/http/h2/hpack.cyr"
 include "src/http/sse.cyr"
 include "src/http/stream.cyr"
 include "src/tls_policy/policy.cyr"

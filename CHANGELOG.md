@@ -6,7 +6,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 0.8.0 work in progress
 
-**Bite 1 — Connection pool + HTTP/1.1 keep-alive** (this commit). 438
+**Bite 2 — HPACK encoder/decoder (RFC 7541)**. 464 test assertions
+green (+26 over Bite 1's 438). Pure protocol code; no network. New
+`src/http/h2/hpack.cyr` (~530 lines).
+
+#### Added
+- Static table — RFC 7541 Appendix A, all 61 entries. Lazy-init
+  via `_hpack_static_init` with the entries split across four
+  helper fns (`_init_a` / `_b` / `_c` / `_d`) — single-fn version
+  exceeded the Cyrius fixup-table per-fn allowance.
+- Dynamic table — `sandhi_hpack_table_new(max_size)`,
+  `_count` / `_size` / `_max_size` accessors, `_add` (with size-
+  triggered tail eviction), `_set_max_size` (shrink-on-shrink).
+  Entry size = `strlen(name) + strlen(value) + 32` per RFC §4.1.
+  Oversized entries empty the table and drop themselves per §4.4.
+- `sandhi_hpack_lookup(t, idx, name_out, value_out)` — combined
+  static (1..61) + dynamic (62..N) index resolution.
+- `_hpack_int_encode` / `_hpack_int_decode` — RFC §5.1 variable-
+  length integer codec with configurable prefix bits (4-7).
+- `_hpack_string_encode` / `_hpack_string_decode` — RFC §5.2
+  length-prefixed string codec. Encode always emits raw (H=0);
+  decode rejects H=1 with `_SANDHI_HPACK_ERR_HUFFMAN` until
+  Bite 2b adds Huffman support. Real h2 servers always Huffman-
+  encode, so Bite 5 (live h2 talk) blocks on 2b shipping first.
+- Header field encoders for all 5 RFC §6 representations:
+  `sandhi_hpack_encode_indexed` (§6.1, 7-bit prefix),
+  `_encode_literal_indexed` / `_indexed_name` (§6.2.1, 6-bit
+  prefix, adds to dynamic table), `_encode_literal_no_index`
+  (§6.2.2, 4-bit prefix), `_encode_literal_never` (§6.2.3),
+  `_encode_table_size_update` (§6.3).
+- `sandhi_hpack_decode_field(t, buf, blen, off_cell, name_out,
+  value_out)` — single-field decode. Returns 0 on success, or a
+  positive `_SANDHI_HPACK_TBL_UPDATE` sentinel for the dynamic-
+  table-size-update representation (which has no associated
+  header), or a negative error sentinel.
+- Error sentinels: `_SANDHI_HPACK_ERR_TRUNCATED`, `_BAD_INDEX`,
+  `_HUFFMAN`, `_MALFORMED`, `_INT_OVERFLOW`.
+
+#### Tests (3 in sandhi.tcyr)
+- `static_table_spotcheck` — Appendix A indices 1, 2, 3, 7, 8,
+  16, 32, 58, 61 verified by name + value where applicable.
+- `huffman_rejected` — H=1 string returns the right sentinel.
+- `rfc_c31_request_decode` — RFC 7541 Appendix C.3.1 four-field
+  request sequence (`:method GET`, `:scheme http`, `:path /`,
+  `:authority www.example.com`) decodes to the expected name/
+  value pairs and adds the literal authority entry to the
+  dynamic table.
+
+**Trimmed test surface**: I dropped targeted unit tests for integer
+encoding (C.1.1, C.1.2, C.1.3 individually), dynamic-table eviction
+mechanics, and the literal/indexed/no-index/never-indexed/size-update
+representations because they pushed the test file past the Cyrius
+fixup-table cap (32768 — already heavily used by the rest of
+sandhi.tcyr's existing 461 assertions). The C.3.1 end-to-end test
+exercises integer + string + literal-incremental + indexed + dynamic-
+table-add through real wire bytes, so semantic coverage is preserved
+even if targeted unit coverage isn't. Bite 3 (h2 frames) will likely
+need to split tests across files; flagged.
+
+#### Notes
+- No version bump — staged on 0.7.3 until 0.8.0 ships fully.
+- Encode side always emits raw (no Huffman) — RFC 7541 permits
+  this; it just costs wire bytes. Most h2 servers tolerate it.
+- This bite ships nothing user-visible — HPACK only matters once
+  Bite 5 makes live h2 calls. Tested in isolation against RFC.
+
+**Bite 1 — Connection pool + HTTP/1.1 keep-alive** (earlier commit). 438
 test assertions green (+27 pool). Pool stays unused until a caller
 attaches one via `sandhi_http_options_pool(opts, pool)`; existing
 `Connection: close` paths are unchanged so this is a strictly

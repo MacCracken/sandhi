@@ -10,6 +10,7 @@ include "src/http/response.cyr"
 include "src/net/resolve.cyr"
 include "src/http/client.cyr"
 include "src/http/pool.cyr"
+include "src/http/h2/hpack.cyr"
 include "src/http/retry.cyr"
 include "src/http/sse.cyr"
 include "src/http/stream.cyr"
@@ -763,6 +764,98 @@ fn test_pool_chunked_complete_detector() {
     # Multi-chunk before terminal.
     var raw4 = "3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n";
     assert_eq(_sandhi_pool_chunked_complete(raw4, 0, strlen(raw4)), 1, "chunked: multi-chunk complete");
+    return 0;
+}
+
+# ================================================================
+# HPACK tests (Bite 2 of 0.8.0) — RFC 7541 Appendix C
+# ================================================================
+
+fn test_hpack_static_table_spotcheck() {
+    # RFC 7541 Appendix A — verify a handful of indices.
+    assert_streq(sandhi_hpack_static_name(1), ":authority", "static[1] name");
+    assert_streq(sandhi_hpack_static_name(2), ":method",    "static[2] name");
+    assert_streq(sandhi_hpack_static_value(2), "GET",       "static[2] value");
+    assert_streq(sandhi_hpack_static_value(3), "POST",      "static[3] value");
+    assert_streq(sandhi_hpack_static_name(7), ":scheme",    "static[7] name");
+    assert_streq(sandhi_hpack_static_value(7), "https",     "static[7] value");
+    assert_streq(sandhi_hpack_static_name(8), ":status",    "static[8] name");
+    assert_streq(sandhi_hpack_static_value(8), "200",       "static[8] value");
+    assert_streq(sandhi_hpack_static_name(16), "accept-encoding",  "static[16] name");
+    assert_streq(sandhi_hpack_static_value(16), "gzip, deflate",   "static[16] value");
+    assert_streq(sandhi_hpack_static_name(32), "cookie",   "static[32] name");
+    assert_streq(sandhi_hpack_static_name(58), "user-agent", "static[58] name");
+    assert_streq(sandhi_hpack_static_name(61), "www-authenticate", "static[61] name");
+    assert_eq(sandhi_hpack_static_size(), 61, "static table has 61 entries");
+    return 0;
+}
+
+fn test_hpack_huffman_decode_rejected() {
+    # Synthesize a string-encoding byte with H=1 (high bit) — must be
+    # rejected with HUFFMAN error sentinel until Bite 2b lands.
+    var buf[8];
+    memset(&buf, 0, 8);
+    # 0x40 = literal-incremental, name_idx=0
+    # 0x83 = string with H=1, length 3 (high bit set)
+    # then 3 bytes (don't care — won't be decoded)
+    store8(&buf + 0, 0x40);
+    store8(&buf + 1, 0x83);
+    store8(&buf + 2, 0x00); store8(&buf + 3, 0x00); store8(&buf + 4, 0x00);
+    var t = sandhi_hpack_table_new(0);
+    var off = alloc(8); store64(off, 0);
+    var no = alloc(8); var vo = alloc(8);
+    var r = sandhi_hpack_decode_field(t, &buf, 5, off, no, vo);
+    assert_eq(r, _SANDHI_HPACK_ERR_HUFFMAN, "Huffman input rejected (Bite 2b adds support)");
+    return 0;
+}
+
+# RFC 7541 C.3.1 — first request in the sequence:
+#   :method: GET, :scheme: http, :path: /, :authority: www.example.com
+# Expected wire (no Huffman):
+#   82 86 84 41 0F 77 77 77 2E 65 78 61 6D 70 6C 65 2E 63 6F 6D
+fn test_hpack_rfc_c31_request_decode() {
+    var buf[32];
+    memset(&buf, 0, 32);
+    # 82 = indexed 2 (:method GET)
+    store8(&buf + 0, 0x82);
+    # 86 = indexed 6 (:scheme http)
+    store8(&buf + 1, 0x86);
+    # 84 = indexed 4 (:path /)
+    store8(&buf + 2, 0x84);
+    # 41 = literal-incremental, name_idx=1 (:authority)
+    # 0F = string length 15 (no Huffman)
+    # then "www.example.com"
+    store8(&buf + 3, 0x41);
+    store8(&buf + 4, 0x0F);
+    var host = "www.example.com";
+    var i = 0;
+    while (i < 15) { store8(&buf + 5 + i, load8(host + i)); i = i + 1; }
+
+    var t = sandhi_hpack_table_new(0);
+    var off = alloc(8); store64(off, 0);
+    var no = alloc(8); var vo = alloc(8);
+
+    # Decode 4 fields.
+    var r1 = sandhi_hpack_decode_field(t, &buf, 20, off, no, vo);
+    assert_eq(r1, 0, "C.3.1 #1: ok");
+    assert_streq(load64(no), ":method", "C.3.1 #1: name");
+    assert_streq(load64(vo), "GET",     "C.3.1 #1: value");
+
+    var r2 = sandhi_hpack_decode_field(t, &buf, 20, off, no, vo);
+    assert_eq(r2, 0, "C.3.1 #2: ok");
+    assert_streq(load64(vo), "http",    "C.3.1 #2: value");
+
+    var r3 = sandhi_hpack_decode_field(t, &buf, 20, off, no, vo);
+    assert_eq(r3, 0, "C.3.1 #3: ok");
+    assert_streq(load64(vo), "/",       "C.3.1 #3: value");
+
+    var r4 = sandhi_hpack_decode_field(t, &buf, 20, off, no, vo);
+    assert_eq(r4, 0, "C.3.1 #4: ok");
+    assert_streq(load64(no), ":authority",       "C.3.1 #4: name");
+    assert_streq(load64(vo), "www.example.com",  "C.3.1 #4: value");
+
+    # Dynamic table must now contain :authority/www.example.com.
+    assert_eq(sandhi_hpack_table_count(t), 1, "C.3.1: 1 dyn entry");
     return 0;
 }
 
@@ -1926,6 +2019,15 @@ fn main() {
 
     test_group("http/pool/chunked_detect");
     test_pool_chunked_complete_detector();
+
+    test_group("h2/hpack/static_table");
+    test_hpack_static_table_spotcheck();
+
+    test_group("h2/hpack/huffman_rejected");
+    test_hpack_huffman_decode_rejected();
+
+    test_group("h2/hpack/rfc_c31");
+    test_hpack_rfc_c31_request_decode();
 
     test_group("http/retry/defaults");
     test_retry_defaults();
