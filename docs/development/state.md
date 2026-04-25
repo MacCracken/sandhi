@@ -4,6 +4,10 @@
 
 ## Version
 
+**0.9.5** — 2026-04-25. **h2 redirect-following + retry-through-auto.** Two internal wire-up commits, ADR 0005 freeze respected (no new public verbs). (1) `src/http/h2/dispatch.cyr` — redirect logic hoisted to the auto layer: new `_sandhi_http_auto_once` (per-hop: take h2 from pool, else 1.1 single-shot via `_sandhi_http_do`) + `_sandhi_http_auto_follow` (mirrors `_sandhi_http_follow` semantics — https→http refusal, cred-strip on cross-authority, 303→GET — but each hop re-evaluates h2 selection, so a redirect from authority A to authority B uses h2 if the pool has it for B). Side effect: the 1.1 fallback path used to follow inside `_sandhi_http_dispatch` and stayed on 1.1 across the chain; now redirects ride the auto layer. (2) `src/http/retry.cyr` — `_sandhi_http_retry` calls `sandhi_http_request_auto` instead of `_sandhi_http_dispatch`, so `sandhi_http_get_retry` / `_head_retry` / `_put_retry` / `_delete_retry` inherit h2 selection when the pool has an h2 conn. **635 assertions green** (482 sandhi + 153 h2; no regression). Helpers used by the new code (`_sandhi_is_redirect`, `_sandhi_resolve_location`, `_sandhi_url_same_authority`, `_sandhi_url_is_https_downgrade`, `_sandhi_strip_sensitive_headers`) are already covered by the 0.9.0 P0 redirect tests.
+
+**0.9.4** — 2026-04-25. **Versioning refactor + chunked response trailers.** No new public verbs (ADR 0005 freeze respected). (1) Versioning collapsed to one auto-generated source — new `scripts/version-bump.sh` regenerates `src/version_str.cyr` (auto-generated, committed; the only place `SANDHI_VERSION` is declared); CI re-runs the bump script and `git diff --quiet src/version_str.cyr` for drift detection. Mirrors the cyrius repo's own `scripts/version-bump.sh` + `src/version_str.cyr` pattern. Probe programs and test files updated to `include "src/version_str.cyr"` ahead of `src/error.cyr`. (2) `src/http/response.cyr` — chunked-body decoder parses RFC 7230 §4.1.2 trailers after the terminal 0-chunk and merges allowed fields into the response headers (visible via existing `sandhi_http_headers(r)` accessor — no new public verb). Forbidden trailers (Transfer-Encoding, Content-Length, Host, Authorization, Set-Cookie, Cache-Control, Expect, Max-Forwards, Pragma, Range, TE, Trailer) are filtered as smuggling vectors. **635 assertions green** (482 sandhi + 153 h2). Trailer-parser verification lives in `programs/_trailers_probe.cyr` rather than the test suite — `tests/sandhi.tcyr` is at the per-program fixup cap (architecture/001).
+
 **0.9.3** — 2026-04-25. **TLS runtime wire-up.** Internal-only fill of two surfaces that shipped stubbed in 0.8.x / 0.9.x — no new public verbs (ADR 0005 freeze respected). `tls_policy/apply.cyr` resolves nine libssl/libcrypto symbols via stdlib `tls_dlsym` and runs them through a `tls_connect_with_ctx_hook` callback (ALPN advertise + trust-store override + mTLS cert/key load) plus a post-handshake SPKI extraction (X509_get_pubkey + i2d_PUBKEY → SHA-256 → constant-time hex compare). `tls_policy/alpn.cyr`'s `_selected` / `_is_h2` accessors read a new `SANDHI_CONN_OFF_ALPN_DATA` slot on the conn struct (struct 24 → 32 bytes). `sandhi_http_get("https://example.com/")` returns 200 / 528 bytes. Toolchain pin bumped 5.6.30 → 5.6.41 across the day; libssl-pthread / ALPN-hook / 7-arg-frame-segfault all resolved upstream. **634 assertions green (481 sandhi + 153 h2; two existing tests rewritten to reflect wired-up state).**
 
 **0.9.2** — 2026-04-24. **Pre-fold closeout.** Server symbol rename: every public `http_*` function in `src/server/mod.cyr` renamed to `sandhi_server_*` for consistency with the rest of the sandhi surface. Transitional `http_*` aliases retained through 0.9.x — all 23 affected names get thin tail-call wrappers; aliases drop at 1.0.0 (v5.7.0 fold). First formal `dist/sandhi.cyr` bundle via `cyrius distlib` — 8564 lines / 335 KB / `Version: 0.9.2` header. Surface-freeze policy added to CLAUDE.md as a hard constraint: no new public verbs land between 0.9.2 and 1.0.0; fold ships everything permanently into stdlib. **634 assertions green (481 sandhi + 153 h2; +2 server-rename regression).**
@@ -53,7 +57,8 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | Module | Lines | Status |
 |--------|-------|--------|
 | `src/main.cyr` | 48 | public API declarations — docstring refreshed at 0.7.1; version bumped 0.7.2 |
-| `src/http/retry.cyr` | 128 | **0.7.2 new** — retry-with-backoff wrappers for idempotent methods (GET/HEAD/PUT/DELETE). Exponential 2× capped at max_backoff_ms. |
+| `src/http/retry.cyr` | 152 | **0.7.2 new** — retry-with-backoff wrappers for idempotent methods (GET/HEAD/PUT/DELETE). Exponential 2× capped at max_backoff_ms. 0.9.3: AWS-style full-jitter sleep replaces fixed-exponential (thundering-herd guard). 0.9.5: `_sandhi_http_retry` routes through `sandhi_http_request_auto` so retries inherit h2 selection when the pool has an h2 conn for the route. |
+| `src/http/h2/dispatch.cyr` | 194 | **0.8.1 new** — `sandhi_http_request_auto` (per-method `_get_auto` / `_head_auto` / `_post_auto` / `_put_auto` / `_patch_auto` / `_delete_auto`). Pool h2-take → 1.1 single-shot fallback. 0.9.5: redirect-following hoisted to this layer — new `_sandhi_http_auto_once` (per-hop dispatch) + `_sandhi_http_auto_follow` (mirrors 1.1 follow's security semantics; each hop re-evaluates h2 selection). |
 | `src/obs/trace.cyr` | 57 | **0.7.2 new** — opt-in sakshi-span wrapper. Default off; `sandhi_trace_enable(1)` turns on emission. Boundary spans: `sandhi.http` / `sandhi.dns.v4` / `sandhi.dns.v6` / `sandhi.rpc`. |
 | `src/error.cyr` | 33 | scaffold — error kinds defined |
 | `src/http/headers.cyr` | 258 | **M2 done** — key-value store, case-insensitive lookup, wire-format serialize + parse |
@@ -91,8 +96,9 @@ Planned `dist/sandhi.cyr` bundle via `cyrius distlib` — can now be produced an
 
 ## Tests
 
-- `tests/sandhi.tcyr` — **333 assertions green** across 89 test groups: all of the above + **sse (single-event / named-event / multi-line-data / id+retry / comments / multiple-events / CRLF / partial-trailing / no-space-after-colon / empty-data / blank-line-resets) and stream (result-accessors / chunk-parse-size / incomplete / zero-size / chunked-roundtrip)**.
-- `tests/integration/` — cross-submodule integration not yet a separate file; loopback client+server round-trip deferred until the HTTPS TLS-init issue resolves.
+- `tests/sandhi.tcyr` — **482 assertions green** across the public surface: headers / URL / response / client / redirect (P0-hardened: cred-strip cross-authority, https→http refusal, 303→GET) / DNS / RPC dialects / discovery / TLS policy + fingerprint / SSE / streaming. File is at the per-program fixup cap (architecture/001) — additional verification lands as `programs/_*_probe.cyr` standalone probes (e.g., `_trailers_probe.cyr` covers RFC 7230 §4.1.2 trailer parsing).
+- `tests/h2.tcyr` — **153 assertions green** for HTTP/2: HPACK static table + Huffman (RFC 7541 C.4.1) / frame wire format (SETTINGS / PING / WINDOW_UPDATE / RST_STREAM / GOAWAY / HEADERS) / connection lifecycle / request-encode + roundtrip / response-decode / pool routing.
+- **635 total** as of 0.9.5 (`sandhi.tcyr` 482 + `h2.tcyr` 153).
 
 ## Dependencies
 
@@ -139,7 +145,14 @@ Release sequence toward v5.7.0 fold (see `roadmap.md` for full detail):
 - **0.8.1** ✅ — `sandhi_http_request_auto` + per-method auto verbs. Pool h2-take → 1.1 fallback. ALPN-advertise upstream-ask filed.
 - **0.9.0** ✅ — Phase 1 security: 5 P0s from the 0.7.0 audit.
 - **0.9.1** ✅ — Phase 2 P1 sweep: 7 hardening fixes.
-- **0.9.2** ✅ (this release) — Pre-fold closeout: server `http_*` → `sandhi_server_*` rename + transitional aliases, first `dist/sandhi.cyr` via `cyrius distlib`, surface freeze in CLAUDE.md.
+- **0.9.2** ✅ — Pre-fold closeout: server `http_*` → `sandhi_server_*` rename + transitional aliases, first `dist/sandhi.cyr` via `cyrius distlib`, surface freeze in CLAUDE.md.
+- **0.9.3** ✅ — Stub-elimination + CI hardening. All upstream TLS blockers cleared (5.6.39/40/41); ALPN runtime + TLS policy enforcement + mDNS resolver + IPv6 client integration + bracketed IPv6 URLs + retry jitter all wired. Versioning collapsed to `SANDHI_VERSION` literal.
+- **0.9.4** ✅ — Versioning refactor (auto-generated `src/version_str.cyr` via `scripts/version-bump.sh`) + chunked response trailers (RFC 7230 §4.1.2; allowed-list filtering against smuggling vectors).
+- **0.9.5** ✅ (this release) — h2 redirect-following hoisted to the auto layer (re-evaluates h2 per hop) + retry routing through `sandhi_http_request_auto` (retries inherit h2 selection).
+- **0.9.6** — ALPN-driven h2 auto-promotion: open advertising both protocols, check `sandhi_conn_alpn_is_h2`, do preface/SETTINGS, cache `sandhi_h2_conn` in the pool. First release where live h2 fires end-to-end.
+- **0.9.7** — `TE: trailers` request signaling (outgoing counterpart to 0.9.4 trailer parser; RFC 7230 §4.4 — servers gate trailer emission on this).
+- **0.9.8** — HPACK Huffman encode (deferred from 0.8.x; wire-size optimization).
+- **0.9.9** — Internal P1 self-audit pass before fold (last chance to fix surface bugs).
 - **1.0.0** — fold event @ Cyrius v5.7.0. stdlib gets `lib/sandhi.cyr` vendored from `dist/sandhi.cyr`; stdlib deletes `lib/http_server.cyr` per ADR 0002 clean-break fold.
 
 **Under-v1 milestone back-matter**:

@@ -104,12 +104,18 @@ fn _sandhi_retry_should_retry(response) {
 # Sleeps initial_backoff_ms → 2× → 4× ... capped at max_backoff_ms
 # between attempts. Returns the last response (successful or final
 # failure — caller inspects err_kind / status).
+#
+# Each attempt routes through `sandhi_http_request_auto` since 0.9.5
+# so retries inherit h2 selection: if the attached pool has an h2
+# conn for the route, the retry uses h2; otherwise it falls back to
+# the 1.1 path. Pre-0.9.5 retries went straight to
+# `_sandhi_http_dispatch` and were 1.1-only regardless of pool state.
 fn _sandhi_http_retry(method, url, user_headers, body, body_len, opts, retry) {
     var attempts = _sandhi_retry_attempts(retry);
     var backoff = _sandhi_retry_initial(retry);
     var max_backoff = _sandhi_retry_max(retry);
     var tried = 0;
-    var r = _sandhi_http_dispatch(method, url, user_headers, body, body_len, opts);
+    var r = sandhi_http_request_auto(method, url, user_headers, body, body_len, opts);
     tried = 1;
     while (tried < attempts) {
         if (_sandhi_retry_should_retry(r) == 0) { return r; }
@@ -118,7 +124,7 @@ fn _sandhi_http_retry(method, url, user_headers, body, body_len, opts, retry) {
         _sandhi_retry_jitter_sleep(ceiling);
         backoff = backoff * 2;
         if (backoff > max_backoff) { backoff = max_backoff; }
-        r = _sandhi_http_dispatch(method, url, user_headers, body, body_len, opts);
+        r = sandhi_http_request_auto(method, url, user_headers, body, body_len, opts);
         tried = tried + 1;
     }
     return r;

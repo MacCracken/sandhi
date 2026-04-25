@@ -4,6 +4,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.5] — 2026-04-25
+
+**HTTP/2 redirect-following + retry-through-auto.** Two internal
+wire-up commits, ADR 0005 surface freeze respected (no new public
+verbs). The auto-dispatcher (`sandhi_http_request_auto`, shipped
+0.8.1) gains redirect-following on the h2 path and re-evaluates h2
+selection per hop; the retry wrappers gain h2 selection by routing
+through the same auto-dispatcher.
+
+**635 assertions green** (482 sandhi + 153 h2; no regression
+against 0.9.4).
+
+### http/h2
+
+- `src/http/h2/dispatch.cyr` — redirect-following hoisted to the
+  auto layer. New `_sandhi_http_auto_once` is the per-hop
+  dispatcher: takes h2 from the pool when available, otherwise
+  calls `_sandhi_http_do` directly (1.1 single-shot — bypassing
+  `_sandhi_http_dispatch`'s built-in follow loop so the auto
+  follower owns the chain). New `_sandhi_http_auto_follow` mirrors
+  `_sandhi_http_follow`'s security semantics (https→http refusal
+  with err=TLS surfaced, Authorization / Cookie /
+  Proxy-Authorization stripped on cross-authority hops, 303
+  rewrites to GET and drops body) and bounds via `opts.max_hops`.
+  Each hop re-enters `_sandhi_http_auto_once`, so a redirect from
+  authority A (no h2 in pool) to authority B (h2 in pool) takes
+  the h2 path for hop 2. `sandhi_http_request_auto` now branches
+  on `opts.follow`: 1 → follower, 0 → single hop.
+- Side effect: under 0.9.4 and prior, `sandhi_http_request_auto`
+  with `opts.follow=1` worked only when the pool didn't have an h2
+  conn (h2 wins → silent drop of the redirect; 1.1 wins → follow
+  inside `_sandhi_http_dispatch`). Now both branches follow.
+
+### http/retry
+
+- `src/http/retry.cyr` — `_sandhi_http_retry` calls
+  `sandhi_http_request_auto` instead of `_sandhi_http_dispatch`.
+  `sandhi_http_get_retry` / `_head_retry` / `_put_retry` /
+  `_delete_retry` now inherit h2 selection: when the attached
+  pool has an h2 conn for the route, retries use h2; otherwise
+  they fall back to 1.1. Pre-0.9.5 retries were 1.1-only
+  regardless of pool state. Backoff + jitter behavior unchanged.
+
+### Verification
+
+The redirect helpers used by the new code (`_sandhi_is_redirect`,
+`_sandhi_resolve_location`, `_sandhi_url_same_authority`,
+`_sandhi_url_is_https_downgrade`, `_sandhi_strip_sensitive_headers`)
+are already covered by the 0.9.0 P0 redirect tests in
+`tests/sandhi.tcyr` (lines 548–880). End-to-end h2 redirect
+verification follows the precedent set when 0.8.1 shipped
+`sandhi_http_request_auto` itself — gated on a consumer
+integration ask, since synthetic h2 round-trip plumbing isn't in
+the test infra today.
+
 ## [0.9.4] — 2026-04-25
 
 **Versioning refactor + chunked response trailers.** No new public
