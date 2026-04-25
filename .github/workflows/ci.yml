@@ -40,5 +40,8 @@ jobs:
           mkdir -p build
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
-      - name: Test
-        run: cyrius test src/test.cyr
+      - name: Test (core)
+        run: cyrius test tests/sandhi.tcyr
+
+      - name: Test (h2)
+        run: cyrius test tests/h2.tcyr
