@@ -54,7 +54,7 @@ fn main() {
 
     say("[2] open with default policy (no enforcement)\n");
     var c2 = sandhi_conn_open_with_policy(ip, 443, 1, "one.one.one.one",
-                                            sandhi_tls_policy_new_default());
+    sandhi_tls_policy_new_default());
     say("    conn = "); fmt_int(c2); say("\n");
     if (c2 == 0) { say("ABORT: default policy open failed\n"); return 2; }
     sandhi_conn_close(c2);

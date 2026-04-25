@@ -513,7 +513,7 @@ fn test_h2_request_encode_simple_get() {
     var h2c = sandhi_h2_conn_new(0);
     var hbuf = alloc(8192);
     var n = sandhi_h2_request_encode_headers(h2c, "GET", "https", "/",
-                                               "www.example.com", 0, hbuf);
+    "www.example.com", 0, hbuf);
     assert_eq(load8(hbuf + 0), 0x82, "byte 0 = indexed :method GET");
     assert_eq(load8(hbuf + 1), 0x87, "byte 1 = indexed :scheme https");
     assert_eq(load8(hbuf + 2), 0x84, "byte 2 = indexed :path /");
@@ -529,7 +529,7 @@ fn test_h2_request_encode_decode_roundtrip() {
     var h2c = sandhi_h2_conn_new(0);
     var hbuf = alloc(8192);
     var n = sandhi_h2_request_encode_headers(h2c, "GET", "http", "/",
-                                               "api.example", 0, hbuf);
+    "api.example", 0, hbuf);
 
     # Decode side: fresh HPACK table.
     var t = sandhi_hpack_table_new(0);
@@ -572,7 +572,7 @@ fn test_h2_response_decode_headers() {
     off = sandhi_hpack_encode_indexed(hbuf, off, 8);
     # content-type = static idx 31, value "text/plain"
     off = sandhi_hpack_encode_literal_indexed_name(t_enc, hbuf, off,
-        31, "content-type", "text/plain");
+    31, "content-type", "text/plain");
 
     # Decode side: fresh h2 conn (whose dec table starts empty).
     var h2c = sandhi_h2_conn_new(0);
@@ -603,7 +603,7 @@ fn test_h2_request_drops_forbidden_headers() {
     var h2c = sandhi_h2_conn_new(0);
     var hbuf = alloc(8192);
     var n = sandhi_h2_request_encode_headers(h2c, "GET", "https", "/",
-                                               "x", h, hbuf);
+    "x", h, hbuf);
     # Decode and verify Connection isn't there but X-Custom is.
     var t = sandhi_hpack_table_new(0);
     var off = alloc(8); store64(off, 0);

@@ -479,8 +479,8 @@ fn _expected_with_version(prefix, suffix) {
 fn test_client_build_request_get() {
     var req = _sandhi_client_build_request("GET", "/path", "example.com", 0, 0);
     var expected = _expected_with_version(
-        "GET /path HTTP/1.1\r\nHost: example.com\r\n",
-        "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
+    "GET /path HTTP/1.1\r\nHost: example.com\r\n",
+    "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
     assert_streq(str_data(req), expected, "build: GET no body no user headers");
     return 0;
 }
@@ -488,8 +488,8 @@ fn test_client_build_request_get() {
 fn test_client_build_request_post() {
     var req = _sandhi_client_build_request("POST", "/api", "api.example.com", 0, 42);
     var expected = _expected_with_version(
-        "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\n",
-        "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
+    "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\n",
+    "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
     assert_streq(str_data(req), expected, "build: POST emits Content-Length");
     return 0;
 }
@@ -498,8 +498,8 @@ fn test_client_build_request_post_empty_body() {
     # POST with body_len 0 should still emit Content-Length: 0.
     var req = _sandhi_client_build_request("POST", "/ping", "example.com", 0, 0);
     var expected = _expected_with_version(
-        "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n",
-        "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
+    "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n",
+    "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
     assert_streq(str_data(req), expected, "build: POST empty body");
     return 0;
 }
@@ -512,8 +512,8 @@ fn test_client_build_request_user_headers() {
     # User-supplied Accept != Accept-Encoding, so both defaults still inject.
     # User hasn't supplied User-Agent either, so the default lands.
     var expected = _expected_with_version(
-        "GET /me HTTP/1.1\r\nHost: api.example.com\r\n",
-        "Accept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n");
+    "GET /me HTTP/1.1\r\nHost: api.example.com\r\n",
+    "Accept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n");
     assert_streq(str_data(req), expected, "build: user headers serialized");
     return 0;
 }
@@ -1608,12 +1608,12 @@ fn test_discovery_chain_as_resolver_nested() {
 fn test_discovery_daimon_url_building() {
     # No trailing slash on base.
     assert_streq(_sandhi_daimon_url("http://127.0.0.1:9000", "yantra"),
-                 "http://127.0.0.1:9000/services/yantra",
-                 "daimon: url no trailing slash");
+    "http://127.0.0.1:9000/services/yantra",
+    "daimon: url no trailing slash");
     # With trailing slash on base.
     assert_streq(_sandhi_daimon_url("http://127.0.0.1:9000/", "yantra"),
-                 "http://127.0.0.1:9000/services/yantra",
-                 "daimon: url trailing slash absorbed");
+    "http://127.0.0.1:9000/services/yantra",
+    "daimon: url trailing slash absorbed");
     return 0;
 }
 
