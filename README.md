@@ -16,14 +16,22 @@ scales.
 
 ## Status
 
-**0.9.2** (2026-04-24) — pre-fold closeout shipped. **634 test assertions
-green** across 481 sandhi + 153 h2 entries. Public surface frozen per
-[ADR 0005](docs/adr/0005-public-surface-freeze-at-0-9-2.md).
+**1.0.0** (2026-04-25) — **fold-ready release**. Cyrius v5.7.0 vendors
+this repo's `dist/sandhi.cyr` as `lib/sandhi.cyr` in stdlib and deletes
+its own `lib/http_server.cyr` per the clean-break fold ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)).
+After the fold, sandhi enters maintenance mode — subsequent patches
+land via the Cyrius release cycle, not this repo.
 
-The next release is **1.0.0** — the fold event at Cyrius v5.7.0. stdlib will
-vendor `lib/sandhi.cyr` from this repo's `dist/sandhi.cyr` and delete its
-own `lib/http_server.cyr` per the clean-break fold ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)).
-That's an external gate — checked at the Cyrius release, not here.
+**649 test assertions green** (482 sandhi + 167 h2). Public surface
+frozen per [ADR 0005](docs/adr/0005-public-surface-freeze-at-0-9-2.md);
+278 `sandhi_*` verbs at fold time.
+
+The 0.9.x sequence (10 releases between the 0.9.2 freeze and 1.0.0
+fold) was pure internal wire-up + hardening — TLS runtime enablement,
+HTTP/2 redirects/retries, ALPN auto-promotion, `TE: trailers`, HPACK
+Huffman encode, and an internal P1 self-audit pass. Detail in
+[CHANGELOG.md](CHANGELOG.md); shipped log in
+[docs/development/roadmap.md](docs/development/roadmap.md).
 
 ## Quick start
 

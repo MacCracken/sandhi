@@ -32,62 +32,62 @@ include "src/server/mod.cyr"
 include "src/main.cyr"  # sandhi_version() used by the http client's default User-Agent (0.7.1)
 
 fn test_url_decode() {
-    var a = http_url_decode("hello%20world");
+    var a = sandhi_server_url_decode("hello%20world");
     assert_streq(a, "hello world", "url_decode: %20 → space");
 
-    var b = http_url_decode("a+b+c");
+    var b = sandhi_server_url_decode("a+b+c");
     assert_streq(b, "a b c", "url_decode: + → space");
 
-    var c = http_url_decode("%2Fusr%2Flocal");
+    var c = sandhi_server_url_decode("%2Fusr%2Flocal");
     assert_streq(c, "/usr/local", "url_decode: uppercase hex");
 
-    var d = http_url_decode("%2fusr%2flocal");
+    var d = sandhi_server_url_decode("%2fusr%2flocal");
     assert_streq(d, "/usr/local", "url_decode: lowercase hex");
 
-    var e = http_url_decode("noescape");
+    var e = sandhi_server_url_decode("noescape");
     assert_streq(e, "noescape", "url_decode: passthrough");
     return 0;
 }
 
 fn test_path_only() {
-    var a = http_path_only("/foo?bar=baz");
+    var a = sandhi_server_path_only("/foo?bar=baz");
     assert_streq(a, "/foo", "path_only: strips query");
 
-    var b = http_path_only("/no/query/here");
+    var b = sandhi_server_path_only("/no/query/here");
     assert_streq(b, "/no/query/here", "path_only: no query passthrough");
     return 0;
 }
 
 fn test_path_segment() {
-    var a = http_path_segment("/a/b/c", 0);
+    var a = sandhi_server_path_segment("/a/b/c", 0);
     assert_streq(a, "a", "path_segment[0]");
 
-    var b = http_path_segment("/a/b/c", 1);
+    var b = sandhi_server_path_segment("/a/b/c", 1);
     assert_streq(b, "b", "path_segment[1]");
 
-    var c = http_path_segment("/a/b/c", 2);
+    var c = sandhi_server_path_segment("/a/b/c", 2);
     assert_streq(c, "c", "path_segment[2]");
 
-    var d = http_path_segment("/a/b/c", 3);
+    var d = sandhi_server_path_segment("/a/b/c", 3);
     assert_eq(d, 0, "path_segment out-of-range → 0");
 
     # Segment indexing ignores the query string.
-    var e = http_path_segment("/users/42?ref=1", 1);
+    var e = sandhi_server_path_segment("/users/42?ref=1", 1);
     assert_streq(e, "42", "path_segment: query stripped first");
     return 0;
 }
 
 fn test_get_param() {
-    var a = http_get_param("/a?foo=1&bar=hello%20world", "bar");
+    var a = sandhi_server_get_param("/a?foo=1&bar=hello%20world", "bar");
     assert_streq(a, "hello world", "get_param: decoded value");
 
-    var b = http_get_param("/a?foo=1&bar=baz", "foo");
+    var b = sandhi_server_get_param("/a?foo=1&bar=baz", "foo");
     assert_streq(b, "1", "get_param: first key");
 
-    var c = http_get_param("/a?foo=1", "missing");
+    var c = sandhi_server_get_param("/a?foo=1", "missing");
     assert_eq(c, 0, "get_param: missing → 0");
 
-    var d = http_get_param("/no-query", "anything");
+    var d = sandhi_server_get_param("/no-query", "anything");
     assert_eq(d, 0, "get_param: no query → 0");
     return 0;
 }
@@ -96,26 +96,26 @@ fn test_request_parse() {
     var req = "GET /hello?name=sandhi HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello";
     var rlen = strlen(req);
 
-    var method = http_get_method(req, rlen);
+    var method = sandhi_server_get_method(req, rlen);
     assert_streq(method, "GET", "get_method");
 
-    var path = http_get_path(req, rlen);
+    var path = sandhi_server_get_path(req, rlen);
     assert_streq(path, "/hello?name=sandhi", "get_path");
 
-    var host = http_find_header(req, rlen, "Host");
+    var host = sandhi_server_find_header(req, rlen, "Host");
     assert_streq(host, "example.com", "find_header: Host");
 
     # Case-insensitive lookup.
-    var host_lc = http_find_header(req, rlen, "host");
+    var host_lc = sandhi_server_find_header(req, rlen, "host");
     assert_streq(host_lc, "example.com", "find_header: case-insensitive");
 
-    var clen = http_content_length(req, rlen);
+    var clen = sandhi_server_content_length(req, rlen);
     assert_eq(clen, 5, "content_length");
 
-    var bo = http_body_offset(req, rlen);
+    var bo = sandhi_server_body_offset(req, rlen);
     assert_eq(bo, rlen - 5, "body_offset: points at body");
 
-    var missing = http_find_header(req, rlen, "X-Nope");
+    var missing = sandhi_server_find_header(req, rlen, "X-Nope");
     assert_eq(missing, 0, "find_header: absent → 0");
     return 0;
 }
@@ -123,7 +123,7 @@ fn test_request_parse() {
 fn test_server_rename_canonical() {
     # 0.9.2 closeout — verify canonical sandhi_server_* names work.
     # The existing http_* tests above implicitly verify aliases still
-    # resolve (they call http_url_decode etc.). One explicit check
+    # resolve (they call sandhi_server_url_decode etc.). One explicit check
     # of the new name to lock in the rename.
     var a = sandhi_server_url_decode("hi%20there");
     assert_streq(a, "hi there", "canonical url_decode");

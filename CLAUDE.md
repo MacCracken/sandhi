@@ -21,7 +21,7 @@
 
 Be the one place AGNOS consumers go for service-to-service communication — HTTP client + JSON-RPC + WebSocket + TLS policy + service discovery — composed cleanly on top of the thin stdlib primitives.
 
-Stdlib carries the primitives; sandhi carries the patterns. Same relationship sakshi has to tracing, mabda to GPU, sankoch to compression. Scaffolded as a sibling crate; fold-into-stdlib target is **before v5.6.x closeout** per the cyrius roadmap.
+Stdlib carries the primitives; sandhi carries the patterns. Same relationship sakshi has to tracing, mabda to GPU, sankoch to compression. Scaffolded as a sibling crate; fold-into-stdlib target is the **v5.7.0 clean-break fold** per [ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md) — revised from the original "before v5.6.x closeout" plan once the alias-window tradeoffs got concrete.
 
 ## Current State
 

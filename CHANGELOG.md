@@ -4,6 +4,100 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-04-25
+
+**Fold-ready release.** Final sandhi-side tag before the cyrius
+v5.7.0 release vendors this repo's `dist/sandhi.cyr` as stdlib's
+`lib/sandhi.cyr`. After the fold, sandhi enters maintenance mode —
+patches land via the Cyrius release cycle, not this repo.
+
+**649 assertions green** (482 sandhi + 167 h2). Public surface =
+278 `sandhi_*` verbs.
+
+The 0.9.x sequence (0.9.3 → 0.9.10, 8 hardening releases between
+the 0.9.2 freeze and 1.0.0) was internal wire-up + audit pass —
+TLS runtime enablement, h2 redirect-following + retry-through-auto,
+ALPN auto-promotion, `TE: trailers` on both protocols, HPACK
+Huffman encode, internal P1 self-audit, pool stale-skip hardening.
+ADR 0005 surface freeze respected throughout (with one documented
+exception: see "Public surface" below).
+
+### http/server — transitional aliases dropped
+
+Per the 0.9.2 plan: 19 `http_*` tail-call wrappers in
+`src/server/mod.cyr` were retained through the 0.9.x window to
+give downstream consumers an upgrade path from the M1 lift-and-
+shift originals. They retire at 1.0.0 so they don't ship as
+permanent stdlib API at v5.7.0 fold.
+
+Migration path for any remaining consumers: rename references
+from `http_*` to `sandhi_server_*`. The mapping is one-to-one
+(every `http_X` was a tail-call to `sandhi_server_X` already).
+`tests/sandhi.tcyr` and `programs/smoke.cyr` updated in this
+release; downstream repos that still use the old names need the
+same mechanical rename before bumping to a v5.7.0-compatible tag.
+
+### Public surface — confirmed against 0.9.2 freeze
+
+Diffed `fn sandhi_*` declarations between the 0.9.2 release commit
+and 1.0.0 to verify the freeze:
+
+- **Removed (35)**: per-module `*_version` accessors
+  (`sandhi_alpn_version`, `sandhi_ap_version`, ...,
+  `sandhi_wd_version`). Retired in 0.9.3's versioning refactor —
+  the only version accessor any consumer ever called was
+  `sandhi_version()`, and the 35 module-level ones existed only
+  because the early scaffolding generator emitted them per-module.
+  Removal was logged in the 0.9.3 changelog with full notice.
+- **Added (2)**: `sandhi_hpack_huffman_encode` and
+  `sandhi_hpack_huffman_encoded_len`, landed in 0.9.8 as the
+  encoder counterpart of the public decoder
+  (`sandhi_hpack_huffman_decode`, public since 0.8.0 Bite 2b).
+  Strictly an ADR 0005 deviation; the rationale was that having
+  a public decoder and a private encoder would have been worse
+  asymmetry than the freeze deviation. Both are HPACK internals
+  consumers don't typically call directly — `_hpack_string_encode`
+  is the actual integration point.
+
+Net: **278 `sandhi_*` verbs** at fold time. This is the permanent
+stdlib API.
+
+### Documentation
+
+- `README.md` — Status section updated for 1.0.0; quick-start and
+  module map unchanged.
+- `CLAUDE.md` — fold-target line updated from "before v5.6.x
+  closeout" (the original plan, superseded by ADR 0002) to "v5.7.0
+  clean-break fold."
+- `docs/development/state.md` — 1.0.0 entry framing the fold;
+  Next-list closes with "Post-1.0.0: maintenance mode."
+- `docs/development/roadmap.md` — already cleaned up post-0.9.9 to
+  be forward-looking; shipped log carries the 0.x sequence.
+- ADRs — no edits; ADRs 0001–0005 all still accurate and load-bearing.
+
+### `dist/sandhi.cyr`
+
+Regenerated via `cyrius distlib` from the 1.0.0 source tree. This
+bundle is what the cyrius v5.7.0 release vendors as
+`lib/sandhi.cyr` — byte-identity of the two at the fold commit is
+one of the v5.7.0 acceptance criteria.
+
+### Acceptance criteria (checked at the v5.7.0 release gate, not in this repo)
+
+- Consumer repos (yantra, hoosh, ifran, daimon, mela, vidya,
+  sit-remote, ark-remote) build against 5.7.0 stdlib without
+  `[deps.sandhi]` pins.
+- `dist/sandhi.cyr` is byte-identical to `lib/sandhi.cyr` at the
+  fold commit.
+- No `include "lib/http_server.cyr"` survives anywhere in AGNOS.
+
+Post-fold patches happen on the cyrius-side via the regular
+release cycle. The two 0.9.9-deferred items (trailer
+`Proxy-Authenticate`, request-builder dup-prevention for
+caller-supplied `Host` / `Content-Length` / `Transfer-Encoding` /
+`Connection`) land as 1.0.x stdlib patches once the per-program
+fixup cap re-baselines after fold.
+
 ## [0.9.10] — 2026-04-25
 
 **Pool stale-skip hardening.** Closes the only "audited and noted,
