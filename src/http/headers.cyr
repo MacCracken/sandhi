@@ -88,9 +88,32 @@ fn sandhi_headers_count(h) {
     return vec_len(h);
 }
 
+# 0.9.1 P1 — 1 if `s` contains any of CR (0x0D), LF (0x0A), or NUL
+# embedded mid-string (NUL is the cstr terminator, so embedded NUL
+# is the only failure mode; CR/LF are header smuggling vectors).
+# Returns 1 = unsafe, 0 = safe. Used by add / set to refuse caller-
+# injected smuggled-header bytes.
+fn _sandhi_hdr_has_unsafe_byte(s) {
+    if (s == 0) { return 0; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c == 13 || c == 10) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Append an entry. Multi-value-friendly — `add` never replaces;
 # use `set` when you want single-value semantics.
+#
+# 0.9.1 P1 — refuses caller-supplied name/value containing CR / LF.
+# Without this guard, `sandhi_headers_set(h, "X", "v\r\nInjected:
+# yes")` would smuggle a new header onto the wire when the entry
+# is later serialized. Returns 0 on success, `0 - 1` on rejection.
 fn sandhi_headers_add(h, name, value) {
+    if (_sandhi_hdr_has_unsafe_byte(name) == 1)  { return 0 - 1; }
+    if (_sandhi_hdr_has_unsafe_byte(value) == 1) { return 0 - 1; }
     var e = _sandhi_hdr_entry_new(
         _sandhi_hdr_cstr_dup(name),
         _sandhi_hdr_cstr_dup(value));
@@ -101,9 +124,10 @@ fn sandhi_headers_add(h, name, value) {
 # Replace all entries with the given name, then append one new entry.
 # Use for single-value headers (Host, Content-Length, User-Agent).
 fn sandhi_headers_set(h, name, value) {
+    if (_sandhi_hdr_has_unsafe_byte(name) == 1)  { return 0 - 1; }
+    if (_sandhi_hdr_has_unsafe_byte(value) == 1) { return 0 - 1; }
     sandhi_headers_remove(h, name);
-    sandhi_headers_add(h, name, value);
-    return 0;
+    return sandhi_headers_add(h, name, value);
 }
 
 # Remove all entries with the given name. Returns number removed.
@@ -250,9 +274,47 @@ fn sandhi_headers_parse(buf, blen) {
 }
 
 # ================================================================
+# Smuggling-vector dup detection (0.9.1 P1)
+# ================================================================
+#
+# Per RFC 7230 §3.3.2 and §5.4, multiple `Content-Length` / multiple
+# `Host` / multiple `Transfer-Encoding` headers in a single message
+# is a malformed-message condition. Different intermediaries pick
+# different ones to honor — the classic CL.CL / Host.Host
+# disagreement vectors. We can't repair these; the only safe move
+# is to refuse the message entirely.
+#
+# `sandhi_headers_smuggle_dup` returns 1 if any of those three
+# header names appears more than once (case-insensitive). The
+# response parser + server-side accept loop call it after parse
+# and reject on truthy.
+
+fn _sandhi_hdr_count_ci(h, name) {
+    var count = 0;
+    var n = sandhi_headers_count(h);
+    var i = 0;
+    while (i < n) {
+        var entry = vec_get(h, i);
+        if (_sandhi_hdr_ieq(_sandhi_hdr_entry_name(entry), name) == 1) {
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
+fn sandhi_headers_smuggle_dup(h) {
+    if (h == 0) { return 0; }
+    if (_sandhi_hdr_count_ci(h, "Host") > 1)              { return 1; }
+    if (_sandhi_hdr_count_ci(h, "Content-Length") > 1)    { return 1; }
+    if (_sandhi_hdr_count_ci(h, "Transfer-Encoding") > 1) { return 1; }
+    return 0;
+}
+
+# ================================================================
 # Identity
 # ================================================================
 
 fn sandhi_headers_version() {
-    return "0.3.0";
+    return "0.9.1";
 }

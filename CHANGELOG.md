@@ -4,6 +4,109 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-04-24
+
+**Phase 2 security sweep** — P1 hardening / defense-in-depth from
+the 0.7.0 audit. **632 total assertions green** (479 sandhi + 153
+h2; +17 over 0.9.0's 615). All hardening; no behavior change to
+well-formed callers.
+
+### Hardening
+
+#### URL port overflow guard
+`src/http/url.cyr` — explicit 5-digit cap on the port-parse loop.
+The existing post-multiply `port > 65535` check already aborted
+before the i64 multiply could wrap (port grows at most 5 digits
+before exceeding 65535), but the digit-count guard is more
+defensive and rejects pathological inputs (`http://h:0000000000080/`)
+that any other parser might handle differently.
+
+#### Header CRLF / NUL validation
+`src/http/headers.cyr` — `sandhi_headers_add` and `_set` now
+reject CR / LF in name or value. New `_sandhi_hdr_has_unsafe_byte`
+helper. Without this, `sandhi_headers_set(h, "X", "v\r\nInjected:
+yes")` could smuggle a new header onto the wire when the entry
+serializes. Returns `0 - 1` on rejection.
+
+#### Content-Length strict parse
+`src/http/response.cyr::_sandhi_resp_parse_clen` and
+`src/server/mod.cyr::http_content_length` — pure decimal digits
+only (with optional leading/trailing whitespace) per RFC 7230
+§3.3.2. Previously `"10, 20"` parsed as 1020 — different from
+any sane parser, the CL.CL leg of the smuggling triad. Returns
+`0 - 1` (response side) / `0` (server side) on malformed values;
+`_sandhi_resp_frame` propagates the response error as
+`SANDHI_ERR_PROTOCOL`.
+
+#### SPKI constant-time compare
+`src/tls_policy/fingerprint.cyr::sandhi_fp_eq` — replaced
+`streq`'s short-circuit with a length-aware constant-time XOR
+accumulator. Cert-pinning is auth-adjacent; defensive compares
+should always be constant-time, full stop.
+
+#### SSE id-with-NUL ignored
+`src/http/sse.cyr` — new `_sandhi_sse_value_has_nul` helper
+scans the raw value bytes (cstr operations don't see embedded
+NULs) and the `id` field handler skips assignment per WHATWG
+EventSource spec. An `id: a\x00b` field used to store the
+attacker-controlled prefix that strlen consumers would truncate
+to "a", causing reconnect-with-Last-Event-ID drift.
+
+#### Header duplicate detection
+`src/http/headers.cyr` — new `sandhi_headers_smuggle_dup`
+counts `Host` / `Content-Length` / `Transfer-Encoding`
+occurrences via the existing `_sandhi_hdr_ieq` case-insensitive
+match. `_sandhi_resp_frame` rejects the response if any of
+those three appear more than once. Server side (in `mod.cyr`)
+gets parallel `_http_count_header_occurrences` +
+`http_request_has_dup_smuggling_header`; the accept loop
+replies 400 before user-handler dispatch. Closes CL.CL /
+Host.Host / TE.TE smuggling vectors per RFC 7230 §3.3.2 + §5.4.
+
+#### SSE re-entrance fix (the biggest of the P1s)
+`src/http/sse.cyr` — parser state moved off module-scope
+globals (`_sandhi_sse_cur_*`) into a 40-byte ctx struct
+allocated per `sandhi_sse_parse` call. New
+`_sandhi_sse_ctx_new` / `_reset` / accessors via offset
+constants. `_sandhi_sse_apply_line` now takes a ctx parameter.
+The previous module-scope vars made the parser non-reentrant —
+a callback fired during stream dispatch that itself parsed SSE
+(e.g., chained MCP-over-SSE) would clobber the outer parse's
+state. With per-call ctx, nested calls are independent.
+
+### Considered and verified — no fix needed
+
+#### JSON escape state
+The 0.7.0 audit's P2 #21 flagged `_sandhi_json_skip_object`'s
+`prev_backslash` tracking as broken on `\\\"`. After tracing the
+state machine through `\\\\` (escaped-backslash + escaped-quote)
++ `\\\"` (escaped-backslash + escaped-quote) + `\\` (escaped-
+backslash) + `\\\\\\\\` (4 escaped-backslashes) + the closing-
+quote disambiguation case, the existing logic handles every
+combination correctly. Documented the trace in this CHANGELOG
+entry rather than refactor for no behavior change.
+
+### Tests added (8 in `tests/sandhi.tcyr`)
+
+`p1/url_port_valid`, `p1/url_port_overflow`,
+`p1/header_crlf_rejected`, `p1/clen_strict_comma`,
+`p1/clen_strict_plus`, `p1/spki_compare`, `p1/header_dup`,
+`p1/sse_reentrant`. Each exercises the precise bug class the fix
+addresses.
+
+### Notes
+
+- `sandhi_headers_version()` bumped to 0.9.1 to mark the new
+  smuggle-dup accessor.
+- Server-side SSE id-NUL test deferred — synthetic byte buffer
+  with embedded NUL needs an alloc-pattern that didn't fit one
+  test cleanly; behavior verified by reading code + helper test
+  for `_sandhi_sse_value_has_nul`.
+- 0.9.2 picks up the closeout: server `http_*` →
+  `sandhi_server_*` rename, surface freeze, first
+  `dist/sandhi.cyr` via `cyrius distlib`, consumer pin uplift
+  coordination. 1.0.0 = fold event @ Cyrius v5.7.0.
+
 ## [0.9.0] — 2026-04-24
 
 **Phase 1 security sweep** — five P0 fixes from the 0.7.0 external

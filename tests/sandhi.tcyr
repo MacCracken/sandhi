@@ -437,14 +437,14 @@ fn test_client_host_header() {
 
 fn test_client_build_request_get() {
     var req = _sandhi_client_build_request("GET", "/path", "example.com", 0, 0);
-    var expected = "GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: sandhi/0.9.0\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: sandhi/0.9.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: GET no body no user headers");
     return 0;
 }
 
 fn test_client_build_request_post() {
     var req = _sandhi_client_build_request("POST", "/api", "api.example.com", 0, 42);
-    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nUser-Agent: sandhi/0.9.0\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nUser-Agent: sandhi/0.9.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: POST emits Content-Length");
     return 0;
 }
@@ -452,7 +452,7 @@ fn test_client_build_request_post() {
 fn test_client_build_request_post_empty_body() {
     # POST with body_len 0 should still emit Content-Length: 0.
     var req = _sandhi_client_build_request("POST", "/ping", "example.com", 0, 0);
-    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nUser-Agent: sandhi/0.9.0\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nUser-Agent: sandhi/0.9.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: POST empty body");
     return 0;
 }
@@ -464,7 +464,7 @@ fn test_client_build_request_user_headers() {
     var req = _sandhi_client_build_request("GET", "/me", "api.example.com", h, 0);
     # User-supplied Accept != Accept-Encoding, so both defaults still inject.
     # User hasn't supplied User-Agent either, so the default lands.
-    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: sandhi/0.9.0\r\nAccept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
+    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: sandhi/0.9.1\r\nAccept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: user headers serialized");
     return 0;
 }
@@ -837,6 +837,71 @@ fn test_p0_tls_policy_fail_closed() {
     var c = sandhi_conn_open_with_policy(0x0100007F, 1, 1, "x", p);
     assert_eq(c, 0, "fail closed");
     assert_eq(sandhi_conn_last_open_err(), SANDHI_CONN_OPEN_TLS, "err=TLS");
+    return 0;
+}
+
+# ================================================================
+# 0.9.1 P1 regressions
+# ================================================================
+
+fn test_p1_url_port_valid_max() {
+    var u = sandhi_url_parse("http://host:65535/");
+    assert_eq(sandhi_url_port(u), 65535, "65535 ok");
+    return 0;
+}
+
+fn test_p1_url_port_overflow() {
+    assert_eq(sandhi_url_parse("http://host:65536/"), 0, "65536 rej");
+    assert_eq(sandhi_url_parse("http://host:123456/"), 0, "6dig rej");
+    return 0;
+}
+
+fn test_p1_header_crlf_rejected() {
+    var h = sandhi_headers_new();
+    assert_eq(sandhi_headers_set(h, "X-Foo", "v\r\nInjected"), 0 - 1, "CRLF val rej");
+    assert_eq(sandhi_headers_add(h, "X-Bar\r\nB", "v"), 0 - 1, "CRLF name rej");
+    assert_eq(sandhi_headers_set(h, "X-OK", "ok"), 0, "clean ok");
+    return 0;
+}
+
+fn test_p1_clen_strict_comma() {
+    var raw = "HTTP/1.1 200 OK\r\nContent-Length: 10, 20\r\n\r\nhellohello";
+    var r = sandhi_http_response_parse(raw, strlen(raw));
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_PROTOCOL, "comma rej");
+    return 0;
+}
+
+fn test_p1_clen_strict_plus() {
+    var raw = "HTTP/1.1 200 OK\r\nContent-Length: +10\r\n\r\nhellohello";
+    var r = sandhi_http_response_parse(raw, strlen(raw));
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_PROTOCOL, "+ rej");
+    return 0;
+}
+
+fn test_p1_spki_compare() {
+    assert_eq(sandhi_fp_eq("aabbcc", "aabbcc"), 1, "match");
+    assert_eq(sandhi_fp_eq("aabbcc", "aabbcd"), 0, "diff end");
+    assert_eq(sandhi_fp_eq("aabbcc", "babbcc"), 0, "diff start");
+    assert_eq(sandhi_fp_eq("aa", "aabb"), 0, "len mismatch");
+    return 0;
+}
+
+fn test_p1_header_dup_smuggling() {
+    var raw = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello";
+    var r = sandhi_http_response_parse(raw, strlen(raw));
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_PROTOCOL, "dup CL rej");
+    return 0;
+}
+
+fn test_p1_sse_reentrant() {
+    var rem1 = alloc(8);
+    var rem2 = alloc(8);
+    var ev1 = sandhi_sse_parse("data: first\n\n", 13, rem1);
+    var ev2 = sandhi_sse_parse("data: second\n\n", 14, rem2);
+    assert_eq(vec_len(ev1), 1, "one in first");
+    assert_eq(vec_len(ev2), 1, "one in second");
+    assert_streq(sandhi_sse_event_data(vec_get(ev1, 0)), "first", "first kept");
+    assert_streq(sandhi_sse_event_data(vec_get(ev2, 0)), "second", "second kept");
     return 0;
 }
 
@@ -2055,6 +2120,30 @@ fn main() {
 
     test_group("p0/tls_fail_closed");
     test_p0_tls_policy_fail_closed();
+
+    test_group("p1/url_port_valid");
+    test_p1_url_port_valid_max();
+
+    test_group("p1/url_port_overflow");
+    test_p1_url_port_overflow();
+
+    test_group("p1/header_crlf_rejected");
+    test_p1_header_crlf_rejected();
+
+    test_group("p1/clen_strict_comma");
+    test_p1_clen_strict_comma();
+
+    test_group("p1/clen_strict_plus");
+    test_p1_clen_strict_plus();
+
+    test_group("p1/spki_compare");
+    test_p1_spki_compare();
+
+    test_group("p1/header_dup");
+    test_p1_header_dup_smuggling();
+
+    test_group("p1/sse_reentrant");
+    test_p1_sse_reentrant();
 
     test_group("alpn/encode_default");
     test_alpn_encode_default();

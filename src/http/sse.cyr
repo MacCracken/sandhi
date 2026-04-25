@@ -158,18 +158,77 @@ fn _sandhi_sse_data_append(current, addition) {
 # lines. Partial events (no terminating blank line) stay in the
 # remaining buffer for the next call.
 
-# Cyrius has no closures, and threading the in-progress event through
-# the parse loop via multiple out-params gets unreadable fast. Parse
-# state lives at module scope and is reset on entry to
-# `sandhi_sse_parse`. Not thread-safe — SSE parsing is expected to
-# happen on the single stream-consumer thread.
-var _sandhi_sse_cur_event = 0;
-var _sandhi_sse_cur_data = 0;
-var _sandhi_sse_cur_id = 0;
-var _sandhi_sse_cur_retry = 0 - 1;
-var _sandhi_sse_has_fields = 0;
+# 0.9.1 P1 — SSE parse state moved off module-scope into an
+# explicit ctx struct allocated per `sandhi_sse_parse` call. The
+# previous module-scope vars (`_sandhi_sse_cur_event` etc.) made
+# the parser non-reentrant: a callback fired during stream
+# dispatch that itself parsed SSE (e.g., a chained MCP-over-SSE
+# call) would clobber the outer parse's in-progress event. With
+# per-call ctx, nested calls are independent.
+#
+# Ctx struct (40 bytes):
+#   +0   cur_event   (cstr; defaults to "message" per WHATWG)
+#   +8   cur_data    (cstr; null until first data field)
+#   +16  cur_id      (cstr; null between explicit id sets)
+#   +24  cur_retry   (int; SANDHI_SSE_RETRY_UNSET sentinel)
+#   +32  has_fields  (int; 1 once any field has been observed in
+#                     the current event)
+enum _SandhiSseCtxOff {
+    _SANDHI_SSE_CTX_OFF_EVENT      = 0;
+    _SANDHI_SSE_CTX_OFF_DATA       = 8;
+    _SANDHI_SSE_CTX_OFF_ID         = 16;
+    _SANDHI_SSE_CTX_OFF_RETRY      = 24;
+    _SANDHI_SSE_CTX_OFF_HAS_FIELDS = 32;
+}
 
-fn _sandhi_sse_apply_line(buf, line_start, line_end) {
+var _SANDHI_SSE_CTX_STRUCT_SIZE = 40;
+
+fn _sandhi_sse_ctx_new() {
+    var c = alloc(_SANDHI_SSE_CTX_STRUCT_SIZE);
+    store64(c + _SANDHI_SSE_CTX_OFF_EVENT, _sandhi_sse_dup("message"));
+    store64(c + _SANDHI_SSE_CTX_OFF_DATA, 0);
+    store64(c + _SANDHI_SSE_CTX_OFF_ID, 0);
+    store64(c + _SANDHI_SSE_CTX_OFF_RETRY, SANDHI_SSE_RETRY_UNSET);
+    store64(c + _SANDHI_SSE_CTX_OFF_HAS_FIELDS, 0);
+    return c;
+}
+
+fn _sandhi_sse_ctx_reset(c) {
+    store64(c + _SANDHI_SSE_CTX_OFF_EVENT, _sandhi_sse_dup("message"));
+    store64(c + _SANDHI_SSE_CTX_OFF_DATA, 0);
+    store64(c + _SANDHI_SSE_CTX_OFF_ID, 0);
+    store64(c + _SANDHI_SSE_CTX_OFF_RETRY, SANDHI_SSE_RETRY_UNSET);
+    store64(c + _SANDHI_SSE_CTX_OFF_HAS_FIELDS, 0);
+    return 0;
+}
+
+# 0.9.1 P1 — 1 if the wire bytes for this line's value (after the
+# colon + optional leading space, before any trailing CR/LF) contain
+# any U+0000 NULL. Used by the id-field branch to honor the WHATWG
+# spec rule that NUL-bearing ids must be ignored. Re-derives the
+# value byte range from the same `buf, line_start, line_end` that
+# `_sandhi_sse_parse_field` walks — the parsed value cstr is no
+# good here because cstr operations stop at the first NUL.
+fn _sandhi_sse_value_has_nul(buf, line_start, line_end) {
+    var le = line_end;
+    if (le > line_start && load8(buf + le - 1) == 10) { le = le - 1; }
+    if (le > line_start && load8(buf + le - 1) == 13) { le = le - 1; }
+    var colon = line_start;
+    while (colon < le && load8(buf + colon) != 58) { colon = colon + 1; }
+    var vstart = colon;
+    if (vstart < le && load8(buf + vstart) == 58) {
+        vstart = vstart + 1;
+        if (vstart < le && load8(buf + vstart) == 32) { vstart = vstart + 1; }
+    }
+    var i = vstart;
+    while (i < le) {
+        if (load8(buf + i) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _sandhi_sse_apply_line(ctx, buf, line_start, line_end) {
     var name_cell = alloc(8);
     var value_cell = alloc(8);
     store64(name_cell, 0);
@@ -178,28 +237,33 @@ fn _sandhi_sse_apply_line(buf, line_start, line_end) {
     if (rc != 0) { return 0; }  # comment or malformed — skip
     var name = load64(name_cell);
     var value = load64(value_cell);
-    _sandhi_sse_has_fields = 1;
+    store64(ctx + _SANDHI_SSE_CTX_OFF_HAS_FIELDS, 1);
     if (streq(name, "event") == 1) {
-        _sandhi_sse_cur_event = value;
+        store64(ctx + _SANDHI_SSE_CTX_OFF_EVENT, value);
     } elif (streq(name, "data") == 1) {
-        _sandhi_sse_cur_data = _sandhi_sse_data_append(_sandhi_sse_cur_data, value);
+        var prev_data = load64(ctx + _SANDHI_SSE_CTX_OFF_DATA);
+        store64(ctx + _SANDHI_SSE_CTX_OFF_DATA,
+                _sandhi_sse_data_append(prev_data, value));
     } elif (streq(name, "id") == 1) {
-        _sandhi_sse_cur_id = value;
+        # 0.9.1 P1 — WHATWG: "If the field name is 'id' and the
+        # field value does not contain U+0000 NULL, then set the
+        # last event ID buffer to the field value." NUL-bearing id
+        # values are silently ignored.
+        if (_sandhi_sse_value_has_nul(buf, line_start, line_end) == 0) {
+            store64(ctx + _SANDHI_SSE_CTX_OFF_ID, value);
+        }
     } elif (streq(name, "retry") == 1) {
-        _sandhi_sse_cur_retry = atoi(value);
+        store64(ctx + _SANDHI_SSE_CTX_OFF_RETRY, atoi(value));
     }
     # Unknown field names: silently ignore per WHATWG.
     return 0;
 }
 
-# Top-level parse using the global dispatcher state. Resets state on
-# entry so repeated calls don't leak between invocations.
+# Top-level parse. Allocates a fresh ctx struct per call — re-entrant
+# (a callback that itself calls sandhi_sse_parse runs against its
+# own ctx and can't clobber an outer parse).
 fn sandhi_sse_parse(buf, blen, remaining_out) {
-    _sandhi_sse_cur_event = _sandhi_sse_dup("message");
-    _sandhi_sse_cur_data = 0;
-    _sandhi_sse_cur_id = 0;
-    _sandhi_sse_cur_retry = SANDHI_SSE_RETRY_UNSET;
-    _sandhi_sse_has_fields = 0;
+    var ctx = _sandhi_sse_ctx_new();
 
     var events = vec_new();
     if (buf == 0 || blen <= 0) {
@@ -214,22 +278,19 @@ fn sandhi_sse_parse(buf, blen, remaining_out) {
         if (line_end < 0) { pos = blen; }
         else {
             if (_sandhi_sse_line_empty(buf, pos, line_end) == 1) {
-                if (_sandhi_sse_has_fields == 1) {
-                    var d = _sandhi_sse_cur_data;
+                if (load64(ctx + _SANDHI_SSE_CTX_OFF_HAS_FIELDS) == 1) {
+                    var d = load64(ctx + _SANDHI_SSE_CTX_OFF_DATA);
                     if (d == 0) { d = _sandhi_sse_dup(""); }
-                    var ev = sandhi_sse_event_new(_sandhi_sse_cur_event, d,
-                                                  _sandhi_sse_cur_id,
-                                                  _sandhi_sse_cur_retry);
+                    var ev = sandhi_sse_event_new(
+                        load64(ctx + _SANDHI_SSE_CTX_OFF_EVENT), d,
+                        load64(ctx + _SANDHI_SSE_CTX_OFF_ID),
+                        load64(ctx + _SANDHI_SSE_CTX_OFF_RETRY));
                     vec_push(events, ev);
-                    _sandhi_sse_cur_event = _sandhi_sse_dup("message");
-                    _sandhi_sse_cur_data = 0;
-                    _sandhi_sse_cur_id = 0;
-                    _sandhi_sse_cur_retry = SANDHI_SSE_RETRY_UNSET;
-                    _sandhi_sse_has_fields = 0;
+                    _sandhi_sse_ctx_reset(ctx);
                 }
                 consumed = line_end;
             } else {
-                _sandhi_sse_apply_line(buf, pos, line_end);
+                _sandhi_sse_apply_line(ctx, buf, pos, line_end);
                 consumed = line_end;
             }
             pos = line_end;

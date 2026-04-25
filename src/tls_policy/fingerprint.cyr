@@ -62,12 +62,35 @@ fn sandhi_fp_normalize(hex) {
 # Case- and delimiter-insensitive equality. Returns 1 if the two
 # strings represent the same hex fingerprint, 0 otherwise. Either
 # operand being 0 returns 0 (null-safe; absent pin never matches).
+#
+# 0.9.1 P1 — constant-time compare. Cert-pinning is auth-adjacent
+# (a MITM trying to craft a cert that matches a pin can use timing
+# leaks to brute-force one byte at a time when the cost-of-attempt
+# is sub-millisecond). For SHA-256 pins the search space is large
+# enough that timing-side-channel doesn't matter in absolute terms,
+# but the pattern matters — defensive compares should always be
+# constant-time, full stop.
 fn sandhi_fp_eq(a, b) {
     if (a == 0 || b == 0) { return 0; }
     var na = sandhi_fp_normalize(a);
     var nb = sandhi_fp_normalize(b);
     if (na == 0 || nb == 0) { return 0; }
-    return streq(na, nb);
+    var la = strlen(na);
+    var lb = strlen(nb);
+    # Length mismatch is fatal (different fingerprint widths can't
+    # match anyway). Surface this directly — leaks no per-byte info.
+    if (la != lb) { return 0; }
+    # Walk the full length regardless of mismatch position. OR every
+    # XOR into a running accumulator; only inspect the accumulator
+    # at the end. No early-exit on mismatch.
+    var diff = 0;
+    var i = 0;
+    while (i < la) {
+        diff = diff | (load8(na + i) ^ load8(nb + i));
+        i = i + 1;
+    }
+    if (diff == 0) { return 1; }
+    return 0;
 }
 
 # Byte length of the normalized fingerprint (2 hex chars per byte).

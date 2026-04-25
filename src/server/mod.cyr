@@ -135,17 +135,74 @@ fn http_find_header(buf, blen, name) {
 }
 
 # Content-Length value — 0 if header absent or malformed.
+#
+# 0.9.1 P1 — strict per RFC 7230 §3.3.2: pure decimal digits (with
+# optional leading/trailing whitespace) only. Previously skipped
+# non-digits silently, so "10, 20" parsed as 1020 — CL.CL smuggling.
+# Returns 0 on any malformed value (including non-digit characters
+# embedded in the number); the existing accept loop reads body up
+# to the parsed length so 0 means "no body" which is a safe fail
+# closed for malformed input.
 fn http_content_length(buf, blen) {
     var v = http_find_header(buf, blen, "Content-Length");
     if (v == 0) { return 0; }
-    var n = 0;
     var i = 0;
-    while (load8(v + i) != 0) {
-        var c = load8(v + i);
-        if (c >= 48 && c <= 57) { n = n * 10 + (c - 48); }
+    while (load8(v + i) == 32 || load8(v + i) == 9) { i = i + 1; }
+    if (load8(v + i) == 0) { return 0; }
+    var n = 0;
+    var seen_digit = 0;
+    while (load8(v + i) >= 48 && load8(v + i) <= 57) {
+        n = n * 10 + (load8(v + i) - 48);
+        seen_digit = 1;
         i = i + 1;
     }
+    if (seen_digit == 0) { return 0; }
+    while (load8(v + i) == 32 || load8(v + i) == 9) { i = i + 1; }
+    if (load8(v + i) != 0) { return 0; }
     return n;
+}
+
+# 0.9.1 P1 — count occurrences of a given header name in the
+# request. Used to detect Host.Host / CL.CL / TE.TE duplicate
+# conditions that are malformed per RFC 7230. Case-insensitive
+# match. We don't have to be perfect about line boundaries here
+# because http_find_header / `_hsv_find` already understand the
+# request format — we just iterate all body offsets and use them.
+fn _http_count_header_occurrences(buf, blen, name) {
+    var count = 0;
+    var pos = 0;
+    var name_len = strlen(name);
+    var line_start = 0;
+    while (line_start < blen) {
+        # Find end of line.
+        var line_end = line_start;
+        while (line_end < blen && load8(buf + line_end) != 10) { line_end = line_end + 1; }
+        if (line_end == line_start) { return count; }  # blank line ends headers
+        if (line_end == line_start + 1 && load8(buf + line_start) == 13) {
+            return count;
+        }
+        # Compare line prefix against `name:` (case-insensitive).
+        if (line_end > line_start + name_len) {
+            if (_hsv_iceq(buf + line_start, name, name_len) == 1) {
+                if (load8(buf + line_start + name_len) == 58) {
+                    count = count + 1;
+                }
+            }
+        }
+        line_start = line_end + 1;
+    }
+    return count;
+}
+
+# 0.9.1 P1 — 1 if the request has multiple Host / Content-Length /
+# Transfer-Encoding headers (CL.CL / Host.Host / TE.TE smuggling
+# vector per RFC 7230 §3.3.2 + §5.4). Server replies 400 on truthy
+# rather than dispatching to the handler.
+fn http_request_has_dup_smuggling_header(buf, blen) {
+    if (_http_count_header_occurrences(buf, blen, "Host") > 1)              { return 1; }
+    if (_http_count_header_occurrences(buf, blen, "Content-Length") > 1)    { return 1; }
+    if (_http_count_header_occurrences(buf, blen, "Transfer-Encoding") > 1) { return 1; }
+    return 0;
 }
 
 # 0.9.0 P0 #2 — 1 if the request carries both `Content-Length` AND
@@ -560,9 +617,12 @@ fn http_server_run_opts(addr, port, handler_fp, ctx, opts) {
             var n = http_recv_request(cfd, _hsv_req_buf, HSV_REQ_BUF_SIZE - 1);
             if (n > 0) {
                 # 0.9.0 P0 #2 — reject CL+TE coexistence with 400
-                # before handing to the user handler. Smuggling
-                # vector per RFC 7230 §3.3.3.
+                # (smuggling vector, RFC 7230 §3.3.3).
+                # 0.9.1 P1 — also reject Host.Host / CL.CL / TE.TE
+                # duplicates (smuggling vector, RFC 7230 §3.3.2 + §5.4).
                 if (http_request_has_cl_te_conflict(_hsv_req_buf, n) == 1) {
+                    http_send_status(cfd, 400, "Bad Request");
+                } elif (http_request_has_dup_smuggling_header(_hsv_req_buf, n) == 1) {
                     http_send_status(cfd, 400, "Bad Request");
                 } else {
                     fncall4(handler_fp, ctx, cfd, _hsv_req_buf, n);

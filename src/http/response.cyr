@@ -254,16 +254,33 @@ fn _sandhi_resp_is_chunked(headers) {
     return 0;
 }
 
-# Parse the decimal Content-Length value from a cstr. Returns 0 on empty.
+# Parse the decimal Content-Length value from a cstr. Returns 0 on
+# empty, `0 - 1` on malformed.
+#
+# 0.9.1 P1 — strict per RFC 7230 §3.3.2: pure decimal digits only,
+# leading/trailing space tolerated. Previously non-digit bytes
+# (including `+`, `,`, `-`, `0x`) were silently skipped, so values
+# like `"10, 20"` would parse as 1020 — different from any sane
+# parser's reading. That kind of disagreement is the CL.CL leg of
+# the smuggling triad (CL.TE handled in 0.9.0 P0 #2).
 fn _sandhi_resp_parse_clen(v) {
     if (v == 0) { return 0; }
-    var n = 0;
     var i = 0;
-    while (load8(v + i) != 0) {
-        var c = load8(v + i);
-        if (c >= 48 && c <= 57) { n = n * 10 + (c - 48); }
+    # Skip leading whitespace.
+    while (load8(v + i) == 32 || load8(v + i) == 9) { i = i + 1; }
+    if (load8(v + i) == 0) { return 0; }
+    var n = 0;
+    var seen_digit = 0;
+    while (load8(v + i) >= 48 && load8(v + i) <= 57) {
+        n = n * 10 + (load8(v + i) - 48);
+        seen_digit = 1;
         i = i + 1;
     }
+    if (seen_digit == 0) { return 0 - 1; }
+    # Skip trailing whitespace.
+    while (load8(v + i) == 32 || load8(v + i) == 9) { i = i + 1; }
+    # Anything else after digits + whitespace is malformed.
+    if (load8(v + i) != 0) { return 0 - 1; }
     return n;
 }
 
@@ -299,6 +316,13 @@ fn _sandhi_resp_frame(buf, blen, status, headers, body_start) {
         return _sandhi_resp_err(SANDHI_ERR_PROTOCOL);
     }
 
+    # 0.9.1 P1 — duplicate Host / Content-Length / Transfer-Encoding
+    # is a malformed-message condition per RFC 7230. CL.CL / Host.Host
+    # disagreement is the smuggling vector.
+    if (sandhi_headers_smuggle_dup(headers) == 1) {
+        return _sandhi_resp_err(SANDHI_ERR_PROTOCOL);
+    }
+
     if (chunked == 1) {
         var outp_cell = alloc(8);
         var outl_cell = alloc(8);
@@ -312,6 +336,12 @@ fn _sandhi_resp_frame(buf, blen, status, headers, body_start) {
         var clen_v = sandhi_headers_get(headers, "Content-Length");
         if (clen_v != 0) {
             var n = _sandhi_resp_parse_clen(clen_v);
+            if (n < 0) {
+                # 0.9.1 P1 — strict CL parse: malformed value rejects
+                # the response. Before this, "10, 20" would silently
+                # parse as 1020 — CL.CL smuggling vector.
+                return _sandhi_resp_err(SANDHI_ERR_PROTOCOL);
+            }
             if (body_start + n > blen) { n = blen - body_start; }
             body_len = n;
             body_ptr = _sandhi_resp_body_copy(buf, body_start, body_len);

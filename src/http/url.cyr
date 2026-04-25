@@ -121,9 +121,19 @@ fn _sandhi_url_finish(url, scheme, default_port, host_start, host_end) {
         p = p + 1;
         port = 0;
         var got = 0;
+        # 0.9.1 P1 — explicit digit count cap. Existing post-multiply
+        # check already aborts before the i64 multiply could wrap
+        # (port > 65535 fires by the 5th non-leading-zero digit), but
+        # bounding the input scan at 5 digits is safer and rejects
+        # pathological inputs like "00000000000000080" early. Also
+        # blocks attempts to use leading zeros to mask a multi-digit
+        # port that any other parser might handle differently.
+        var port_digits = 0;
         while (load8(url + p) >= 48 && load8(url + p) <= 57) {
+            if (port_digits >= 5) { return 0; }
             port = port * 10 + (load8(url + p) - 48);
             got = 1;
+            port_digits = port_digits + 1;
             p = p + 1;
             if (port > 65535) { return 0; }
         }
