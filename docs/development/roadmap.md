@@ -364,7 +364,19 @@ section as the release body.
 
 ### 0.9.4 — Internal wire-up follow-up
 
-*All scoped, no upstream gates, no public surface impact.*
+*All scoped, no upstream gates, no public surface impact. Partial
+ship in progress — chunked trailers landed 2026-04-25.*
+
+- ✅ **Chunked response trailers** — landed 2026-04-25.
+  `_sandhi_resp_decode_chunked` parses RFC 7230 §4.1.2 trailers and
+  merges allowed names into the response headers; forbidden fields
+  (Transfer-Encoding, Content-Length, Host, Authorization,
+  Set-Cookie, Cache-Control, Expect, Max-Forwards, Pragma, Range,
+  TE, Trailer) are filtered. Surfaces via existing
+  `sandhi_http_headers(r)` — no new public verb. Verified by
+  `programs/_trailers_probe.cyr`.
+
+Remaining for 0.9.4:
 
 - **HTTP/2 redirect-following** — the 1.1 path does it via
   `_sandhi_http_follow`; `sandhi_http_request_auto`'s h2 branch
@@ -374,19 +386,21 @@ section as the release body.
   currently call `_sandhi_http_dispatch` directly, bypassing the
   auto-h2 path. Route them through `sandhi_http_request_auto` so
   retries inherit h2 selection where available.
-- **Chunked response trailers** — `src/http/pool.cyr:242` and
-  `src/http/h2/request.cyr:147` document the gap. RFC 7230 §4.1.2
-  trailer parse, exposed via a `sandhi_http_trailers(resp)`
-  accessor. Internal addition only — frozen surface stays clean
-  because no new public *verb* (the accessor pattern matches
-  existing `sandhi_http_headers` shape and was conceptually
-  reserved when the response struct shipped).
 - **ALPN-driven h2 auto-promotion** — full version of the auto
   dispatcher: open the conn (advertise both protocols), check
   `sandhi_conn_alpn_is_h2`, if yes do the h2 preface/SETTINGS
   exchange and cache an `sandhi_h2_conn` in the pool, dispatch the
   request via `sandhi_h2_request`. Builds on the ALPN runtime
   shipped at 0.9.3.
+- **`TE: trailers` request signaling** — outgoing-side counterpart
+  to the response trailer parser. Send `TE: trailers` on 1.1
+  requests and allow `te: trailers` past the h2
+  `_h2_is_connection_header` filter, so spec-compliant servers
+  emit trailers (RFC 7230 §4.4: "a server SHOULD NOT generate
+  trailer fields ... unless the request includes a TE header
+  field indicating 'trailers' is acceptable"). Wire-bytes change
+  affects existing User-Agent test expectations — bundle with the
+  h2 redirect/retry pass.
 - **Huffman encode** (deferred from 0.8.x) — wire-size optimization,
   raw byte literal is spec-permitted. Add only on bandwidth-pressure
   evidence.
