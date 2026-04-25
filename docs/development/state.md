@@ -4,6 +4,8 @@
 
 ## Version
 
+**0.9.2** — 2026-04-24. **Pre-fold closeout.** Server symbol rename: every public `http_*` function in `src/server/mod.cyr` renamed to `sandhi_server_*` for consistency with the rest of the sandhi surface. Transitional `http_*` aliases retained through 0.9.x — all 23 affected names get thin tail-call wrappers; aliases drop at 1.0.0 (v5.7.0 fold). First formal `dist/sandhi.cyr` bundle via `cyrius distlib` — 8564 lines / 335 KB / `Version: 0.9.2` header. Surface-freeze policy added to CLAUDE.md as a hard constraint: no new public verbs land between 0.9.2 and 1.0.0; fold ships everything permanently into stdlib. **634 assertions green (481 sandhi + 153 h2; +2 server-rename regression).** This is the last sandhi-side release before the fold.
+
 **0.9.1** — 2026-04-24. **Phase 2 security sweep** — 7 P1 hardening fixes from the 0.7.0 audit. (1) URL port digit-count cap (5 max). (2) Header CRLF/NUL validation in `add`/`set`. (3) Strict CL parse — `"10, 20"` rejected, `+10` rejected, comma-or-non-digit fails. (4) SPKI constant-time compare via XOR accumulator. (5) SSE id-with-NUL ignored per WHATWG. (6) Header duplicate detection (Host / CL / TE) on both client and server. (7) SSE re-entrance fix — parser state moved from module-scope globals into a per-call ctx struct (~40 bytes); nested `sandhi_sse_parse` calls are now independent. P2 #21 (JSON escape state) traced and cleared — audit was incorrect, no fix needed. **632 assertions green (479 sandhi + 153 h2; +17 over 0.9.0).**
 
 **0.9.0** — 2026-04-24. **Phase 1 security sweep** — five P0 fixes from the 0.7.0 audit, each with a focused regression test. (1) Chunked decoder requires terminal 0-chunk + `seen_digit` guard, sizes >2^31 rejected. (2) CL+TE coexistence rejected on both client (`SANDHI_ERR_PROTOCOL`) and server (400) per RFC 7230 §3.3.3 — closes CL.TE / TE.CL smuggling. (3) Chunk-size overflow guard caps at `i31`. (4) Redirect cross-origin strips `Authorization` / `Cookie` / `Proxy-Authorization`; https→http downgrades refused outright. (5) TLS-policy fail-closed when policy demands `pinned` / `mtls` / `trust_store` enforcement that isn't actually wired. **Two visible behavior changes** (semver minor): cred-strip on redirects + pinned-without-enforcement now errors instead of silently downgrading. **615 assertions green (462 sandhi + 153 h2; +16 over 0.8.1's 599).**
@@ -134,8 +136,8 @@ Release sequence toward v5.7.0 fold (see `roadmap.md` for full detail):
 - **0.8.0** ✅ — HTTP/2 + connection pool (8 bites). Pool + 1.1 keep-alive, full HPACK + Huffman decode, h2 frames + lifecycle, ALPN surface (runtime stubbed), public `sandhi_h2_request` verb.
 - **0.8.1** ✅ — `sandhi_http_request_auto` + per-method auto verbs. Pool h2-take → 1.1 fallback. ALPN-advertise upstream-ask filed.
 - **0.9.0** ✅ — Phase 1 security: 5 P0s from the 0.7.0 audit.
-- **0.9.1** ✅ (this release) — Phase 2 P1 sweep: 7 hardening fixes (URL port overflow, header CRLF/NUL, CL strict parse, SPKI const-time, SSE id-NUL, header dup-detection, SSE re-entrance). P2 JSON-escape audit-finding cleared as incorrect.
-- **0.9.2** — Pre-fold closeout: server `http_*` → `sandhi_server_*` rename, surface freeze, first `dist/sandhi.cyr` via `cyrius distlib`, consumer pin uplift coordination.
+- **0.9.1** ✅ — Phase 2 P1 sweep: 7 hardening fixes.
+- **0.9.2** ✅ (this release) — Pre-fold closeout: server `http_*` → `sandhi_server_*` rename + transitional aliases, first `dist/sandhi.cyr` via `cyrius distlib`, surface freeze in CLAUDE.md.
 - **1.0.0** — fold event @ Cyrius v5.7.0. stdlib gets `lib/sandhi.cyr` vendored from `dist/sandhi.cyr`; stdlib deletes `lib/http_server.cyr` per ADR 0002 clean-break fold.
 
 **Under-v1 milestone back-matter**:

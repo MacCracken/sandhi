@@ -77,7 +77,7 @@ fn _hsv_next_nl(buf, start, end) {
 # ================================================================
 
 # Method from the request line — "GET", "POST", etc. Returns "" on malformed.
-fn http_get_method(buf, blen) {
+fn sandhi_server_get_method(buf, blen) {
     var sp = _hsv_find(buf, blen, " ", 1);
     if (sp < 0) { return ""; }
     var out = alloc(sp + 1);
@@ -87,7 +87,7 @@ fn http_get_method(buf, blen) {
 }
 
 # Path-and-query from the request line — "/foo?bar=baz". Returns "" on malformed.
-fn http_get_path(buf, blen) {
+fn sandhi_server_get_path(buf, blen) {
     var sp1 = _hsv_find(buf, blen, " ", 1);
     if (sp1 < 0) { return ""; }
     var sp2 = _hsv_find(buf + sp1 + 1, blen - sp1 - 1, " ", 1);
@@ -99,7 +99,7 @@ fn http_get_path(buf, blen) {
 }
 
 # Offset of the body start (after \r\n\r\n) — 0 - 1 if no headers terminator.
-fn http_body_offset(buf, blen) {
+fn sandhi_server_body_offset(buf, blen) {
     var off = _hsv_find(buf, blen, "\r\n\r\n", 4);
     if (off < 0) { return 0 - 1; }
     return off + 4;
@@ -107,7 +107,7 @@ fn http_body_offset(buf, blen) {
 
 # Case-insensitive header lookup. Returns the value cstr (trimmed of leading
 # SP and trailing CR), or 0 if the header is absent.
-fn http_find_header(buf, blen, name) {
+fn sandhi_server_find_header(buf, blen, name) {
     var nlen = strlen(name);
     var headers_end = _hsv_find(buf, blen, "\r\n\r\n", 4);
     if (headers_end < 0) { headers_end = blen; }
@@ -143,8 +143,8 @@ fn http_find_header(buf, blen, name) {
 # embedded in the number); the existing accept loop reads body up
 # to the parsed length so 0 means "no body" which is a safe fail
 # closed for malformed input.
-fn http_content_length(buf, blen) {
-    var v = http_find_header(buf, blen, "Content-Length");
+fn sandhi_server_content_length(buf, blen) {
+    var v = sandhi_server_find_header(buf, blen, "Content-Length");
     if (v == 0) { return 0; }
     var i = 0;
     while (load8(v + i) == 32 || load8(v + i) == 9) { i = i + 1; }
@@ -166,9 +166,9 @@ fn http_content_length(buf, blen) {
 # request. Used to detect Host.Host / CL.CL / TE.TE duplicate
 # conditions that are malformed per RFC 7230. Case-insensitive
 # match. We don't have to be perfect about line boundaries here
-# because http_find_header / `_hsv_find` already understand the
+# because sandhi_server_find_header / `_hsv_find` already understand the
 # request format — we just iterate all body offsets and use them.
-fn _http_count_header_occurrences(buf, blen, name) {
+fn _sandhi_server_count_header_occurrences(buf, blen, name) {
     var count = 0;
     var pos = 0;
     var name_len = strlen(name);
@@ -198,21 +198,21 @@ fn _http_count_header_occurrences(buf, blen, name) {
 # Transfer-Encoding headers (CL.CL / Host.Host / TE.TE smuggling
 # vector per RFC 7230 §3.3.2 + §5.4). Server replies 400 on truthy
 # rather than dispatching to the handler.
-fn http_request_has_dup_smuggling_header(buf, blen) {
-    if (_http_count_header_occurrences(buf, blen, "Host") > 1)              { return 1; }
-    if (_http_count_header_occurrences(buf, blen, "Content-Length") > 1)    { return 1; }
-    if (_http_count_header_occurrences(buf, blen, "Transfer-Encoding") > 1) { return 1; }
+fn sandhi_server_request_has_dup_smuggling_header(buf, blen) {
+    if (_sandhi_server_count_header_occurrences(buf, blen, "Host") > 1)              { return 1; }
+    if (_sandhi_server_count_header_occurrences(buf, blen, "Content-Length") > 1)    { return 1; }
+    if (_sandhi_server_count_header_occurrences(buf, blen, "Transfer-Encoding") > 1) { return 1; }
     return 0;
 }
 
 # 0.9.0 P0 #2 — 1 if the request carries both `Content-Length` AND
 # `Transfer-Encoding: chunked`, which is malformed per RFC 7230
 # §3.3.3 and the canonical CL.TE smuggling vector. The accept-loop
-# in `http_server_run_opts` checks this and replies 400 before
+# in `sandhi_server_run_opts` checks this and replies 400 before
 # handing the request to the user's handler.
-fn http_request_has_cl_te_conflict(buf, blen) {
-    if (http_find_header(buf, blen, "Content-Length") == 0) { return 0; }
-    var te = http_find_header(buf, blen, "Transfer-Encoding");
+fn sandhi_server_request_has_cl_te_conflict(buf, blen) {
+    if (sandhi_server_find_header(buf, blen, "Content-Length") == 0) { return 0; }
+    var te = sandhi_server_find_header(buf, blen, "Transfer-Encoding");
     if (te == 0) { return 0; }
     # Tolerant case-insensitive substring match for "chunked".
     var i = 0;
@@ -241,7 +241,7 @@ fn http_request_has_cl_te_conflict(buf, blen) {
 # ================================================================
 
 # "/foo?bar=baz" → "/foo". Returns the input unchanged if there's no '?'.
-fn http_path_only(path) {
+fn sandhi_server_path_only(path) {
     if (path == 0) { return path; }
     var i = 0;
     while (load8(path + i) != 0) {
@@ -257,7 +257,7 @@ fn http_path_only(path) {
 }
 
 # Percent-decode (%20 → ' ', + → ' '). Returns alloc'd cstr.
-fn http_url_decode(s) {
+fn sandhi_server_url_decode(s) {
     if (s == 0) { return ""; }
     var slen = strlen(s);
     var out = alloc(slen + 1);
@@ -292,8 +292,8 @@ fn http_url_decode(s) {
 }
 
 # Query parameter value, percent-decoded. 0 if not found.
-# Example: http_get_param("/a?foo=1&bar=hello%20world", "bar") → "hello world"
-fn http_get_param(path, name) {
+# Example: sandhi_server_get_param("/a?foo=1&bar=hello%20world", "bar") → "hello world"
+fn sandhi_server_get_param(path, name) {
     if (path == 0) { return 0; }
     var plen = strlen(path);
     var qmark = 0 - 1;
@@ -315,7 +315,7 @@ fn http_get_param(path, name) {
             var raw = alloc(ve - vs + 1);
             memcpy(raw, path + vs, ve - vs);
             store8(raw + ve - vs, 0);
-            return http_url_decode(raw);
+            return sandhi_server_url_decode(raw);
         }
         while (pi < plen && load8(path + pi) != 38) { pi = pi + 1; }
         pi = pi + 1;
@@ -323,11 +323,11 @@ fn http_get_param(path, name) {
     return 0;
 }
 
-# Nth segment of a path. Indices 0-based. http_path_segment("/a/b/c", 0) → "a".
+# Nth segment of a path. Indices 0-based. sandhi_server_path_segment("/a/b/c", 0) → "a".
 # Strips a leading "/" before counting. Returns 0 if n is out of range.
-fn http_path_segment(path, n) {
+fn sandhi_server_path_segment(path, n) {
     if (path == 0) { return 0; }
-    var path_only = http_path_only(path);
+    var path_only = sandhi_server_path_only(path);
     var plen = strlen(path_only);
     var seg = 0;
     var ss = 0;
@@ -357,8 +357,8 @@ fn http_path_segment(path, n) {
 # ================================================================
 
 # Minimal status response with Content-Length: 0.
-# e.g. http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
-fn http_send_status(cfd, code, msg) {
+# e.g. sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+fn sandhi_server_send_status(cfd, code, msg) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "HTTP/1.1 ");
     str_builder_add_int(sb, code);
@@ -371,8 +371,8 @@ fn http_send_status(cfd, code, msg) {
 }
 
 # Full response. extra_headers is a cstr (each line CRLF-terminated) or 0.
-# e.g. http_send_response(cfd, 200, "OK", "application/json", body, len, 0);
-fn http_send_response(cfd, code, msg, content_type, body, body_len, extra_headers) {
+# e.g. sandhi_server_send_response(cfd, 200, "OK", "application/json", body, len, 0);
+fn sandhi_server_send_response(cfd, code, msg, content_type, body, body_len, extra_headers) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "HTTP/1.1 ");
     str_builder_add_int(sb, code);
@@ -392,7 +392,7 @@ fn http_send_response(cfd, code, msg, content_type, body, body_len, extra_header
 }
 
 # 204 No Content with optional extra headers (CRLF-terminated cstr or 0).
-fn http_send_204(cfd, extra_headers) {
+fn sandhi_server_send_204(cfd, extra_headers) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "HTTP/1.1 204 No Content\r\n");
     if (extra_headers != 0) { str_builder_add_cstr(sb, extra_headers); }
@@ -407,16 +407,16 @@ fn http_send_204(cfd, extra_headers) {
 # ================================================================
 # Use this for SSE, large bodies, or any long-running response.
 # Sequence:
-#   http_send_chunked_start(cfd, 200, "text/event-stream", 0);
-#   http_send_chunk(cfd, "data: hello\n\n", 13);
-#   http_send_chunk(cfd, "data: world\n\n", 13);
-#   http_send_chunked_end(cfd);
+#   sandhi_server_send_chunked_start(cfd, 200, "text/event-stream", 0);
+#   sandhi_server_send_chunk(cfd, "data: hello\n\n", 13);
+#   sandhi_server_send_chunk(cfd, "data: world\n\n", 13);
+#   sandhi_server_send_chunked_end(cfd);
 
 # Begin a chunked / SSE response. Sends the HTTP/1.1 status line plus
-# Transfer-Encoding: chunked. Follow with repeated http_send_chunk calls
-# and finish with http_send_chunked_end. extra_headers is a cstr of
+# Transfer-Encoding: chunked. Follow with repeated sandhi_server_send_chunk calls
+# and finish with sandhi_server_send_chunked_end. extra_headers is a cstr of
 # CRLF-terminated header lines or 0.
-fn http_send_chunked_start(cfd, code, content_type, extra_headers) {
+fn sandhi_server_send_chunked_start(cfd, code, content_type, extra_headers) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "HTTP/1.1 ");
     str_builder_add_int(sb, code);
@@ -432,8 +432,8 @@ fn http_send_chunked_start(cfd, code, content_type, extra_headers) {
 
 # Send one chunk of a chunked-transfer response. Emits the chunk-length
 # as lowercase hex followed by CRLF, then `len` bytes of `data`, then
-# another CRLF. Use between http_send_chunked_start and http_send_chunked_end.
-fn http_send_chunk(cfd, data, len) {
+# another CRLF. Use between sandhi_server_send_chunked_start and sandhi_server_send_chunked_end.
+fn sandhi_server_send_chunk(cfd, data, len) {
     var hexbuf[32];
     var hi = 0;
     var n = len;
@@ -465,7 +465,7 @@ fn http_send_chunk(cfd, data, len) {
 
 # Terminate a chunked-transfer response. Sends the zero-length chunk
 # that tells the client the body is complete ("0\r\n\r\n").
-fn http_send_chunked_end(cfd) {
+fn sandhi_server_send_chunked_end(cfd) {
     sock_send(cfd, "0\r\n\r\n", 5);
     return 0;
 }
@@ -481,7 +481,7 @@ fn http_send_chunked_end(cfd) {
 #   - max bytes have been read.
 # Returns the total bytes read (or 0 - 1 on socket error). Always
 # null-terminates buf at the returned length.
-fn http_recv_request(cfd, buf, max) {
+fn sandhi_server_recv_request(cfd, buf, max) {
     var have = 0;
     var need_body = 0 - 1;
 
@@ -497,9 +497,9 @@ fn http_recv_request(cfd, buf, max) {
 
         if (need_body == 0 - 1) {
             store8(buf + have, 0);
-            var bo = http_body_offset(buf, have);
+            var bo = sandhi_server_body_offset(buf, have);
             if (bo >= 0) {
-                var clen = http_content_length(buf, have);
+                var clen = sandhi_server_content_length(buf, have);
                 need_body = bo + clen;
             }
         }
@@ -580,14 +580,14 @@ fn sandhi_server_options_get_max_conns(opts) {
 #   fn handler(ctx, cfd, req_buf, req_len) → 0
 #
 # Returns 1 on bind/listen failure; never returns on success (loops forever).
-fn http_server_run(addr, port, handler_fp, ctx) {
-    return http_server_run_opts(addr, port, handler_fp, ctx, 0);
+fn sandhi_server_run(addr, port, handler_fp, ctx) {
+    return sandhi_server_run_opts(addr, port, handler_fp, ctx, 0);
 }
 
 # Opts-aware variant. Applies SO_RCVTIMEO on each accepted connection
 # to bound slow/idle peers (slowloris guard). max_conns is accepted
 # but not honored today — server stays single-threaded until 0.8.0.
-fn http_server_run_opts(addr, port, handler_fp, ctx, opts) {
+fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts) {
     if (_hsv_req_buf == 0) { _hsv_req_buf = alloc(HSV_REQ_BUF_SIZE); }
 
     var idle_ms = sandhi_server_options_get_idle_ms(opts);
@@ -614,16 +614,16 @@ fn http_server_run_opts(addr, port, handler_fp, ctx, opts) {
             if (idle_ms > 0) {
                 _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO);
             }
-            var n = http_recv_request(cfd, _hsv_req_buf, HSV_REQ_BUF_SIZE - 1);
+            var n = sandhi_server_recv_request(cfd, _hsv_req_buf, HSV_REQ_BUF_SIZE - 1);
             if (n > 0) {
                 # 0.9.0 P0 #2 — reject CL+TE coexistence with 400
                 # (smuggling vector, RFC 7230 §3.3.3).
                 # 0.9.1 P1 — also reject Host.Host / CL.CL / TE.TE
                 # duplicates (smuggling vector, RFC 7230 §3.3.2 + §5.4).
-                if (http_request_has_cl_te_conflict(_hsv_req_buf, n) == 1) {
-                    http_send_status(cfd, 400, "Bad Request");
-                } elif (http_request_has_dup_smuggling_header(_hsv_req_buf, n) == 1) {
-                    http_send_status(cfd, 400, "Bad Request");
+                if (sandhi_server_request_has_cl_te_conflict(_hsv_req_buf, n) == 1) {
+                    sandhi_server_send_status(cfd, 400, "Bad Request");
+                } elif (sandhi_server_request_has_dup_smuggling_header(_hsv_req_buf, n) == 1) {
+                    sandhi_server_send_status(cfd, 400, "Bad Request");
                 } else {
                     fncall4(handler_fp, ctx, cfd, _hsv_req_buf, n);
                 }
@@ -635,10 +635,60 @@ fn http_server_run_opts(addr, port, handler_fp, ctx, opts) {
 }
 
 # ================================================================
+# Deprecated `http_*` aliases — drop at 1.0.0
+# ================================================================
+#
+# 0.9.2 closeout — the canonical names became `sandhi_server_*` to
+# match every other sandhi module's prefix. The `http_*` names below
+# are transitional wrappers for downstream consumers that still
+# reference the lift-and-shift originals from M1 (lib/http_server.cyr).
+# They retire at 1.0.0 (the v5.7.0 fold) — at that point stdlib
+# vendors `lib/sandhi.cyr` from `dist/sandhi.cyr` and consumers update
+# their `include` line to match.
+#
+# New code uses `sandhi_server_*` directly. The wrappers add a
+# tail-call hop at runtime, which the optimizer typically inlines —
+# negligible. Every reference here is a fold-time bookkeeping line,
+# not a long-term maintenance burden.
+
+fn http_get_method(buf, blen)               { return sandhi_server_get_method(buf, blen); }
+fn http_get_path(buf, blen)                 { return sandhi_server_get_path(buf, blen); }
+fn http_body_offset(buf, blen)              { return sandhi_server_body_offset(buf, blen); }
+fn http_find_header(buf, blen, name)        { return sandhi_server_find_header(buf, blen, name); }
+fn http_content_length(buf, blen)           { return sandhi_server_content_length(buf, blen); }
+fn http_request_has_dup_smuggling_header(buf, blen) {
+    return sandhi_server_request_has_dup_smuggling_header(buf, blen);
+}
+fn http_request_has_cl_te_conflict(buf, blen) {
+    return sandhi_server_request_has_cl_te_conflict(buf, blen);
+}
+fn http_path_only(path)                     { return sandhi_server_path_only(path); }
+fn http_url_decode(s)                       { return sandhi_server_url_decode(s); }
+fn http_get_param(path, name)               { return sandhi_server_get_param(path, name); }
+fn http_path_segment(path, n)               { return sandhi_server_path_segment(path, n); }
+fn http_send_status(cfd, code, msg)         { return sandhi_server_send_status(cfd, code, msg); }
+fn http_send_response(cfd, code, msg, content_type, body, body_len, extra_headers) {
+    return sandhi_server_send_response(cfd, code, msg, content_type, body, body_len, extra_headers);
+}
+fn http_send_204(cfd, extra_headers)        { return sandhi_server_send_204(cfd, extra_headers); }
+fn http_send_chunked_start(cfd, code, content_type, extra_headers) {
+    return sandhi_server_send_chunked_start(cfd, code, content_type, extra_headers);
+}
+fn http_send_chunk(cfd, data, len)          { return sandhi_server_send_chunk(cfd, data, len); }
+fn http_send_chunked_end(cfd)               { return sandhi_server_send_chunked_end(cfd); }
+fn http_recv_request(cfd, buf, max)         { return sandhi_server_recv_request(cfd, buf, max); }
+fn http_server_run(addr, port, handler_fp, ctx) {
+    return sandhi_server_run(addr, port, handler_fp, ctx);
+}
+fn http_server_run_opts(addr, port, handler_fp, ctx, opts) {
+    return sandhi_server_run_opts(addr, port, handler_fp, ctx, opts);
+}
+
+# ================================================================
 # sandhi-scoped identity
 # ================================================================
 # Kept so downstream can probe the migrated-module version. Retires
 # when fold-into-stdlib lands; consumers should prefer sandhi_version().
 fn sandhi_server_version() {
-    return "0.2.0";
+    return "0.9.2";
 }

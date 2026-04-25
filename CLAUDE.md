@@ -113,6 +113,7 @@ When the public API stabilizes and consumer pins are all green:
 - Do not grow the public surface speculatively — wait for a second consumer asking for the same thing before generalizing.
 - Do not inline volatile state in this file — `docs/development/state.md` is the home for that.
 - Do not bypass `cyrius build` with raw `cc5` invocations.
+- **Public surface frozen at 0.9.2.** No new public verbs land between 0.9.2 and the v5.7.0 fold (1.0.0). The fold ships sandhi into stdlib's `lib/sandhi.cyr` permanently — every name in the public surface at fold-time becomes a permanent stdlib API. Bug fixes and internal refactors are fine; new verbs are not. If a consumer asks for something post-0.9.2, it lands as a 1.0.x stdlib patch after fold, not as 0.9.x.
 
 ## Cyrius Conventions
 

@@ -119,8 +119,20 @@ fn test_request_parse() {
     return 0;
 }
 
+fn test_server_rename_canonical() {
+    # 0.9.2 closeout — verify canonical sandhi_server_* names work.
+    # The existing http_* tests above implicitly verify aliases still
+    # resolve (they call http_url_decode etc.). One explicit check
+    # of the new name to lock in the rename.
+    var a = sandhi_server_url_decode("hi%20there");
+    assert_streq(a, "hi there", "canonical url_decode");
+    var b = sandhi_server_path_only("/x?y=1");
+    assert_streq(b, "/x", "canonical path_only");
+    return 0;
+}
+
 fn test_sandhi_identity() {
-    assert_streq(sandhi_server_version(), "0.2.0", "server version string (module retains its landing version)");
+    assert_streq(sandhi_server_version(), "0.9.2", "server version string (rename + alias landed at 0.9.2 closeout)");
     assert_eq(SANDHI_OK, 0, "error enum: OK is 0");
     assert_streq(sandhi_err_kind_name(SANDHI_ERR_TLS), "TLS", "error kind name");
     return 0;
@@ -437,14 +449,14 @@ fn test_client_host_header() {
 
 fn test_client_build_request_get() {
     var req = _sandhi_client_build_request("GET", "/path", "example.com", 0, 0);
-    var expected = "GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: sandhi/0.9.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: sandhi/0.9.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: GET no body no user headers");
     return 0;
 }
 
 fn test_client_build_request_post() {
     var req = _sandhi_client_build_request("POST", "/api", "api.example.com", 0, 42);
-    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nUser-Agent: sandhi/0.9.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nUser-Agent: sandhi/0.9.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: POST emits Content-Length");
     return 0;
 }
@@ -452,7 +464,7 @@ fn test_client_build_request_post() {
 fn test_client_build_request_post_empty_body() {
     # POST with body_len 0 should still emit Content-Length: 0.
     var req = _sandhi_client_build_request("POST", "/ping", "example.com", 0, 0);
-    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nUser-Agent: sandhi/0.9.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nUser-Agent: sandhi/0.9.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: POST empty body");
     return 0;
 }
@@ -464,7 +476,7 @@ fn test_client_build_request_user_headers() {
     var req = _sandhi_client_build_request("GET", "/me", "api.example.com", h, 0);
     # User-supplied Accept != Accept-Encoding, so both defaults still inject.
     # User hasn't supplied User-Agent either, so the default lands.
-    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: sandhi/0.9.1\r\nAccept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
+    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: sandhi/0.9.2\r\nAccept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
     assert_streq(str_data(req), expected, "build: user headers serialized");
     return 0;
 }
@@ -1914,6 +1926,9 @@ fn main() {
 
     test_group("server/request_parse");
     test_request_parse();
+
+    test_group("server/rename_canonical");
+    test_server_rename_canonical();
 
     test_group("sandhi/identity");
     test_sandhi_identity();
