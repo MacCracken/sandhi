@@ -74,11 +74,11 @@ it demands enforcement.
 
 Since 0.9.0, sandhi refuses connections when a policy demands enforcement we
 can't deliver today. `sandhi_tls_policy_enforcement_available()` returns `0`
-until two upstream blockers clear:
-
-1. libssl-pthread-deadlock — `docs/issues/2026-04-24-libssl-pthread-deadlock.md`
-2. Stdlib `tls.cyr` missing SSL_CTX hook for SPKI extraction / mTLS /
-   trust-store override.
+until sandhi-side wire-up of the stdlib SSL_CTX hook (`tls_connect_with_ctx_hook`,
+shipped at cyrius v5.6.40) lands in `src/tls_policy/apply.cyr`. The two
+upstream blockers this once tracked both cleared 2026-04-25 — see
+`docs/issues/archive/2026-04-24-libssl-pthread-deadlock.md` and
+`docs/issues/archive/2026-04-24-stdlib-tls-alpn-hook.md`.
 
 So any of `_new_pinned()`, `_new_mtls()`, `_new_trust_store()` applied via
 `sandhi_conn_open_with_policy()` returns `0` today. Check the classification:

@@ -1,0 +1,92 @@
+# programs/_alpn_runtime_probe.cyr — verify ALPN runtime wire-up.
+#
+# Default conn-open advertises http/1.1 only — server should pick
+# http/1.1 (or nothing). With _sandhi_alpn_advertise_h2 flipped on,
+# server should pick h2 against an h2-capable origin.
+
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+fn report(label, conn) {
+    say(label);
+    say(": ");
+    var sel = sandhi_conn_alpn_selected(conn);
+    if (sel == 0) {
+        say("(no ALPN)\n");
+    } else {
+        say("'"); say(sel); say("'");
+        if (sandhi_conn_alpn_is_h2(conn) == 1) { say(" [h2=YES]"); }
+        else                                    { say(" [h2=no]"); }
+        say("\n");
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    var ip = 1 | (1 << 8) | (1 << 16) | (1 << 24);  # 1.1.1.1
+
+    say("=== default advertise (http/1.1 only) ===\n");
+    var c1 = sandhi_conn_open(ip, 443, 1, "one.one.one.one");
+    if (c1 == 0) { say("ABORT: c1 open failed\n"); return 1; }
+    report("c1", c1);
+    sandhi_conn_close(c1);
+
+    say("=== flip _sandhi_alpn_advertise_h2 = 1 ===\n");
+    _sandhi_alpn_advertise_h2 = 1;
+    var c2 = sandhi_conn_open(ip, 443, 1, "one.one.one.one");
+    if (c2 == 0) { say("ABORT: c2 open failed\n"); return 2; }
+    report("c2", c2);
+    sandhi_conn_close(c2);
+    _sandhi_alpn_advertise_h2 = 0;
+
+    say("=== back to default ===\n");
+    var c3 = sandhi_conn_open(ip, 443, 1, "one.one.one.one");
+    if (c3 == 0) { say("ABORT: c3 open failed\n"); return 3; }
+    report("c3", c3);
+    sandhi_conn_close(c3);
+
+    say("done\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

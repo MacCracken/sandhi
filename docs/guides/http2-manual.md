@@ -5,20 +5,19 @@ to use it when you have to.
 
 ## Why h2 is opt-in today
 
-Two upstream blockers keep h2 from being automatic:
+The two upstream TLS blockers that gated auto-selection cleared at cyrius
+v5.6.39 (libssl-pthread, see `docs/issues/archive/2026-04-24-libssl-pthread-deadlock.md`)
+and v5.6.40 (ALPN hook, see `docs/issues/archive/2026-04-24-stdlib-tls-alpn-hook.md`).
+Live HTTPS now works through `sandhi_http_get`. What remains is sandhi-side
+wire-up of the new stdlib hook into `src/tls_policy/alpn.cyr` plus a connection
+struct slot for the negotiated protocol — roughly 80 lines, untracked at 0.9.2
+because the public surface is frozen until the v5.7.0 fold ([ADR 0005](../adr/0005-public-surface-freeze-at-0-9-2.md)).
 
-1. **libssl-pthread-deadlock** — the stdlib `tls.cyr` hits a pthread-futex
-   deadlock on `SSL_connect`, so live HTTPS doesn't work. See
-   `docs/issues/2026-04-24-libssl-pthread-deadlock.md`.
-2. **Missing stdlib TLS hook for ALPN** — even with libssl fixed, we can't
-   advertise `h2` via ALPN without an `SSL_CTX` customization hook in stdlib.
-   See `docs/issues/2026-04-24-stdlib-tls-alpn-hook.md`.
-
-Until those clear, `sandhi_conn_alpn_is_h2(conn)` returns 0 for every live
-connection, and auto-selection correctly degrades to HTTP/1.1. The h2 code is
-fully exercised in `tests/h2.tcyr` against synthetic byte streams — frames,
+Until that wire-up lands, `sandhi_conn_alpn_is_h2(conn)` returns 0 for every
+live connection, and auto-selection correctly degrades to HTTP/1.1. The h2 code
+is fully exercised in `tests/h2.tcyr` against synthetic byte streams — frames,
 HPACK, preface/settings exchange, request/response — so the path is ready to
-go live the moment the TLS blockers clear.
+go live the moment the wire-up lands.
 
 ## Manual h2 path
 

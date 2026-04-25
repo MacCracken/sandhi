@@ -4,6 +4,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-04-25
+
+**TLS runtime wire-up** — internal-only fill-in of two surfaces that
+shipped stubbed in 0.8.x / 0.9.x. No new public verbs (ADR 0005
+freeze respected); the existing accessors stop returning 0 and start
+returning the real values.
+
+**634 assertions still green** (481 sandhi + 153 h2). Two existing
+tests (`test_p0_tls_policy_fail_closed`, `test_tls_enforcement_flag`)
+were rewritten to reflect the wired-up state — the
+"enforcement-stubbed" assertions had baked in the stub contract.
+
+### Toolchain pin
+- `cyrius.cyml [package].cyrius` 5.6.30 → 5.6.41 across the day.
+  Fix sequence: 5.6.39 cleared `libssl-pthread-deadlock`, 5.6.40
+  shipped the SSL_CTX hook (`tls_connect_with_ctx_hook` + `tls_dlsym`),
+  5.6.41 fixed a SysV-ABI calling-convention regression that broke
+  `tls_connect` when invoked from a 7-param Cyrius frame. All three
+  issue docs now live in `docs/issues/archive/`.
+
+### http
+- `src/http/conn.cyr` — ALPN runtime wired. HTTPS connections call
+  stdlib's `tls_connect_with_ctx_hook` with a hook that runs
+  `SSL_CTX_set_alpn_protos`; post-handshake, `SSL_get0_alpn_selected`
+  copies the negotiated protocol into a new `SANDHI_CONN_OFF_ALPN_DATA`
+  slot on the conn struct (struct grows 24 → 32 bytes). Default
+  advertise is `http/1.1` only — matches what the 1.1 client path
+  can speak. A module-level `_sandhi_alpn_advertise_h2` toggle lets
+  a future h2 auto-dispatcher claim h2 capability without a public
+  API change. Hook-override pair (`_sandhi_tls_hook_override` /
+  `_sandhi_tls_hook_override_ctx`) lets `tls_policy/apply.cyr` swap
+  in a richer policy-aware hook for the same open path.
+
+### tls_policy
+- `src/tls_policy/alpn.cyr` — `sandhi_conn_alpn_selected` and
+  `sandhi_conn_alpn_is_h2` now read the new conn-struct slot.
+  Previously `return 0` stubs.
+- `src/tls_policy/apply.cyr` — `sandhi_tls_policy_enforcement_available`
+  resolves nine libssl/libcrypto symbols via `tls_dlsym`
+  (`SSL_CTX_set_alpn_protos`, `SSL_CTX_load_verify_locations`,
+  `SSL_CTX_use_certificate_file`, `SSL_CTX_use_PrivateKey_file`,
+  `SSL_get(1)_peer_certificate`, `X509_get_pubkey`, `i2d_PUBKEY`,
+  `X509_free`, `EVP_PKEY_free`) and returns 1 when all load. The
+  policy-aware hook layers trust-store override + mTLS cert/key load
+  on top of ALPN advertise; post-handshake SPKI pinning extracts the
+  peer SPKI DER, hashes via stdlib `sigil`'s SHA-256, and compares
+  via `sandhi_fp_eq` (constant-time). Mismatch closes the conn and
+  fails the open with err=TLS (ADR 0004).
+
+### Verification (programs/_*.cyr — disposable probes, not in suite)
+- `_alpn_runtime_probe.cyr` — confirms the advertise toggle round-trips:
+  default → server picks `http/1.1`; flip-flag → server picks `h2`.
+- `_policy_runtime_probe.cyr` — confirms enforcement_available=1, default
+  policy opens, wrong-pin closes with err=TLS, bad-trust-store path
+  closes with err=TLS.
+- `_https_oneshot.cyr` (canonical) — `sandhi_http_get("https://example.com/")`
+  returns 200 / 528 bytes through the full sandhi stack.
+
+### Stdlib deps
+- Added `sigil` already in 0.7.x; this release exercises `sha256` for
+  SPKI hashing.
+
 ## [0.9.2] — 2026-04-24
 
 **Pre-fold closeout** — last sandhi-side release before the v5.7.0

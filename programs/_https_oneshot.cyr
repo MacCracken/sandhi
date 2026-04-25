@@ -1,10 +1,3 @@
-# programs/http-probe.cyr — ad-hoc live-HTTP(S) round-trip check.
-#
-# Not part of the test suite (requires network). Run manually:
-#   cyrius run programs/http-probe.cyr <url>
-# Example:
-#   cyrius run programs/http-probe.cyr https://example.com/
-
 include "src/error.cyr"
 include "src/obs/trace.cyr"
 include "src/http/headers.cyr"
@@ -46,37 +39,22 @@ include "src/main.cyr"
 
 fn main() {
     alloc_init();
-    args_init();
-
-    var url = "http://example.com/";
-    if (argc() >= 2) {
-        var arg = argv(1);
-        if (arg != 0 && load8(arg) != 0) { url = arg; }
-    }
-
+    var url = "https://example.com/";
     syscall(1, 1, "GET ", 4);
     syscall(1, 1, url, strlen(url));
     syscall(1, 1, "\n", 1);
-
     var r = sandhi_http_get(url, 0);
     var ek = sandhi_http_err_kind(r);
     if (ek != SANDHI_OK) {
-        syscall(1, 1, "error kind: ", 12);
-        var kname = sandhi_err_kind_name(ek);
-        syscall(1, 1, kname, strlen(kname));
+        syscall(1, 1, "err: ", 5);
+        syscall(1, 1, sandhi_err_kind_name(ek), strlen(sandhi_err_kind_name(ek)));
         syscall(1, 1, "\n", 1);
         return 1;
     }
-
     syscall(1, 1, "status: ", 8);
     fmt_int(sandhi_http_status(r));
     syscall(1, 1, "\nbody_len: ", 11);
     fmt_int(sandhi_http_body_len(r));
-    syscall(1, 1, "\nfirst 120 bytes of body:\n", 26);
-    var body = sandhi_http_body(r);
-    var blen = sandhi_http_body_len(r);
-    if (blen > 120) { blen = 120; }
-    syscall(1, 1, body, blen);
     syscall(1, 1, "\n", 1);
     return 0;
 }

@@ -5,7 +5,7 @@ description = "Service-boundary layer for AGNOS — shared HTTP/TCP/TLS + servic
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sandhi"
 language = "cyrius"
-cyrius = "5.6.30"
+cyrius = "5.6.41"
 
 # sandhi (सन्धि — junction, connection, joining) is the service-boundary
 # layer for AGNOS. Named 2026-04-24 after extensive search confirmed the

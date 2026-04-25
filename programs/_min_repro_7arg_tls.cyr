@@ -1,0 +1,55 @@
+# Minimum repro: tls_connect from a 7-arg frame crashes; 6-arg frame ok.
+# Same caller/callee. Only difference is one extra never-used arg.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/syscalls.cyr"
+include "lib/mmap.cyr"
+include "lib/fnptr.cyr"
+include "lib/dynlib.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/tls.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+fn six(addr, port, use_tls, sni, a, b) {
+    var fd_r = tcp_socket();
+    var fd = payload(fd_r);
+    sock_connect(fd, addr, port);
+    if (tls_available() == 0) { sock_close(fd); return 0; }
+    say("  [6] pre tls_connect\n");
+    var t = tls_connect(fd, sni);
+    say("  [6] post tls_connect: "); fmt_int(t); say("\n");
+    if (t != 0) { tls_close(t); }
+    sock_close(fd);
+    return 0;
+}
+
+fn seven(addr, port, use_tls, sni, a, b, c) {
+    var fd_r = tcp_socket();
+    var fd = payload(fd_r);
+    sock_connect(fd, addr, port);
+    if (tls_available() == 0) { sock_close(fd); return 0; }
+    say("  [7] pre tls_connect\n");
+    var t = tls_connect(fd, sni);
+    say("  [7] post tls_connect: "); fmt_int(t); say("\n");
+    if (t != 0) { tls_close(t); }
+    sock_close(fd);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    var ip = 1 | (1 << 8) | (1 << 16) | (1 << 24);
+    say("=== 6-arg ===\n");
+    six(ip, 443, 1, "one.one.one.one", 0, 0);
+    say("=== 7-arg ===\n");
+    seven(ip, 443, 1, "one.one.one.one", 0, 0, 0);
+    say("done\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

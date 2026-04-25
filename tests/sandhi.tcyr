@@ -845,10 +845,19 @@ fn test_p0_redirect_strip_sensitive() {
 }
 
 fn test_p0_tls_policy_fail_closed() {
+    # Originally guarded the fail-closed gate when enforcement was
+    # stubbed (sandhi_tls_policy_enforcement_available() == 0 →
+    # err=TLS pre-emptively). With enforcement wired since cyrius
+    # v5.6.41 the gate code still exists in apply.cyr but never
+    # fires in normal operation. We retain the smoke for the open
+    # path executing under a pinned policy: the call runs, the
+    # connection fails (port 1 has no listener), and last_err is a
+    # legitimate CONNECT classification (the SPKI check never gets
+    # to run because we never handshook).
     var p = sandhi_tls_policy_new_pinned("aabb");
     var c = sandhi_conn_open_with_policy(0x0100007F, 1, 1, "x", p);
-    assert_eq(c, 0, "fail closed");
-    assert_eq(sandhi_conn_last_open_err(), SANDHI_CONN_OPEN_TLS, "err=TLS");
+    assert_eq(c, 0, "policy path fails on dead port");
+    assert_eq(sandhi_conn_last_open_err(), SANDHI_CONN_OPEN_CONNECT, "err=CONNECT");
     return 0;
 }
 
@@ -1729,8 +1738,15 @@ fn test_fp_encode_bytes() {
 }
 
 fn test_tls_enforcement_flag() {
-    # Surface shipped but enforcement-available flag reflects the stub state.
-    assert_eq(sandhi_tls_policy_enforcement_available(), 0, "tls: enforcement stubbed today");
+    # Wired since cyrius v5.6.41 — enforcement_available resolves the
+    # libssl/libcrypto symbols (SSL_CTX_load_verify_locations,
+    # SSL_CTX_use_certificate_file, SSL_CTX_use_PrivateKey_file,
+    # SSL_get(1)_peer_certificate, X509_get_pubkey, i2d_PUBKEY,
+    # X509_free, EVP_PKEY_free) via tls_dlsym and returns 1 when all
+    # of them load. Test asserts the wired-up state. If a future
+    # upstream reshuffle drops one of those symbols this trips,
+    # which is exactly the canary we want.
+    assert_eq(sandhi_tls_policy_enforcement_available(), 1, "tls: enforcement wired");
     return 0;
 }
 

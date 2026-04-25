@@ -73,7 +73,7 @@ syscall(60, exit_code);
 - **[Getting started](docs/guides/getting-started.md)** — build, smallest GET, response accessors
 - **[Timeouts](docs/guides/timeouts.md)** — connect_ms / read_ms / write_ms / total_ms
 - **[Connection pool](docs/guides/connection-pool.md)** — keep-alive semantics, route isolation
-- **[HTTP/2 (manual)](docs/guides/http2-manual.md)** — opt-in path until libssl-pthread-deadlock clears
+- **[HTTP/2 (manual)](docs/guides/http2-manual.md)** — explicit opt-in path; auto-selection wire-up pending sandhi-side as of 0.9.2
 - **[Redirects + security](docs/guides/redirects-and-security.md)** — cross-origin credential strip, https→http refusal
 - **[TLS policy](docs/guides/tls-policy.md)** — pinning, mTLS, fail-closed semantics
 - **[Server](docs/guides/server.md)** — minimal accept loop, request parsing, smuggling guards
@@ -108,10 +108,15 @@ Each AGNOS crate that sandhi serves has a coordination doc in [`docs/issues/`](d
 
 ## Known blockers
 
-- [`libssl-pthread-deadlock`](docs/issues/2026-04-24-libssl-pthread-deadlock.md) — `SSL_connect` deadlocks on a futex-wait in static cyrius binaries. Plain HTTP works; live HTTPS gated.
-- [`stdlib-tls-alpn-hook`](docs/issues/2026-04-24-stdlib-tls-alpn-hook.md) — stdlib `tls_connect` doesn't expose the SSL_CTX so sandhi can't advertise ALPN. Auto-selection between h2 and 1.1 falls back to 1.1 until both clear.
+All upstream blockers cleared as of cyrius v5.6.41 (2026-04-25). Live HTTPS through `sandhi_http_get` round-trips real HTML from `https://example.com/`. ALPN advertise lands too — server-side h2 selection verified at the stdlib hook level.
 
-When both clear, ~80 lines of sandhi-side wiring lights up live HTTPS + ALPN + auto-selection without any consumer change.
+Resolved log:
+
+- ~~[`libssl-pthread-deadlock`](docs/issues/archive/2026-04-24-libssl-pthread-deadlock.md)~~ — ✅ cyrius v5.6.39. `tls_connect` round-trips real HTTPS bytes.
+- ~~[`stdlib-tls-alpn-hook`](docs/issues/archive/2026-04-24-stdlib-tls-alpn-hook.md)~~ — ✅ cyrius v5.6.40. `tls_connect_with_ctx_hook` + `tls_dlsym` ship the requested Option A.
+- ~~[`cyrius-7arg-frame-tls-connect-segfault`](docs/issues/archive/2026-04-25-cyrius-7arg-frame-tls-connect-segfault.md)~~ — ✅ cyrius v5.6.41. SysV-ABI calling-convention regression resolved. `sandhi_conn_open_fully_timed` is no longer a SIGSEGV trap; live HTTPS through sandhi works end-to-end.
+
+Sandhi-side ALPN runtime + auto-selection wire-up (~80 lines in `src/tls_policy/alpn.cyr` + `src/http/conn.cyr`) is now ungated. Consumer-visible behavior change at wire-up: `sandhi_http_request_auto` will start picking h2 transparently where the server supports it.
 
 ## Build
 

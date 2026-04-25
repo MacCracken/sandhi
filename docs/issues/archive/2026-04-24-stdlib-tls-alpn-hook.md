@@ -1,6 +1,19 @@
 # 2026-04-24 — stdlib `tls.cyr` needs an SSL_CTX hook for ALPN
 
-**Status**: Open — filed 0.8.1
+**Status**: ✅ Resolved upstream — cyrius v5.6.40 (2026-04-24).
+Implemented Option A from this filing. `lib/tls.cyr` now exposes
+`tls_connect_with_ctx_hook(sock, host, hook_fp, hook_ctx)` plus
+`tls_dlsym(name)` (resolves any libssl/libcrypto symbol via the
+fdlopen-managed handle stdlib already holds — no per-call
+bootstrap). Default `tls_connect` collapsed to a 1-line wrapper
+passing zeros. End-to-end verified: ALPN `h2,http/1.1` advertised
+to Cloudflare 1.1.1.1:443 → server picks `h2`, read back via
+`SSL_get0_alpn_selected`. See cyrius
+`docs/development/completed-phases.md` § v5.6.40 for shipped
+detail. Pin sandhi to cyrius v5.6.40+ to consume; sandhi-side
+wire-up of the new hook is the remaining 0.8.x work.
+
+**Filed**: 0.8.1
 **Side**: Upstream (cyrius stdlib)
 **Sandhi-side surface**: `src/tls_policy/alpn.cyr` (Bite 4 of 0.8.0).
 
@@ -104,3 +117,16 @@ selecting h2 transparently. No consumer code change.
   wiring landing. No urgency from sandhi — degradation to HTTP/1.1
   is the same path consumers use today, so we lose nothing while
   this remains open.
+- **2026-04-25** — Verified end-to-end on cyrius v5.6.40. Bumped
+  sandhi pin 5.6.38 → 5.6.40. Stdlib-only repro
+  `programs/_alpn_hook_probe.cyr`: `tls_dlsym` resolves both
+  `SSL_CTX_set_alpn_protos` and `SSL_get0_alpn_selected`; hook
+  applies `h2,http/1.1` advertise; `tls_connect_with_ctx_hook`
+  handshake to `1.1.1.1:443` succeeds; post-handshake
+  `SSL_get0_alpn_selected` returns `h2`. Cloudflare picked HTTP/2
+  from the advertise list. **Issue closed**. Sandhi-side wire-up
+  of the new hook (~80 lines in `src/tls_policy/alpn.cyr` +
+  `src/http/conn.cyr`) is now ungated from this side, but live
+  HTTPS through `sandhi_http_get` is currently blocked by a
+  separate cyrius regression — see
+  `2026-04-25-cyrius-7arg-frame-tls-connect-segfault.md`.

@@ -11,20 +11,13 @@
 # Example for "h2, http/1.1":
 #   02 'h' '2' 08 'h' 't' 't' 'p' '/' '1' '.' '1'   (13 bytes)
 #
-# STATUS (Bite 4 of 0.8.0): wire-format encoding ships; runtime
-# negotiation is **stubbed** pending the libssl-pthread-deadlock
-# blocker (`docs/issues/2026-04-24-libssl-pthread-deadlock.md`).
-# Bite 7's auto-selection logic queries `sandhi_conn_alpn_selected`
-# which returns 0 (= "no h2 negotiated") today — auto-selection
-# correctly degrades to HTTP/1.1, which is the only protocol that
-# actually works right now.
-#
-# When libssl works, filling in the runtime path is ~30 lines:
-# resolve `SSL_CTX_set_alpn_protos` + `SSL_get0_alpn_selected` via
-# `_dynlib_resolve_global` (same pattern stdlib `tls.cyr` uses for
-# everything else), call them in `tls_connect`'s SSL_CTX setup, and
-# stash the selected protocol on the conn struct. No public-API
-# change.
+# STATUS: wired end-to-end since cyrius v5.6.41 (the v5.6.40 stdlib
+# hook + the v5.6.41 calling-convention fix together). HTTPS
+# connections opened via `sandhi_conn_open*` advertise
+# `h2,http/1.1` and store whatever the server picks at
+# `SANDHI_CONN_OFF_ALPN_DATA`. The runtime lives in
+# `src/http/conn.cyr` (cached fn pointers, hook callback,
+# post-handshake read); this file's accessors just load the slot.
 
 # Default ALPN proto list — h2 preferred, http/1.1 fallback. Most
 # h2-capable servers honor this preference.
@@ -68,26 +61,18 @@ fn sandhi_alpn_encode_protos(protos_csv, out, out_cap) {
 }
 
 # ================================================================
-# Selection accessor (stubbed until libssl-pthread-deadlock clears)
+# Selection accessors
 # ================================================================
-#
-# Returns the negotiated ALPN protocol as a cstr ("h2", "http/1.1",
-# or 0 / empty if ALPN didn't fire on this connection). Today this
-# always returns 0 — sandhi can't actually run TLS yet, so ALPN
-# never negotiates anything. Bite 7 (auto-selection) handles 0 as
-# "use HTTP/1.1", which is correct degradation behavior.
-#
-# When real ALPN wires up, the conn struct gets an `alpn_selected`
-# slot populated post-handshake from `SSL_get0_alpn_selected`. This
-# accessor reads that slot; the stub is just `return 0`.
+
+# Returns the negotiated ALPN protocol as a NUL-terminated cstr
+# ("h2", "http/1.1", or 0 if ALPN didn't fire). The cstr is owned
+# by the conn — do not free, do not retain past `sandhi_conn_close`.
 fn sandhi_conn_alpn_selected(conn) {
     if (conn == 0) { return 0; }
-    # Stubbed — see top-of-file STATUS.
-    return 0;
+    return load64(conn + SANDHI_CONN_OFF_ALPN_DATA);
 }
 
-# Convenience: 1 if h2 was negotiated, 0 otherwise. Bite 7's
-# dispatch logic calls this directly.
+# 1 if h2 was negotiated, 0 otherwise.
 fn sandhi_conn_alpn_is_h2(conn) {
     var sel = sandhi_conn_alpn_selected(conn);
     if (sel == 0) { return 0; }
@@ -97,5 +82,5 @@ fn sandhi_conn_alpn_is_h2(conn) {
 }
 
 fn sandhi_alpn_version() {
-    return "0.7.4-bite4";
+    return "0.9.3";
 }

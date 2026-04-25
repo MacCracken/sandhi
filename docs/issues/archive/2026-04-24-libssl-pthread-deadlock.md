@@ -1,8 +1,9 @@
 # 2026-04-24 — `SSL_connect` deadlocks in libssl's pthread-lock path
 
-**Status**: Open — surfaced at cyrius v5.6.29-1 after previous blocker closed
+**Status**: ✅ **RESOLVED** at cyrius v5.6.39 (sandhi pin now `5.6.41`; bumped 5.6.38 → 5.6.40 → 5.6.41 across the same day for the ALPN-hook ship and then the 7-arg-frame fix).
+Stdlib-only `programs/tls-raw-probe.cyr` now completes a full HTTPS round-trip to `1.1.1.1:443` (handshake → request → 200 OK → first 60 bytes of response). Live `sandhi_http_get("https://example.com/")` returns 200 / 528 bytes since 5.6.41 cleared the last gating issue.
 **Reporter**: sandhi M2 HTTPS re-verification
-**Toolchain pin**: `cyrius = "5.6.30"` (sandhi `cyrius.cyml`) — symptom identical on 5.6.29-1 and 5.6.30; 5.6.30 stdlib changes are doc-only in `fdlopen.cyr` and don't touch the tls/dynlib path.
+**Toolchain pin**: `cyrius = "5.6.41"` (sandhi `cyrius.cyml`) — fix appeared between 5.6.30 and 5.6.39.
 **Host**: Arch Linux x86_64, kernel 6.18.22-1-lts, glibc 2.43+r5, openssl 3.x at `/usr/lib/libssl.so.3`
 **Predecessor**: [`archive/2026-04-24-fdlopen-getaddrinfo-blocked.md`](archive/2026-04-24-fdlopen-getaddrinfo-blocked.md) — closed v5.6.29-1 with both sides fixing their respective bugs; **this is the next-layer blocker that closure revealed**, not a regression of that work.
 
@@ -100,3 +101,4 @@ One specific thing that would help on the cyrius side: **add a live-handshake te
 
 - **2026-04-24** — Filed immediately after predecessor closed at v5.6.29-1. Both sides of that issue had real fixes; this is the next layer surfaced by getting past the previous one. No fix proposed — sandhi's track record on proposing cyrius-layer fixes is 0-for-1 (the previous issue's A/B fix proposals solved a non-existent collision). Leaving the root-cause analysis to the cyrius agent.
 - **2026-04-24 (later)** — Re-tested against cyrius 5.6.30. Deadlock pattern identical (`futex(FUTEX_WAIT_PRIVATE, 2, NULL)` after tls_connect entry). 5.6.30 stdlib changes were doc-only in `fdlopen.cyr` (stale "KNOWN-INCOMPLETE v5.5.29" comment replaced with correct "complete since v5.5.34" text); no functional changes to tls/dynlib would have been expected to fix this. Confirming the blocker is unchanged and sandhi pin is now `5.6.30`.
+- **2026-04-25** — **Resolved.** Bumped sandhi pin to `5.6.38` (CLI ships `5.6.39`). Stdlib-only `programs/tls-raw-probe.cyr` now runs to completion: `tls_available → 1`, `tls_connect → ctx`, `tls_write → 60`, `tls_read → 1369`, first 60 bytes are a real `HTTP/1.1 200 OK\r\nDate: …` response from 1.1.1.1. The futex-wait pattern is gone — handshake bytes hit the wire and a response comes back. No sandhi-side change was required for the unblock; the pthread/locale/TLS bootstrap that was missing is now in place upstream. **Followup blocker found, separate issue**: `tls_connect` segfaults when invoked from a Cyrius function whose 7th arg is on the stack (sandhi's own `sandhi_conn_open_fully_timed` has 7 params). See `2026-04-25-cyrius-7arg-frame-tls-connect-segfault.md` — sandhi-side workaround tracked there. Live HTTPS through `sandhi_http_get` is gated on that issue, not this one.

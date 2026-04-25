@@ -1,12 +1,30 @@
-# 003 — Surfaces ship, runtime stubs pending libssl
+# 003 — Surfaces shipped stubbed; wire-up landed at 0.9.3
 
-Several sandhi modules ship fully-designed public surfaces whose
-runtime path delegates to a stub. This is a deliberate shape: the
-blocker isn't the sandhi-side design, it's a pair of external
-asks (one libssl, one stdlib) that need to clear first. Shipping
-the surface now means consumers can write against the permanent
-API today; when the blockers clear, the runtime fills in without
-a public-API change and without a consumer code churn.
+Several sandhi modules originally shipped fully-designed public
+surfaces whose runtime path delegated to a stub. This was a
+deliberate shape: the blocker wasn't the sandhi-side design, it
+was a pair of external asks (one libssl, one stdlib) that needed
+to clear first. Shipping the surface while the runtime stubbed
+let consumers write against the permanent API immediately; when
+the blockers cleared, the runtime filled in without a public-API
+change and without a consumer code churn.
+
+> **Status — 2026-04-25 (closed):** All three external blockers
+> cleared between cyrius v5.6.39 and v5.6.41 (see `docs/issues/archive/`).
+> Sandhi-side wire-up landed at 0.9.3 — `tls_policy/apply.cyr`
+> resolves nine libssl/libcrypto symbols via stdlib `tls_dlsym`
+> and exercises them through a `tls_connect_with_ctx_hook`
+> callback (ALPN advertise + trust-store override + mTLS load) +
+> a post-handshake SPKI extraction; `tls_policy/alpn.cyr`'s
+> `_selected` / `_is_h2` accessors read a new
+> `SANDHI_CONN_OFF_ALPN_DATA` slot on the conn struct, populated
+> from `SSL_get0_alpn_selected`. `sandhi_tls_policy_enforcement_available()`
+> returns 1 in normal operation; the fail-closed gate code stays
+> in the source as a defense against future symbol regression
+> (the test suite asserts `== 1` so a regression trips loud).
+> This document is preserved as historical context for why the
+> surface-first / runtime-second pattern was chosen. Sections
+> below describe the original stub state, not the current state.
 
 ## What's stubbed
 
@@ -37,11 +55,11 @@ What's needed to un-stub:
   (SPKI extraction for pin comparison).
 - A stdlib-side hook to customize the `SSL_CTX` that stdlib
   `tls.cyr` creates privately inside `tls_connect` — see
-  `docs/issues/2026-04-24-stdlib-tls-alpn-hook.md` for the
+  `docs/issues/archive/2026-04-24-stdlib-tls-alpn-hook.md` for the
   function-pointer hook ask.
 
 Plus the libssl-pthread-deadlock blocker
-(`docs/issues/2026-04-24-libssl-pthread-deadlock.md`) — until
+(`docs/issues/archive/2026-04-24-libssl-pthread-deadlock.md`) — until
 `SSL_connect` stops hanging on a futex, live HTTPS doesn't work
 at all, which is the prerequisite for any of the above exercising
 anything.
@@ -153,9 +171,9 @@ state at runtime:
 - `src/tls_policy/alpn.cyr` — ALPN encoder + stubbed selection.
 - `src/http/h2/` — protocol stack (complete, tested against
   synthetic streams).
-- `docs/issues/2026-04-24-libssl-pthread-deadlock.md` — the
+- `docs/issues/archive/2026-04-24-libssl-pthread-deadlock.md` — the
   SSL_connect futex blocker.
-- `docs/issues/2026-04-24-stdlib-tls-alpn-hook.md` — the stdlib
+- `docs/issues/archive/2026-04-24-stdlib-tls-alpn-hook.md` — the stdlib
   `tls.cyr` SSL_CTX factory hook ask.
 - CHANGELOG 0.6.0, 0.8.0, 0.8.1, 0.9.0 P0 #5 — when the surface
   landed and when the fail-closed semantics firmed up.

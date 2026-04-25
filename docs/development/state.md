@@ -4,7 +4,9 @@
 
 ## Version
 
-**0.9.2** — 2026-04-24. **Pre-fold closeout.** Server symbol rename: every public `http_*` function in `src/server/mod.cyr` renamed to `sandhi_server_*` for consistency with the rest of the sandhi surface. Transitional `http_*` aliases retained through 0.9.x — all 23 affected names get thin tail-call wrappers; aliases drop at 1.0.0 (v5.7.0 fold). First formal `dist/sandhi.cyr` bundle via `cyrius distlib` — 8564 lines / 335 KB / `Version: 0.9.2` header. Surface-freeze policy added to CLAUDE.md as a hard constraint: no new public verbs land between 0.9.2 and 1.0.0; fold ships everything permanently into stdlib. **634 assertions green (481 sandhi + 153 h2; +2 server-rename regression).** This is the last sandhi-side release before the fold.
+**0.9.3** — 2026-04-25. **TLS runtime wire-up.** Internal-only fill of two surfaces that shipped stubbed in 0.8.x / 0.9.x — no new public verbs (ADR 0005 freeze respected). `tls_policy/apply.cyr` resolves nine libssl/libcrypto symbols via stdlib `tls_dlsym` and runs them through a `tls_connect_with_ctx_hook` callback (ALPN advertise + trust-store override + mTLS cert/key load) plus a post-handshake SPKI extraction (X509_get_pubkey + i2d_PUBKEY → SHA-256 → constant-time hex compare). `tls_policy/alpn.cyr`'s `_selected` / `_is_h2` accessors read a new `SANDHI_CONN_OFF_ALPN_DATA` slot on the conn struct (struct 24 → 32 bytes). `sandhi_http_get("https://example.com/")` returns 200 / 528 bytes. Toolchain pin bumped 5.6.30 → 5.6.41 across the day; libssl-pthread / ALPN-hook / 7-arg-frame-segfault all resolved upstream. **634 assertions green (481 sandhi + 153 h2; two existing tests rewritten to reflect wired-up state).**
+
+**0.9.2** — 2026-04-24. **Pre-fold closeout.** Server symbol rename: every public `http_*` function in `src/server/mod.cyr` renamed to `sandhi_server_*` for consistency with the rest of the sandhi surface. Transitional `http_*` aliases retained through 0.9.x — all 23 affected names get thin tail-call wrappers; aliases drop at 1.0.0 (v5.7.0 fold). First formal `dist/sandhi.cyr` bundle via `cyrius distlib` — 8564 lines / 335 KB / `Version: 0.9.2` header. Surface-freeze policy added to CLAUDE.md as a hard constraint: no new public verbs land between 0.9.2 and 1.0.0; fold ships everything permanently into stdlib. **634 assertions green (481 sandhi + 153 h2; +2 server-rename regression).**
 
 **0.9.1** — 2026-04-24. **Phase 2 security sweep** — 7 P1 hardening fixes from the 0.7.0 audit. (1) URL port digit-count cap (5 max). (2) Header CRLF/NUL validation in `add`/`set`. (3) Strict CL parse — `"10, 20"` rejected, `+10` rejected, comma-or-non-digit fails. (4) SPKI constant-time compare via XOR accumulator. (5) SSE id-with-NUL ignored per WHATWG. (6) Header duplicate detection (Host / CL / TE) on both client and server. (7) SSE re-entrance fix — parser state moved from module-scope globals into a per-call ctx struct (~40 bytes); nested `sandhi_sse_parse` calls are now independent. P2 #21 (JSON escape state) traced and cleared — audit was incorrect, no fix needed. **632 assertions green (479 sandhi + 153 h2; +17 over 0.9.0).**
 
@@ -36,7 +38,7 @@
 
 ## Toolchain
 
-- **Cyrius pin**: `5.6.22` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `5.6.41` (in `cyrius.cyml [package].cyrius`)
 
 ## Fold-into-stdlib status
 

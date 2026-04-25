@@ -1,0 +1,102 @@
+# programs/_alpn_hook_probe.cyr — verify v5.6.40 tls_connect_with_ctx_hook
+# end-to-end: build SSL_CTX with ALPN advertise list, complete handshake,
+# read SSL_get0_alpn_selected post-handshake.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/syscalls.cyr"
+include "lib/mmap.cyr"
+include "lib/fnptr.cyr"
+include "lib/dynlib.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/tls.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+# Hook resolves SSL_CTX_set_alpn_protos and applies an h2,http/1.1 advertise.
+# hook_ctx points to a 16-byte buffer: { protos_ptr, protos_len }.
+fn _alpn_hook(hook_ctx, ssl_ctx) {
+    var fp = tls_dlsym("SSL_CTX_set_alpn_protos");
+    if (fp == 0) { return 1; }
+    var protos = load64(hook_ctx);
+    var plen   = load64(hook_ctx + 8);
+    # SSL_CTX_set_alpn_protos returns 0 on success.
+    var rc = fncall3(fp, ssl_ctx, protos, plen);
+    return rc;
+}
+
+fn main() {
+    alloc_init();
+
+    say("[1] tls_available\n");
+    if (tls_available() == 0) { say("ABORT: tls_available 0\n"); return 1; }
+
+    say("[2] resolve SSL_CTX_set_alpn_protos via tls_dlsym\n");
+    var fp_set = tls_dlsym("SSL_CTX_set_alpn_protos");
+    say("    -> "); fmt_int(fp_set); say("\n");
+    if (fp_set == 0) { say("ABORT: alpn_protos sym missing\n"); return 2; }
+
+    say("[3] resolve SSL_get0_alpn_selected via tls_dlsym\n");
+    var fp_get = tls_dlsym("SSL_get0_alpn_selected");
+    say("    -> "); fmt_int(fp_get); say("\n");
+    if (fp_get == 0) { say("ABORT: alpn_selected sym missing\n"); return 3; }
+
+    say("[4] tcp_socket + connect 1.1.1.1:443\n");
+    var fd = payload(tcp_socket());
+    var ip = 1 | (1 << 8) | (1 << 16) | (1 << 24);
+    sock_connect(fd, ip, 443);
+
+    # Build ALPN wire-format advertise: \x02 'h' '2' \x08 'h' 't' 't' 'p' '/' '1' '.' '1'
+    var protos = alloc(16);
+    store8(protos + 0, 2);
+    store8(protos + 1, 104);  # 'h'
+    store8(protos + 2, 50);   # '2'
+    store8(protos + 3, 8);
+    store8(protos + 4, 104);  # 'h'
+    store8(protos + 5, 116);  # 't'
+    store8(protos + 6, 116);  # 't'
+    store8(protos + 7, 112);  # 'p'
+    store8(protos + 8, 47);   # '/'
+    store8(protos + 9, 49);   # '1'
+    store8(protos + 10, 46);  # '.'
+    store8(protos + 11, 49);  # '1'
+    var plen = 12;
+
+    var hook_ctx = alloc(16);
+    store64(hook_ctx, protos);
+    store64(hook_ctx + 8, plen);
+
+    say("[5] tls_connect_with_ctx_hook (advertise h2,http/1.1)\n");
+    var ctx = tls_connect_with_ctx_hook(fd, "one.one.one.one", &_alpn_hook, hook_ctx);
+    say("    ctx = "); fmt_int(ctx); say("\n");
+    if (ctx == 0) { say("ABORT: handshake failed\n"); sock_close(fd); return 5; }
+
+    # Pull SSL handle out (offset 8 per stdlib layout).
+    var ssl = load64(ctx + 8);
+    say("[6] SSL_get0_alpn_selected\n");
+    var out_p = alloc(8);
+    var out_l = alloc(8);
+    store64(out_p, 0);
+    store64(out_l, 0);
+    fncall3(fp_get, ssl, out_p, out_l);
+    var data = load64(out_p);
+    var dlen = load64(out_l);
+    say("    selected_len = "); fmt_int(dlen); say("\n");
+    if (dlen > 0) {
+        say("    selected = '");
+        syscall(1, 1, data, dlen);
+        say("'\n");
+    } else {
+        say("    (no ALPN selected)\n");
+    }
+
+    tls_close(ctx);
+    sock_close(fd);
+    say("done\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

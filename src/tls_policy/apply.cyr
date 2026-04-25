@@ -4,36 +4,193 @@
 # sni_host, policy)` — parallel to `sandhi_conn_open` but honors a
 # caller-supplied TLS policy.
 #
-# STATUS (2026-04-24): surface ships clean. Enforcement is
-# STUBBED pending the libssl pthread-lock deadlock logged in
-# `docs/issues/2026-04-24-libssl-pthread-deadlock.md`. When that
-# fix lands (`SSL_connect` stops hanging on a futex), filling in
-# the OpenSSL calls below is a ~50-line patch — no API shape
-# change, no consumer code churn.
+# STATUS (2026-04-25): wired since cyrius v5.6.41 (the v5.6.40
+# stdlib hook + the v5.6.41 calling-convention fix). Trust store
+# override, mTLS cert/key load, and SPKI pinning are all live.
 #
-# What's deferred and why:
+# How it fits together:
 #
-#   - SPKI extraction from the peer cert requires `X509_get_pubkey`
-#     + `i2d_PUBKEY` + `SSL_get_peer_certificate` — OpenSSL symbols
-#     stdlib `lib/tls.cyr` does not currently resolve. Adding them
-#     sandhi-side works via `_dynlib_resolve_global` (same pattern
-#     tls.cyr uses) but is load-bearing on live-HTTPS working at all,
-#     which today it doesn't.
+#   - `_sandhi_apply_resolve_fns` lazily resolves the libssl/libcrypto
+#     symbols we need via stdlib `tls_dlsym`. If any are missing, the
+#     enforcement-available accessor stays at 0 and the open path
+#     fails closed when policy demands enforcement.
 #
-#   - mTLS requires `SSL_CTX_use_certificate_file` +
-#     `SSL_CTX_use_PrivateKey_file` plus customizing the SSL_CTX that
-#     tls.cyr creates privately inside `tls_connect`. sandhi needs to
-#     either (a) re-implement tls_connect with policy hooks, or
-#     (b) add an SSL_CTX factory callback to stdlib tls.cyr. Both
-#     paths land easier once tls.cyr itself runs reliably.
+#   - `_sandhi_apply_hook` is a `tls_connect_with_ctx_hook` callback
+#     that runs against the raw SSL_CTX. It applies ALPN advertise
+#     (mirroring the conn-level default), trust-store override, and
+#     mTLS cert/key load — all `SSL_CTX_set_*` calls that have to
+#     happen before SSL_new / SSL_connect.
 #
-#   - Custom trust store via `SSL_CTX_load_verify_locations` — same
-#     SSL_CTX customization concern as mTLS.
+#   - `_sandhi_check_spki` runs post-handshake. Pulls the peer cert
+#     via SSL_get_peer_certificate, serializes the SPKI to DER via
+#     X509_get_pubkey + i2d_PUBKEY, hashes with SHA-256, and compares
+#     to the policy's pinned hex via the constant-time
+#     `sandhi_fp_eq`. Mismatch closes the conn and fails the open
+#     with err=TLS, per ADR 0004.
 #
-# Until those fill in, `sandhi_conn_open_with_policy` delegates to
-# `sandhi_conn_open` and records what policy was requested so
-# integration tests (when they can run) can verify the policy shape
-# travelled through the API correctly.
+# Cached fn pointers
+# ==================
+
+var _sandhi_apply_set_alpn_fp        = 0;  # SSL_CTX_set_alpn_protos
+var _sandhi_apply_load_verify_fp     = 0;  # SSL_CTX_load_verify_locations
+var _sandhi_apply_use_cert_fp        = 0;  # SSL_CTX_use_certificate_file
+var _sandhi_apply_use_key_fp         = 0;  # SSL_CTX_use_PrivateKey_file
+var _sandhi_apply_get_peer_cert_fp   = 0;  # SSL_get_peer_certificate (1.1.x) / SSL_get1_peer_certificate (3.0+)
+var _sandhi_apply_get_pubkey_fp      = 0;  # X509_get_pubkey
+var _sandhi_apply_i2d_pubkey_fp      = 0;  # i2d_PUBKEY
+var _sandhi_apply_x509_free_fp       = 0;  # X509_free
+var _sandhi_apply_evp_pkey_free_fp   = 0;  # EVP_PKEY_free
+var _sandhi_apply_resolved           = 0;
+
+# OpenSSL constants we need.
+var _SANDHI_SSL_FILETYPE_PEM = 1;
+
+fn _sandhi_apply_resolve_fns() {
+    if (_sandhi_apply_resolved == 1) { return 0; }
+    _sandhi_apply_set_alpn_fp      = tls_dlsym("SSL_CTX_set_alpn_protos");
+    _sandhi_apply_load_verify_fp   = tls_dlsym("SSL_CTX_load_verify_locations");
+    _sandhi_apply_use_cert_fp      = tls_dlsym("SSL_CTX_use_certificate_file");
+    _sandhi_apply_use_key_fp       = tls_dlsym("SSL_CTX_use_PrivateKey_file");
+    # OpenSSL 3.0 renamed SSL_get_peer_certificate to
+    # SSL_get1_peer_certificate; the old name remained as a macro
+    # forwarding to the new one. The macro means symbol-by-name
+    # may resolve only the new spelling on some installs. Try the
+    # new name first, fall back to the legacy.
+    _sandhi_apply_get_peer_cert_fp = tls_dlsym("SSL_get1_peer_certificate");
+    if (_sandhi_apply_get_peer_cert_fp == 0) {
+        _sandhi_apply_get_peer_cert_fp = tls_dlsym("SSL_get_peer_certificate");
+    }
+    _sandhi_apply_get_pubkey_fp    = tls_dlsym("X509_get_pubkey");
+    _sandhi_apply_i2d_pubkey_fp    = tls_dlsym("i2d_PUBKEY");
+    _sandhi_apply_x509_free_fp     = tls_dlsym("X509_free");
+    _sandhi_apply_evp_pkey_free_fp = tls_dlsym("EVP_PKEY_free");
+    _sandhi_apply_resolved = 1;
+    return 0;
+}
+
+# Returns 1 if every fn ptr we need for policy enforcement (mTLS,
+# trust store, SPKI pinning) is resolved. Anything missing → 0,
+# and the fail-closed gate in sandhi_conn_open_with_policy refuses
+# to open enforcement-demanding policies.
+fn sandhi_tls_policy_enforcement_available() {
+    _sandhi_apply_resolve_fns();
+    if (_sandhi_apply_set_alpn_fp == 0)        { return 0; }
+    if (_sandhi_apply_load_verify_fp == 0)     { return 0; }
+    if (_sandhi_apply_use_cert_fp == 0)        { return 0; }
+    if (_sandhi_apply_use_key_fp == 0)         { return 0; }
+    if (_sandhi_apply_get_peer_cert_fp == 0)   { return 0; }
+    if (_sandhi_apply_get_pubkey_fp == 0)      { return 0; }
+    if (_sandhi_apply_i2d_pubkey_fp == 0)      { return 0; }
+    if (_sandhi_apply_x509_free_fp == 0)       { return 0; }
+    if (_sandhi_apply_evp_pkey_free_fp == 0)   { return 0; }
+    return 1;
+}
+
+# ================================================================
+# Hook context layout (24 bytes):
+#   +0   protos_ptr     (cstr — ALPN advertise wire bytes)
+#   +8   protos_len     (int  — length of the wire bytes)
+#   +16  policy_ptr     (sandhi_tls_policy* — for trust/mTLS lookup)
+# ================================================================
+
+fn _sandhi_apply_hook(hook_ctx, ssl_ctx) {
+    _sandhi_apply_resolve_fns();
+    if (hook_ctx == 0 || ssl_ctx == 0) { return 0; }
+
+    # ALPN advertise — non-fatal if missing, same shape as the
+    # plain ALPN hook in conn.cyr.
+    if (_sandhi_apply_set_alpn_fp != 0) {
+        var protos = load64(hook_ctx);
+        var plen   = load64(hook_ctx + 8);
+        if (protos != 0 && plen > 0) {
+            fncall3(_sandhi_apply_set_alpn_fp, ssl_ctx, protos, plen);
+        }
+    }
+
+    var policy = load64(hook_ctx + 16);
+    if (policy == 0) { return 0; }
+
+    # Custom trust store: SSL_CTX_load_verify_locations(ctx, file, dir).
+    # We always pass file=path, dir=0 — sandhi's policy is per-file,
+    # not per-directory.
+    var trust = sandhi_tls_policy_trust_store(policy);
+    if (trust != 0) {
+        if (_sandhi_apply_load_verify_fp == 0) { return 1; }
+        var rc = fncall3(_sandhi_apply_load_verify_fp, ssl_ctx, trust, 0);
+        if (rc != 1) { return 1; }
+    }
+
+    # mTLS: SSL_CTX_use_certificate_file + SSL_CTX_use_PrivateKey_file.
+    # Both expect SSL_FILETYPE_PEM (1). Order matters — load the cert
+    # before the key so libssl can verify they match.
+    var cert = sandhi_tls_policy_mtls_cert(policy);
+    var key  = sandhi_tls_policy_mtls_key(policy);
+    if (cert != 0) {
+        if (_sandhi_apply_use_cert_fp == 0) { return 1; }
+        var rc2 = fncall3(_sandhi_apply_use_cert_fp, ssl_ctx, cert, _SANDHI_SSL_FILETYPE_PEM);
+        if (rc2 != 1) { return 1; }
+    }
+    if (key != 0) {
+        if (_sandhi_apply_use_key_fp == 0) { return 1; }
+        var rc3 = fncall3(_sandhi_apply_use_key_fp, ssl_ctx, key, _SANDHI_SSL_FILETYPE_PEM);
+        if (rc3 != 1) { return 1; }
+    }
+
+    return 0;
+}
+
+# Post-handshake SPKI check. Returns 1 if the peer's SPKI hash
+# matches `expected_hex`, 0 on any failure (cert missing, pubkey
+# extraction failure, hash mismatch). Frees the X509 + EVP_PKEY it
+# pulls along the way.
+#
+# tls_ctx is the stdlib `tls_connect`-shaped 24-byte struct
+# (ssl_ctx / ssl / sock at offsets 0/8/16); we read SSL from
+# offset 8.
+fn _sandhi_check_spki(tls_ctx, expected_hex) {
+    _sandhi_apply_resolve_fns();
+    if (tls_ctx == 0 || expected_hex == 0) { return 0; }
+    if (_sandhi_apply_get_peer_cert_fp == 0)   { return 0; }
+    if (_sandhi_apply_get_pubkey_fp == 0)      { return 0; }
+    if (_sandhi_apply_i2d_pubkey_fp == 0)      { return 0; }
+    if (_sandhi_apply_x509_free_fp == 0)       { return 0; }
+    if (_sandhi_apply_evp_pkey_free_fp == 0)   { return 0; }
+
+    var ssl = load64(tls_ctx + 8);
+    if (ssl == 0) { return 0; }
+
+    var x509 = fncall1(_sandhi_apply_get_peer_cert_fp, ssl);
+    if (x509 == 0) { return 0; }
+
+    var pkey = fncall1(_sandhi_apply_get_pubkey_fp, x509);
+    if (pkey == 0) {
+        fncall1(_sandhi_apply_x509_free_fp, x509);
+        return 0;
+    }
+
+    # i2d_PUBKEY(pkey, NULL) returns required buffer size.
+    # Then i2d_PUBKEY(pkey, &buf) writes DER and advances *buf.
+    var size = fncall2(_sandhi_apply_i2d_pubkey_fp, pkey, 0);
+    if (size <= 0) {
+        fncall1(_sandhi_apply_evp_pkey_free_fp, pkey);
+        fncall1(_sandhi_apply_x509_free_fp, x509);
+        return 0;
+    }
+    var der = alloc(size);
+    var p_cell = alloc(8);
+    store64(p_cell, der);
+    var written = fncall2(_sandhi_apply_i2d_pubkey_fp, pkey, p_cell);
+    fncall1(_sandhi_apply_evp_pkey_free_fp, pkey);
+    fncall1(_sandhi_apply_x509_free_fp, x509);
+    if (written <= 0) { return 0; }
+
+    # SHA-256 the SPKI DER, hex-encode, constant-time compare.
+    var digest = alloc(32);
+    sha256(der, written, digest);
+    var actual_hex = sandhi_fp_encode_bytes(digest, 32);
+    if (sandhi_fp_eq(actual_hex, expected_hex) == 1) { return 1; }
+    return 0;
+}
 
 # Apply the given policy while opening a connection. `addr` + `port`
 # + `use_tls` + `sni_host` match `sandhi_conn_open`. `policy` may be
@@ -43,58 +200,79 @@
 #
 # 0.9.0 P0 #5 — fail-closed when policy demands enforcement we
 # can't deliver. If the caller built a `_pinned()` / `_mtls()` /
-# `_trust_store()` policy AND `enforcement_available()` is 0 (i.e.,
-# the libssl-pthread-deadlock + missing-symbol blockers haven't
-# cleared yet), we refuse the connection rather than silently
-# downgrade to the default verify path. Previous behavior — silent
-# downgrade — was surface-only-shipped scaffolding from 0.6.0; that
-# mode is now gone. Callers wanting the old "best effort" behavior
-# can pass `sandhi_tls_policy_new_default()` explicitly, which has
-# no enforcement requirements.
+# `_trust_store()` policy AND `enforcement_available()` is 0, we
+# refuse the connection rather than silently downgrade to the
+# default verify path. Callers wanting "best effort" behavior pass
+# `sandhi_tls_policy_new_default()` explicitly (no enforcement
+# requirements).
 fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
-    # Plain TCP — policy is irrelevant but we still return the conn
-    # so caller code doesn't branch on use_tls at the call site.
     if (use_tls == 0) {
         return sandhi_conn_open(addr, port, 0, sni_host);
     }
 
-    # Read policy fields. NULL policy is equivalent to the default
-    # (no enforcement requirements); skip the fail-closed gate.
-    if (policy != 0) {
-        var pinned = sandhi_tls_policy_pinned_hash(policy);
-        var mtls_cert = sandhi_tls_policy_mtls_cert(policy);
-        var trust_store = sandhi_tls_policy_trust_store(policy);
-        var demands_enforcement = 0;
-        if (pinned != 0)      { demands_enforcement = 1; }
-        if (mtls_cert != 0)   { demands_enforcement = 1; }
-        if (trust_store != 0) { demands_enforcement = 1; }
-        if (demands_enforcement == 1
-         && sandhi_tls_policy_enforcement_available() == 0) {
-            # Set the conn-open last-err so the http client's
-            # path-failure mapping surfaces TLS rather than CONNECT.
+    # Read policy fields. NULL policy is the default — no enforcement
+    # requirements, plain conn-open path.
+    if (policy == 0) {
+        return sandhi_conn_open(addr, port, 1, sni_host);
+    }
+
+    var pinned      = sandhi_tls_policy_pinned_hash(policy);
+    var mtls_cert   = sandhi_tls_policy_mtls_cert(policy);
+    var trust_store = sandhi_tls_policy_trust_store(policy);
+    var demands_enforcement = 0;
+    if (pinned != 0)      { demands_enforcement = 1; }
+    if (mtls_cert != 0)   { demands_enforcement = 1; }
+    if (trust_store != 0) { demands_enforcement = 1; }
+
+    if (demands_enforcement == 1
+     && sandhi_tls_policy_enforcement_available() == 0) {
+        _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+        return 0;
+    }
+
+    if (demands_enforcement == 0) {
+        # Default policy — same as plain open.
+        return sandhi_conn_open(addr, port, 1, sni_host);
+    }
+
+    # Build the policy hook ctx and route the open through
+    # conn.cyr's override mechanism.
+    _sandhi_alpn_init_wire();
+    var protos = _sandhi_alpn_h11_wire;
+    var plen   = _sandhi_alpn_h11_wire_len;
+    if (_sandhi_alpn_advertise_h2 == 1) {
+        protos = _sandhi_alpn_h2h11_wire;
+        plen   = _sandhi_alpn_h2h11_wire_len;
+    }
+    var hook_ctx = alloc(24);
+    store64(hook_ctx,      protos);
+    store64(hook_ctx + 8,  plen);
+    store64(hook_ctx + 16, policy);
+
+    _sandhi_tls_hook_override     = &_sandhi_apply_hook;
+    _sandhi_tls_hook_override_ctx = hook_ctx;
+    var conn = sandhi_conn_open(addr, port, 1, sni_host);
+    _sandhi_tls_hook_override     = 0;
+    _sandhi_tls_hook_override_ctx = 0;
+
+    if (conn == 0) {
+        # last-err was set by sandhi_conn_open_fully_timed.
+        return 0;
+    }
+
+    # Post-handshake SPKI check.
+    if (pinned != 0) {
+        var tls_ctx = sandhi_conn_tls_ctx(conn);
+        if (_sandhi_check_spki(tls_ctx, pinned) == 0) {
+            sandhi_conn_close(conn);
             _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
             return 0;
         }
     }
 
-    # Otherwise delegate to the default tls.cyr flow. Policy
-    # enforcement (the SSL_CTX_set_* calls listed previously) lands
-    # when stdlib `tls.cyr` exposes a context hook — see
-    # docs/issues/2026-04-24-stdlib-tls-alpn-hook.md for the same
-    # ask, since ALPN runtime needs the same hook.
-    return sandhi_conn_open(addr, port, 1, sni_host);
-}
-
-# 1 if the apply layer can actually enforce the given policy on this
-# platform right now, 0 if it's in stubbed-delegate mode. Callers
-# that require hard enforcement (anything mission-critical) should
-# check this at startup and refuse to run when enforcement is unavailable.
-fn sandhi_tls_policy_enforcement_available() {
-    # See module-level comment. Returns 0 until stdlib TLS-init
-    # stabilizes AND the additional OpenSSL symbols are wired.
-    return 0;
+    return conn;
 }
 
 fn sandhi_tls_policy_version() {
-    return "0.6.0";
+    return "0.9.3";
 }

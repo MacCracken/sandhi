@@ -1,0 +1,86 @@
+# programs/_policy_runtime_probe.cyr — verify TLS policy enforcement
+# wire-up against live HTTPS.
+
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+fn main() {
+    alloc_init();
+
+    say("[1] enforcement_available\n");
+    var ea = sandhi_tls_policy_enforcement_available();
+    say("    -> "); fmt_int(ea); say("\n");
+    if (ea != 1) { say("ABORT: enforcement not available\n"); return 1; }
+
+    var ip = 1 | (1 << 8) | (1 << 16) | (1 << 24);  # 1.1.1.1
+
+    say("[2] open with default policy (no enforcement)\n");
+    var c2 = sandhi_conn_open_with_policy(ip, 443, 1, "one.one.one.one",
+                                            sandhi_tls_policy_new_default());
+    say("    conn = "); fmt_int(c2); say("\n");
+    if (c2 == 0) { say("ABORT: default policy open failed\n"); return 2; }
+    sandhi_conn_close(c2);
+
+    say("[3] open with WRONG pin — must fail closed\n");
+    var bad_pin = "0000000000000000000000000000000000000000000000000000000000000000";
+    var p3 = sandhi_tls_policy_new_pinned(bad_pin);
+    var c3 = sandhi_conn_open_with_policy(ip, 443, 1, "one.one.one.one", p3);
+    say("    conn = "); fmt_int(c3); say("\n");
+    say("    last_err = "); fmt_int(sandhi_conn_last_open_err()); say(" (TLS=");
+    fmt_int(SANDHI_CONN_OPEN_TLS); say(")\n");
+    if (c3 != 0) { say("ABORT: wrong pin opened — fail-closed broken\n"); sandhi_conn_close(c3); return 3; }
+    if (sandhi_conn_last_open_err() != SANDHI_CONN_OPEN_TLS) {
+        say("ABORT: wrong-pin err should be TLS\n"); return 4;
+    }
+
+    say("[4] open with bad trust_store path — must fail closed\n");
+    var p4 = sandhi_tls_policy_new_trust_store("/nonexistent/ca.pem");
+    var c4 = sandhi_conn_open_with_policy(ip, 443, 1, "one.one.one.one", p4);
+    say("    conn = "); fmt_int(c4); say("\n");
+    if (c4 != 0) { say("    (handshake unexpectedly succeeded — system CAs probably still loaded)\n"); sandhi_conn_close(c4); }
+    else        { say("    last_err = "); fmt_int(sandhi_conn_last_open_err()); say("\n"); }
+
+    say("done\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,108 @@
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+fn try3(addr, port, sni) {
+    var fd_r = tcp_socket();
+    var fd = payload(fd_r);
+    sock_connect(fd, addr, port);
+    say("  [3] tls_available\n");
+    var ok = tls_available();
+    say("  [3] -> "); fmt_int(ok); say("\n");
+    if (ok == 0) { sock_close(fd); return 0; }
+    var t = tls_connect(fd, sni);
+    if (t != 0) { tls_close(t); }
+    sock_close(fd);
+    return ok;
+}
+
+fn try6(addr, port, use_tls, sni, a, b) {
+    var fd_r = tcp_socket();
+    var fd = payload(fd_r);
+    sock_connect(fd, addr, port);
+    var ok = tls_available();
+    if (ok == 0) { sock_close(fd); return 0; }
+    say("  [6] pre tls_connect\n");
+    var t = tls_connect(fd, sni);
+    say("  [6] post tls_connect: "); fmt_int(t); say("\n");
+    if (t != 0) { tls_close(t); }
+    sock_close(fd);
+    return ok;
+}
+
+fn try7(addr, port, use_tls, sni, a, b, c) {
+    var fd_r = tcp_socket();
+    var fd = payload(fd_r);
+    sock_connect(fd, addr, port);
+    say("  [7] tls_available\n");
+    var ok = tls_available();
+    say("  [7] -> "); fmt_int(ok); say("\n");
+    if (ok == 0) { sock_close(fd); return 0; }
+    say("  [7] pre tls_connect; sni=");
+    say(sni); say("\n");
+    var t = tls_connect(fd, sni);
+    say("  [7] post tls_connect: "); fmt_int(t); say("\n");
+    if (t != 0) { tls_close(t); }
+    sock_close(fd);
+    return ok;
+}
+
+fn main() {
+    alloc_init();
+    var ip = 1 | (1 << 8) | (1 << 16) | (1 << 24);
+
+    say("[A] try3 (3-arg)\n");
+    try3(ip, 443, "one.one.one.one");
+    say("    A done\n");
+
+    say("[B] try6 (6-arg)\n");
+    try6(ip, 443, 1, "one.one.one.one", 0, 0);
+    say("    B done\n");
+
+    say("[C] try7 (7-arg)\n");
+    try7(ip, 443, 1, "one.one.one.one", 0, 0, 0);
+    say("    C done\n");
+
+    say("done\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);
