@@ -148,6 +148,22 @@ fn _sandhi_pool_idle_conn_new(conn, now_ms) {
     return ic;
 }
 
+# Non-consuming peek: 1 if the route has at least one 1.1 idle conn
+# stored. Used by the h2 auto-promoter (`_sandhi_http_try_h2_promote`)
+# to decide whether to attempt ALPN promotion or just take the
+# existing 1.1 conn — without this, a server that picks http/1.1
+# during ALPN would cause every subsequent request to open a fresh
+# TLS conn instead of reusing the idle one.
+fn _sandhi_pool_has_idle(pool, host, port, tls) {
+    if (pool == 0) { return 0; }
+    var key = _sandhi_pool_route_key(host, port, tls);
+    var m = load64(pool + SANDHI_POOL_OFF_MAP);
+    var v = map_get(m, key);
+    if (v == 0) { return 0; }
+    if (vec_len(v) == 0) { return 0; }
+    return 1;
+}
+
 # ================================================================
 # Take / put — the hot path
 # ================================================================

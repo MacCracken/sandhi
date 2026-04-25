@@ -4,6 +4,79 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.6] — 2026-04-25
+
+**ALPN-driven HTTP/2 auto-promotion.** First release where live h2
+fires end-to-end via the auto-dispatcher with no consumer code
+change. ADR 0005 surface freeze respected (no new public verbs).
+
+The auto-dispatcher (`sandhi_http_request_auto`, shipped 0.8.1) was
+the natural home for h2 selection but until now only used h2 if the
+caller had pre-cached an h2 conn in the pool. ALPN's runtime wire-up
+landed at 0.9.3, redirect-and-retry routing through the auto path
+landed at 0.9.5 — this release closes the loop by having the auto
+path itself open conns advertising both protocols and promote based
+on what the server picks.
+
+**635 assertions green** (482 sandhi + 153 h2; no regression).
+
+### http/h2
+
+- `src/http/h2/dispatch.cyr` — new `_sandhi_http_try_h2_promote`.
+  Triggered from `_sandhi_http_auto_once` only when:
+  - URL is HTTPS (ALPN is TLS-only)
+  - A pool is attached (`opts.pool != 0`)
+  - The pool's h2 slot for this route is empty
+  - The pool's 1.1 slot for this route is also empty (peeked
+    non-consumingly via the new `_sandhi_pool_has_idle`)
+  Resolves the host (v4 then v6 fallback), flips
+  `_sandhi_alpn_advertise_h2 = 1` for the open call only, calls
+  `sandhi_conn_open_fully_timed` (or the v6 variant) with the
+  caller's `connect_ms` / `read_ms` / `write_ms`, restores the
+  flag. After handshake:
+  - `sandhi_conn_alpn_is_h2 == 1` → `sandhi_h2_conn_new` +
+    `sandhi_h2_conn_send_preface_and_settings` +
+    `sandhi_h2_conn_recv_peer_settings`. On success, the h2 conn
+    is cached via `sandhi_http_pool_put_h2` and returned; caller
+    dispatches via `sandhi_h2_request`. Handshake failure closes
+    the conn and falls through.
+  - http/1.1 (or no ALPN) → the bare TLS conn is donated to the
+    pool's 1.1 slot via `_sandhi_pool_put`. The immediately-
+    following `_sandhi_http_do` takes it via `_sandhi_pool_take`,
+    so the handshake is not wasted.
+- `_sandhi_http_auto_once` — h2-promote check inserted between
+  the existing pool-take and the 1.1 fallback. Behavior unchanged
+  for non-TLS routes, no-pool requests, and routes where the pool
+  already has h2 or 1.1 conns.
+
+### http/pool
+
+- `src/http/pool.cyr` — new `_sandhi_pool_has_idle(pool, host,
+  port, tls)`. Non-consuming peek into the per-route 1.1 vec —
+  returns 1 if at least one idle conn is stored. Used by the
+  auto-promoter to skip ALPN promotion when the route has known
+  1.1 conns. Without this gate, a server that picks http/1.1
+  during ALPN would cause every subsequent request to open a
+  fresh TLS conn instead of reusing the idle one (the old conns
+  would only get reaped via the 90 s stale-eviction path).
+
+### Operational notes
+
+- ALPN promotion happens at most once per route per process when
+  the server picks http/1.1 — the `_sandhi_pool_has_idle` gate
+  short-circuits the second attempt. When the server picks h2,
+  promotion happens once; subsequent requests take the cached
+  h2 conn directly via `sandhi_http_pool_take_h2`.
+- No-pool requests skip the promotion path entirely. h2's
+  preface + SETTINGS + ACK roundtrips don't pay back on a single
+  request — without a pool to cache the conn for the next
+  request, advertising h2 is strictly slower than 1.1.
+- Promotion is best-effort. DNS / connect / TLS handshake
+  failures during promotion return 0 from
+  `_sandhi_http_try_h2_promote`; the auto path then falls
+  through to `_sandhi_http_do`, which re-attempts the open and
+  surfaces the appropriate error kind to the caller.
+
 ## [0.9.5] — 2026-04-25
 
 **HTTP/2 redirect-following + retry-through-auto.** Two internal
