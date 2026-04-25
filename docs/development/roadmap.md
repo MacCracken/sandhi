@@ -177,93 +177,137 @@ per-call ctx) — unblocked by 0.8.0's pool work.
   changes the pool's checkout shape (per-stream rather than per-
   connection). Designing both at once avoids a mid-release refactor.
 
-### 0.8.0 — HTTP/2 + connection pool (bundled)
+### 0.8.0 — HTTP/2 + connection pool (bundled) — ✅ shipped 2026-04-24
 
-*Moved into 0.8.0 at user direction. Adds the single biggest
-consumer-facing capability increase between now and fold — h2c +
-ALPN negotiation + per-stream body framing, composed on top of the
-existing HTTP/1.1 surface rather than replacing it. Connection pool
-bundled here because h2 multiplexing + HTTP/1.1 keep-alive share the
-same checkout machinery — designed together, not bolted on.*
+*Eight commit-sized "bites" landed: pool + 1.1 keep-alive (Bite 1),
+HPACK + Huffman decode (Bites 2 + 2b), h2 frames (Bite 3), ALPN
+surface (Bite 4), h2 connection lifecycle split into
+scaffolding/request/response (Bites 5a/5b/5c), pool h2 glue (Bite
+6), public h2 dispatch verb + version ship (Bite 7).*
 
-- ALPN negotiation in `tls_policy::apply` — advertise `h2, http/1.1`
-  and select based on server offer. Plain-HTTP path stays 1.1 only
-  (h2c prior-knowledge may land later if a consumer asks).
-- **Connection pool** (new `src/http/pool.cyr`) — map keyed by
-  `host:port:tls` via stdlib `map_u64_*`. `sandhi_http_pool_new(
-  max_per_host, idle_timeout_ms)` + option-field threading. For h2:
-  one connection, vec of active streams. For 1.1: vec of idle
-  connections, checkout/return. Drops `Connection: close` when pool
-  attached; sends `Connection: keep-alive`. Discards on non-2xx +
-  server-sent close. ~100 ms saved per request at 50 ms RTT.
-- Connection multiplexing — one TCP+TLS connection carries many h2
-  streams.
-- Frame parser + HPACK decoder in a new `src/http/h2/*` submodule.
-  HPACK static + dynamic table per RFC 7541.
-- Public surface unchanged — `sandhi_http_get(url, headers)` picks
-  h2 or 1.1 automatically based on ALPN. No new verbs, no consumer
-  code churn.
-- Non-goals: server push (retired from the spec anyway), prioritization
-  trees (CVE surface and almost never useful), h2c prior-knowledge
-  over plain TCP (rare in AGNOS shape).
+- **Pool** (`src/http/pool.cyr`) — keyed by `host:port:tls`, LIFO
+  take with stale-skip, FIFO eviction at cap. Default 8 conns/route,
+  90 s idle timeout.
+- **HPACK** (`src/http/h2/hpack.cyr` + `huffman.cyr`) — full RFC
+  7541, all 5 header-field representations, Huffman decode tested
+  against RFC C.4.1.
+- **h2 frames** (`src/http/h2/frame.cyr`) — RFC 7540 §4.1+§6 wire
+  format for SETTINGS / PING / WINDOW_UPDATE / RST_STREAM / GOAWAY
+  + frame header.
+- **ALPN surface** (`src/tls_policy/alpn.cyr`) — wire-format
+  encoder ships; runtime negotiation stubbed (libssl + stdlib hook
+  blockers).
+- **h2 connection lifecycle** (`src/http/h2/conn.cyr` +
+  `request.cyr` + `response.cyr`) — preface + SETTINGS handshake,
+  HEADERS encoding via HPACK, frame loop dispatcher with
+  CONTINUATION reassembly + DATA accumulation + PADDED handling.
+- **Public h2 verb** (`src/http/h2/dispatch.cyr`) —
+  `sandhi_h2_request(h2c, method, url, headers, body, body_len)`
+  for manual h2 use.
 
-### 0.8.x — Phase 1 security (P0 sweep)
+**Auto-selection deferred to 0.8.1** because the libssl-pthread-
+deadlock + missing-stdlib-tls-hook blockers mean live h2 never
+fires today anyway.
 
-*Ship-stopper security findings from the 0.7.0 external review. Each
-patch is its own focused release (0.8.1 / 0.8.2 / etc.) with a
-regression test per fix.*
+### 0.8.1 — Auto-selection wiring — ✅ shipped 2026-04-24
 
-1. **Chunked decoder**: require terminal 0-chunk + footer CRLF; track
+*Strictly additive — no existing call-site behavior changes.*
+
+- New `sandhi_http_request_auto(method, url, headers, body,
+  body_len, opts)` in `dispatch.cyr` — checks the attached pool
+  for an h2 conn matching the URL's route, dispatches via
+  `sandhi_h2_request` if found, falls through to
+  `_sandhi_http_dispatch` (1.1 path) otherwise.
+- Per-method auto verbs (`sandhi_http_get_auto`, `_post_auto`, etc.)
+  matching the 1.1 surface shape.
+- Filed `docs/issues/2026-04-24-stdlib-tls-alpn-hook.md` for the
+  upstream-ask: stdlib `tls_connect` needs an SSL_CTX hook so
+  sandhi can call `SSL_CTX_set_alpn_protos` to advertise h2.
+
+### 0.9.0 — Phase 1 security (P0 sweep)
+
+*Ship-stopper findings from the 0.7.0 external audit. Each fix is
+its own focused patch within the release, with a regression test.
+Behavior changes are visible (e.g., redirects start stripping
+`Authorization` cross-origin) — semver-wise this is a minor bump,
+not a patch.*
+
+1. **Chunked decoder**: require terminal 0-chunk + footer CRLF;
    `seen_digit` guard; reject `size == 0` mid-stream as truncation,
    not success. (`src/http/response.cyr`)
-2. **CL + TE coexistence**: reject (`SANDHI_ERR_PROTOCOL` on client;
-   400 on server) when both headers are present. RFC 7230 §3.3.3
-   mandatory. (`src/http/response.cyr` + `src/server/mod.cyr`)
-3. **Chunk-size overflow**: reject chunk sizes > 2^31 explicitly;
-   unsigned-safe comparison before `memcpy`. (`src/http/response.cyr`)
-4. **Redirect credential strip**: on each hop, compare scheme + host +
-   port against the previous; strip `Authorization` / `Cookie` /
-   `Proxy-*` when authority changes; refuse https→http; opt-in
-   private-IP block for daimon-class consumers. (`src/http/client.cyr`)
+2. **CL + TE coexistence reject**: when both headers are present,
+   400 on server / `SANDHI_ERR_PROTOCOL` on client. RFC 7230
+   §3.3.3 mandatory. (`src/http/response.cyr` + `src/server/mod.cyr`)
+3. **Chunk-size overflow guard**: reject chunk sizes > 2^31
+   explicitly; unsigned-safe comparison before `memcpy`.
+   (`src/http/response.cyr`)
+4. **Redirect credential strip**: on each hop, compare scheme +
+   host + port against the previous; strip `Authorization` /
+   `Cookie` / `Proxy-*` when authority changes; refuse https→http;
+   opt-in private-IP block for daimon-class consumers.
+   (`src/http/client.cyr`)
 5. **TLS-policy fail-closed**: when
-   `sandhi_tls_policy_enforcement_available() == 0` AND policy
-   has `PINNED | MTLS | CUSTOM_TRUST`, refuse the connection rather
+   `sandhi_tls_policy_enforcement_available() == 0` AND policy has
+   `PINNED | MTLS | CUSTOM_TRUST`, refuse the connection rather
    than silently downgrading. (`src/tls_policy/apply.cyr` +
    `src/http/client.cyr`)
 
-### 0.9.x — Phase 2 security (P1 sweep) + Phase 3 closeout
+### 0.9.1 — Phase 2 security (P1 sweep)
 
-*P1 hardening + pre-fold closeout. Closes the surface area for the
-v5.7.0 fold.*
+*Hardening / defense-in-depth. Each fix small and isolated; bundled
+into one minor because individually they don't warrant releases.*
 
-**P1 sweep** (each its own small release within 0.9.x):
+- **SSE re-entrance fix** — thread parser state via ctx struct
+  rather than module-scope globals. (`src/http/sse.cyr`)
+- **SSE id with NUL** — ignore per WHATWG (currently stored).
+  (`src/http/sse.cyr`)
+- **Header duplicate detection** for `Host` / `Content-Length` /
+  `Transfer-Encoding` at parse time. (`src/http/headers.cyr`)
+- **Header CRLF / NUL validation** on `sandhi_headers_add` / `_set`.
+  (`src/http/headers.cyr`)
+- **SPKI constant-time compare** — replace `streq` short-circuit
+  with full-length compare. (`src/tls_policy/fingerprint.cyr`)
+- **CL strict parse** — reject `+` / `,` / `0x` / multi-value on
+  client + server. (`src/http/response.cyr` + `src/server/mod.cyr`)
+- **URL port overflow guard** — clamp digit count before the
+  65535 check. (`src/http/url.cyr`)
+- **JSON escape-state tracking** — fix `\\\\` (consecutive
+  backslashes) handling in dotted-path skip. (`src/rpc/json.cyr`)
 
-- **SSE**: parser re-entrance fix (thread state via ctx, not
-  module-scope globals); `id:` with NUL ignored per WHATWG
-- **Headers**: duplicate detection for `Host` / `Content-Length` /
-  `Transfer-Encoding` at parse time; CRLF / NUL validation on
-  `sandhi_headers_add` / `_set`
-- **TLS-policy**: constant-time SPKI compare
-- **URL**: port overflow guard before the 65535 check
-- **Content-Length**: strict parse (reject `+` / `,` / `0x` /
-  multi-value) on client + server
-- **JSON**: escape-state tracking fix (`\\\\`  runs); lone-surrogate
-  rejection at build time
+### 0.9.2 — Pre-fold closeout
 
-**Pre-fold closeout**:
+*Surface freeze + bundling. After this, no new verbs land until
+post-fold (only-on-second-consumer-ask).*
 
-- **Server symbol rename**: `http_get_method` / `http_send_response` /
-  `http_server_run` etc. → `sandhi_server_*`. Last chance before the
-  v5.7.0 fold freezes them in stdlib permanently. Transitional
-  `http_*` aliases retained through 0.9.x; dropped at 1.0.0.
+- **Server symbol rename** — `http_get_method` /
+  `http_send_response` / `http_server_run` etc. → `sandhi_server_*`.
+  Last chance before the v5.7.0 fold freezes the names in stdlib
+  permanently. Transitional `http_*` aliases retained through
+  0.9.2; dropped at 1.0.0.
 - **Surface freeze** — no new verbs past this point unless a second
   consumer asks. Speculative surface is doubly discouraged by a
   clean-break fold.
-- **`dist/sandhi.cyr` generation** via `cyrius distlib`. First formal
-  bundle.
-- **Consumer pin uplift** — coordinate with yantra / daimon / hoosh /
-  ifran / sit / ark / mela to pin 0.9.x tags for their 5.7.0-
-  compatible cuts.
+- **`dist/sandhi.cyr` generation** via `cyrius distlib`. First
+  formal bundle, byte-for-byte identical to what stdlib will
+  vendor at 1.0.0.
+- **Consumer pin uplift** — coordinate with yantra / daimon /
+  hoosh / ifran / sit / ark / mela to pin 0.9.2 tags for their
+  v5.7.0-compatible cuts.
+
+### Carried beyond 0.9.x (only when blockers clear)
+
+- **ALPN runtime hookup** — needs the `lib/tls.cyr` SSL_CTX hook
+  per `docs/issues/2026-04-24-stdlib-tls-alpn-hook.md`. When
+  upstream lands, ~30 lines of sandhi-side changes.
+- **Live HTTPS** — needs the libssl-pthread-deadlock fix per
+  `docs/issues/2026-04-24-libssl-pthread-deadlock.md`.
+- **Huffman encode** — wire-size optimization only (raw is
+  spec-permitted). Add when a consumer reports bandwidth
+  pressure.
+- **HTTP/2 redirects + retry** — h2 dispatch path skips both
+  today; auto-selection falls through to 1.1 when redirects/retry
+  are needed via the existing `*_opts` variants. Bundle if a
+  consumer wants h2-with-redirects.
 
 ### M6 — Fold into Cyrius stdlib (v1.0.0) — clean-break at v5.7.0
 

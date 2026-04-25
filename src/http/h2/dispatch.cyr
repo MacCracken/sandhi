@@ -74,6 +74,72 @@ fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len) {
     return sandhi_h2_response_recv(h2c, stream_id);
 }
 
+# ================================================================
+# Auto-selecting dispatch (0.8.1)
+# ================================================================
+#
+# Tries h2 first if the attached pool has an h2 conn for this route;
+# otherwise falls back to the existing HTTP/1.1 dispatch. Today h2
+# is rarely available (libssl-pthread-deadlock blocks live HTTPS;
+# stdlib tls.cyr doesn't expose an SSL_CTX hook so we can't
+# advertise ALPN even when libssl works — see
+# `docs/issues/2026-04-24-stdlib-tls-alpn-hook.md` for the upstream
+# ask). When those clear, this verb starts auto-negotiating without
+# any consumer change.
+#
+# Limitations vs the 1.1 dispatch:
+#   - No redirect-following on the h2 path. Redirects still work
+#     when auto-selection falls back to 1.1.
+#   - No retry-with-backoff on the h2 path. Idempotent-method retry
+#     wrappers (sandhi_http_get_retry etc.) stay 1.1-only.
+# Both are addressable when a consumer reports a real need; for
+# now the h2 path serves single-shot RPC traffic where neither
+# applies.
+
+fn sandhi_http_request_auto(method, url, user_headers, body, body_len, opts) {
+    var pool = sandhi_http_options_get_pool(opts);
+    if (pool != 0) {
+        var u = sandhi_url_parse(url);
+        if (u != 0) {
+            var host = sandhi_url_host(u);
+            var port = sandhi_url_port(u);
+            var tls = 0;
+            if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { tls = 1; }
+            var h2c = sandhi_http_pool_take_h2(pool, host, port, tls);
+            if (h2c != 0) {
+                return sandhi_h2_request(h2c, method, url, user_headers, body, body_len);
+            }
+        }
+    }
+    return _sandhi_http_dispatch(method, url, user_headers, body, body_len, opts);
+}
+
+# Convenience verbs matching the 1.1 surface. Body-less methods drop
+# body+body_len; body-bearing ones forward through.
+fn sandhi_http_get_auto(url, user_headers, opts) {
+    return sandhi_http_request_auto("GET", url, user_headers, 0, 0, opts);
+}
+
+fn sandhi_http_head_auto(url, user_headers, opts) {
+    return sandhi_http_request_auto("HEAD", url, user_headers, 0, 0, opts);
+}
+
+fn sandhi_http_post_auto(url, user_headers, body, body_len, opts) {
+    return sandhi_http_request_auto("POST", url, user_headers, body, body_len, opts);
+}
+
+fn sandhi_http_put_auto(url, user_headers, body, body_len, opts) {
+    return sandhi_http_request_auto("PUT", url, user_headers, body, body_len, opts);
+}
+
+fn sandhi_http_patch_auto(url, user_headers, body, body_len, opts) {
+    return sandhi_http_request_auto("PATCH", url, user_headers, body, body_len, opts);
+}
+
+fn sandhi_http_delete_auto(url, user_headers, opts) {
+    return sandhi_http_request_auto("DELETE", url, user_headers, 0, 0, opts);
+}
+
 fn sandhi_h2_dispatch_version() {
-    return "0.8.0";
+    return "0.8.1";
 }

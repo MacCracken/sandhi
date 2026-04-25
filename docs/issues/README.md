@@ -31,6 +31,7 @@ zero ambiguity on what to put on its roadmap.
 | Doc | Upstream | Effect |
 |-----|----------|--------|
 | [`2026-04-24-libssl-pthread-deadlock.md`](2026-04-24-libssl-pthread-deadlock.md) | cyrius-lang (stdlib `tls.cyr` + pthread init in static cyrius binaries) | `SSL_connect` deadlocks on a futex-wait; M2 HTTPS + M5 TLS-policy enforcement pending live verification. Plain HTTP unaffected. |
+| [`2026-04-24-stdlib-tls-alpn-hook.md`](2026-04-24-stdlib-tls-alpn-hook.md) | cyrius-lang (stdlib `tls.cyr` SSL_CTX exposure) | `tls_connect` hides the SSL_CTX so sandhi can't call `SSL_CTX_set_alpn_protos` to advertise h2. Asks for a function-pointer hook variant. Sandhi's 0.8.1 auto-selection degrades to HTTP/1.1 until this clears. |
 
 ## Archived (resolved)
 

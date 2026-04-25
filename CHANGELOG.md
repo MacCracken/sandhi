@@ -4,6 +4,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-04-24
+
+Auto-selection wiring + upstream-ask filed for the ALPN advertise
+side. Strictly additive — no existing call-site behavior changes.
+
+### Added
+- **http/h2/dispatch**: `sandhi_http_request_auto(method, url,
+  user_headers, body, body_len, opts)` — checks the attached pool
+  for an h2 conn matching the URL's route; if found, dispatches via
+  `sandhi_h2_request`; otherwise falls through to the existing
+  `_sandhi_http_dispatch` (HTTP/1.1 path with all its features —
+  redirects, retry, timeouts, etc.).
+- **http/h2/dispatch**: convenience verbs `sandhi_http_get_auto` /
+  `_head_auto` / `_post_auto` / `_put_auto` / `_patch_auto` /
+  `_delete_auto`. Same signature shape as the 1.1 verbs; just
+  routes through the auto-selecting dispatch.
+
+### Limitations carried (still gated on stdlib + libssl)
+- The h2 dispatch path **does not** support redirect-following or
+  retry-with-backoff today. Both stay 1.1-only because no consumer
+  has reported needing them on h2 yet, and they require state
+  machine tweaks. Auto-selection naturally falls through to 1.1
+  when redirects or retries are needed via the existing `*_opts`
+  path.
+- Live ALPN negotiation still doesn't fire — sandhi cannot set the
+  advertise list because stdlib `tls.cyr` hides the SSL_CTX. Filed
+  as `docs/issues/2026-04-24-stdlib-tls-alpn-hook.md` proposing a
+  function-pointer hook variant of `tls_connect`. When the hook
+  lands + libssl-pthread-deadlock clears, `sandhi_http_request_auto`
+  starts auto-negotiating without consumer code change.
+
+### Changed
+- `src/main.cyr`: `sandhi_version()` → `0.8.1`.
+- `src/http/h2/dispatch.cyr`: `sandhi_h2_dispatch_version()` → `0.8.1`.
+- 4 expected-wire-bytes UA strings in `tests/sandhi.tcyr` bumped
+  `0.8.0` → `0.8.1`.
+
+### Notes
+- No new tests in this patch. The auto-dispatch verb is a 3-line
+  orchestration over pool h2 take + `sandhi_h2_request` (both
+  tested in Bite 6 / 5b-c respectively) + `_sandhi_http_dispatch`
+  (covered by existing sandhi.tcyr tests). Adding a dedicated
+  integration test would require pulling `client.cyr` into
+  `h2.tcyr`, which risks tripping the per-program fixup cap.
+- 599 total assertions remain green (no regression).
+- Huffman encode (currently raw-only — RFC 7541 permits this; spec
+  requires servers to accept) stays deferred. Encode is wire-size
+  optimization; no consumer asks for it yet.
+
 ## [0.8.0] — 2026-04-24
 
 HTTP/2 + connection pool. Eight commit-sized "bites" landed in this
@@ -129,479 +178,6 @@ C.3.1 + C.4.1 round-trips verified).
 - Performance work (e.g., stream-multiplex flow-control tracking,
   HPACK encode-side static table optimization beyond pseudo-headers)
   is post-fold and only when a consumer reports a real bottleneck.
-
-### 0.8.0 work in progress (deprecated header — see [0.8.0] above)
-
-**Bite 5c — h2 response decode + stream state**. New
-`src/http/h2/response.cyr` (~210 lines). 592 total assertions across
-both files (446 sandhi + 146 h2; +9 response). With this bite the h2
-protocol stack is functionally complete end-to-end; Bite 6 (multiplex
-via pool) and Bite 7 (auto-selection + ship) wrap up.
-
-#### Added
-- `sandhi_h2_response_recv(h2c, stream_id)` — reads frames in a
-  loop, dispatches by type and stream-id, returns a
-  `sandhi_response` struct (the same shape `_sandhi_http_dispatch`
-  produces) so callers stay protocol-agnostic.
-- Connection-level frame handlers:
-  - SETTINGS (non-ACK): apply via Bite 5a's settings-payload
-    parser, then ACK back.
-  - SETTINGS (ACK): record + continue.
-  - PING (non-ACK): echo with the ACK flag.
-  - GOAWAY: set conn flag, surface as `SANDHI_ERR_REMOTE`.
-  - PRIORITY / WINDOW_UPDATE: silently ignored. Bite 6 will track
-    flow control once multiplex needs it.
-- Stream-level frame handlers (only on our `stream_id`):
-  - HEADERS: append to header block; END_HEADERS triggers HPACK
-    decode; END_STREAM finishes (empty-body case).
-  - CONTINUATION: append; END_HEADERS triggers decode.
-  - DATA: append to body, honoring the PADDED flag (1-byte pad
-    length + that many trailing bytes stripped per §6.1).
-  - RST_STREAM: surface as `SANDHI_ERR_REMOTE`.
-- Frames on other stream-ids are dropped — first-cut single-
-  stream-per-connection client.
-- `_h2_decode_response_headers(h2c, hblock, hblock_len, headers_out)`
-  — walks the HPACK-encoded block, extracts `:status`, drops other
-  pseudo-headers, populates `headers_out` with non-pseudo response
-  headers.
-- `_h2_parse_status(s)` — parses `:status` value to int. Empty or
-  non-digit returns 0 (caller treats as malformed).
-
-#### Tests (3 new in tests/h2.tcyr)
-- `parse_status` — 200 / 404 / 503 + edge cases (empty, non-digit).
-- `decode_headers` — synthesized header block with `:status 200` +
-  `content-type: text/plain` decodes correctly.
-- `pseudo_dropped` — `:status 404` populates the int but leaves the
-  user-visible headers struct empty.
-
-#### Notes
-- The frame loop itself isn't tested against a live socket — that
-  needs a mock or fixture. Frame send/recv plumbing is already
-  covered in Bites 3 + 5a; this bite tests the decode-side
-  semantics on synthesized inputs.
-- Body / header buffers are static-size (`_SANDHI_H2_HBLOCK_CAP =
-  16 KB`, `_SANDHI_H2_BODY_CAP = 1 MB`). Bigger needs surface as
-  Bite 7 options or a follow-up. Both fit typical RPC traffic
-  comfortably.
-- Bite 6 turns this single-stream client into a per-connection
-  stream-multiplex via the pool from Bite 1. Bite 7 wires
-  `sandhi_http_get` etc. to dispatch on ALPN selection.
-
-**Bite 5b — HEADERS encoding + request send**. New
-`src/http/h2/request.cyr` (~170 lines). 583 total assertions across
-both files (446 sandhi + 137 h2; +14 request). Composes Bite 2/2b
-(HPACK + Huffman decode), Bite 3 (frames), and Bite 5a's frame
-plumbing into a one-shot send-a-request function.
-
-#### Added
-- `sandhi_h2_request_encode_headers(h2c, method, scheme, path,
-  authority, user_headers, hbuf)` — produces the HPACK-encoded
-  HEADERS frame body. Pseudo-headers in fixed order
-  (`:method`/`:scheme`/`:path`/`:authority`) per RFC 7540 §8.1.2.1,
-  then user headers with names lowercased per §8.1.2.
-- Static-table optimization for the common pseudo-headers:
-  - `:method GET` → indexed 2 (1 byte)
-  - `:method POST` → indexed 3 (1 byte)
-  - `:scheme http` / `https` → indexed 6 / 7 (1 byte)
-  - `:path /` → indexed 4 (1 byte)
-  - `:authority` → literal-incremental name idx 1 (efficient reuse
-    via dynamic table on subsequent requests to the same authority)
-  - Other methods + non-root paths fall back to literal-incremental
-    with name index. Trades a few wire bytes for code simplicity.
-- `sandhi_h2_request_send(h2c, method, scheme, path, authority,
-  user_headers, body, body_len)` — builds the header block, sends a
-  HEADERS frame (with END_HEADERS + END_STREAM for body-less
-  methods, END_HEADERS only when a body follows), then sends a
-  single DATA frame with END_STREAM if there's a body. Returns the
-  allocated stream-id on success.
-- Forbidden-headers filter per RFC 7540 §8.1.2.2 — drops
-  `Connection`, `Keep-Alive`, `Proxy-Connection`, `Transfer-Encoding`,
-  `Upgrade`, `TE` headers. h2 carries connection control via SETTINGS
-  + WINDOW_UPDATE, not header values; sending them is a stream
-  protocol error.
-- `_h2_streq_ci` helper — case-insensitive cstr compare. Internal
-  use; the existing `sandhi_headers_*` API stays mixed-case.
-
-#### Tests (3 new in tests/h2.tcyr)
-- `encode_simple_get` — `GET https://www.example.com/` produces the
-  expected first 4 bytes (`82 87 84 41` = three indexed pseudo-
-  headers + literal-with-name-idx-1 for `:authority`).
-- `roundtrip` — encode then decode through a fresh HPACK table;
-  recover all four pseudo-headers in order.
-- `drops_forbidden` — `Connection: close` is silently dropped from
-  the encoded block; user `X-Custom` passes through (lowercased).
-
-#### Notes
-- One-DATA-frame body limit for now: if `body_len > peer_max_frame`,
-  request fails with `_BAD_LENGTH`. Multi-frame body fragmentation
-  is a follow-up — no consumer asks for huge h2 request bodies yet.
-- HEADERS+CONTINUATION fragmentation isn't handled either — if the
-  encoded block exceeds `_SANDHI_H2_REQ_HBUF_CAP` (8 KB) we'd
-  overflow the buffer (caller-allocated, no overflow check today).
-  Real headers don't get that big in practice; if a consumer ever
-  hits this we add a CONTINUATION emitter.
-- Bite 5c receives + decodes the response. Until then, this send
-  side is testable through round-trip-with-decode but doesn't talk
-  to a real server.
-
-**Bite 5a — HTTP/2 connection lifecycle scaffolding**. New
-`src/http/h2/conn.cyr` (~210 lines). 569 total assertions across
-both files (446 sandhi + 123 h2; +12 conn). Bite 5 is split into
-three sub-bites because the full lifecycle is too big for one
-commit: 5a (this) is conn struct + handshake + frame plumbing; 5b
-will encode requests; 5c will decode responses + manage stream
-state.
-
-#### Added
-- `sandhi_h2_conn` struct (80 bytes) wrapping a `sandhi_conn` with
-  h2-specific state: HPACK encode + decode tables, next stream-id
-  counter, settings-acked flags, peer's MAX_FRAME_SIZE /
-  MAX_CONCURRENT_STREAMS / INITIAL_WINDOW_SIZE (defaulted per
-  RFC 7540 §6.5.2), GOAWAY received flag.
-- `sandhi_h2_conn_new(sandhi_conn_ptr)` constructor + accessors:
-  `_underlying`, `_enc_table`, `_dec_table`, `_peer_max_frame`,
-  `_peer_max_streams`, `_peer_init_window`, `_goaway_received`.
-- `sandhi_h2_conn_next_stream_id` — RFC 7540 §5.1.1 client-side
-  odd-id allocation (1, 3, 5, ...).
-- `sandhi_h2_conn_send_frame(c, type, flags, sid, payload, plen)`
-  — frame-level send: 9-byte header + payload as one logical
-  frame, two `send_all` syscalls.
-- `sandhi_h2_conn_recv_frame(c, result_out)` — frame-level recv
-  into a 16-byte result struct `{hdr_ptr, payload_ptr}`. Handles
-  truncation; returns negative sentinel.
-- `sandhi_h2_conn_send_preface_and_settings(c)` — emits the
-  24-byte client preface (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`)
-  followed by an empty SETTINGS frame.
-- `sandhi_h2_conn_recv_peer_settings(c)` — reads the peer's first
-  frame (expected SETTINGS), applies its parameters, and ACKs.
-- `sandhi_h2_conn_apply_settings_payload(c, payload, len)` —
-  parses SETTINGS pairs and applies each via `_h2_conn_apply_setting`.
-  Handles MAX_FRAME_SIZE, MAX_CONCURRENT_STREAMS, INITIAL_WINDOW_SIZE,
-  HEADER_TABLE_SIZE (resizes the HPACK decode table). ENABLE_PUSH
-  + MAX_HEADER_LIST_SIZE silently ignored — Bite 5c may want them.
-- `sandhi_h2_conn_send_settings_ack` — empty SETTINGS+ACK frame.
-
-#### Tests (4 new in tests/h2.tcyr)
-- `defaults` — initial state matches spec defaults.
-- `stream_id_alloc` — first three allocations are 1, 3, 5.
-- `apply_settings` — synthesized 3-pair SETTINGS payload updates
-  conn state correctly.
-- `apply_settings_malformed` — non-multiple-of-6 length rejected
-  with `_SANDHI_H2_ERR_MALFORMED`.
-
-#### Notes
-- Live send/recv tests need a real socket fixture or a mock; not
-  attempted in 5a. The frame wire format is already covered by
-  Bite 3's `frame.cyr` round-trip tests; this bite tests state
-  transitions on synthetic settings payloads.
-- Bites 5b and 5c are next. 5b encodes a request via HPACK + this
-  send_frame plumbing; 5c reads frames, decodes responses, manages
-  stream state.
-
-**Bite 2b — HPACK Huffman decode (RFC 7541 §5.2 + Appendix B)**. New
-`src/http/h2/huffman.cyr` (~150 lines + 2570-char data blob). 557
-total assertions across both files (446 sandhi + 111 h2; +4
-Huffman). Real h2 servers always Huffman-encode response headers,
-so this unblocks Bite 5 (live h2 talk).
-
-#### Added
-- 257-entry RFC 7541 Appendix B code table embedded as a single
-  hex blob — one string literal, one fixup. Each entry is 10 hex
-  chars: 8 for the code (left-zero-padded to fit the 30-bit max)
-  + 2 for the bit length. Symbols are implicit by index 0..256
-  (256 is EOS). Total blob: 2570 chars. Verified entry-by-entry
-  via a one-shot Python generator against the spec, then dropped
-  in.
-- Lazy-init builder `_hpack_huffman_init` parses the blob into a
-  binary tree (24-byte nodes: `{left, right, symbol_or_-1}`). Each
-  entry walks from root taking left/right per bit (MSB→LSB) of
-  its code, creating internal nodes as needed; the leaf at depth
-  = bit-length is tagged with the symbol.
-- `sandhi_hpack_huffman_decode(buf, start, nbytes)` — walks the
-  tree bit-by-bit through `nbytes` of input. Emits each symbol on
-  reaching a leaf; resets to root and continues. Returns a
-  freshly-allocated NUL-terminated cstr, or 0 on malformed input.
-- Padding handling per RFC 7541 §5.2:
-  - EOS (symbol 256) in payload → reject (decoding error).
-  - Trailing partial path > 7 bits → reject.
-  - Trailing partial path with any 0 bit → reject (padding MUST
-    be the most-significant bits of the EOS code, which are all
-    1s).
-  - Trailing partial path ≤ 7 bits and all-1s → accept (legal
-    padding).
-
-#### Changed
-- `_hpack_string_decode` in `src/http/h2/hpack.cyr` no longer
-  rejects Huffman-encoded input with `_SANDHI_HPACK_ERR_HUFFMAN`.
-  Now it calls `sandhi_hpack_huffman_decode` and returns the
-  decoded cstr. Error sentinel still fires when the Huffman input
-  itself is malformed (bad padding, EOS in payload, bit with no
-  edge).
-
-#### Tests (3 new in tests/h2.tcyr)
-- `huffman_www_example` — RFC 7541 C.4.1's 12-byte Huffman-encoded
-  `www.example.com` round-trips through `sandhi_hpack_huffman_decode`.
-- `huffman_malformed` — 0x00 (8 zero bits) decodes the first 5
-  bits as `'0'` then leaves 3 trailing zeros as bad padding;
-  rejected.
-- `huffman_via_string` — full HPACK `_hpack_string_decode` path
-  with H=1 bit + length + Huffman bytes round-trips end-to-end.
-
-#### Notes
-- Encode side is **not** implemented — sandhi continues to emit
-  raw strings (H=0), which RFC 7541 §5.2 requires servers to
-  accept. Adding Huffman encode is a wire-size optimization (~30%
-  smaller for typical headers), not a correctness need; can land
-  if/when a consumer asks.
-- The blob string lives on a single line (2570 chars) because
-  Cyrius's lexer doesn't auto-concatenate adjacent string literals
-  the way C does. Lint flags it as line-too-long (expected); not
-  worth disabling the lint rule globally over.
-- Generator script at the time of creation:
-  `/tmp/build_huffman_blob.py` — kept for reference but not
-  checked in. The blob is the artifact; regenerate from the RFC
-  table if anything ever needs to change.
-- Bite 5 (h2 connection lifecycle) is now unblocked — it can
-  decode response HEADERS frames from real h2 servers.
-
-**Bite 4 — ALPN surface (RFC 7301)**. New `src/tls_policy/alpn.cyr`
-(~75 lines). Wire-format encoder + selection accessor. 553 total
-assertions across both test files (446 sandhi + 107 h2; +8 ALPN).
-
-#### Added
-- `sandhi_alpn_encode_protos(csv, out, cap)` — encodes a comma-
-  separated proto list into RFC 7301 ProtocolNameList wire format
-  (1-byte length-prefix per proto, concatenated). `"h2,http/1.1"`
-  → 12 bytes (`02 h 2 08 h t t p / 1 . 1`). Per-proto length cap
-  255; output overflow returns `0 - 1`.
-- `SANDHI_ALPN_DEFAULT = "h2,http/1.1"` — the canonical advertise
-  list.
-- `sandhi_conn_alpn_selected(conn)` — accessor for the negotiated
-  protocol post-handshake. **Stubbed** to return 0 today; real
-  hookup is gated on the libssl-pthread-deadlock blocker (same
-  reason `tls_policy/apply.cyr`'s pinning / mTLS / trust-store
-  enforcement is stubbed). Bite 7's auto-selection logic handles
-  0 as "negotiate to HTTP/1.1," which is the only protocol that
-  works today, so this degrades correctly.
-- `sandhi_conn_alpn_is_h2(conn)` — convenience predicate for the
-  Bite 7 dispatch decision.
-
-#### Notes
-- When libssl-pthread-deadlock clears, real ALPN runtime wires up
-  in ~30 lines: resolve `SSL_CTX_set_alpn_protos` +
-  `SSL_get0_alpn_selected` via `_dynlib_resolve_global` (matching
-  the pattern stdlib `tls.cyr` already uses for everything else),
-  call them in `tls_connect`'s SSL_CTX setup, stash the selected
-  protocol on the conn struct.
-- Wire-format encoding is fully tested today against the canonical
-  example. The runtime negotiation path runs the same encoder, so
-  when it lights up we just feed the bytes to OpenSSL.
-
-**Bite 3 — HTTP/2 frame layer (RFC 7540 §4.1, §6)**. New
-`src/http/h2/frame.cyr` (~280 lines). 545 total assertions across
-both test files (438 sandhi + 107 h2; +32 frame on top of Bite 2.5).
-
-#### Added
-- Frame header (`SandhiH2Hdr` 32-byte struct: length, type, flags,
-  stream_id) + `_encode` / `_decode` honoring RFC 7540 §4.1 wire
-  format. Reserved high bit of stream_id is masked off on decode
-  per spec; encode rejects sources that try to set it. Length cap
-  at 2^24-1 (`SANDHI_H2_MAX_FRAME_SIZE`); default frame ceiling
-  16384 (`SANDHI_H2_DEFAULT_MAX_FRAME` — matches the spec default
-  for `SETTINGS_MAX_FRAME_SIZE`).
-- Frame-type constants (DATA, HEADERS, PRIORITY, RST_STREAM,
-  SETTINGS, PUSH_PROMISE, PING, GOAWAY, WINDOW_UPDATE,
-  CONTINUATION).
-- Flag constants (END_STREAM, ACK, END_HEADERS, PADDED, PRIORITY)
-  with the intentional ACK/END_STREAM = 0x1 overlap per §6.
-- Error codes (NO_ERROR through HTTP_1_1_REQUIRED, all 14 from
-  §7).
-- SETTINGS parameter identifiers (HEADER_TABLE_SIZE through
-  MAX_HEADER_LIST_SIZE).
-- Per-frame payload codecs:
-  - `sandhi_h2_settings_pair_encode` / `_decode` — id+value pair
-    layout (§6.5).
-  - `sandhi_h2_ping_encode` — 8 octets opaque (§6.7).
-  - `sandhi_h2_window_update_encode` / `_decode` — high-bit-
-    reserved 31-bit increment (§6.9). Encode rejects increment=0
-    per spec.
-  - `sandhi_h2_rst_stream_encode` / `_decode` — 32-bit error code
-    (§6.4).
-  - `sandhi_h2_goaway_encode` / `_decode` — last_stream_id +
-    error_code + optional debug data (§6.8).
-- Big-endian write helpers (`_h2_write_u24`, `_h2_write_u32`,
-  matching reads). h2 wire is BE end-to-end.
-
-#### Tests (10 new in tests/h2.tcyr)
-- Header round-trip on a DATA/END_STREAM frame.
-- Reserved-bit stripping on stream_id decode (0xFFFFFFFF →
-  0x7FFFFFFF).
-- Length-overflow rejection (encode of 2^24 fails with
-  `_BAD_LENGTH`).
-- Stream-id high-bit rejection on encode (`_BAD_STREAM`).
-- SETTINGS pair round-trip (id + value).
-- WINDOW_UPDATE round-trip + zero-increment rejection.
-- RST_STREAM error code round-trip.
-- GOAWAY round-trip (last_stream_id + error_code, no debug).
-- PING 8-byte opaque pass-through.
-
-#### Notes
-- DATA / HEADERS / CONTINUATION payloads are intentionally NOT
-  parsed here — those are passthrough of HPACK-encoded bytes
-  (HEADERS / CONTINUATION) or arbitrary octets (DATA). HPACK
-  decode happens in `src/http/h2/hpack.cyr`; Bite 5 wires the
-  two layers together.
-- PUSH_PROMISE is enumerated but sandhi never originates it and
-  rejects incoming push (Bite 5 will set
-  `SETTINGS_ENABLE_PUSH=0`). Server push was retired by major
-  browsers anyway.
-- A struct-layout bug crept in during the first draft (8-byte
-  field stride collapsed to 4-byte for type/flags, causing
-  `store64` writes to overlap). Caught immediately by the round-
-  trip test — flagging as a Cyrius-idiom note: every struct
-  field should be 8-byte aligned when accessed via `store64`/
-  `load64`. Already true everywhere else in sandhi.
-
-**Bite 2.5 — Test split + fixup-cap proposal + CI fix**. Earlier in
-this work-stream — see commit `82e24ef`. Split sandhi.tcyr → core
-(438) + h2 (75 at that time, now 107). Fixed CI workflow that
-referenced a nonexistent `src/test.cyr`. Filed
-`docs/proposals/2026-04-24-cyrius-fixup-table-cap.md` for the
-upstream-investigation question.
-
-**Bite 2 — HPACK encoder/decoder (RFC 7541)**. 464 test assertions
-green (+26 over Bite 1's 438). Pure protocol code; no network. New
-`src/http/h2/hpack.cyr` (~530 lines).
-
-#### Added
-- Static table — RFC 7541 Appendix A, all 61 entries. Lazy-init
-  via `_hpack_static_init` with the entries split across four
-  helper fns (`_init_a` / `_b` / `_c` / `_d`) — single-fn version
-  exceeded the Cyrius fixup-table per-fn allowance.
-- Dynamic table — `sandhi_hpack_table_new(max_size)`,
-  `_count` / `_size` / `_max_size` accessors, `_add` (with size-
-  triggered tail eviction), `_set_max_size` (shrink-on-shrink).
-  Entry size = `strlen(name) + strlen(value) + 32` per RFC §4.1.
-  Oversized entries empty the table and drop themselves per §4.4.
-- `sandhi_hpack_lookup(t, idx, name_out, value_out)` — combined
-  static (1..61) + dynamic (62..N) index resolution.
-- `_hpack_int_encode` / `_hpack_int_decode` — RFC §5.1 variable-
-  length integer codec with configurable prefix bits (4-7).
-- `_hpack_string_encode` / `_hpack_string_decode` — RFC §5.2
-  length-prefixed string codec. Encode always emits raw (H=0);
-  decode rejects H=1 with `_SANDHI_HPACK_ERR_HUFFMAN` until
-  Bite 2b adds Huffman support. Real h2 servers always Huffman-
-  encode, so Bite 5 (live h2 talk) blocks on 2b shipping first.
-- Header field encoders for all 5 RFC §6 representations:
-  `sandhi_hpack_encode_indexed` (§6.1, 7-bit prefix),
-  `_encode_literal_indexed` / `_indexed_name` (§6.2.1, 6-bit
-  prefix, adds to dynamic table), `_encode_literal_no_index`
-  (§6.2.2, 4-bit prefix), `_encode_literal_never` (§6.2.3),
-  `_encode_table_size_update` (§6.3).
-- `sandhi_hpack_decode_field(t, buf, blen, off_cell, name_out,
-  value_out)` — single-field decode. Returns 0 on success, or a
-  positive `_SANDHI_HPACK_TBL_UPDATE` sentinel for the dynamic-
-  table-size-update representation (which has no associated
-  header), or a negative error sentinel.
-- Error sentinels: `_SANDHI_HPACK_ERR_TRUNCATED`, `_BAD_INDEX`,
-  `_HUFFMAN`, `_MALFORMED`, `_INT_OVERFLOW`.
-
-#### Tests (3 in sandhi.tcyr)
-- `static_table_spotcheck` — Appendix A indices 1, 2, 3, 7, 8,
-  16, 32, 58, 61 verified by name + value where applicable.
-- `huffman_rejected` — H=1 string returns the right sentinel.
-- `rfc_c31_request_decode` — RFC 7541 Appendix C.3.1 four-field
-  request sequence (`:method GET`, `:scheme http`, `:path /`,
-  `:authority www.example.com`) decodes to the expected name/
-  value pairs and adds the literal authority entry to the
-  dynamic table.
-
-**Trimmed test surface**: I dropped targeted unit tests for integer
-encoding (C.1.1, C.1.2, C.1.3 individually), dynamic-table eviction
-mechanics, and the literal/indexed/no-index/never-indexed/size-update
-representations because they pushed the test file past the Cyrius
-fixup-table cap (32768 — already heavily used by the rest of
-sandhi.tcyr's existing 461 assertions). The C.3.1 end-to-end test
-exercises integer + string + literal-incremental + indexed + dynamic-
-table-add through real wire bytes, so semantic coverage is preserved
-even if targeted unit coverage isn't. Bite 3 (h2 frames) will likely
-need to split tests across files; flagged.
-
-#### Notes
-- No version bump — staged on 0.7.3 until 0.8.0 ships fully.
-- Encode side always emits raw (no Huffman) — RFC 7541 permits
-  this; it just costs wire bytes. Most h2 servers tolerate it.
-- This bite ships nothing user-visible — HPACK only matters once
-  Bite 5 makes live h2 calls. Tested in isolation against RFC.
-
-**Bite 1 — Connection pool + HTTP/1.1 keep-alive** (earlier commit). 438
-test assertions green (+27 pool). Pool stays unused until a caller
-attaches one via `sandhi_http_options_pool(opts, pool)`; existing
-`Connection: close` paths are unchanged so this is a strictly
-additive patch.
-
-#### Added
-- New `src/http/pool.cyr` (~330 lines).
-  - `sandhi_http_pool_new(max_per_host, idle_timeout_ms)` →
-    `sandhi_http_pool_close` / `_idle_count` / `_max_per_host` /
-    `_idle_timeout_ms` accessors.
-  - Internal `_sandhi_pool_take(pool, host, port, tls)` (LIFO,
-    skip-stale, recurse) and `_sandhi_pool_put(...)` (FIFO eviction
-    when at cap).
-  - Map keyed by `host:port:tls` cstr → vec of idle_conn{conn,
-    last_used_ms} via stdlib `map_new` + `vec_*`.
-  - `_sandhi_http_recv_framed(conn, buf, cap, deadline_ms)` — drains
-    headers incrementally, parses `Content-Length` or detects
-    `Transfer-Encoding: chunked`, reads exactly that much body so the
-    socket survives for the next request. Returns `0 - 2` sentinel
-    when the server sent `Connection: close` so the caller skips
-    pool-put.
-  - `_sandhi_pool_chunked_complete(buf, body_start, blen)` — detector
-    used by the framed-recv loop to know when a chunked body has
-    fully arrived.
-- **http/client**: `sandhi_http_options_pool(opts, pool)` setter +
-  `sandhi_http_options_get_pool(opts)` accessor. Options struct
-  56→64 bytes.
-- **http/client**: `_sandhi_client_build_request_v` variant accepts
-  a `keep_alive` flag — when set, omits the trailing `Connection:
-  close` header (HTTP/1.1 default is keep-alive). Existing
-  `_sandhi_client_build_request` is now a `keep_alive=0` wrapper.
-- **http/client**: `_sandhi_http_exchange_keepalive(conn, req, body,
-  body_len, max_bytes, deadline_ms, pool, host, port, use_tls)` —
-  framed-recv variant that returns the conn to the pool on
-  success (2xx/3xx, no server-Connection-close) or closes it
-  otherwise.
-
-#### Changed
-- **http/client `_sandhi_http_do_impl`** signature gained `pool`
-  parameter. When attached, tries `_sandhi_pool_take` first to skip
-  the connect phase entirely; falls through to
-  `sandhi_conn_open_fully_timed` on miss. Uses
-  `_sandhi_http_exchange_keepalive` instead of the close-delimited
-  `_sandhi_http_exchange` when keep_alive is on.
-- **http/client `_sandhi_http_follow`** + `_sandhi_http_dispatch`
-  thread `pool` through. Per-hop reuse — each redirect hop tries
-  the pool independently; non-2xx responses (301/302/etc.) still
-  put back since they're successful HTTP exchanges.
-- **cyrius.cyml `[lib].modules`**: `pool.cyr` registered between
-  `client.cyr` and `retry.cyr` (pool depends on client's
-  `_sandhi_http_clamp_ms` indirectly via the recv-framed deadline
-  path; alphabetical dep order respected).
-- **programs/smoke.cyr**: pool added to keep the smoke link parity
-  with the test build.
-
-#### Notes
-- This bite is the foundation for both HTTP/1.1 keep-alive (now
-  available) and h2 stream multiplex (Bite 6 — same checkout shape,
-  per-stream rather than per-connection).
-- No version bump — staged on 0.7.3 until 0.8.0 ships fully (after
-  Bite 7).
-- Pool is single-threaded today (matches the rest of the client).
-  When a multi-threaded request dispatch lands, a per-pool mutex
-  goes here.
-- `_sandhi_http_recv_framed` does NOT parse `Trailer:` headers or
-  trailer chunks per RFC 7230 §4.4 robustness — they're discarded.
-  Will revisit only if a consumer asks.
 
 ## [0.7.3] — 2026-04-24
 
