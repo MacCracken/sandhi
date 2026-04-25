@@ -14,10 +14,10 @@
 # (HTTP call → DNS resolve + RPC dispatch → HTTP call), so the 16-
 # slot budget is comfortable.
 #
-# Attribute support deferred: sakshi's public API is span-only today
-# (no `sakshi_span_attr` surfaced). When sakshi grows attrs, sandhi
-# threads them through here. Until then, the span name carries enough
-# context (method + host) for the common consumer needs.
+# Span-name-only by design — sakshi's public API has no key/value
+# attribute surface (no `sakshi_span_attr` ships). Span names carry
+# the context callers need (e.g. `sandhi.http.GET.example.com`).
+# This is an upstream API shape, not a sandhi stub.
 
 # Opt-in flag. Default 0 = every span call is a no-op; sandhi stays
 # silent. Consumers that want spans call sandhi_trace_enable(1) once
@@ -52,6 +52,3 @@ fn sandhi_trace_depth() {
     return sakshi_span_depth();
 }
 
-fn sandhi_trace_version() {
-    return "0.7.2";
-}

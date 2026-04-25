@@ -81,6 +81,3 @@ fn sandhi_conn_alpn_is_h2(conn) {
     return 0;
 }
 
-fn sandhi_alpn_version() {
-    return "0.9.3";
-}

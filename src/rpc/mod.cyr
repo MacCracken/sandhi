@@ -12,6 +12,3 @@
 # Adding a new dialect is a new file + a cyrius.cyml entry; don't grow
 # an existing dialect file.
 
-fn sandhi_rpc_version() {
-    return "0.4.0";
-}

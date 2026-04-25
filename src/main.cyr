@@ -41,17 +41,17 @@
 #                             Transport only per ADR 0001 — protocol
 #                             semantics live in bote / t-ron.
 #   sandhi::discovery       — service discovery: daimon-registered
-#                             lookup, chain-fallback composition, mDNS
-#                             interface (lookup stubbed pending stdlib
-#                             net.cyr multicast primitives).
+#                             lookup, chain-fallback composition,
+#                             mDNS resolver (RFC 6762 link-local A
+#                             query against 224.0.0.251:5353).
 #   sandhi::tls_policy      — cert pinning (SPKI, constant-time
 #                             compare), mTLS, custom trust store,
 #                             policy composition, ALPN advertise list.
-#                             Surface complete; runtime enforcement
-#                             stubbed pending libssl-pthread-deadlock
-#                             + stdlib tls.cyr SSL_CTX hook (see
-#                             docs/issues/). Fail-closed when a policy
-#                             demands enforcement that isn't wired.
+#                             Runtime enforcement wired since 0.9.3
+#                             (libssl/libcrypto symbols resolved via
+#                             stdlib `tls_dlsym`); fail-closed when a
+#                             policy demands enforcement that isn't
+#                             wired.
 #   sandhi::server          — HTTP/1.1 server. Canonical names are
 #                             `sandhi_server_*` (post-0.9.2 rename);
 #                             `http_*` aliases retained as transitional
@@ -59,6 +59,15 @@
 #                             Built-in 400-on-smuggling guards (CL+TE,
 #                             dup Host/CL/TE).
 
+# Single source of truth for the crate version. **Must match the
+# top-level `VERSION` file** at the repository root — `cyrius.cyml`
+# reads VERSION via `${file:VERSION}` for package metadata; this
+# constant is the runtime-side mirror. CI checks the two for drift
+# at build time. Bump them together; never hardcode the version
+# string anywhere else in the source — every `*_version()` accessor
+# delegates here.
+var SANDHI_VERSION = "0.9.3";
+
 fn sandhi_version() {
-    return "0.9.2";
+    return SANDHI_VERSION;
 }

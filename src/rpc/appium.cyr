@@ -134,6 +134,3 @@ fn sandhi_ap_screenshot(base_url, session_id) {
     return sandhi_rpc_call(url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_ap_version() {
-    return "0.4.0";
-}

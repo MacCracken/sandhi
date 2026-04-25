@@ -111,6 +111,3 @@ fn sandhi_discovery_daimon_resolver(base_url) {
     return sandhi_resolver_new(&_sandhi_daimon_lookup, ctx);
 }
 
-fn sandhi_discovery_daimon_version() {
-    return "0.5.0";
-}

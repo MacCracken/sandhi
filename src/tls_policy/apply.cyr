@@ -273,6 +273,3 @@ fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
     return conn;
 }
 
-fn sandhi_tls_policy_version() {
-    return "0.9.3";
-}

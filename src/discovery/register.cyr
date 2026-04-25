@@ -50,6 +50,3 @@ fn sandhi_discovery_deregister(base_url, name) {
     return SANDHI_OK;
 }
 
-fn sandhi_discovery_register_version() {
-    return "0.5.0";
-}

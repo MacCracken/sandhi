@@ -235,6 +235,3 @@ fn sandhi_h2_response_recv(h2c, stream_id) {
     return _sandhi_resp_new(status, body, body_len, headers, SANDHI_OK);
 }
 
-fn sandhi_h2_response_version() {
-    return "0.7.4-bite5c";
-}

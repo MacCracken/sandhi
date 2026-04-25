@@ -231,6 +231,3 @@ fn sandhi_h2_conn_recv_peer_settings(c) {
     return sandhi_h2_conn_send_settings_ack(c);
 }
 
-fn sandhi_h2_conn_version() {
-    return "0.7.4-bite5a";
-}

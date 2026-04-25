@@ -132,7 +132,27 @@ fn test_server_rename_canonical() {
 }
 
 fn test_sandhi_identity() {
-    assert_streq(sandhi_server_version(), "0.9.2", "server version string (rename + alias landed at 0.9.2 closeout)");
+    # Single source of truth: VERSION file → SANDHI_VERSION (mirrored
+    # once in src/main.cyr) → sandhi_version(). Per-module *_version()
+    # accessors were removed in 0.9.3.
+    #
+    # Drift guard: read the VERSION file at test time and assert it
+    # matches what sandhi_version() returns. If a developer bumps
+    # VERSION but forgets to update SANDHI_VERSION (or vice versa),
+    # this test fails loud — CI runs the full suite, so this is
+    # effectively a release-blocker.
+    var vbuf = alloc(64);
+    var n = file_read_all("VERSION", vbuf, 63);
+    assert_gt(n, 0, "VERSION file readable");
+    var trimmed_len = n;
+    var trimming = 1;
+    while (trimming == 1 && trimmed_len > 0) {
+        var c = load8(vbuf + trimmed_len - 1);
+        if (c == 10 || c == 13 || c == 32 || c == 9) { trimmed_len = trimmed_len - 1; }
+        else { trimming = 0; }
+    }
+    store8(vbuf + trimmed_len, 0);
+    assert_streq(vbuf, sandhi_version(), "VERSION file matches SANDHI_VERSION");
     assert_eq(SANDHI_OK, 0, "error enum: OK is 0");
     assert_streq(sandhi_err_kind_name(SANDHI_ERR_TLS), "TLS", "error kind name");
     return 0;
@@ -442,21 +462,34 @@ fn test_client_host_header() {
     return 0;
 }
 
-# NOTE: the default `User-Agent: sandhi/<version>` string in the
-# expected-wire-bytes tests below embeds sandhi_version() at the time
-# this file was last touched. Bump the literal on each version bump
-# alongside src/main.cyr's sandhi_version(). Added in 0.7.1.
+# Build the expected wire-bytes for default-headers tests dynamically
+# from sandhi_version() — single source of truth (VERSION file →
+# src/main.cyr's SANDHI_VERSION → sandhi_version()). Adding the UA
+# string here means a VERSION bump never desyncs the test fixtures.
+fn _expected_with_version(prefix, suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_cstr(sb, "User-Agent: sandhi/");
+    str_builder_add_cstr(sb, sandhi_version());
+    str_builder_add_cstr(sb, "\r\n");
+    str_builder_add_cstr(sb, suffix);
+    return str_data(str_builder_build(sb));
+}
 
 fn test_client_build_request_get() {
     var req = _sandhi_client_build_request("GET", "/path", "example.com", 0, 0);
-    var expected = "GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: sandhi/0.9.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = _expected_with_version(
+        "GET /path HTTP/1.1\r\nHost: example.com\r\n",
+        "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
     assert_streq(str_data(req), expected, "build: GET no body no user headers");
     return 0;
 }
 
 fn test_client_build_request_post() {
     var req = _sandhi_client_build_request("POST", "/api", "api.example.com", 0, 42);
-    var expected = "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\nUser-Agent: sandhi/0.9.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = _expected_with_version(
+        "POST /api HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 42\r\n",
+        "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
     assert_streq(str_data(req), expected, "build: POST emits Content-Length");
     return 0;
 }
@@ -464,7 +497,9 @@ fn test_client_build_request_post() {
 fn test_client_build_request_post_empty_body() {
     # POST with body_len 0 should still emit Content-Length: 0.
     var req = _sandhi_client_build_request("POST", "/ping", "example.com", 0, 0);
-    var expected = "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nUser-Agent: sandhi/0.9.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    var expected = _expected_with_version(
+        "POST /ping HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n",
+        "Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
     assert_streq(str_data(req), expected, "build: POST empty body");
     return 0;
 }
@@ -476,7 +511,9 @@ fn test_client_build_request_user_headers() {
     var req = _sandhi_client_build_request("GET", "/me", "api.example.com", h, 0);
     # User-supplied Accept != Accept-Encoding, so both defaults still inject.
     # User hasn't supplied User-Agent either, so the default lands.
-    var expected = "GET /me HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: sandhi/0.9.2\r\nAccept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
+    var expected = _expected_with_version(
+        "GET /me HTTP/1.1\r\nHost: api.example.com\r\n",
+        "Accept-Encoding: identity\r\nAuthorization: Bearer xyz\r\nAccept: application/json\r\nConnection: close\r\n\r\n");
     assert_streq(str_data(req), expected, "build: user headers serialized");
     return 0;
 }
@@ -1607,11 +1644,15 @@ fn test_discovery_daimon_parse_service_rejects_malformed() {
     return 0;
 }
 
-fn test_discovery_local_stub_always_misses() {
+fn test_discovery_local_resolver_smoke() {
+    # mDNS resolver wired at 0.9.3. With no mDNS responder on the test
+    # host, the lookup should miss within SO_RCVTIMEO (500 ms). Test
+    # asserts the resolver builds, looks up cleanly, and the available
+    # flag reports the wired state.
     var r = sandhi_discovery_local_resolver();
     assert_neq(r, 0, "local: resolver non-null");
-    assert_eq(sandhi_resolver_lookup(r, "any.local"), 0, "local: stub misses");
-    assert_eq(sandhi_discovery_local_available(), 0, "local: available=0 until impl lands");
+    assert_eq(sandhi_resolver_lookup(r, "definitely-no-responder-for-this-name.local"), 0, "local: miss is clean");
+    assert_eq(sandhi_discovery_local_available(), 1, "local: available=1 since 0.9.3");
     return 0;
 }
 
@@ -2339,7 +2380,7 @@ fn main() {
     test_discovery_daimon_parse_service_rejects_malformed();
 
     test_group("discovery/local/stub");
-    test_discovery_local_stub_always_misses();
+    test_discovery_local_resolver_smoke();
 
     test_group("discovery/register/bad_input");
     test_discovery_register_rejects_bad_inputs();

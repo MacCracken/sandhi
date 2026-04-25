@@ -183,6 +183,3 @@ fn sandhi_hpack_huffman_decode(buf, start, nbytes) {
     return out;
 }
 
-fn sandhi_hpack_huffman_version() {
-    return "0.7.4-bite2b";
-}

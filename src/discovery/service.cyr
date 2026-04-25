@@ -70,6 +70,3 @@ fn sandhi_resolver_lookup(r, name) {
     return fncall2(fp, sandhi_resolver_ctx(r), name);
 }
 
-fn sandhi_discovery_service_version() {
-    return "0.5.0";
-}

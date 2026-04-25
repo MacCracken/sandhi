@@ -435,6 +435,3 @@ fn _sandhi_stream_decode_chunked_into(in_sb, chunk_state, out_sb) {
     return 0;
 }
 
-fn sandhi_stream_version() {
-    return "0.7.3";
-}

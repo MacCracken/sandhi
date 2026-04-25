@@ -8,7 +8,8 @@
 #
 # Scope: what service consumers actually hit.
 #   - UDP only (no TCP fallback for >512B responses — rare for A-only)
-#   - A records only (AAAA — ipv6 — deferred until a consumer asks)
+#   - A + AAAA records (sandhi_resolve_ipv4 / _ipv6); HTTP client
+#     tries v4 first, falls back to v6 in `_sandhi_http_do_impl`
 #   - First nameserver from /etc/resolv.conf (no per-query retry across
 #     multiple nameservers yet — add when we see timeouts in practice)
 #   - No /etc/hosts consultation; resolve_ipv4 defers to the client's
@@ -465,14 +466,15 @@ fn _sandhi_resolve_parse_response_aaaa(buf, blen, expected_id) {
 # Resolve `host` to an IPv6 address. Returns a freshly-allocated 16-byte
 # buffer (network-byte-order AAAA record bytes), or 0 on failure. Caller
 # owns the alloc. Intentionally does NOT share a resolver handle with
-# sandhi_resolve_ipv4 — both issue their own UDP query. Happy Eyeballs
-# (parallel v4+v6 with first-response-wins) is deferred per roadmap.
+# sandhi_resolve_ipv4 — both issue their own UDP query.
 #
-# Client-side integration deferred: `_sandhi_client_resolve` remains
-# IPv4-only at 0.7.2. A consumer that needs IPv6 connectivity through
-# sandhi today can call `sandhi_resolve_ipv6(host)` and hand the
-# 16-byte buffer to a future `sandhi_conn_open_v6(...)` verb. The
-# connect-path wiring lands when a consumer asks; see roadmap 0.7.3+.
+# Client-side integration: wired since 0.9.3.
+# `_sandhi_http_do_impl` calls v4 first; on miss falls back to
+# `_sandhi_client_resolve_v6` and routes through
+# `_sandhi_conn_open_v6_fully_timed` (raw socket(AF_INET6) +
+# connect(sockaddr_in6)). v4 + v6 are tried sequentially, not in
+# parallel — Happy Eyeballs (RFC 8305) would need the connect-path
+# refactor to drive two concurrent attempts; not in 0.9.x scope.
 fn sandhi_resolve_ipv6(host) {
     sandhi_trace_begin("sandhi.dns.v6");
     var r = _sandhi_resolve_ipv6_impl(host);
@@ -552,6 +554,3 @@ fn _sandhi_resolve_ipv4_impl(host) {
     return _sandhi_resolve_parse_response(rbuf, rlen, txid);
 }
 
-fn sandhi_resolve_version() {
-    return "0.7.2";
-}

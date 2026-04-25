@@ -6,15 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.9.3] — 2026-04-25
 
-**TLS runtime wire-up** — internal-only fill-in of two surfaces that
-shipped stubbed in 0.8.x / 0.9.x. No new public verbs (ADR 0005
-freeze respected); the existing accessors stop returning 0 and start
-returning the real values.
+**Stub-elimination pass** — every runtime stub in `src/` shipped in
+prior 0.x releases has been replaced with a working implementation.
+Internal wire-up only; no new public verbs (ADR 0005 freeze
+respected). Existing accessors stop returning 0 and start returning
+real values.
 
-**634 assertions still green** (481 sandhi + 153 h2). Two existing
-tests (`test_p0_tls_policy_fail_closed`, `test_tls_enforcement_flag`)
-were rewritten to reflect the wired-up state — the
-"enforcement-stubbed" assertions had baked in the stub contract.
+**634 assertions still green** (481 sandhi + 153 h2). Three existing
+tests (`test_p0_tls_policy_fail_closed`, `test_tls_enforcement_flag`,
+`test_discovery_local_stub_always_misses`) were rewritten to reflect
+the wired-up state — they had baked in the stub contracts they were
+guarding.
 
 ### Toolchain pin
 - `cyrius.cyml [package].cyrius` 5.6.30 → 5.6.41 across the day.
@@ -53,12 +55,41 @@ were rewritten to reflect the wired-up state — the
   via `sandhi_fp_eq` (constant-time). Mismatch closes the conn and
   fails the open with err=TLS (ADR 0004).
 
+### discovery
+- `src/discovery/local.cyr` — mDNS resolver implemented (RFC 6762).
+  Builds an A-record query for `<name>.local` with the QU bit set
+  (so responders unicast back, no IP_ADD_MEMBERSHIP needed), sends
+  to 224.0.0.251:5353, recvs with SO_RCVTIMEO=500 ms, parses via the
+  unicast resolver's `_sandhi_resolve_parse_response`. Returns a
+  `sandhi_service` on hit, 0 on miss. `sandhi_discovery_local_available()`
+  flipped from 0 to 1.
+
+### http
+- `src/http/conn.cyr` — IPv6 connect path added.
+  `_sandhi_conn_open_v6_fully_timed(addr16, port, ...)` opens a
+  `socket(AF_INET6) + connect(sockaddr_in6)` via raw syscalls,
+  reuses the existing TLS/ALPN/policy plumbing through a new
+  `_sandhi_conn_finalize` helper shared with the v4 path.
+  `_sandhi_conn_connect_sa_nb` factors the non-blocking
+  connect+poll dance so v4 and v6 share the connect_ms logic.
+- `src/http/client.cyr` — `_sandhi_http_do_impl` now falls back to
+  v6 when `_sandhi_client_resolve` misses on v4. v6-only hosts are
+  reachable through `sandhi_http_get` without any consumer change
+  (ADR 0005 freeze means no new public open verb — internal helper
+  only).
+
 ### Verification (programs/_*.cyr — disposable probes, not in suite)
-- `_alpn_runtime_probe.cyr` — confirms the advertise toggle round-trips:
-  default → server picks `http/1.1`; flip-flag → server picks `h2`.
-- `_policy_runtime_probe.cyr` — confirms enforcement_available=1, default
-  policy opens, wrong-pin closes with err=TLS, bad-trust-store path
+- `_alpn_runtime_probe.cyr` — advertise toggle round-trips:
+  default → `http/1.1`; flip-flag → `h2`. Real wire negotiation.
+- `_policy_runtime_probe.cyr` — enforcement_available=1, default
+  policy opens, wrong-pin closes with err=TLS, bad-trust-store
   closes with err=TLS.
+- `_mdns_probe.cyr` — sends real multicast UDP to 224.0.0.251:5353,
+  recv-timeout fires cleanly when no responder is present (~500 ms);
+  qname builder preserves `.local` suffix correctly (case-insensitive).
+- `_v6_probe.cyr` — `_sandhi_conn_open_v6_fully_timed` connects to
+  a Python listener bound on `::1`, full HTTP request/response
+  roundtrip via `socket(AF_INET6)` + `connect(sockaddr_in6)`.
 - `_https_oneshot.cyr` (canonical) — `sandhi_http_get("https://example.com/")`
   returns 200 / 528 bytes through the full sandhi stack.
 

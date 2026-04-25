@@ -382,6 +382,3 @@ fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms) {
     return have;
 }
 
-fn sandhi_pool_version() {
-    return "0.7.4";  # Bite 1 of 0.8.0; staged on 0.7.x until 0.8.0 ships.
-}

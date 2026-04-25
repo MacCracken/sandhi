@@ -30,6 +30,17 @@ fn _sandhi_client_resolve(host) {
     return sandhi_resolve_ipv4(host);
 }
 
+# IPv6 fallback. Returns a freshly-alloc'd 16-byte AAAA buffer or 0.
+# Tried after _sandhi_client_resolve misses on the v4 path; lets us
+# reach v6-only hosts without needing a new public open verb (ADR
+# 0005 freeze). Wire-up into the connect path lives in
+# _sandhi_http_do_impl below — `_sandhi_conn_open_v6_fully_timed`
+# in conn.cyr does the actual socket(AF_INET6) + connect(sockaddr_in6).
+fn _sandhi_client_resolve_v6(host) {
+    if (host == 0) { return 0; }
+    return sandhi_resolve_ipv6(host);
+}
+
 # ================================================================
 # Request build
 # ================================================================
@@ -178,8 +189,16 @@ fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
     var u = sandhi_url_parse(url);
     if (u == 0) { return _sandhi_resp_err(SANDHI_ERR_PARSE); }
 
+    # v4-first, v6-fallback. Most production hosts have v4 (often
+    # alongside v6), so a v4 hit is the common path. v6-only hosts
+    # are reached via _sandhi_client_resolve_v6 + the v6 connect
+    # path in conn.cyr.
     var addr = _sandhi_client_resolve(sandhi_url_host(u));
-    if (addr == 0 - 1) { return _sandhi_resp_err(SANDHI_ERR_DISCOVERY); }
+    var addr6 = 0;
+    if (addr == 0 - 1) {
+        addr6 = _sandhi_client_resolve_v6(sandhi_url_host(u));
+        if (addr6 == 0) { return _sandhi_resp_err(SANDHI_ERR_DISCOVERY); }
+    }
 
     # Compute monotonic deadline if total_ms is set. Passed through to
     # exchange so the recv loop can break early. A fresh deadline
@@ -206,8 +225,13 @@ fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
     if (conn == 0) {
         var eff_connect = _sandhi_http_clamp_ms(connect_ms, deadline_ms);
         if (eff_connect == 0 - 1) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
-        conn = sandhi_conn_open_fully_timed(addr, port, use_tls, host,
-                                             eff_connect, read_ms, write_ms);
+        if (addr6 != 0) {
+            conn = _sandhi_conn_open_v6_fully_timed(addr6, port, use_tls, host,
+                                                      eff_connect, read_ms, write_ms);
+        } else {
+            conn = sandhi_conn_open_fully_timed(addr, port, use_tls, host,
+                                                  eff_connect, read_ms, write_ms);
+        }
         if (conn == 0) {
             var oe = sandhi_conn_last_open_err();
             if (oe == SANDHI_CONN_OPEN_TIMEOUT) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
@@ -705,6 +729,3 @@ fn sandhi_http_post_opts(url, user_headers, body, body_len, opts) {
     return _sandhi_http_dispatch("POST", url, user_headers, body, body_len, opts);
 }
 
-fn sandhi_http_client_version() {
-    return "0.7.3";
-}

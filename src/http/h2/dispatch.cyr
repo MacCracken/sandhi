@@ -6,21 +6,21 @@
 # protocol-agnostic.
 #
 # This is the **manual** entry point. The library-level
-# `sandhi_http_get` etc. continues to use the HTTP/1.1 path because
-# there's no way to actually negotiate h2 today (libssl pthread
-# deadlock blocks live HTTPS, and ALPN selection is stubbed in
-# `src/tls_policy/alpn.cyr`). When the libssl side clears, a
-# follow-up bite will wire `sandhi_conn_alpn_is_h2` into
-# `_sandhi_http_dispatch` so consumers get auto-selection without
-# code change.
+# `sandhi_http_get` etc. uses the HTTP/1.1 path; the auto-h2
+# dispatcher (`sandhi_http_request_auto`) opportunistically uses
+# h2 when the pool already holds an h2 conn for the route.
 #
-# Until then: consumers that want h2 today construct the conn
-# themselves (open sandhi_conn, do their own ALPN/h2c setup,
-# `sandhi_h2_conn_send_preface_and_settings` + `_recv_peer_settings`),
-# then call `sandhi_h2_request` per request. Tests in tests/h2.tcyr
-# exercise this end-to-end against synthetic byte streams.
+# Live ALPN selection is wired since 0.9.3 — `sandhi_conn_alpn_is_h2`
+# returns the real value off the conn struct. The remaining piece
+# for full h2 auto-promotion (open conn → if ALPN chose h2, do the
+# preface/SETTINGS exchange and cache an h2 conn in the pool) is
+# additional wire-up in this file's `sandhi_http_request_auto`.
 #
-# Bite 7 of 0.8.0.
+# Consumers that want h2 today construct the conn themselves
+# (`sandhi_conn_open`, then `sandhi_h2_conn_send_preface_and_settings`
+# + `_recv_peer_settings`), then call `sandhi_h2_request` per
+# request. Tests in tests/h2.tcyr exercise this end-to-end against
+# synthetic byte streams.
 
 # Send a request on `h2c` and wait for the matching response.
 # Returns a sandhi_response (same shape as `_sandhi_http_dispatch`
@@ -140,6 +140,3 @@ fn sandhi_http_delete_auto(url, user_headers, opts) {
     return sandhi_http_request_auto("DELETE", url, user_headers, 0, 0, opts);
 }
 
-fn sandhi_h2_dispatch_version() {
-    return "0.8.1";
-}

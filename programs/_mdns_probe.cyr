@@ -1,0 +1,93 @@
+# programs/_mdns_probe.cyr — exercise the live mDNS resolver path.
+
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+fn report(label, name) {
+    var t0 = clock_now_ms();
+    var ip = _sandhi_local_query(name);
+    var dt = clock_now_ms() - t0;
+    say(label); say(": '"); say(name); say("' -> ");
+    if (ip == 0) {
+        say("MISS");
+    } else {
+        var b0 = ip & 0xFF;
+        var b1 = (ip >> 8) & 0xFF;
+        var b2 = (ip >> 16) & 0xFF;
+        var b3 = (ip >> 24) & 0xFF;
+        fmt_int(b0); say("."); fmt_int(b1); say("."); fmt_int(b2); say("."); fmt_int(b3);
+    }
+    say(" ("); fmt_int(dt); say(" ms)\n");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    say("[1] available?\n");
+    say("    -> "); fmt_int(sandhi_discovery_local_available()); say("\n");
+
+    say("[2] qname builder\n");
+    say("    'foo'           -> "); say(_sandhi_local_qname("foo")); say("\n");
+    say("    'bar.local'     -> "); say(_sandhi_local_qname("bar.local")); say("\n");
+    say("    'baz.LOCAL'     -> "); say(_sandhi_local_qname("baz.LOCAL")); say("\n");
+
+    say("[3] live mDNS queries (need avahi-daemon for hits; misses are normal)\n");
+    report("    self", "archaemenid");
+    report("    nonexistent", "definitely-no-responder-name-zzz");
+
+    say("[4] resolver shape\n");
+    var r = sandhi_discovery_local_resolver();
+    say("    resolver = "); fmt_int(r); say("\n");
+    var s = sandhi_resolver_lookup(r, "archaemenid");
+    if (s == 0) {
+        say("    lookup = MISS (clean)\n");
+    } else {
+        say("    lookup = "); say(sandhi_service_host(s)); say(" ip=");
+        fmt_int(sandhi_service_ipv4(s)); say("\n");
+    }
+
+    say("done\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

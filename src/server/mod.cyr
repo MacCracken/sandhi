@@ -689,6 +689,3 @@ fn http_server_run_opts(addr, port, handler_fp, ctx, opts) {
 # ================================================================
 # Kept so downstream can probe the migrated-module version. Retires
 # when fold-into-stdlib lands; consumers should prefer sandhi_version().
-fn sandhi_server_version() {
-    return "0.9.2";
-}

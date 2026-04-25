@@ -1,70 +1,160 @@
-# sandhi/discovery/local — mDNS / local-link resolver.
+# sandhi/discovery/local — mDNS / link-local resolver (RFC 6762).
 #
-# M4 ships the INTERFACE only; the implementation returns 0 (miss)
-# today. Chain-resolver users can wire this in without code churn —
-# when the real lookup lands, existing `sandhi_discovery_local_resolver()`
-# callers start getting hits without any API change.
+# Real implementation: builds a unicast-response (QU) A-record query
+# for `<name>.local`, sends it to the IPv4 mDNS multicast group
+# 224.0.0.251:5353 over UDP, recvs the first response, parses out
+# the A record, returns a sandhi_service. Bounded by SO_RCVTIMEO so
+# a missing responder doesn't hang the chain.
 #
-# Why deferred:
-#   mDNS requires multicast-UDP socket setup (IP_ADD_MEMBERSHIP,
-#   IP_MULTICAST_TTL, IP_MULTICAST_IF) that stdlib `net.cyr` does not
-#   currently expose. Two paths forward, neither in M4 scope:
+# Wire shape:
+#   - Query name: `<name>.local` (one label appended if `name` doesn't
+#     already end in `.local`).
+#   - QTYPE=A (1), QCLASS = IN with the QU (top) bit set = 0x8001 so
+#     responders unicast the answer to our source port. Using QU
+#     means we don't need IP_ADD_MEMBERSHIP — the response arrives on
+#     the same fd we sent from, no multicast listen required.
+#   - TTL: kernel default for IP_MULTICAST_TTL on Linux is 1, which is
+#     exactly what RFC 6762 calls for (link-local only). No setsockopt
+#     needed.
 #
-#   A) Extend net.cyr with multicast setsockopt helpers; sandhi's
-#      local resolver then sends `<name>.local.` A-record queries to
-#      224.0.0.251:5353 and parses the first response. ~100 lines of
-#      sandhi code on top of the net.cyr patch.
-#
-#   B) Shell out to `avahi-resolve` or `getent hosts` via
-#      `process.cyr`. Quick but introduces an external-binary
-#      dependency sandhi has otherwise avoided.
-#
-# Revisit when a consumer actually asks for mDNS in-process, or when
-# net.cyr gains multicast primitives as part of other work.
-#
-# Reference for the eventual implementation:
-#   RFC 6762 (Multicast DNS), RFC 6763 (DNS-Based Service Discovery).
+# Reference: RFC 6762 (Multicast DNS), RFC 6763 (DNS-Based Service
+# Discovery — out of scope here; this resolver answers names, not
+# services-by-type).
 
-# Context struct reserved for future parameters (interface index,
-# timeout, domain override). Allocated so the resolver's shape
-# matches what the real impl will look like — caller code doesn't
-# change when we fill it in.
-enum SandhiLocalCtxOff {
-    SANDHI_LOCAL_CTX_OFF_IFACE   = 0;  # reserved: interface name or index
-    SANDHI_LOCAL_CTX_OFF_TIMEOUT = 8;  # reserved: query timeout ms
+# 224.0.0.251 packed as a network-byte-order uint32 in
+# little-endian-host repr (matches sock_connect's expectations:
+# bytes 224, 0, 0, 251 across the int).
+var _SANDHI_MDNS_GROUP = 0;
+var _SANDHI_MDNS_PORT  = 5353;
+var _SANDHI_MDNS_TIMEOUT_MS = 500;
+
+# Build a `<name>.local` cstr — caller-owned alloc. If `name` already
+# ends in `.local` (case-insensitive), passes it through.
+fn _sandhi_local_qname(name) {
+    var nlen = strlen(name);
+    var has_suffix = 0;
+    if (nlen >= 6) {
+        var s = name + nlen - 6;
+        var c0 = load8(s + 0);
+        var c1 = load8(s + 1);
+        var c2 = load8(s + 2);
+        var c3 = load8(s + 3);
+        var c4 = load8(s + 4);
+        var c5 = load8(s + 5);
+        # Lowercase compare on the suffix.
+        if (c0 == 46) {  # '.'
+            if ((c1 == 108 || c1 == 76) && (c2 == 111 || c2 == 79)
+             && (c3 == 99 || c3 == 67) && (c4 == 97 || c4 == 65)
+             && (c5 == 108 || c5 == 76)) {
+                has_suffix = 1;
+            }
+        }
+    }
+    if (has_suffix == 1) {
+        var dup = alloc(nlen + 1);
+        memcpy(dup, name, nlen);
+        store8(dup + nlen, 0);
+        return dup;
+    }
+    var out = alloc(nlen + 7);
+    memcpy(out, name, nlen);
+    store8(out + nlen + 0, 46);   # '.'
+    store8(out + nlen + 1, 108);  # 'l'
+    store8(out + nlen + 2, 111);  # 'o'
+    store8(out + nlen + 3, 99);   # 'c'
+    store8(out + nlen + 4, 97);   # 'a'
+    store8(out + nlen + 5, 108);  # 'l'
+    store8(out + nlen + 6, 0);
+    return out;
 }
 
-var SANDHI_LOCAL_CTX_SIZE = 16;
+# Build the mDNS query packet. Same wire format as the unicast DNS
+# resolver in net/resolve.cyr but with QCLASS = 0x8001 (IN | QU bit
+# per RFC 6762 §5.4 — request unicast response).
+fn _sandhi_local_build_query(id, qname, out) {
+    store8(out + 0, (id >> 8) & 0xFF);
+    store8(out + 1, id & 0xFF);
+    store8(out + 2, 0x00);  # mDNS queries: QR=0, Opcode=0, AA=0, TC=0, RD=0
+    store8(out + 3, 0x00);
+    store8(out + 4, 0x00); store8(out + 5, 0x01);  # QDCOUNT = 1
+    store8(out + 6, 0x00); store8(out + 7, 0x00);  # ANCOUNT
+    store8(out + 8, 0x00); store8(out + 9, 0x00);  # NSCOUNT
+    store8(out + 10, 0x00); store8(out + 11, 0x00); # ARCOUNT
 
-fn _sandhi_discovery_local_ctx_new() {
-    var c = alloc(SANDHI_LOCAL_CTX_SIZE);
-    store64(c + SANDHI_LOCAL_CTX_OFF_IFACE, 0);
-    store64(c + SANDHI_LOCAL_CTX_OFF_TIMEOUT, 2000);
-    return c;
+    var qname_len = _sandhi_resolve_encode_labels(qname, out + 12);
+    if (qname_len < 0) { return 0 - 1; }
+    var qi = 12 + qname_len;
+    store8(out + qi + 0, 0x00); store8(out + qi + 1, 0x01);  # QTYPE = A
+    store8(out + qi + 2, 0x80); store8(out + qi + 3, 0x01);  # QCLASS = IN | QU
+    return qi + 4;
 }
 
-# Resolver callback. Returns 0 (miss) until multicast lands.
+# Issue an mDNS query and return the resolved IPv4 address (in
+# sock_connect format: bytes packed network-byte-order into a
+# host-endian int), or 0 on any failure / timeout / miss. Reuses
+# the unicast resolver's response parser since the wire format is
+# identical past the question section.
+fn _sandhi_local_query(name) {
+    if (name == 0) { return 0; }
+    if (_SANDHI_MDNS_GROUP == 0) {
+        _SANDHI_MDNS_GROUP = 224 | (0 << 8) | (0 << 16) | (251 << 24);
+    }
+
+    var qname = _sandhi_local_qname(name);
+    var txid = _sandhi_resolve_random_u16();
+    var qbuf = alloc(_SANDHI_RESOLVE_BUF_SIZE);
+    var qlen = _sandhi_local_build_query(txid, qname, qbuf);
+    if (qlen < 0) { return 0; }
+
+    var fd_r = udp_socket();
+    if (is_err_result(fd_r) == 1) { return 0; }
+    var fd = payload(fd_r);
+
+    # Bound the recv — link-local; if no responder shows up in 500 ms
+    # we treat it as a miss so the chain falls through.
+    _sandhi_conn_set_timeout_ms(fd, _SANDHI_MDNS_TIMEOUT_MS, _SANDHI_SO_RCVTIMEO);
+
+    var cr = sock_connect(fd, _SANDHI_MDNS_GROUP, _SANDHI_MDNS_PORT);
+    if (is_err_result(cr) == 1) { sock_close(fd); return 0; }
+    var sr = sock_send(fd, qbuf, qlen);
+    if (is_err_result(sr) == 1) { sock_close(fd); return 0; }
+
+    var rbuf = alloc(_SANDHI_RESOLVE_BUF_SIZE);
+    var rr = sock_recv(fd, rbuf, _SANDHI_RESOLVE_BUF_SIZE);
+    sock_close(fd);
+    if (is_err_result(rr) == 1) { return 0; }
+    var rlen = payload(rr);
+    if (rlen <= 0) { return 0; }
+
+    # _sandhi_resolve_parse_response returns 0 - 1 on any failure (we
+    # treat that as a miss too — same semantics chain expects).
+    var ip = _sandhi_resolve_parse_response(rbuf, rlen, txid);
+    if (ip == 0 - 1) { return 0; }
+    return ip;
+}
+
+# Resolver callback. Returns a sandhi_service on hit, 0 on miss.
 fn _sandhi_local_lookup(ctx, name) {
-    if (ctx == 0 || name == 0) { return 0; }
-    # Always miss for now. When the real impl lands, construct the
-    # multicast query here using the ctx-configured interface/timeout.
-    return 0;
+    if (name == 0) { return 0; }
+    var ip = _sandhi_local_query(name);
+    if (ip == 0) { return 0; }
+    # Build a service struct. host = canonical mDNS name (`<name>.local`)
+    # so callers can emit it in URLs / logs; ipv4 carries the resolved
+    # address so connect() can skip another lookup.
+    var qname = _sandhi_local_qname(name);
+    return sandhi_service_new(name, qname, 0, ip);
 }
 
-# Build the mDNS resolver. Returns a resolver struct whose lookup
-# always misses today but becomes functional when multicast lands.
+# Build the mDNS resolver. Plug into a chain alongside daimon-backed
+# or unicast-DNS resolvers; first-hit wins.
 fn sandhi_discovery_local_resolver() {
-    var ctx = _sandhi_discovery_local_ctx_new();
-    return sandhi_resolver_new(&_sandhi_local_lookup, ctx);
+    return sandhi_resolver_new(&_sandhi_local_lookup, 0);
 }
 
-# 1 if the local resolver has a working implementation on this
-# platform, 0 if it's a no-op stub. Callers constructing a chain
-# at startup can log a warning when this returns 0.
+# 1 — wired since 0.9.3. Always available on Linux (multicast UDP is
+# kernel-side; no extra deps). Returns 0 only if a future port lacks
+# multicast UDP support.
 fn sandhi_discovery_local_available() {
-    return 0;
+    return 1;
 }
 
-fn sandhi_discovery_local_version() {
-    return "0.5.0-stub";
-}

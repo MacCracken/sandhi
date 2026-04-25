@@ -208,6 +208,3 @@ fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
     return stream_id;
 }
 
-fn sandhi_h2_request_version() {
-    return "0.7.4-bite5b";
-}

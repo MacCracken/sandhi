@@ -1,0 +1,86 @@
+# programs/_v6_probe.cyr — exercise the IPv6 client integration.
+#
+# `ipv6.google.com` resolves only on AAAA (no A record) — the v4
+# resolver misses, the v6 path takes over and connects via raw
+# socket(AF_INET6).
+
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+fn main() {
+    alloc_init();
+
+    # Hardcoded ::1 (loopback): all zeros except final byte = 1.
+    var v6 = alloc(16);
+    var i = 0;
+    while (i < 15) { store8(v6 + i, 0); i = i + 1; }
+    store8(v6 + 15, 1);
+
+    say("[1] direct v6 connect to [::1]:18800 (plain HTTP)\n");
+    var conn = _sandhi_conn_open_v6_fully_timed(v6, 18800, 0, "::1", 5000, 5000, 5000);
+    say("    conn = "); fmt_int(conn);
+    say("  last_err = "); fmt_int(sandhi_conn_last_open_err()); say("\n");
+    if (conn == 0) { say("ABORT: v6 connect failed\n"); return 1; }
+
+    say("[2] send HTTP GET on the v6 conn\n");
+    var req = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    var sw = sandhi_conn_send_all(conn, req, strlen(req));
+    say("    send_all = "); fmt_int(sw); say("\n");
+
+    say("[3] recv response\n");
+    var buf = alloc(4096);
+    var n = sandhi_conn_recv_all(conn, buf, 4095);
+    say("    bytes = "); fmt_int(n); say("\n");
+    if (n > 0) {
+        var show = n;
+        if (show > 200) { show = 200; }
+        say("    first 200 bytes: ");
+        syscall(1, 1, buf, show);
+        say("\n");
+    }
+
+    sandhi_conn_close(conn);
+    say("done\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

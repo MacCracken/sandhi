@@ -4,7 +4,7 @@
 #   discovery/service   — service struct + resolver (fn-ptr + ctx) shape
 #   discovery/chain     — fallback sequence of resolvers
 #   discovery/daimon    — HTTP-backed resolver against daimon's registry
-#   discovery/local     — mDNS resolver (interface only; impl deferred — see file)
+#   discovery/local     — mDNS resolver (RFC 6762 link-local query against 224.0.0.251:5353)
 #   discovery/register  — publish/withdraw against daimon
 #
 # Typical consumer shape:
@@ -19,6 +19,3 @@
 # No resolver in the chain is load-bearing — a missing daimon falls
 # through to the next backend silently.
 
-fn sandhi_discovery_version() {
-    return "0.5.0";
-}

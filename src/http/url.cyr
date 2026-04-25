@@ -92,10 +92,28 @@ fn sandhi_url_parse(url) {
         return 0;  # unsupported scheme
     }
 
-    # Host — runs until ':' (port) or '/' (path) or '?' (query) or end.
-    # Cyrius has no `break`; walk forward while none of those delimiters
-    # has appeared, then fall into the tail with p pointing at the
-    # delimiter (or end-of-string).
+    # Host — two flavors:
+    #   1) Bracketed IPv6: `[2001:db8::1]` or `[::1]` per RFC 3986 §3.2.2.
+    #      Brackets contain the literal; ':' inside brackets is part of
+    #      the address, not the port separator. Brackets are stripped
+    #      from the stored host (callers see "::1", not "[::1]").
+    #   2) Bare hostname / IPv4: runs until ':' / '/' / '?' / end.
+    if (load8(url + p) == 91) {  # '['
+        var v6_start = p + 1;
+        var v6_end = v6_start;
+        var v6_scan = 1;
+        while (v6_scan == 1) {
+            var bc = load8(url + v6_end);
+            if (bc == 0)  { return 0; }     # unterminated bracket
+            if (bc == 93) { v6_scan = 0; }  # ']'
+            else          { v6_end = v6_end + 1; }
+        }
+        if (v6_end == v6_start) { return 0; }  # empty []
+        # finish_at() takes content-range + post-host-tail-cursor
+        # separately so the v6 path can skip the trailing ']'.
+        return _sandhi_url_finish_at(url, scheme, default_port, v6_start, v6_end, v6_end + 1);
+    }
+
     var host_start = p;
     var scanning = 1;
     while (scanning == 1) {
@@ -106,17 +124,20 @@ fn sandhi_url_parse(url) {
         elif (c == 63) { scanning = 0; }
         else { p = p + 1; }
     }
-    return _sandhi_url_finish(url, scheme, default_port, host_start, p);
+    return _sandhi_url_finish_at(url, scheme, default_port, host_start, p, p);
 }
 
-# Continue parsing after the host boundary has been found. `host_end`
-# points at ':' / '/' / '?' / NUL.
-fn _sandhi_url_finish(url, scheme, default_port, host_start, host_end) {
-    var host_len = host_end - host_start;
+# Continue parsing after the host boundary. host_start..host_end_excl
+# bounds the host content; tail_start is where post-host parsing
+# (port / path / query) picks up. Bare hosts pass host_end_excl ==
+# tail_start; bracketed-v6 passes tail_start == host_end_excl + 1 to
+# skip the closing ']'.
+fn _sandhi_url_finish_at(url, scheme, default_port, host_start, host_end_excl, tail_start) {
+    var host_len = host_end_excl - host_start;
     if (host_len == 0) { return 0; }
 
     var port = default_port;
-    var p = host_end;
+    var p = tail_start;
     if (load8(url + p) == 58) {
         p = p + 1;
         port = 0;
@@ -198,6 +219,3 @@ fn _sandhi_url_finish(url, scheme, default_port, host_start, host_end) {
     return result;
 }
 
-fn sandhi_url_version() {
-    return "0.3.0";
-}

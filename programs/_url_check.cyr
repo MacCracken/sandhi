@@ -1,0 +1,66 @@
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+fn check(label, url) {
+    say(label); say(": ");
+    var u = sandhi_url_parse(url);
+    if (u == 0) { say("PARSE FAIL\n"); return 0; }
+    say("host="); say(sandhi_url_host(u));
+    say(" port="); fmt_int(sandhi_url_port(u));
+    say(" path="); say(sandhi_url_path(u));
+    say("\n");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    check("plain", "http://example.com/");
+    check("port", "http://example.com:8080/api");
+    check("https", "https://example.com/");
+    check("v6 ::1", "http://[::1]/");
+    check("v6 ::1 +port", "http://[::1]:8080/api");
+    check("v6 full", "https://[2001:db8::1]/");
+    check("blackhole", "http://192.0.2.1/");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

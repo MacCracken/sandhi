@@ -56,6 +56,3 @@ fn sandhi_discovery_chain_as_resolver(chain) {
     return sandhi_resolver_new(&_sandhi_discovery_chain_adapter, chain);
 }
 
-fn sandhi_discovery_chain_version() {
-    return "0.5.0";
-}

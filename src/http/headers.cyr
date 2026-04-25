@@ -315,6 +315,3 @@ fn sandhi_headers_smuggle_dup(h) {
 # Identity
 # ================================================================
 
-fn sandhi_headers_version() {
-    return "0.9.1";
-}

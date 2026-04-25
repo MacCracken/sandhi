@@ -10,9 +10,12 @@
 # apply side effects — consumers that need POST-retry must opt in by
 # calling `sandhi_http_post` in a loop with their own idempotency key.
 #
-# Backoff: exponential (backoff_ms *= 2 per attempt) with a jitter-free
-# cap at `max_backoff_ms`. Jitter not added at 0.7.2 — it's a ~5-line
-# follow-up when a consumer reports thundering-herd behavior.
+# Backoff: exponential (backoff_ms *= 2 per attempt) capped at
+# `max_backoff_ms`, with **AWS-style "full jitter"** applied since
+# 0.9.3: each sleep is a uniform random value in [0, backoff_capped].
+# This prevents thundering-herd alignment when many clients all
+# fail at the same instant (e.g., upstream blip) and would otherwise
+# all retry at exactly the same time.
 #
 # Retry policy struct (24 bytes):
 #   +0   max_attempts       (int: default 3 — one original + two retries)
@@ -68,6 +71,22 @@ fn _sandhi_retry_max(r) {
     return load64(r + SANDHI_RETRY_OFF_MAX);
 }
 
+# Full-jitter sleep: pick a uniform random value in [0, ceiling_ms]
+# and sleep for it. Cryptographic quality not required; the only
+# property we want is "different clients pick different values" so
+# they don't all retry on the same millisecond. clock_now_ns() XOR
+# folded into a 32-bit value is plenty.
+fn _sandhi_retry_jitter_sleep(ceiling_ms) {
+    if (ceiling_ms <= 0) { return 0; }
+    var ns = clock_now_ns();
+    var mix = ns ^ (ns >> 17) ^ (ns >> 31);
+    var rnd = mix & 0xFFFFFFFF;
+    if (rnd < 0) { rnd = 0 - rnd; }
+    var ms = rnd % (ceiling_ms + 1);
+    sleep_ms(ms);
+    return ms;
+}
+
 # 1 if `response` represents a transient failure worth retrying.
 # Retryable: CONNECT, TIMEOUT, DISCOVERY (flaky resolver), 5xx.
 # NOT retryable: PARSE, TLS, PROTOCOL, REMOTE (non-5xx), AUTH, INTERNAL, 4xx.
@@ -94,7 +113,9 @@ fn _sandhi_http_retry(method, url, user_headers, body, body_len, opts, retry) {
     tried = 1;
     while (tried < attempts) {
         if (_sandhi_retry_should_retry(r) == 0) { return r; }
-        sleep_ms(backoff);
+        var ceiling = backoff;
+        if (ceiling > max_backoff) { ceiling = max_backoff; }
+        _sandhi_retry_jitter_sleep(ceiling);
         backoff = backoff * 2;
         if (backoff > max_backoff) { backoff = max_backoff; }
         r = _sandhi_http_dispatch(method, url, user_headers, body, body_len, opts);
@@ -123,6 +144,3 @@ fn sandhi_http_delete_retry(url, user_headers, opts, retry) {
     return _sandhi_http_retry("DELETE", url, user_headers, 0, 0, opts, retry);
 }
 
-fn sandhi_retry_version() {
-    return "0.7.2";
-}

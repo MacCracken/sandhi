@@ -70,6 +70,3 @@ fn sandhi_http_pool_close_h2_conns(pool) {
     return 0;
 }
 
-fn sandhi_http_pool_h2_glue_version() {
-    return "0.7.4-bite6";
-}

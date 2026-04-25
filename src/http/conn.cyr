@@ -335,6 +335,163 @@ fn sandhi_conn_open_timed(addr, port, use_tls, sni_host, read_ms, write_ms) {
 # On failure, `sandhi_conn_last_open_err()` returns the classification
 # (SANDHI_CONN_OPEN_CONNECT / _TIMEOUT / _TLS) so callers can raise
 # the right SANDHI_ERR_*.
+# Build a sockaddr_in6 (28 bytes) from a 16-byte address buffer +
+# port. Caller-owned alloc. Layout matches Linux uapi
+# /usr/include/linux/in6.h.
+fn _sandhi_conn_sockaddr_in6(addr16, port) {
+    var sa = alloc(28);
+    memset(sa, 0, 28);
+    store16(sa + 0, 10);  # AF_INET6
+    store8(sa + 2, (port >> 8) & 0xFF);
+    store8(sa + 3, port & 0xFF);
+    # sin6_flowinfo = 0 (already memset'd)
+    var i = 0;
+    while (i < 16) {
+        store8(sa + 8 + i, load8(addr16 + i));
+        i = i + 1;
+    }
+    # sin6_scope_id = 0 (already memset'd; non-zero only for link-local)
+    return sa;
+}
+
+# Open an IPv6 connection. Internal-only — sandhi's public surface
+# (frozen at 0.9.2 per ADR 0005) stays IPv4-named but the http
+# client tries v6 fallback through this path. `addr16` is a
+# 16-byte network-byte-order AAAA address buffer (e.g. from
+# sandhi_resolve_ipv6).
+#
+# connect_ms is honored via the same non-blocking + poll dance the
+# v4 path uses; the only difference is the connect syscall takes
+# a sockaddr_in6 (28 bytes) instead of sockaddr_in (16 bytes).
+# Bounded connect against an arbitrary already-built sockaddr (v4
+# or v6). fd is already in default blocking mode; flips to
+# non-blocking, fires connect, polls POLLOUT, restores blocking.
+# Returns _SANDHI_CONN_NB_OK / _TIMEOUT / _ERR matching the v4-only
+# variant.
+fn _sandhi_conn_connect_sa_nb(fd, sa, salen, timeout_ms) {
+    var flags = syscall(SYS_FCNTL, fd, _SANDHI_F_GETFL, 0);
+    if (flags < 0) { return _SANDHI_CONN_NB_ERR; }
+    syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags | _SANDHI_O_NONBLOCK);
+
+    var rc = syscall(SYS_CONNECT, fd, sa, salen);
+    if (rc == 0) {
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_OK;
+    }
+    var errno_v = 0 - rc;
+    if (errno_v != _SANDHI_EINPROGRESS) {
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_ERR;
+    }
+    var pfd = alloc(8);
+    store32(pfd, fd);
+    store16(pfd + 4, _SANDHI_POLLOUT);
+    store16(pfd + 6, 0);
+    var nr = syscall(_SANDHI_SYS_POLL, pfd, 1, timeout_ms);
+    if (nr == 0) {
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_TIMEOUT;
+    }
+    if (nr < 0) {
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_ERR;
+    }
+    var err_val = alloc(4);
+    store32(err_val, 0);
+    var len_cell = alloc(4);
+    store32(len_cell, 4);
+    syscall(_SANDHI_SYS_GETSOCKOPT, fd, SOL_SOCKET, _SANDHI_SO_ERROR, err_val, len_cell);
+    var so_err = load32(err_val);
+    syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+    if (so_err != 0) { return _SANDHI_CONN_NB_ERR; }
+    return _SANDHI_CONN_NB_OK;
+}
+
+# Post-connect plumbing: SO_RCVTIMEO/SO_SNDTIMEO, TLS handshake with
+# the policy/ALPN hook, ALPN slot population, conn struct alloc.
+# Shared between the v4 and v6 open paths.
+fn _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms) {
+    if (read_ms > 0)  { _sandhi_conn_set_timeout_ms(fd, read_ms,  _SANDHI_SO_RCVTIMEO); }
+    if (write_ms > 0) { _sandhi_conn_set_timeout_ms(fd, write_ms, _SANDHI_SO_SNDTIMEO); }
+
+    var tls_ctx = 0;
+    var kind = SANDHI_CONN_PLAIN;
+    var alpn_data = 0;
+    if (use_tls == 1) {
+        if (tls_available() == 0) {
+            sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+            return 0;
+        }
+        var hook_fp = 0;
+        var hook_ctx = 0;
+        if (_sandhi_tls_hook_override != 0) {
+            hook_fp  = _sandhi_tls_hook_override;
+            hook_ctx = _sandhi_tls_hook_override_ctx;
+        } else {
+            _sandhi_alpn_init_wire();
+            hook_ctx = alloc(16);
+            if (_sandhi_alpn_advertise_h2 == 1) {
+                store64(hook_ctx,     _sandhi_alpn_h2h11_wire);
+                store64(hook_ctx + 8, _sandhi_alpn_h2h11_wire_len);
+            } else {
+                store64(hook_ctx,     _sandhi_alpn_h11_wire);
+                store64(hook_ctx + 8, _sandhi_alpn_h11_wire_len);
+            }
+            hook_fp = &_sandhi_alpn_hook;
+        }
+        tls_ctx = tls_connect_with_ctx_hook(fd, sni_host, hook_fp, hook_ctx);
+        if (tls_ctx == 0) {
+            sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+            return 0;
+        }
+        alpn_data = _sandhi_alpn_read_selected(tls_ctx);
+        kind = SANDHI_CONN_TLS;
+    }
+
+    var conn = alloc(SANDHI_CONN_STRUCT_SIZE);
+    store64(conn + SANDHI_CONN_OFF_KIND, kind);
+    store64(conn + SANDHI_CONN_OFF_FD, fd);
+    store64(conn + SANDHI_CONN_OFF_TLS_CTX, tls_ctx);
+    store64(conn + SANDHI_CONN_OFF_ALPN_DATA, alpn_data);
+    return conn;
+}
+
+# Open an IPv6 connection. Internal-only — sandhi's public surface
+# (frozen at 0.9.2 per ADR 0005) stays IPv4-named but the http
+# client tries v6 fallback through this path. `addr16` is a
+# 16-byte network-byte-order AAAA address buffer (e.g. from
+# sandhi_resolve_ipv6).
+fn _sandhi_conn_open_v6_fully_timed(addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
+    _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
+    if (addr16 == 0) {
+        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        return 0;
+    }
+    var fd = syscall(SYS_SOCKET, 10, 1, 0);  # AF_INET6, SOCK_STREAM
+    if (fd < 0) {
+        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        return 0;
+    }
+    var sa = _sandhi_conn_sockaddr_in6(addr16, port);
+    if (connect_ms > 0) {
+        var nbr = _sandhi_conn_connect_sa_nb(fd, sa, 28, connect_ms);
+        if (nbr == _SANDHI_CONN_NB_TIMEOUT) {
+            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_TIMEOUT; return 0;
+        }
+        if (nbr != _SANDHI_CONN_NB_OK) {
+            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+        }
+    } else {
+        var rc = syscall(SYS_CONNECT, fd, sa, 28);
+        if (rc < 0) {
+            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+        }
+    }
+    return _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms);
+}
+
 fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
     _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
 
@@ -366,61 +523,7 @@ fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_
         }
     }
 
-    # Apply recv/send timeouts post-connect. Non-fatal on setsockopt
-    # failure — fall through to untimed (blocking) behavior.
-    if (read_ms > 0)  { _sandhi_conn_set_timeout_ms(fd, read_ms,  _SANDHI_SO_RCVTIMEO); }
-    if (write_ms > 0) { _sandhi_conn_set_timeout_ms(fd, write_ms, _SANDHI_SO_SNDTIMEO); }
-
-    var tls_ctx = 0;
-    var kind = SANDHI_CONN_PLAIN;
-    var alpn_data = 0;
-    if (use_tls == 1) {
-        if (tls_available() == 0) {
-            sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
-            return 0;
-        }
-        # Pick the hook + hook_ctx to use. apply.cyr sets the
-        # override pair before calling here when it wants policy
-        # layering (trust store / mTLS on top of ALPN); otherwise
-        # we fall back to the plain ALPN hook with the toggle-
-        # selected advertise list.
-        var hook_fp = 0;
-        var hook_ctx = 0;
-        if (_sandhi_tls_hook_override != 0) {
-            hook_fp  = _sandhi_tls_hook_override;
-            hook_ctx = _sandhi_tls_hook_override_ctx;
-        } else {
-            _sandhi_alpn_init_wire();
-            hook_ctx = alloc(16);
-            if (_sandhi_alpn_advertise_h2 == 1) {
-                store64(hook_ctx,     _sandhi_alpn_h2h11_wire);
-                store64(hook_ctx + 8, _sandhi_alpn_h2h11_wire_len);
-            } else {
-                store64(hook_ctx,     _sandhi_alpn_h11_wire);
-                store64(hook_ctx + 8, _sandhi_alpn_h11_wire_len);
-            }
-            hook_fp = &_sandhi_alpn_hook;
-        }
-        tls_ctx = tls_connect_with_ctx_hook(fd, sni_host, hook_fp, hook_ctx);
-        if (tls_ctx == 0) {
-            sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
-            return 0;
-        }
-        # Post-handshake: read what the server picked. 0 if ALPN
-        # didn't fire (server doesn't speak it / didn't pick from
-        # our advertise list). Stored as a NUL-terminated cstr.
-        alpn_data = _sandhi_alpn_read_selected(tls_ctx);
-        kind = SANDHI_CONN_TLS;
-    }
-
-    var conn = alloc(SANDHI_CONN_STRUCT_SIZE);
-    store64(conn + SANDHI_CONN_OFF_KIND, kind);
-    store64(conn + SANDHI_CONN_OFF_FD, fd);
-    store64(conn + SANDHI_CONN_OFF_TLS_CTX, tls_ctx);
-    store64(conn + SANDHI_CONN_OFF_ALPN_DATA, alpn_data);
-    return conn;
+    return _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms);
 }
 
 # Send `len` bytes through the connection. Returns bytes sent, 0 on
@@ -513,6 +616,3 @@ fn sandhi_conn_close(conn) {
     return 0;
 }
 
-fn sandhi_conn_version() {
-    return "0.7.3";
-}

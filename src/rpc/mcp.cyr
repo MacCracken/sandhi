@@ -122,6 +122,3 @@ fn sandhi_rpc_mcp_stream(endpoint_url, method_name, params_json, cb, ctx) {
     return sandhi_http_stream(endpoint_url, "POST", headers, body, body_len, cb, ctx);
 }
 
-fn sandhi_rpc_mcp_version() {
-    return "0.7.0";
-}

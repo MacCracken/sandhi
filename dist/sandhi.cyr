@@ -58,10 +58,10 @@ fn sandhi_err_kind_name(kind) {
 # (HTTP call → DNS resolve + RPC dispatch → HTTP call), so the 16-
 # slot budget is comfortable.
 #
-# Attribute support deferred: sakshi's public API is span-only today
-# (no `sakshi_span_attr` surfaced). When sakshi grows attrs, sandhi
-# threads them through here. Until then, the span name carries enough
-# context (method + host) for the common consumer needs.
+# Span-name-only by design — sakshi's public API has no key/value
+# attribute surface (no `sakshi_span_attr` ships). Span names carry
+# the context callers need (e.g. `sandhi.http.GET.example.com`).
+# This is an upstream API shape, not a sandhi stub.
 
 # Opt-in flag. Default 0 = every span call is a no-op; sandhi stays
 # silent. Consumers that want spans call sandhi_trace_enable(1) once
@@ -96,9 +96,6 @@ fn sandhi_trace_depth() {
     return sakshi_span_depth();
 }
 
-fn sandhi_trace_version() {
-    return "0.7.2";
-}
 
 # --- headers.cyr ---
 
@@ -419,9 +416,6 @@ fn sandhi_headers_smuggle_dup(h) {
 # Identity
 # ================================================================
 
-fn sandhi_headers_version() {
-    return "0.9.1";
-}
 
 # --- url.cyr ---
 
@@ -519,10 +513,28 @@ fn sandhi_url_parse(url) {
         return 0;  # unsupported scheme
     }
 
-    # Host — runs until ':' (port) or '/' (path) or '?' (query) or end.
-    # Cyrius has no `break`; walk forward while none of those delimiters
-    # has appeared, then fall into the tail with p pointing at the
-    # delimiter (or end-of-string).
+    # Host — two flavors:
+    #   1) Bracketed IPv6: `[2001:db8::1]` or `[::1]` per RFC 3986 §3.2.2.
+    #      Brackets contain the literal; ':' inside brackets is part of
+    #      the address, not the port separator. Brackets are stripped
+    #      from the stored host (callers see "::1", not "[::1]").
+    #   2) Bare hostname / IPv4: runs until ':' / '/' / '?' / end.
+    if (load8(url + p) == 91) {  # '['
+        var v6_start = p + 1;
+        var v6_end = v6_start;
+        var v6_scan = 1;
+        while (v6_scan == 1) {
+            var bc = load8(url + v6_end);
+            if (bc == 0)  { return 0; }     # unterminated bracket
+            if (bc == 93) { v6_scan = 0; }  # ']'
+            else          { v6_end = v6_end + 1; }
+        }
+        if (v6_end == v6_start) { return 0; }  # empty []
+        # finish_at() takes content-range + post-host-tail-cursor
+        # separately so the v6 path can skip the trailing ']'.
+        return _sandhi_url_finish_at(url, scheme, default_port, v6_start, v6_end, v6_end + 1);
+    }
+
     var host_start = p;
     var scanning = 1;
     while (scanning == 1) {
@@ -533,17 +545,20 @@ fn sandhi_url_parse(url) {
         elif (c == 63) { scanning = 0; }
         else { p = p + 1; }
     }
-    return _sandhi_url_finish(url, scheme, default_port, host_start, p);
+    return _sandhi_url_finish_at(url, scheme, default_port, host_start, p, p);
 }
 
-# Continue parsing after the host boundary has been found. `host_end`
-# points at ':' / '/' / '?' / NUL.
-fn _sandhi_url_finish(url, scheme, default_port, host_start, host_end) {
-    var host_len = host_end - host_start;
+# Continue parsing after the host boundary. host_start..host_end_excl
+# bounds the host content; tail_start is where post-host parsing
+# (port / path / query) picks up. Bare hosts pass host_end_excl ==
+# tail_start; bracketed-v6 passes tail_start == host_end_excl + 1 to
+# skip the closing ']'.
+fn _sandhi_url_finish_at(url, scheme, default_port, host_start, host_end_excl, tail_start) {
+    var host_len = host_end_excl - host_start;
     if (host_len == 0) { return 0; }
 
     var port = default_port;
-    var p = host_end;
+    var p = tail_start;
     if (load8(url + p) == 58) {
         p = p + 1;
         port = 0;
@@ -625,9 +640,6 @@ fn _sandhi_url_finish(url, scheme, default_port, host_start, host_end) {
     return result;
 }
 
-fn sandhi_url_version() {
-    return "0.3.0";
-}
 
 # --- conn.cyr ---
 
@@ -968,6 +980,163 @@ fn sandhi_conn_open_timed(addr, port, use_tls, sni_host, read_ms, write_ms) {
 # On failure, `sandhi_conn_last_open_err()` returns the classification
 # (SANDHI_CONN_OPEN_CONNECT / _TIMEOUT / _TLS) so callers can raise
 # the right SANDHI_ERR_*.
+# Build a sockaddr_in6 (28 bytes) from a 16-byte address buffer +
+# port. Caller-owned alloc. Layout matches Linux uapi
+# /usr/include/linux/in6.h.
+fn _sandhi_conn_sockaddr_in6(addr16, port) {
+    var sa = alloc(28);
+    memset(sa, 0, 28);
+    store16(sa + 0, 10);  # AF_INET6
+    store8(sa + 2, (port >> 8) & 0xFF);
+    store8(sa + 3, port & 0xFF);
+    # sin6_flowinfo = 0 (already memset'd)
+    var i = 0;
+    while (i < 16) {
+        store8(sa + 8 + i, load8(addr16 + i));
+        i = i + 1;
+    }
+    # sin6_scope_id = 0 (already memset'd; non-zero only for link-local)
+    return sa;
+}
+
+# Open an IPv6 connection. Internal-only — sandhi's public surface
+# (frozen at 0.9.2 per ADR 0005) stays IPv4-named but the http
+# client tries v6 fallback through this path. `addr16` is a
+# 16-byte network-byte-order AAAA address buffer (e.g. from
+# sandhi_resolve_ipv6).
+#
+# connect_ms is honored via the same non-blocking + poll dance the
+# v4 path uses; the only difference is the connect syscall takes
+# a sockaddr_in6 (28 bytes) instead of sockaddr_in (16 bytes).
+# Bounded connect against an arbitrary already-built sockaddr (v4
+# or v6). fd is already in default blocking mode; flips to
+# non-blocking, fires connect, polls POLLOUT, restores blocking.
+# Returns _SANDHI_CONN_NB_OK / _TIMEOUT / _ERR matching the v4-only
+# variant.
+fn _sandhi_conn_connect_sa_nb(fd, sa, salen, timeout_ms) {
+    var flags = syscall(SYS_FCNTL, fd, _SANDHI_F_GETFL, 0);
+    if (flags < 0) { return _SANDHI_CONN_NB_ERR; }
+    syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags | _SANDHI_O_NONBLOCK);
+
+    var rc = syscall(SYS_CONNECT, fd, sa, salen);
+    if (rc == 0) {
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_OK;
+    }
+    var errno_v = 0 - rc;
+    if (errno_v != _SANDHI_EINPROGRESS) {
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_ERR;
+    }
+    var pfd = alloc(8);
+    store32(pfd, fd);
+    store16(pfd + 4, _SANDHI_POLLOUT);
+    store16(pfd + 6, 0);
+    var nr = syscall(_SANDHI_SYS_POLL, pfd, 1, timeout_ms);
+    if (nr == 0) {
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_TIMEOUT;
+    }
+    if (nr < 0) {
+        syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+        return _SANDHI_CONN_NB_ERR;
+    }
+    var err_val = alloc(4);
+    store32(err_val, 0);
+    var len_cell = alloc(4);
+    store32(len_cell, 4);
+    syscall(_SANDHI_SYS_GETSOCKOPT, fd, SOL_SOCKET, _SANDHI_SO_ERROR, err_val, len_cell);
+    var so_err = load32(err_val);
+    syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
+    if (so_err != 0) { return _SANDHI_CONN_NB_ERR; }
+    return _SANDHI_CONN_NB_OK;
+}
+
+# Post-connect plumbing: SO_RCVTIMEO/SO_SNDTIMEO, TLS handshake with
+# the policy/ALPN hook, ALPN slot population, conn struct alloc.
+# Shared between the v4 and v6 open paths.
+fn _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms) {
+    if (read_ms > 0)  { _sandhi_conn_set_timeout_ms(fd, read_ms,  _SANDHI_SO_RCVTIMEO); }
+    if (write_ms > 0) { _sandhi_conn_set_timeout_ms(fd, write_ms, _SANDHI_SO_SNDTIMEO); }
+
+    var tls_ctx = 0;
+    var kind = SANDHI_CONN_PLAIN;
+    var alpn_data = 0;
+    if (use_tls == 1) {
+        if (tls_available() == 0) {
+            sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+            return 0;
+        }
+        var hook_fp = 0;
+        var hook_ctx = 0;
+        if (_sandhi_tls_hook_override != 0) {
+            hook_fp  = _sandhi_tls_hook_override;
+            hook_ctx = _sandhi_tls_hook_override_ctx;
+        } else {
+            _sandhi_alpn_init_wire();
+            hook_ctx = alloc(16);
+            if (_sandhi_alpn_advertise_h2 == 1) {
+                store64(hook_ctx,     _sandhi_alpn_h2h11_wire);
+                store64(hook_ctx + 8, _sandhi_alpn_h2h11_wire_len);
+            } else {
+                store64(hook_ctx,     _sandhi_alpn_h11_wire);
+                store64(hook_ctx + 8, _sandhi_alpn_h11_wire_len);
+            }
+            hook_fp = &_sandhi_alpn_hook;
+        }
+        tls_ctx = tls_connect_with_ctx_hook(fd, sni_host, hook_fp, hook_ctx);
+        if (tls_ctx == 0) {
+            sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+            return 0;
+        }
+        alpn_data = _sandhi_alpn_read_selected(tls_ctx);
+        kind = SANDHI_CONN_TLS;
+    }
+
+    var conn = alloc(SANDHI_CONN_STRUCT_SIZE);
+    store64(conn + SANDHI_CONN_OFF_KIND, kind);
+    store64(conn + SANDHI_CONN_OFF_FD, fd);
+    store64(conn + SANDHI_CONN_OFF_TLS_CTX, tls_ctx);
+    store64(conn + SANDHI_CONN_OFF_ALPN_DATA, alpn_data);
+    return conn;
+}
+
+# Open an IPv6 connection. Internal-only — sandhi's public surface
+# (frozen at 0.9.2 per ADR 0005) stays IPv4-named but the http
+# client tries v6 fallback through this path. `addr16` is a
+# 16-byte network-byte-order AAAA address buffer (e.g. from
+# sandhi_resolve_ipv6).
+fn _sandhi_conn_open_v6_fully_timed(addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
+    _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
+    if (addr16 == 0) {
+        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        return 0;
+    }
+    var fd = syscall(SYS_SOCKET, 10, 1, 0);  # AF_INET6, SOCK_STREAM
+    if (fd < 0) {
+        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        return 0;
+    }
+    var sa = _sandhi_conn_sockaddr_in6(addr16, port);
+    if (connect_ms > 0) {
+        var nbr = _sandhi_conn_connect_sa_nb(fd, sa, 28, connect_ms);
+        if (nbr == _SANDHI_CONN_NB_TIMEOUT) {
+            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_TIMEOUT; return 0;
+        }
+        if (nbr != _SANDHI_CONN_NB_OK) {
+            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+        }
+    } else {
+        var rc = syscall(SYS_CONNECT, fd, sa, 28);
+        if (rc < 0) {
+            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+        }
+    }
+    return _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms);
+}
+
 fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
     _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
 
@@ -999,61 +1168,7 @@ fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_
         }
     }
 
-    # Apply recv/send timeouts post-connect. Non-fatal on setsockopt
-    # failure — fall through to untimed (blocking) behavior.
-    if (read_ms > 0)  { _sandhi_conn_set_timeout_ms(fd, read_ms,  _SANDHI_SO_RCVTIMEO); }
-    if (write_ms > 0) { _sandhi_conn_set_timeout_ms(fd, write_ms, _SANDHI_SO_SNDTIMEO); }
-
-    var tls_ctx = 0;
-    var kind = SANDHI_CONN_PLAIN;
-    var alpn_data = 0;
-    if (use_tls == 1) {
-        if (tls_available() == 0) {
-            sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
-            return 0;
-        }
-        # Pick the hook + hook_ctx to use. apply.cyr sets the
-        # override pair before calling here when it wants policy
-        # layering (trust store / mTLS on top of ALPN); otherwise
-        # we fall back to the plain ALPN hook with the toggle-
-        # selected advertise list.
-        var hook_fp = 0;
-        var hook_ctx = 0;
-        if (_sandhi_tls_hook_override != 0) {
-            hook_fp  = _sandhi_tls_hook_override;
-            hook_ctx = _sandhi_tls_hook_override_ctx;
-        } else {
-            _sandhi_alpn_init_wire();
-            hook_ctx = alloc(16);
-            if (_sandhi_alpn_advertise_h2 == 1) {
-                store64(hook_ctx,     _sandhi_alpn_h2h11_wire);
-                store64(hook_ctx + 8, _sandhi_alpn_h2h11_wire_len);
-            } else {
-                store64(hook_ctx,     _sandhi_alpn_h11_wire);
-                store64(hook_ctx + 8, _sandhi_alpn_h11_wire_len);
-            }
-            hook_fp = &_sandhi_alpn_hook;
-        }
-        tls_ctx = tls_connect_with_ctx_hook(fd, sni_host, hook_fp, hook_ctx);
-        if (tls_ctx == 0) {
-            sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
-            return 0;
-        }
-        # Post-handshake: read what the server picked. 0 if ALPN
-        # didn't fire (server doesn't speak it / didn't pick from
-        # our advertise list). Stored as a NUL-terminated cstr.
-        alpn_data = _sandhi_alpn_read_selected(tls_ctx);
-        kind = SANDHI_CONN_TLS;
-    }
-
-    var conn = alloc(SANDHI_CONN_STRUCT_SIZE);
-    store64(conn + SANDHI_CONN_OFF_KIND, kind);
-    store64(conn + SANDHI_CONN_OFF_FD, fd);
-    store64(conn + SANDHI_CONN_OFF_TLS_CTX, tls_ctx);
-    store64(conn + SANDHI_CONN_OFF_ALPN_DATA, alpn_data);
-    return conn;
+    return _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms);
 }
 
 # Send `len` bytes through the connection. Returns bytes sent, 0 on
@@ -1146,9 +1261,6 @@ fn sandhi_conn_close(conn) {
     return 0;
 }
 
-fn sandhi_conn_version() {
-    return "0.7.3";
-}
 
 # --- response.cyr ---
 
@@ -1542,9 +1654,6 @@ fn sandhi_http_response_parse(buf, blen) {
     return _sandhi_resp_frame(buf, blen, status, headers, body_start);
 }
 
-fn sandhi_response_version() {
-    return "0.7.1";
-}
 
 # --- resolve.cyr ---
 
@@ -1558,7 +1667,8 @@ fn sandhi_response_version() {
 #
 # Scope: what service consumers actually hit.
 #   - UDP only (no TCP fallback for >512B responses — rare for A-only)
-#   - A records only (AAAA — ipv6 — deferred until a consumer asks)
+#   - A + AAAA records (sandhi_resolve_ipv4 / _ipv6); HTTP client
+#     tries v4 first, falls back to v6 in `_sandhi_http_do_impl`
 #   - First nameserver from /etc/resolv.conf (no per-query retry across
 #     multiple nameservers yet — add when we see timeouts in practice)
 #   - No /etc/hosts consultation; resolve_ipv4 defers to the client's
@@ -2015,14 +2125,15 @@ fn _sandhi_resolve_parse_response_aaaa(buf, blen, expected_id) {
 # Resolve `host` to an IPv6 address. Returns a freshly-allocated 16-byte
 # buffer (network-byte-order AAAA record bytes), or 0 on failure. Caller
 # owns the alloc. Intentionally does NOT share a resolver handle with
-# sandhi_resolve_ipv4 — both issue their own UDP query. Happy Eyeballs
-# (parallel v4+v6 with first-response-wins) is deferred per roadmap.
+# sandhi_resolve_ipv4 — both issue their own UDP query.
 #
-# Client-side integration deferred: `_sandhi_client_resolve` remains
-# IPv4-only at 0.7.2. A consumer that needs IPv6 connectivity through
-# sandhi today can call `sandhi_resolve_ipv6(host)` and hand the
-# 16-byte buffer to a future `sandhi_conn_open_v6(...)` verb. The
-# connect-path wiring lands when a consumer asks; see roadmap 0.7.3+.
+# Client-side integration: wired since 0.9.3.
+# `_sandhi_http_do_impl` calls v4 first; on miss falls back to
+# `_sandhi_client_resolve_v6` and routes through
+# `_sandhi_conn_open_v6_fully_timed` (raw socket(AF_INET6) +
+# connect(sockaddr_in6)). v4 + v6 are tried sequentially, not in
+# parallel — Happy Eyeballs (RFC 8305) would need the connect-path
+# refactor to drive two concurrent attempts; not in 0.9.x scope.
 fn sandhi_resolve_ipv6(host) {
     sandhi_trace_begin("sandhi.dns.v6");
     var r = _sandhi_resolve_ipv6_impl(host);
@@ -2102,9 +2213,6 @@ fn _sandhi_resolve_ipv4_impl(host) {
     return _sandhi_resolve_parse_response(rbuf, rlen, txid);
 }
 
-fn sandhi_resolve_version() {
-    return "0.7.2";
-}
 
 # --- client.cyr ---
 
@@ -2138,6 +2246,17 @@ fn _sandhi_client_resolve(host) {
     var lit = sandhi_net_parse_ipv4(host);
     if (lit != 0 - 1) { return lit; }
     return sandhi_resolve_ipv4(host);
+}
+
+# IPv6 fallback. Returns a freshly-alloc'd 16-byte AAAA buffer or 0.
+# Tried after _sandhi_client_resolve misses on the v4 path; lets us
+# reach v6-only hosts without needing a new public open verb (ADR
+# 0005 freeze). Wire-up into the connect path lives in
+# _sandhi_http_do_impl below — `_sandhi_conn_open_v6_fully_timed`
+# in conn.cyr does the actual socket(AF_INET6) + connect(sockaddr_in6).
+fn _sandhi_client_resolve_v6(host) {
+    if (host == 0) { return 0; }
+    return sandhi_resolve_ipv6(host);
 }
 
 # ================================================================
@@ -2288,8 +2407,16 @@ fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
     var u = sandhi_url_parse(url);
     if (u == 0) { return _sandhi_resp_err(SANDHI_ERR_PARSE); }
 
+    # v4-first, v6-fallback. Most production hosts have v4 (often
+    # alongside v6), so a v4 hit is the common path. v6-only hosts
+    # are reached via _sandhi_client_resolve_v6 + the v6 connect
+    # path in conn.cyr.
     var addr = _sandhi_client_resolve(sandhi_url_host(u));
-    if (addr == 0 - 1) { return _sandhi_resp_err(SANDHI_ERR_DISCOVERY); }
+    var addr6 = 0;
+    if (addr == 0 - 1) {
+        addr6 = _sandhi_client_resolve_v6(sandhi_url_host(u));
+        if (addr6 == 0) { return _sandhi_resp_err(SANDHI_ERR_DISCOVERY); }
+    }
 
     # Compute monotonic deadline if total_ms is set. Passed through to
     # exchange so the recv loop can break early. A fresh deadline
@@ -2316,8 +2443,13 @@ fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
     if (conn == 0) {
         var eff_connect = _sandhi_http_clamp_ms(connect_ms, deadline_ms);
         if (eff_connect == 0 - 1) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
-        conn = sandhi_conn_open_fully_timed(addr, port, use_tls, host,
-                                             eff_connect, read_ms, write_ms);
+        if (addr6 != 0) {
+            conn = _sandhi_conn_open_v6_fully_timed(addr6, port, use_tls, host,
+                                                      eff_connect, read_ms, write_ms);
+        } else {
+            conn = sandhi_conn_open_fully_timed(addr, port, use_tls, host,
+                                                  eff_connect, read_ms, write_ms);
+        }
         if (conn == 0) {
             var oe = sandhi_conn_last_open_err();
             if (oe == SANDHI_CONN_OPEN_TIMEOUT) { return _sandhi_resp_err(SANDHI_ERR_TIMEOUT); }
@@ -2815,9 +2947,6 @@ fn sandhi_http_post_opts(url, user_headers, body, body_len, opts) {
     return _sandhi_http_dispatch("POST", url, user_headers, body, body_len, opts);
 }
 
-fn sandhi_http_client_version() {
-    return "0.7.3";
-}
 
 # --- pool.cyr ---
 
@@ -3205,9 +3334,6 @@ fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms) {
     return have;
 }
 
-fn sandhi_pool_version() {
-    return "0.7.4";  # Bite 1 of 0.8.0; staged on 0.7.x until 0.8.0 ships.
-}
 
 # --- huffman.cyr ---
 
@@ -3396,9 +3522,6 @@ fn sandhi_hpack_huffman_decode(buf, start, nbytes) {
     return out;
 }
 
-fn sandhi_hpack_huffman_version() {
-    return "0.7.4-bite2b";
-}
 
 # --- hpack.cyr ---
 
@@ -3976,9 +4099,6 @@ fn sandhi_hpack_decode_field(t, buf, blen, off_cell, name_out, value_out) {
     return 0;
 }
 
-fn sandhi_hpack_version() {
-    return "0.7.4-bite2";
-}
 
 # --- frame.cyr ---
 
@@ -4263,9 +4383,6 @@ fn sandhi_h2_goaway_decode(buf, blen, off, last_stream_out, error_out) {
     return 0;
 }
 
-fn sandhi_h2_frame_version() {
-    return "0.7.4-bite3";
-}
 
 # --- conn.cyr ---
 
@@ -4502,9 +4619,6 @@ fn sandhi_h2_conn_recv_peer_settings(c) {
     return sandhi_h2_conn_send_settings_ack(c);
 }
 
-fn sandhi_h2_conn_version() {
-    return "0.7.4-bite5a";
-}
 
 # --- request.cyr ---
 
@@ -4718,9 +4832,6 @@ fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
     return stream_id;
 }
 
-fn sandhi_h2_request_version() {
-    return "0.7.4-bite5b";
-}
 
 # --- response.cyr ---
 
@@ -4961,9 +5072,6 @@ fn sandhi_h2_response_recv(h2c, stream_id) {
     return _sandhi_resp_new(status, body, body_len, headers, SANDHI_OK);
 }
 
-fn sandhi_h2_response_version() {
-    return "0.7.4-bite5c";
-}
 
 # --- pool_glue.cyr ---
 
@@ -5039,9 +5147,6 @@ fn sandhi_http_pool_close_h2_conns(pool) {
     return 0;
 }
 
-fn sandhi_http_pool_h2_glue_version() {
-    return "0.7.4-bite6";
-}
 
 # --- dispatch.cyr ---
 
@@ -5053,21 +5158,21 @@ fn sandhi_http_pool_h2_glue_version() {
 # protocol-agnostic.
 #
 # This is the **manual** entry point. The library-level
-# `sandhi_http_get` etc. continues to use the HTTP/1.1 path because
-# there's no way to actually negotiate h2 today (libssl pthread
-# deadlock blocks live HTTPS, and ALPN selection is stubbed in
-# `src/tls_policy/alpn.cyr`). When the libssl side clears, a
-# follow-up bite will wire `sandhi_conn_alpn_is_h2` into
-# `_sandhi_http_dispatch` so consumers get auto-selection without
-# code change.
+# `sandhi_http_get` etc. uses the HTTP/1.1 path; the auto-h2
+# dispatcher (`sandhi_http_request_auto`) opportunistically uses
+# h2 when the pool already holds an h2 conn for the route.
 #
-# Until then: consumers that want h2 today construct the conn
-# themselves (open sandhi_conn, do their own ALPN/h2c setup,
-# `sandhi_h2_conn_send_preface_and_settings` + `_recv_peer_settings`),
-# then call `sandhi_h2_request` per request. Tests in tests/h2.tcyr
-# exercise this end-to-end against synthetic byte streams.
+# Live ALPN selection is wired since 0.9.3 — `sandhi_conn_alpn_is_h2`
+# returns the real value off the conn struct. The remaining piece
+# for full h2 auto-promotion (open conn → if ALPN chose h2, do the
+# preface/SETTINGS exchange and cache an h2 conn in the pool) is
+# additional wire-up in this file's `sandhi_http_request_auto`.
 #
-# Bite 7 of 0.8.0.
+# Consumers that want h2 today construct the conn themselves
+# (`sandhi_conn_open`, then `sandhi_h2_conn_send_preface_and_settings`
+# + `_recv_peer_settings`), then call `sandhi_h2_request` per
+# request. Tests in tests/h2.tcyr exercise this end-to-end against
+# synthetic byte streams.
 
 # Send a request on `h2c` and wait for the matching response.
 # Returns a sandhi_response (same shape as `_sandhi_http_dispatch`
@@ -5187,9 +5292,6 @@ fn sandhi_http_delete_auto(url, user_headers, opts) {
     return sandhi_http_request_auto("DELETE", url, user_headers, 0, 0, opts);
 }
 
-fn sandhi_h2_dispatch_version() {
-    return "0.8.1";
-}
 
 # --- retry.cyr ---
 
@@ -5205,9 +5307,12 @@ fn sandhi_h2_dispatch_version() {
 # apply side effects — consumers that need POST-retry must opt in by
 # calling `sandhi_http_post` in a loop with their own idempotency key.
 #
-# Backoff: exponential (backoff_ms *= 2 per attempt) with a jitter-free
-# cap at `max_backoff_ms`. Jitter not added at 0.7.2 — it's a ~5-line
-# follow-up when a consumer reports thundering-herd behavior.
+# Backoff: exponential (backoff_ms *= 2 per attempt) capped at
+# `max_backoff_ms`, with **AWS-style "full jitter"** applied since
+# 0.9.3: each sleep is a uniform random value in [0, backoff_capped].
+# This prevents thundering-herd alignment when many clients all
+# fail at the same instant (e.g., upstream blip) and would otherwise
+# all retry at exactly the same time.
 #
 # Retry policy struct (24 bytes):
 #   +0   max_attempts       (int: default 3 — one original + two retries)
@@ -5263,6 +5368,22 @@ fn _sandhi_retry_max(r) {
     return load64(r + SANDHI_RETRY_OFF_MAX);
 }
 
+# Full-jitter sleep: pick a uniform random value in [0, ceiling_ms]
+# and sleep for it. Cryptographic quality not required; the only
+# property we want is "different clients pick different values" so
+# they don't all retry on the same millisecond. clock_now_ns() XOR
+# folded into a 32-bit value is plenty.
+fn _sandhi_retry_jitter_sleep(ceiling_ms) {
+    if (ceiling_ms <= 0) { return 0; }
+    var ns = clock_now_ns();
+    var mix = ns ^ (ns >> 17) ^ (ns >> 31);
+    var rnd = mix & 0xFFFFFFFF;
+    if (rnd < 0) { rnd = 0 - rnd; }
+    var ms = rnd % (ceiling_ms + 1);
+    sleep_ms(ms);
+    return ms;
+}
+
 # 1 if `response` represents a transient failure worth retrying.
 # Retryable: CONNECT, TIMEOUT, DISCOVERY (flaky resolver), 5xx.
 # NOT retryable: PARSE, TLS, PROTOCOL, REMOTE (non-5xx), AUTH, INTERNAL, 4xx.
@@ -5289,7 +5410,9 @@ fn _sandhi_http_retry(method, url, user_headers, body, body_len, opts, retry) {
     tried = 1;
     while (tried < attempts) {
         if (_sandhi_retry_should_retry(r) == 0) { return r; }
-        sleep_ms(backoff);
+        var ceiling = backoff;
+        if (ceiling > max_backoff) { ceiling = max_backoff; }
+        _sandhi_retry_jitter_sleep(ceiling);
         backoff = backoff * 2;
         if (backoff > max_backoff) { backoff = max_backoff; }
         r = _sandhi_http_dispatch(method, url, user_headers, body, body_len, opts);
@@ -5318,9 +5441,6 @@ fn sandhi_http_delete_retry(url, user_headers, opts, retry) {
     return _sandhi_http_retry("DELETE", url, user_headers, 0, 0, opts, retry);
 }
 
-fn sandhi_retry_version() {
-    return "0.7.2";
-}
 
 # --- sse.cyr ---
 
@@ -5626,9 +5746,6 @@ fn sandhi_sse_parse(buf, blen, remaining_out) {
     return events;
 }
 
-fn sandhi_sse_version() {
-    return "0.7.0";
-}
 
 # --- stream.cyr ---
 
@@ -6069,9 +6186,6 @@ fn _sandhi_stream_decode_chunked_into(in_sb, chunk_state, out_sb) {
     return 0;
 }
 
-fn sandhi_stream_version() {
-    return "0.7.3";
-}
 
 # --- policy.cyr ---
 
@@ -6255,10 +6369,11 @@ fn sandhi_tls_policy_has_flag(p, flag) {
 #
 # SPKI pinning compares a SHA-256 hash of the server's Subject Public
 # Key Info (DER bytes) against a caller-supplied hex string. This
-# module handles format normalization + comparison; actual DER
-# extraction from server certs lives in apply.cyr (or its deferred
-# TLS-integration successor) since that requires OpenSSL X509 symbols
-# that stdlib `tls.cyr` doesn't currently expose.
+# module handles format normalization + comparison; the actual DER
+# extraction from server certs lives in apply.cyr's
+# `_sandhi_check_spki` (X509_get_pubkey + i2d_PUBKEY → SHA-256, all
+# resolved via stdlib `tls_dlsym`). Wired since 0.9.3 via stdlib's
+# v5.6.40 hook.
 #
 # Accepted caller formats — all of these compare equal:
 #
@@ -6654,9 +6769,6 @@ fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
     return conn;
 }
 
-fn sandhi_tls_policy_version() {
-    return "0.9.3";
-}
 
 # --- alpn.cyr ---
 
@@ -6743,9 +6855,6 @@ fn sandhi_conn_alpn_is_h2(conn) {
     return 0;
 }
 
-fn sandhi_alpn_version() {
-    return "0.9.3";
-}
 
 # --- mod.cyr ---
 
@@ -6769,14 +6878,11 @@ fn sandhi_alpn_version() {
 #   var combined = sandhi_tls_policy_combine(p, q);
 #   var conn = sandhi_conn_open_with_policy(addr, 443, 1, "example.com", combined);
 #
-# See `docs/issues/2026-04-24-libssl-pthread-deadlock.md` for why
-# live enforcement is currently stubbed — surface is shipped, call
-# sites are stable, enforcement fills in when `SSL_connect` stops
-# deadlocking on a libssl-internal futex wait.
+# Live enforcement wired since 0.9.3 (cyrius v5.6.41) — pinning
+# / mTLS / trust-store overrides apply through stdlib's
+# `tls_connect_with_ctx_hook`, post-handshake SPKI extraction
+# verifies pins via `i2d_PUBKEY` + SHA-256 in constant time.
 
-fn sandhi_tls_policy_mod_version() {
-    return "0.6.0";
-}
 
 # --- json.cyr ---
 
@@ -7142,9 +7248,6 @@ fn sandhi_json_has_path(body, path) {
     return 1;
 }
 
-fn sandhi_json_version() {
-    return "0.4.0";
-}
 
 # --- dispatch.cyr ---
 
@@ -7331,9 +7434,6 @@ fn _sandhi_rpc_wrap(hr, dialect) {
     return _sandhi_rpc_resp_new(status, body, blen, SANDHI_OK, 0);
 }
 
-fn sandhi_rpc_dispatch_version() {
-    return "0.4.0";
-}
 
 # --- webdriver.cyr ---
 
@@ -7565,9 +7665,6 @@ fn sandhi_wd_execute_script(base_url, session_id, script, args_json) {
     return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_version() {
-    return "0.4.0";
-}
 
 # --- appium.cyr ---
 
@@ -7707,9 +7804,6 @@ fn sandhi_ap_screenshot(base_url, session_id) {
     return sandhi_rpc_call(url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_ap_version() {
-    return "0.4.0";
-}
 
 # --- mcp.cyr ---
 
@@ -7837,9 +7931,6 @@ fn sandhi_rpc_mcp_stream(endpoint_url, method_name, params_json, cb, ctx) {
     return sandhi_http_stream(endpoint_url, "POST", headers, body, body_len, cb, ctx);
 }
 
-fn sandhi_rpc_mcp_version() {
-    return "0.7.0";
-}
 
 # --- mod.cyr ---
 
@@ -7857,9 +7948,6 @@ fn sandhi_rpc_mcp_version() {
 # Adding a new dialect is a new file + a cyrius.cyml entry; don't grow
 # an existing dialect file.
 
-fn sandhi_rpc_version() {
-    return "0.4.0";
-}
 
 # --- service.cyr ---
 
@@ -7935,9 +8023,6 @@ fn sandhi_resolver_lookup(r, name) {
     return fncall2(fp, sandhi_resolver_ctx(r), name);
 }
 
-fn sandhi_discovery_service_version() {
-    return "0.5.0";
-}
 
 # --- chain.cyr ---
 
@@ -7999,9 +8084,6 @@ fn sandhi_discovery_chain_as_resolver(chain) {
     return sandhi_resolver_new(&_sandhi_discovery_chain_adapter, chain);
 }
 
-fn sandhi_discovery_chain_version() {
-    return "0.5.0";
-}
 
 # --- daimon.cyr ---
 
@@ -8118,82 +8200,169 @@ fn sandhi_discovery_daimon_resolver(base_url) {
     return sandhi_resolver_new(&_sandhi_daimon_lookup, ctx);
 }
 
-fn sandhi_discovery_daimon_version() {
-    return "0.5.0";
-}
 
 # --- local.cyr ---
 
-# sandhi/discovery/local — mDNS / local-link resolver.
+# sandhi/discovery/local — mDNS / link-local resolver (RFC 6762).
 #
-# M4 ships the INTERFACE only; the implementation returns 0 (miss)
-# today. Chain-resolver users can wire this in without code churn —
-# when the real lookup lands, existing `sandhi_discovery_local_resolver()`
-# callers start getting hits without any API change.
+# Real implementation: builds a unicast-response (QU) A-record query
+# for `<name>.local`, sends it to the IPv4 mDNS multicast group
+# 224.0.0.251:5353 over UDP, recvs the first response, parses out
+# the A record, returns a sandhi_service. Bounded by SO_RCVTIMEO so
+# a missing responder doesn't hang the chain.
 #
-# Why deferred:
-#   mDNS requires multicast-UDP socket setup (IP_ADD_MEMBERSHIP,
-#   IP_MULTICAST_TTL, IP_MULTICAST_IF) that stdlib `net.cyr` does not
-#   currently expose. Two paths forward, neither in M4 scope:
+# Wire shape:
+#   - Query name: `<name>.local` (one label appended if `name` doesn't
+#     already end in `.local`).
+#   - QTYPE=A (1), QCLASS = IN with the QU (top) bit set = 0x8001 so
+#     responders unicast the answer to our source port. Using QU
+#     means we don't need IP_ADD_MEMBERSHIP — the response arrives on
+#     the same fd we sent from, no multicast listen required.
+#   - TTL: kernel default for IP_MULTICAST_TTL on Linux is 1, which is
+#     exactly what RFC 6762 calls for (link-local only). No setsockopt
+#     needed.
 #
-#   A) Extend net.cyr with multicast setsockopt helpers; sandhi's
-#      local resolver then sends `<name>.local.` A-record queries to
-#      224.0.0.251:5353 and parses the first response. ~100 lines of
-#      sandhi code on top of the net.cyr patch.
-#
-#   B) Shell out to `avahi-resolve` or `getent hosts` via
-#      `process.cyr`. Quick but introduces an external-binary
-#      dependency sandhi has otherwise avoided.
-#
-# Revisit when a consumer actually asks for mDNS in-process, or when
-# net.cyr gains multicast primitives as part of other work.
-#
-# Reference for the eventual implementation:
-#   RFC 6762 (Multicast DNS), RFC 6763 (DNS-Based Service Discovery).
+# Reference: RFC 6762 (Multicast DNS), RFC 6763 (DNS-Based Service
+# Discovery — out of scope here; this resolver answers names, not
+# services-by-type).
 
-# Context struct reserved for future parameters (interface index,
-# timeout, domain override). Allocated so the resolver's shape
-# matches what the real impl will look like — caller code doesn't
-# change when we fill it in.
-enum SandhiLocalCtxOff {
-    SANDHI_LOCAL_CTX_OFF_IFACE   = 0;  # reserved: interface name or index
-    SANDHI_LOCAL_CTX_OFF_TIMEOUT = 8;  # reserved: query timeout ms
+# 224.0.0.251 packed as a network-byte-order uint32 in
+# little-endian-host repr (matches sock_connect's expectations:
+# bytes 224, 0, 0, 251 across the int).
+var _SANDHI_MDNS_GROUP = 0;
+var _SANDHI_MDNS_PORT  = 5353;
+var _SANDHI_MDNS_TIMEOUT_MS = 500;
+
+# Build a `<name>.local` cstr — caller-owned alloc. If `name` already
+# ends in `.local` (case-insensitive), passes it through.
+fn _sandhi_local_qname(name) {
+    var nlen = strlen(name);
+    var has_suffix = 0;
+    if (nlen >= 6) {
+        var s = name + nlen - 6;
+        var c0 = load8(s + 0);
+        var c1 = load8(s + 1);
+        var c2 = load8(s + 2);
+        var c3 = load8(s + 3);
+        var c4 = load8(s + 4);
+        var c5 = load8(s + 5);
+        # Lowercase compare on the suffix.
+        if (c0 == 46) {  # '.'
+            if ((c1 == 108 || c1 == 76) && (c2 == 111 || c2 == 79)
+             && (c3 == 99 || c3 == 67) && (c4 == 97 || c4 == 65)
+             && (c5 == 108 || c5 == 76)) {
+                has_suffix = 1;
+            }
+        }
+    }
+    if (has_suffix == 1) {
+        var dup = alloc(nlen + 1);
+        memcpy(dup, name, nlen);
+        store8(dup + nlen, 0);
+        return dup;
+    }
+    var out = alloc(nlen + 7);
+    memcpy(out, name, nlen);
+    store8(out + nlen + 0, 46);   # '.'
+    store8(out + nlen + 1, 108);  # 'l'
+    store8(out + nlen + 2, 111);  # 'o'
+    store8(out + nlen + 3, 99);   # 'c'
+    store8(out + nlen + 4, 97);   # 'a'
+    store8(out + nlen + 5, 108);  # 'l'
+    store8(out + nlen + 6, 0);
+    return out;
 }
 
-var SANDHI_LOCAL_CTX_SIZE = 16;
+# Build the mDNS query packet. Same wire format as the unicast DNS
+# resolver in net/resolve.cyr but with QCLASS = 0x8001 (IN | QU bit
+# per RFC 6762 §5.4 — request unicast response).
+fn _sandhi_local_build_query(id, qname, out) {
+    store8(out + 0, (id >> 8) & 0xFF);
+    store8(out + 1, id & 0xFF);
+    store8(out + 2, 0x00);  # mDNS queries: QR=0, Opcode=0, AA=0, TC=0, RD=0
+    store8(out + 3, 0x00);
+    store8(out + 4, 0x00); store8(out + 5, 0x01);  # QDCOUNT = 1
+    store8(out + 6, 0x00); store8(out + 7, 0x00);  # ANCOUNT
+    store8(out + 8, 0x00); store8(out + 9, 0x00);  # NSCOUNT
+    store8(out + 10, 0x00); store8(out + 11, 0x00); # ARCOUNT
 
-fn _sandhi_discovery_local_ctx_new() {
-    var c = alloc(SANDHI_LOCAL_CTX_SIZE);
-    store64(c + SANDHI_LOCAL_CTX_OFF_IFACE, 0);
-    store64(c + SANDHI_LOCAL_CTX_OFF_TIMEOUT, 2000);
-    return c;
+    var qname_len = _sandhi_resolve_encode_labels(qname, out + 12);
+    if (qname_len < 0) { return 0 - 1; }
+    var qi = 12 + qname_len;
+    store8(out + qi + 0, 0x00); store8(out + qi + 1, 0x01);  # QTYPE = A
+    store8(out + qi + 2, 0x80); store8(out + qi + 3, 0x01);  # QCLASS = IN | QU
+    return qi + 4;
 }
 
-# Resolver callback. Returns 0 (miss) until multicast lands.
+# Issue an mDNS query and return the resolved IPv4 address (in
+# sock_connect format: bytes packed network-byte-order into a
+# host-endian int), or 0 on any failure / timeout / miss. Reuses
+# the unicast resolver's response parser since the wire format is
+# identical past the question section.
+fn _sandhi_local_query(name) {
+    if (name == 0) { return 0; }
+    if (_SANDHI_MDNS_GROUP == 0) {
+        _SANDHI_MDNS_GROUP = 224 | (0 << 8) | (0 << 16) | (251 << 24);
+    }
+
+    var qname = _sandhi_local_qname(name);
+    var txid = _sandhi_resolve_random_u16();
+    var qbuf = alloc(_SANDHI_RESOLVE_BUF_SIZE);
+    var qlen = _sandhi_local_build_query(txid, qname, qbuf);
+    if (qlen < 0) { return 0; }
+
+    var fd_r = udp_socket();
+    if (is_err_result(fd_r) == 1) { return 0; }
+    var fd = payload(fd_r);
+
+    # Bound the recv — link-local; if no responder shows up in 500 ms
+    # we treat it as a miss so the chain falls through.
+    _sandhi_conn_set_timeout_ms(fd, _SANDHI_MDNS_TIMEOUT_MS, _SANDHI_SO_RCVTIMEO);
+
+    var cr = sock_connect(fd, _SANDHI_MDNS_GROUP, _SANDHI_MDNS_PORT);
+    if (is_err_result(cr) == 1) { sock_close(fd); return 0; }
+    var sr = sock_send(fd, qbuf, qlen);
+    if (is_err_result(sr) == 1) { sock_close(fd); return 0; }
+
+    var rbuf = alloc(_SANDHI_RESOLVE_BUF_SIZE);
+    var rr = sock_recv(fd, rbuf, _SANDHI_RESOLVE_BUF_SIZE);
+    sock_close(fd);
+    if (is_err_result(rr) == 1) { return 0; }
+    var rlen = payload(rr);
+    if (rlen <= 0) { return 0; }
+
+    # _sandhi_resolve_parse_response returns 0 - 1 on any failure (we
+    # treat that as a miss too — same semantics chain expects).
+    var ip = _sandhi_resolve_parse_response(rbuf, rlen, txid);
+    if (ip == 0 - 1) { return 0; }
+    return ip;
+}
+
+# Resolver callback. Returns a sandhi_service on hit, 0 on miss.
 fn _sandhi_local_lookup(ctx, name) {
-    if (ctx == 0 || name == 0) { return 0; }
-    # Always miss for now. When the real impl lands, construct the
-    # multicast query here using the ctx-configured interface/timeout.
-    return 0;
+    if (name == 0) { return 0; }
+    var ip = _sandhi_local_query(name);
+    if (ip == 0) { return 0; }
+    # Build a service struct. host = canonical mDNS name (`<name>.local`)
+    # so callers can emit it in URLs / logs; ipv4 carries the resolved
+    # address so connect() can skip another lookup.
+    var qname = _sandhi_local_qname(name);
+    return sandhi_service_new(name, qname, 0, ip);
 }
 
-# Build the mDNS resolver. Returns a resolver struct whose lookup
-# always misses today but becomes functional when multicast lands.
+# Build the mDNS resolver. Plug into a chain alongside daimon-backed
+# or unicast-DNS resolvers; first-hit wins.
 fn sandhi_discovery_local_resolver() {
-    var ctx = _sandhi_discovery_local_ctx_new();
-    return sandhi_resolver_new(&_sandhi_local_lookup, ctx);
+    return sandhi_resolver_new(&_sandhi_local_lookup, 0);
 }
 
-# 1 if the local resolver has a working implementation on this
-# platform, 0 if it's a no-op stub. Callers constructing a chain
-# at startup can log a warning when this returns 0.
+# 1 — wired since 0.9.3. Always available on Linux (multicast UDP is
+# kernel-side; no extra deps). Returns 0 only if a future port lacks
+# multicast UDP support.
 fn sandhi_discovery_local_available() {
-    return 0;
+    return 1;
 }
 
-fn sandhi_discovery_local_version() {
-    return "0.5.0-stub";
-}
 
 # --- register.cyr ---
 
@@ -8249,9 +8418,6 @@ fn sandhi_discovery_deregister(base_url, name) {
     return SANDHI_OK;
 }
 
-fn sandhi_discovery_register_version() {
-    return "0.5.0";
-}
 
 # --- mod.cyr ---
 
@@ -8261,7 +8427,7 @@ fn sandhi_discovery_register_version() {
 #   discovery/service   — service struct + resolver (fn-ptr + ctx) shape
 #   discovery/chain     — fallback sequence of resolvers
 #   discovery/daimon    — HTTP-backed resolver against daimon's registry
-#   discovery/local     — mDNS resolver (interface only; impl deferred — see file)
+#   discovery/local     — mDNS resolver (RFC 6762 link-local query against 224.0.0.251:5353)
 #   discovery/register  — publish/withdraw against daimon
 #
 # Typical consumer shape:
@@ -8276,9 +8442,6 @@ fn sandhi_discovery_register_version() {
 # No resolver in the chain is load-bearing — a missing daimon falls
 # through to the next backend silently.
 
-fn sandhi_discovery_version() {
-    return "0.5.0";
-}
 
 # --- mod.cyr ---
 
@@ -8973,9 +9136,6 @@ fn http_server_run_opts(addr, port, handler_fp, ctx, opts) {
 # ================================================================
 # Kept so downstream can probe the migrated-module version. Retires
 # when fold-into-stdlib lands; consumers should prefer sandhi_version().
-fn sandhi_server_version() {
-    return "0.9.2";
-}
 
 # --- main.cyr ---
 
@@ -9022,17 +9182,17 @@ fn sandhi_server_version() {
 #                             Transport only per ADR 0001 — protocol
 #                             semantics live in bote / t-ron.
 #   sandhi::discovery       — service discovery: daimon-registered
-#                             lookup, chain-fallback composition, mDNS
-#                             interface (lookup stubbed pending stdlib
-#                             net.cyr multicast primitives).
+#                             lookup, chain-fallback composition,
+#                             mDNS resolver (RFC 6762 link-local A
+#                             query against 224.0.0.251:5353).
 #   sandhi::tls_policy      — cert pinning (SPKI, constant-time
 #                             compare), mTLS, custom trust store,
 #                             policy composition, ALPN advertise list.
-#                             Surface complete; runtime enforcement
-#                             stubbed pending libssl-pthread-deadlock
-#                             + stdlib tls.cyr SSL_CTX hook (see
-#                             docs/issues/). Fail-closed when a policy
-#                             demands enforcement that isn't wired.
+#                             Runtime enforcement wired since 0.9.3
+#                             (libssl/libcrypto symbols resolved via
+#                             stdlib `tls_dlsym`); fail-closed when a
+#                             policy demands enforcement that isn't
+#                             wired.
 #   sandhi::server          — HTTP/1.1 server. Canonical names are
 #                             `sandhi_server_*` (post-0.9.2 rename);
 #                             `http_*` aliases retained as transitional
@@ -9040,6 +9200,15 @@ fn sandhi_server_version() {
 #                             Built-in 400-on-smuggling guards (CL+TE,
 #                             dup Host/CL/TE).
 
+# Single source of truth for the crate version. **Must match the
+# top-level `VERSION` file** at the repository root — `cyrius.cyml`
+# reads VERSION via `${file:VERSION}` for package metadata; this
+# constant is the runtime-side mirror. CI checks the two for drift
+# at build time. Bump them together; never hardcode the version
+# string anywhere else in the source — every `*_version()` accessor
+# delegates here.
+var SANDHI_VERSION = "0.9.3";
+
 fn sandhi_version() {
-    return "0.9.2";
+    return SANDHI_VERSION;
 }

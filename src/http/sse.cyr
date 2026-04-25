@@ -300,6 +300,3 @@ fn sandhi_sse_parse(buf, blen, remaining_out) {
     return events;
 }
 
-fn sandhi_sse_version() {
-    return "0.7.0";
-}

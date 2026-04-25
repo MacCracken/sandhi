@@ -2,10 +2,11 @@
 #
 # SPKI pinning compares a SHA-256 hash of the server's Subject Public
 # Key Info (DER bytes) against a caller-supplied hex string. This
-# module handles format normalization + comparison; actual DER
-# extraction from server certs lives in apply.cyr (or its deferred
-# TLS-integration successor) since that requires OpenSSL X509 symbols
-# that stdlib `tls.cyr` doesn't currently expose.
+# module handles format normalization + comparison; the actual DER
+# extraction from server certs lives in apply.cyr's
+# `_sandhi_check_spki` (X509_get_pubkey + i2d_PUBKEY → SHA-256, all
+# resolved via stdlib `tls_dlsym`). Wired since 0.9.3 via stdlib's
+# v5.6.40 hook.
 #
 # Accepted caller formats — all of these compare equal:
 #

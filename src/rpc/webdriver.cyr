@@ -226,6 +226,3 @@ fn sandhi_wd_execute_script(base_url, session_id, script, args_json) {
     return sandhi_rpc_call(url, "POST", sandhi_json_build(body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_version() {
-    return "0.4.0";
-}

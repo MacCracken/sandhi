@@ -181,6 +181,3 @@ fn _sandhi_rpc_wrap(hr, dialect) {
     return _sandhi_rpc_resp_new(status, body, blen, SANDHI_OK, 0);
 }
 
-fn sandhi_rpc_dispatch_version() {
-    return "0.4.0";
-}
