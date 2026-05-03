@@ -24,30 +24,46 @@
 # "http://127.0.0.1:9000" for a local daimon. Chain-resolver users
 # can make daimon one backend among many; daimon outages fall through.
 
-# Context struct (16 bytes):
+# Context struct (24 bytes):
 #   +0   base_url  (cstr)
 #   +8   reserved  (kept 0 for now — future: auth token, timeouts)
+#   +16  alloc     (Allocator handed to the resolver-fn-pointer
+#                   callback; the (ctx, name) shape can't take an
+#                   extra arg, so the allocator rides on the ctx)
 enum SandhiDaimonCtxOff {
-    SANDHI_DAIMON_CTX_OFF_BASE = 0;
-    SANDHI_DAIMON_CTX_OFF_RES  = 8;
+    SANDHI_DAIMON_CTX_OFF_BASE  = 0;
+    SANDHI_DAIMON_CTX_OFF_RES   = 8;
+    SANDHI_DAIMON_CTX_OFF_ALLOC = 16;
 }
 
-var SANDHI_DAIMON_CTX_SIZE = 16;
+var SANDHI_DAIMON_CTX_SIZE = 24;
 
-fn _sandhi_discovery_daimon_ctx_new(base_url) {
-    var c = alloc(SANDHI_DAIMON_CTX_SIZE);
+# Build a daimon resolver context backed by `a`. Returns 0 on OOM.
+fn _sandhi_discovery_daimon_ctx_new_a(a, base_url) {
+    var c = alloc_via(a, SANDHI_DAIMON_CTX_SIZE);
+    if (c == 0) { return 0; }
     store64(c + SANDHI_DAIMON_CTX_OFF_BASE, base_url);
     store64(c + SANDHI_DAIMON_CTX_OFF_RES, 0);
+    store64(c + SANDHI_DAIMON_CTX_OFF_ALLOC, a);
     return c;
 }
 
-# Build "{base}/services/{name}" with trailing-slash normalization on base.
-fn _sandhi_daimon_url(base, name) {
+fn _sandhi_discovery_daimon_ctx_new(base_url) {
+    return _sandhi_discovery_daimon_ctx_new_a(default_alloc(), base_url);
+}
+
+# Build "{base}/services/{name}" with trailing-slash normalization,
+# allocating the trimmed copy from `a`. The str_builder used to
+# concatenate the final URL still goes through the global bump
+# (str_builder lacks `_a` variants in the pinned stdlib); only the
+# trim-copy and the final cstr land in `a`.
+fn _sandhi_daimon_url_a(a, base, name) {
     var sb = str_builder_new();
     var blen = strlen(base);
     if (blen > 0 && load8(base + blen - 1) == 47) {
         # Trim trailing slash.
-        var trimmed = alloc(blen);
+        var trimmed = alloc_via(a, blen);
+        if (trimmed == 0) { return 0; }
         memcpy(trimmed, base, blen - 1);
         store8(trimmed + blen - 1, 0);
         str_builder_add_cstr(sb, trimmed);
@@ -59,13 +75,21 @@ fn _sandhi_daimon_url(base, name) {
     return str_data(str_builder_build(sb));
 }
 
-# The resolver callback. Matches fn(ctx, name) → *service.
-# Kept small — fits under the local-count threshold.
+fn _sandhi_daimon_url(base, name) {
+    return _sandhi_daimon_url_a(default_alloc(), base, name);
+}
+
+# The resolver callback. Matches fn(ctx, name) → *service. The
+# allocator stored on ctx (slot +16, 0 = process default) drives
+# every alloc on the resolved-service path.
 fn _sandhi_daimon_lookup(ctx, name) {
     if (ctx == 0 || name == 0) { return 0; }
     var base = load64(ctx + SANDHI_DAIMON_CTX_OFF_BASE);
     if (base == 0) { return 0; }
-    var url = _sandhi_daimon_url(base, name);
+    var a = load64(ctx + SANDHI_DAIMON_CTX_OFF_ALLOC);
+    if (a == 0) { a = default_alloc(); }
+    var url = _sandhi_daimon_url_a(a, base, name);
+    if (url == 0) { return 0; }
     var resp = sandhi_http_get(url, 0);
     # Any non-2xx or transport error → miss (fall-through for chain).
     if (sandhi_http_err_kind(resp) != SANDHI_OK) { return 0; }
@@ -73,12 +97,13 @@ fn _sandhi_daimon_lookup(ctx, name) {
     if (status < 200 || status >= 300) { return 0; }
     var body = sandhi_http_body(resp);
     if (body == 0) { return 0; }
-    return _sandhi_daimon_parse_service(body, name);
+    return _sandhi_daimon_parse_service_a(a, body, name);
 }
 
-# Parse daimon's {"host":"...","port":N} response into a service.
-# Fails gracefully — returns 0 if either field is missing/malformed.
-fn _sandhi_daimon_parse_service(body, name) {
+# Parse daimon's {"host":"...","port":N} response into a service
+# allocated from `a`. Returns 0 on missing fields, malformed input,
+# or OOM.
+fn _sandhi_daimon_parse_service_a(a, body, name) {
     var host = sandhi_json_get_string(body, "host");
     if (host == 0) { return 0; }
     var port = sandhi_json_get_int(body, "port");
@@ -88,26 +113,35 @@ fn _sandhi_daimon_parse_service(body, name) {
     var ipv4 = 0;
     var addr_str = sandhi_json_get_string(body, "address");
     if (addr_str != 0) {
-        var a = sandhi_net_parse_ipv4(addr_str);
-        if (a != 0 - 1) { ipv4 = a; }
+        var av4 = sandhi_net_parse_ipv4(addr_str);
+        if (av4 != 0 - 1) { ipv4 = av4; }
     }
     # Dup the caller-passed name so the service is self-contained.
     var name_copy = 0;
     if (name != 0) {
         var nlen = strlen(name);
-        name_copy = alloc(nlen + 1);
+        name_copy = alloc_via(a, nlen + 1);
+        if (name_copy == 0) { return 0; }
         memcpy(name_copy, name, nlen);
         store8(name_copy + nlen, 0);
     }
-    return sandhi_service_new(name_copy, host, port, ipv4);
+    return sandhi_service_new_a(a, name_copy, host, port, ipv4);
 }
 
-# Build a resolver for the given daimon base URL. Usage:
-#   sandhi_discovery_chain_add(chain,
-#       sandhi_discovery_daimon_resolver("http://127.0.0.1:9000"));
-fn sandhi_discovery_daimon_resolver(base_url) {
+fn _sandhi_daimon_parse_service(body, name) {
+    return _sandhi_daimon_parse_service_a(default_alloc(), body, name);
+}
+
+# Build a resolver for the given daimon base URL, owned by `a`.
+# Returns 0 on OOM.
+fn sandhi_discovery_daimon_resolver_a(a, base_url) {
     if (base_url == 0) { return 0; }
-    var ctx = _sandhi_discovery_daimon_ctx_new(base_url);
-    return sandhi_resolver_new(&_sandhi_daimon_lookup, ctx);
+    var ctx = _sandhi_discovery_daimon_ctx_new_a(a, base_url);
+    if (ctx == 0) { return 0; }
+    return sandhi_resolver_new_a(a, &_sandhi_daimon_lookup, ctx);
+}
+
+fn sandhi_discovery_daimon_resolver(base_url) {
+    return sandhi_discovery_daimon_resolver_a(default_alloc(), base_url);
 }
 

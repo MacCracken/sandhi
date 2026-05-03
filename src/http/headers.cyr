@@ -15,11 +15,19 @@
 # Entry layout + helpers
 # ================================================================
 
-fn _sandhi_hdr_entry_new(name, value) {
-    var e = alloc(16);
+# Internal entry constructor — `_a` variant takes the Allocator first.
+# Returns 0 on OOM. Callers MUST null-check (existing call sites in
+# sandhi_headers_add_a do).
+fn _sandhi_hdr_entry_new_a(a, name, value) {
+    var e = alloc_via(a, 16);
+    if (e == 0) { return 0; }
     store64(e, name);
     store64(e + 8, value);
     return e;
+}
+
+fn _sandhi_hdr_entry_new(name, value) {
+    return _sandhi_hdr_entry_new_a(default_alloc(), name, value);
 }
 
 fn _sandhi_hdr_entry_name(e) {
@@ -49,38 +57,54 @@ fn _sandhi_hdr_ieq(a, b) {
     return 0;
 }
 
-# Trim ASCII SP / HTAB from both ends of a cstr range [ptr+start, ptr+end).
-# Returns a fresh null-terminated alloc with just the trimmed content.
-fn _sandhi_hdr_trim_copy(ptr, start, end) {
+# Trim ASCII SP / HTAB from both ends of a cstr range and copy into
+# `a`. Returns 0 on OOM.
+fn _sandhi_hdr_trim_copy_a(a, ptr, start, end) {
     var s = start;
     var e = end;
     while (s < e && (load8(ptr + s) == 32 || load8(ptr + s) == 9)) { s = s + 1; }
     while (e > s && (load8(ptr + e - 1) == 32 || load8(ptr + e - 1) == 9)) { e = e - 1; }
     var n = e - s;
-    var out = alloc(n + 1);
+    var out = alloc_via(a, n + 1);
+    if (out == 0) { return 0; }
     memcpy(out, ptr + s, n);
     store8(out + n, 0);
     return out;
 }
 
-# Duplicate a cstr into a fresh null-terminated alloc. Used on set/add
-# so the block owns its copies (caller can free / reuse the inputs).
-fn _sandhi_hdr_cstr_dup(s) {
+fn _sandhi_hdr_trim_copy(ptr, start, end) {
+    return _sandhi_hdr_trim_copy_a(default_alloc(), ptr, start, end);
+}
+
+# Duplicate a cstr into a fresh null-terminated alloc owned by `a`.
+# Returns 0 on null input OR on OOM (caller distinguishes via the
+# input-null pre-check that lives in the public verbs).
+fn _sandhi_hdr_cstr_dup_a(a, s) {
     if (s == 0) { return 0; }
     var n = strlen(s);
-    var out = alloc(n + 1);
+    var out = alloc_via(a, n + 1);
+    if (out == 0) { return 0; }
     memcpy(out, s, n);
     store8(out + n, 0);
     return out;
+}
+
+fn _sandhi_hdr_cstr_dup(s) {
+    return _sandhi_hdr_cstr_dup_a(default_alloc(), s);
 }
 
 # ================================================================
 # Public API — block creation + mutation
 # ================================================================
 
-# Allocate an empty header block. Returns a vec of entry pointers.
+# Allocate an empty header block from `a`. Returns a vec of entry
+# pointers; 0 on OOM.
+fn sandhi_headers_new_a(a) {
+    return vec_new_a(a);
+}
+
 fn sandhi_headers_new() {
-    return vec_new();
+    return sandhi_headers_new_a(default_alloc());
 }
 
 # Total entry count (includes duplicate-name entries).
@@ -104,30 +128,39 @@ fn _sandhi_hdr_has_unsafe_byte(s) {
     return 0;
 }
 
-# Append an entry. Multi-value-friendly — `add` never replaces;
-# use `set` when you want single-value semantics.
+# Append an entry into `a`. Multi-value-friendly — `add` never
+# replaces; use `set` when you want single-value semantics.
 #
 # 0.9.1 P1 — refuses caller-supplied name/value containing CR / LF.
-# Without this guard, `sandhi_headers_set(h, "X", "v\r\nInjected:
-# yes")` would smuggle a new header onto the wire when the entry
-# is later serialized. Returns 0 on success, `0 - 1` on rejection.
-fn sandhi_headers_add(h, name, value) {
+# Returns 0 on success, `0 - 1` on byte-rejection, `0 - 2` on OOM.
+fn sandhi_headers_add_a(a, h, name, value) {
     if (_sandhi_hdr_has_unsafe_byte(name) == 1)  { return 0 - 1; }
     if (_sandhi_hdr_has_unsafe_byte(value) == 1) { return 0 - 1; }
-    var e = _sandhi_hdr_entry_new(
-    _sandhi_hdr_cstr_dup(name),
-    _sandhi_hdr_cstr_dup(value));
-    vec_push(h, e);
+    var name_dup = _sandhi_hdr_cstr_dup_a(a, name);
+    if (name_dup == 0) { return 0 - 2; }
+    var value_dup = _sandhi_hdr_cstr_dup_a(a, value);
+    if (value_dup == 0) { return 0 - 2; }
+    var e = _sandhi_hdr_entry_new_a(a, name_dup, value_dup);
+    if (e == 0) { return 0 - 2; }
+    vec_push_a(a, h, e);
     return 0;
 }
 
-# Replace all entries with the given name, then append one new entry.
-# Use for single-value headers (Host, Content-Length, User-Agent).
-fn sandhi_headers_set(h, name, value) {
+fn sandhi_headers_add(h, name, value) {
+    return sandhi_headers_add_a(default_alloc(), h, name, value);
+}
+
+# Replace all entries with the given name, then append one new entry,
+# allocating any new storage in `a`. Use for single-value headers.
+fn sandhi_headers_set_a(a, h, name, value) {
     if (_sandhi_hdr_has_unsafe_byte(name) == 1)  { return 0 - 1; }
     if (_sandhi_hdr_has_unsafe_byte(value) == 1) { return 0 - 1; }
     sandhi_headers_remove(h, name);
-    return sandhi_headers_add(h, name, value);
+    return sandhi_headers_add_a(a, h, name, value);
+}
+
+fn sandhi_headers_set(h, name, value) {
+    return sandhi_headers_set_a(default_alloc(), h, name, value);
 }
 
 # Remove all entries with the given name. Returns number removed.
@@ -220,11 +253,17 @@ fn sandhi_headers_serialize(h, sb) {
 # start the buffer at the first header line. Stops at the first
 # empty (CRLF-only) line or at blen, whichever comes first.
 #
-# Returns a new sandhi_headers block. Malformed lines (no ':' sep)
-# are skipped. Multi-line folded headers (RFC 7230 obsolete) are
-# NOT supported — modern HTTP/1.1 deprecates them.
-fn sandhi_headers_parse(buf, blen) {
-    var h = sandhi_headers_new();
+# Parse a raw HTTP header block into a fresh block allocated from `a`.
+# Returns 0 on OOM (block allocation failure); otherwise returns a
+# block that may be empty if every line was malformed. Per-line
+# allocation failures bail out of the loop with the partial block —
+# arena callers reset on failure anyway, default-alloc callers get a
+# best-effort partial parse (matches pre-migration behavior where
+# alloc-fail aborted, since the global bump can't fail in practice
+# until the heap is exhausted).
+fn sandhi_headers_parse_a(a, buf, blen) {
+    var h = sandhi_headers_new_a(a);
+    if (h == 0) { return 0; }
     var i = 0;
     while (i < blen) {
         # End-of-headers marker — empty line.
@@ -258,19 +297,25 @@ fn sandhi_headers_parse(buf, blen) {
             }
             var name_len = name_end - line_start;
             if (name_len > 0) {
-                var name = alloc(name_len + 1);
+                var name = alloc_via(a, name_len + 1);
+                if (name == 0) { return h; }
                 memcpy(name, buf + line_start, name_len);
                 store8(name + name_len, 0);
 
                 # Value: [colon+1, trim_end) — trim leading + trailing whitespace.
-                var val = _sandhi_hdr_trim_copy(buf, colon + 1, trim_end);
-                sandhi_headers_add(h, name, val);
+                var val = _sandhi_hdr_trim_copy_a(a, buf, colon + 1, trim_end);
+                if (val == 0) { return h; }
+                sandhi_headers_add_a(a, h, name, val);
             }
         }
 
         i = line_end + 1;
     }
     return h;
+}
+
+fn sandhi_headers_parse(buf, blen) {
+    return sandhi_headers_parse_a(default_alloc(), buf, blen);
 }
 
 # ================================================================

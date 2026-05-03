@@ -71,8 +71,11 @@ fn _sandhi_url_sceq(a, b, n) {
     return 1;
 }
 
-# Parse a URL. Returns the struct on success, 0 on any malformed input.
-fn sandhi_url_parse(url) {
+# Parse a URL into the given Allocator. Returns the struct on success,
+# 0 on malformed input or OOM. Every alloc on the parsed-URL hot path
+# (host / path / query / struct) lands in `a`; reset_via(a) reclaims
+# all of it in one shot — the per-request-arena pattern.
+fn sandhi_url_parse_a(a, url) {
     if (url == 0) { return 0; }
     if (_sandhi_url_safe(url) == 0) { return 0; }
 
@@ -111,7 +114,7 @@ fn sandhi_url_parse(url) {
         if (v6_end == v6_start) { return 0; }  # empty []
         # finish_at() takes content-range + post-host-tail-cursor
         # separately so the v6 path can skip the trailing ']'.
-        return _sandhi_url_finish_at(url, scheme, default_port, v6_start, v6_end, v6_end + 1);
+        return _sandhi_url_finish_at_a(a, url, scheme, default_port, v6_start, v6_end, v6_end + 1);
     }
 
     var host_start = p;
@@ -124,15 +127,21 @@ fn sandhi_url_parse(url) {
         elif (c == 63) { scanning = 0; }
         else { p = p + 1; }
     }
-    return _sandhi_url_finish_at(url, scheme, default_port, host_start, p, p);
+    return _sandhi_url_finish_at_a(a, url, scheme, default_port, host_start, p, p);
 }
 
-# Continue parsing after the host boundary. host_start..host_end_excl
-# bounds the host content; tail_start is where post-host parsing
-# (port / path / query) picks up. Bare hosts pass host_end_excl ==
-# tail_start; bracketed-v6 passes tail_start == host_end_excl + 1 to
-# skip the closing ']'.
-fn _sandhi_url_finish_at(url, scheme, default_port, host_start, host_end_excl, tail_start) {
+# Back-compat: parse using the process-wide default Allocator.
+fn sandhi_url_parse(url) {
+    return sandhi_url_parse_a(default_alloc(), url);
+}
+
+# Continue parsing after the host boundary, allocating into `a`.
+# host_start..host_end_excl bounds the host content; tail_start is
+# where post-host parsing (port / path / query) picks up. Bare hosts
+# pass host_end_excl == tail_start; bracketed-v6 passes
+# tail_start == host_end_excl + 1 to skip the closing ']'. Returns
+# 0 on bad input OR on allocator failure (OOM).
+fn _sandhi_url_finish_at_a(a, url, scheme, default_port, host_start, host_end_excl, tail_start) {
     var host_len = host_end_excl - host_start;
     if (host_len == 0) { return 0; }
 
@@ -180,7 +189,8 @@ fn _sandhi_url_finish_at(url, scheme, default_port, host_start, host_end_excl, t
         var path_end = p;
         if (qmark >= 0) { path_end = qmark; }
         var plen = path_end - path_start;
-        var path_out = alloc(plen + 1);
+        var path_out = alloc_via(a, plen + 1);
+        if (path_out == 0) { return 0; }
         memcpy(path_out, url + path_start, plen);
         store8(path_out + plen, 0);
         path = path_out;
@@ -190,7 +200,8 @@ fn _sandhi_url_finish_at(url, scheme, default_port, host_start, host_end_excl, t
             var q_end = q_start;
             while (load8(url + q_end) != 0) { q_end = q_end + 1; }
             var qlen = q_end - q_start;
-            var query_out = alloc(qlen + 1);
+            var query_out = alloc_via(a, qlen + 1);
+            if (query_out == 0) { return 0; }
             memcpy(query_out, url + q_start, qlen);
             store8(query_out + qlen, 0);
             query = query_out;
@@ -200,17 +211,20 @@ fn _sandhi_url_finish_at(url, scheme, default_port, host_start, host_end_excl, t
         var qe = qs;
         while (load8(url + qe) != 0) { qe = qe + 1; }
         var qlen2 = qe - qs;
-        var query_out2 = alloc(qlen2 + 1);
+        var query_out2 = alloc_via(a, qlen2 + 1);
+        if (query_out2 == 0) { return 0; }
         memcpy(query_out2, url + qs, qlen2);
         store8(query_out2 + qlen2, 0);
         query = query_out2;
     }
 
-    var host = alloc(host_len + 1);
+    var host = alloc_via(a, host_len + 1);
+    if (host == 0) { return 0; }
     memcpy(host, url + host_start, host_len);
     store8(host + host_len, 0);
 
-    var result = alloc(SANDHI_URL_STRUCT_SIZE);
+    var result = alloc_via(a, SANDHI_URL_STRUCT_SIZE);
+    if (result == 0) { return 0; }
     store64(result + SANDHI_URL_OFF_SCHEME, scheme);
     store64(result + SANDHI_URL_OFF_HOST, host);
     store64(result + SANDHI_URL_OFF_PORT, port);

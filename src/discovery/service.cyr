@@ -19,13 +19,19 @@ enum SandhiServiceOff {
 
 var SANDHI_SERVICE_STRUCT_SIZE = 32;
 
-fn sandhi_service_new(name, host, port, ipv4) {
-    var s = alloc(SANDHI_SERVICE_STRUCT_SIZE);
+# Allocate a service struct from `a`. Returns 0 on OOM.
+fn sandhi_service_new_a(a, name, host, port, ipv4) {
+    var s = alloc_via(a, SANDHI_SERVICE_STRUCT_SIZE);
+    if (s == 0) { return 0; }
     store64(s + SANDHI_SERVICE_OFF_NAME, name);
     store64(s + SANDHI_SERVICE_OFF_HOST, host);
     store64(s + SANDHI_SERVICE_OFF_PORT, port);
     store64(s + SANDHI_SERVICE_OFF_IPV4, ipv4);
     return s;
+}
+
+fn sandhi_service_new(name, host, port, ipv4) {
+    return sandhi_service_new_a(default_alloc(), name, host, port, ipv4);
 }
 
 fn sandhi_service_name(s) { return load64(s + SANDHI_SERVICE_OFF_NAME); }
@@ -52,11 +58,17 @@ enum SandhiResolverOff {
 
 var SANDHI_RESOLVER_STRUCT_SIZE = 16;
 
-fn sandhi_resolver_new(lookup_fn, ctx) {
-    var r = alloc(SANDHI_RESOLVER_STRUCT_SIZE);
+# Allocate a resolver wrapper from `a`. Returns 0 on OOM.
+fn sandhi_resolver_new_a(a, lookup_fn, ctx) {
+    var r = alloc_via(a, SANDHI_RESOLVER_STRUCT_SIZE);
+    if (r == 0) { return 0; }
     store64(r + SANDHI_RESOLVER_OFF_FN, lookup_fn);
     store64(r + SANDHI_RESOLVER_OFF_CTX, ctx);
     return r;
+}
+
+fn sandhi_resolver_new(lookup_fn, ctx) {
+    return sandhi_resolver_new_a(default_alloc(), lookup_fn, ctx);
 }
 
 fn sandhi_resolver_fn(r)  { return load64(r + SANDHI_RESOLVER_OFF_FN); }

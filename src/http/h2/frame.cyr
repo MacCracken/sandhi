@@ -101,13 +101,19 @@ enum SandhiH2HdrOff {
 
 var SANDHI_H2_HDR_STRUCT_SIZE = 32;
 
-fn sandhi_h2_hdr_new(length, type, flags, stream_id) {
-    var h = alloc(SANDHI_H2_HDR_STRUCT_SIZE);
+# Allocate an h2 frame-header struct from `a`. Returns 0 on OOM.
+fn sandhi_h2_hdr_new_a(a, length, type, flags, stream_id) {
+    var h = alloc_via(a, SANDHI_H2_HDR_STRUCT_SIZE);
+    if (h == 0) { return 0; }
     store64(h + SANDHI_H2_HDR_OFF_LENGTH, length);
     store64(h + SANDHI_H2_HDR_OFF_TYPE, type);
     store64(h + SANDHI_H2_HDR_OFF_FLAGS, flags);
     store64(h + SANDHI_H2_HDR_OFF_STREAM_ID, stream_id);
     return h;
+}
+
+fn sandhi_h2_hdr_new(length, type, flags, stream_id) {
+    return sandhi_h2_hdr_new_a(default_alloc(), length, type, flags, stream_id);
 }
 
 fn sandhi_h2_hdr_length(h)    { return load64(h + SANDHI_H2_HDR_OFF_LENGTH); }
@@ -158,10 +164,10 @@ fn sandhi_h2_hdr_encode(out, off, length, type, flags, stream_id) {
     return off + SANDHI_H2_FRAME_HEADER_SIZE;
 }
 
-# Parse a frame header starting at buf[off]. Caller must have ≥ 9
-# bytes available. Returns a freshly-alloc'd hdr struct (caller owns)
-# or 0 on truncation / over-length.
-fn sandhi_h2_hdr_decode(buf, blen, off) {
+# Parse a frame header starting at buf[off], allocating the result
+# from `a`. Caller must have ≥ 9 bytes available. Returns a hdr
+# struct (caller owns) or 0 on truncation / over-length / OOM.
+fn sandhi_h2_hdr_decode_a(a, buf, blen, off) {
     if (off + SANDHI_H2_FRAME_HEADER_SIZE > blen) { return 0; }
     var length = _h2_read_u24(buf, off + 0);
     var type   = load8(buf + off + 3);
@@ -169,7 +175,11 @@ fn sandhi_h2_hdr_decode(buf, blen, off) {
     # Read stream_id, mask off reserved high bit per §4.1.
     var sid_raw = _h2_read_u32(buf, off + 5);
     var stream_id = sid_raw & 0x7FFFFFFF;
-    return sandhi_h2_hdr_new(length, type, flags, stream_id);
+    return sandhi_h2_hdr_new_a(a, length, type, flags, stream_id);
+}
+
+fn sandhi_h2_hdr_decode(buf, blen, off) {
+    return sandhi_h2_hdr_decode_a(default_alloc(), buf, blen, off);
 }
 
 # ================================================================

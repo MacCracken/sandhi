@@ -3,6 +3,23 @@
 # Requires: string.cyr, syscalls.cyr, mmap.cyr
 
 include "lib/fnptr.cyr"
+# v5.8.31: Result-returning *_r variants (dynlib_open_r,
+# dynlib_sym_r) for typed error returns.
+include "lib/result.cyr"
+
+# v5.8.31 — DynlibError variants. `DynlibNotFound` for path
+# resolution / open failure; `DynlibBadElf` for malformed ELF
+# (parse failure); `DynlibSymMissing` for unresolved symbol
+# lookups; `DynlibOther` for the rest. Variant-name prefix
+# `Dynlib` keeps these distinct in the global enum-variant
+# namespace.
+enum DynlibError {
+    DynlibNotFound;
+    DynlibBadElf;
+    DynlibSymMissing;
+    DynlibOther;
+}
+
 #
 # Loads ELF shared objects via mmap, parses ELF64 headers,
 # walks .dynsym + .dynstr to resolve exported symbols.
@@ -965,8 +982,8 @@ fn dynlib_bootstrap_cpu_features() {
 #   3  — newlocale returned null (allocation failed inside libc)
 #
 # LC_ALL_MASK = 0x1FBF on x86_64 glibc (LC_{CTYPE,NUMERIC,TIME,
-    # COLLATE,MONETARY,MESSAGES,PAPER,NAME,ADDRESS,TELEPHONE,
-    # MEASUREMENT,IDENTIFICATION} = bits 0-12 with LC_ALL excluded).
+# COLLATE,MONETARY,MESSAGES,PAPER,NAME,ADDRESS,TELEPHONE,
+# MEASUREMENT,IDENTIFICATION} = bits 0-12 with LC_ALL excluded).
 fn dynlib_bootstrap_locale(hc) {
     if (hc == 0) { return 1; }
     var fp_newlocale = dynlib_sym(hc, "newlocale");
@@ -1164,4 +1181,32 @@ fn dynlib_close(handle) {
     var size = _dynlib_size(handle);
     cyr_munmap(base, size);
     return 0;
+}
+
+# v5.8.31 — Result variant of dynlib_open. On success: Ok(handle);
+# on path/open failure: Err(DynlibNotFound); on ELF parse failure
+# (dynlib_open returns 0 because the file wasn't a valid ELF):
+# Err(DynlibBadElf). The two error modes are distinguished by
+# checking file existence first.
+fn dynlib_open_r(path) {
+    var handle = dynlib_open(path);
+    if (handle != 0) { return Ok(handle); }
+    # Distinguish "couldn't open the file" from "file opened but
+    # ELF parse failed" by re-probing the path. open(2) succeeding
+    # means the file exists and is readable; the failure must then
+    # have been parse-side.
+    var probe = syscall(2, path, 0, 0);
+    if (probe < 0) { return Err(DynlibNotFound); }
+    syscall(3, probe);
+    return Err(DynlibBadElf);
+}
+
+# v5.8.31 — Result variant of dynlib_sym. On success: Ok(addr);
+# on null handle: Err(DynlibNotFound) (caller never opened);
+# on missing symbol: Err(DynlibSymMissing).
+fn dynlib_sym_r(handle, name) {
+    if (handle == 0) { return Err(DynlibNotFound); }
+    var addr = dynlib_sym(handle, name);
+    if (addr == 0) { return Err(DynlibSymMissing); }
+    return Ok(addr);
 }

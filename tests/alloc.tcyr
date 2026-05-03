@@ -1,0 +1,175 @@
+# sandhi alloc test suite — covers the v1.1.0 Allocator-as-first-arg
+# migration. Lives in its own .tcyr so it doesn't push tests/sandhi.tcyr
+# over the per-program fixup-table cap (architecture/001).
+#
+# Each batch of the migration adds a `test_alloc_batchN_*` group below
+# that drives the per-request-arena pattern + OOM coverage for at least
+# one `_a` variant in that batch (proposal acceptance gates 4 + 5).
+
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/rpc/json.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/main.cyr"  # sandhi_version() — referenced by http/client.cyr's UA builder
+
+# ================================================================
+# Batch 1 — leaves
+# ================================================================
+
+# url.cyr — per-request-arena round-trip. Parse two URLs into the
+# same arena across a reset; verify reset reclaims the first parse.
+fn test_alloc_batch1_url_arena_reset() {
+    var a = arena_allocator(4096);
+    assert_eq(a != 0, 1, "arena_allocator(4096) constructed");
+
+    var u1 = sandhi_url_parse_a(a, "http://example.com:8080/foo?bar=baz");
+    assert_eq(u1 != 0, 1, "url parse #1 into arena succeeded");
+    assert_eq(sandhi_url_scheme(u1), SANDHI_URL_HTTP, "scheme #1");
+    assert_eq(sandhi_url_port(u1), 8080, "port #1");
+    assert_streq(sandhi_url_host(u1), "example.com", "host #1");
+    assert_streq(sandhi_url_path(u1), "/foo", "path #1");
+    assert_streq(sandhi_url_query(u1), "bar=baz", "query #1");
+
+    var used_after_first = arena_used(allocator_state(a));
+    assert_eq(used_after_first > 0, 1, "arena bytes consumed by parse #1");
+
+    reset_via(a);
+
+    var used_after_reset = arena_used(allocator_state(a));
+    assert_eq(used_after_reset, 0, "reset_via clears arena");
+
+    var u2 = sandhi_url_parse_a(a, "https://[::1]:443/");
+    assert_eq(u2 != 0, 1, "url parse #2 into reset arena succeeded");
+    assert_eq(sandhi_url_scheme(u2), SANDHI_URL_HTTPS, "scheme #2");
+    assert_eq(sandhi_url_port(u2), 443, "port #2");
+    assert_streq(sandhi_url_host(u2), "::1", "v6 host stripped of brackets");
+    return 0;
+}
+
+# url.cyr — OOM via fail_after_n_allocs. The host parse path takes
+# 2 allocs (host cstr + struct) for the simplest input
+# "http://example.com/"; failing after 1 should yield 0 cleanly.
+fn test_alloc_batch1_url_oom() {
+    var a = fail_after_n_allocs(1);
+    assert_eq(a != 0, 1, "fail_after_n_allocs(1) constructed");
+    var u = sandhi_url_parse_a(a, "http://example.com/");
+    assert_eq(u, 0, "OOM at second alloc → parse returns 0, no abort");
+    return 0;
+}
+
+# headers.cyr — arena reset reclaims a parsed header block.
+fn test_alloc_batch1_headers_arena_reset() {
+    var a = arena_allocator(4096);
+    var raw = "X-One: alpha\r\nX-Two: beta\r\n\r\n";
+    var rlen = strlen(raw);
+
+    var h1 = sandhi_headers_parse_a(a, raw, rlen);
+    assert_eq(h1 != 0, 1, "headers parse #1 into arena");
+    assert_eq(sandhi_headers_count(h1), 2, "two entries parsed");
+    assert_streq(sandhi_headers_get(h1, "x-one"), "alpha", "case-insensitive get");
+
+    var used_after_first = arena_used(allocator_state(a));
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "arena cleared");
+    assert_eq(used_after_first > 0, 1, "first parse did consume bytes");
+
+    var h2 = sandhi_headers_parse_a(a, raw, rlen);
+    assert_eq(h2 != 0, 1, "headers parse #2 into reset arena");
+    assert_eq(sandhi_headers_count(h2), 2, "two entries parsed (round 2)");
+    return 0;
+}
+
+# headers.cyr — OOM. add_a returns -2 on alloc failure (not -1
+# which is byte-rejection). Drive a 0-budget allocator to confirm.
+fn test_alloc_batch1_headers_add_oom() {
+    var a = arena_allocator(4096);
+    var h = sandhi_headers_new_a(a);
+    assert_eq(h != 0, 1, "block allocated");
+
+    # Switch to a failing alloc for the actual add. fail_after(0)
+    # makes EVERY alloc fail.
+    var failer = fail_after_n_allocs(0);
+    var rc = sandhi_headers_add_a(failer, h, "X-Test", "value");
+    assert_eq(rc, 0 - 2, "add_a returns -2 on OOM");
+    return 0;
+}
+
+# service.cyr — service_new_a OOM yields 0 cleanly.
+fn test_alloc_batch1_service_oom() {
+    var failer = fail_after_n_allocs(0);
+    var s = sandhi_service_new_a(failer, "x", "host", 80, 0);
+    assert_eq(s, 0, "service_new_a returns 0 on OOM");
+    return 0;
+}
+
+# pool.cyr — pool_new_a stores the allocator on the struct.
+fn test_alloc_batch1_pool_alloc_slot() {
+    var a = arena_allocator(8192);
+    var p = sandhi_http_pool_new_a(a, 4, 60000);
+    assert_eq(p != 0, 1, "pool_new_a succeeded");
+    assert_eq(sandhi_http_pool_max_per_host(p), 4, "max_per_host stored");
+    # Confirm the allocator slot round-trips: _sandhi_pool_alloc(p)
+    # must be the same pointer we handed in.
+    assert_eq(_sandhi_pool_alloc(p) == a, 1, "pool stores allocator handle");
+    return 0;
+}
+
+# h2/frame.cyr — hdr_new_a + hdr_decode_a + OOM round-trip.
+fn test_alloc_batch1_h2_hdr_arena() {
+    var a = arena_allocator(1024);
+    var h = sandhi_h2_hdr_new_a(a, 16, SANDHI_H2_FRAME_DATA, 0, 1);
+    assert_eq(h != 0, 1, "h2 hdr alloced into arena");
+    assert_eq(sandhi_h2_hdr_length(h), 16, "length round-trip");
+    assert_eq(sandhi_h2_hdr_type(h), SANDHI_H2_FRAME_DATA, "type round-trip");
+    assert_eq(sandhi_h2_hdr_stream_id(h), 1, "stream_id round-trip");
+
+    var failer = fail_after_n_allocs(0);
+    var h_oom = sandhi_h2_hdr_new_a(failer, 0, 0, 0, 0);
+    assert_eq(h_oom, 0, "hdr_new_a returns 0 on OOM");
+    return 0;
+}
+
+# ================================================================
+# Runner
+# ================================================================
+
+fn main() {
+    test_group("alloc/batch1/url_arena_reset");
+    test_alloc_batch1_url_arena_reset();
+
+    test_group("alloc/batch1/url_oom");
+    test_alloc_batch1_url_oom();
+
+    test_group("alloc/batch1/headers_arena_reset");
+    test_alloc_batch1_headers_arena_reset();
+
+    test_group("alloc/batch1/headers_add_oom");
+    test_alloc_batch1_headers_add_oom();
+
+    test_group("alloc/batch1/service_oom");
+    test_alloc_batch1_service_oom();
+
+    test_group("alloc/batch1/pool_alloc_slot");
+    test_alloc_batch1_pool_alloc_slot();
+
+    test_group("alloc/batch1/h2_hdr_arena");
+    test_alloc_batch1_h2_hdr_arena();
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

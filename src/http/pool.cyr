@@ -37,6 +37,7 @@ enum SandhiPoolOff {
     SANDHI_POOL_OFF_IDLE_TIMEOUT    = 16;
     SANDHI_POOL_OFF_TOTAL_IDLE      = 24;
     SANDHI_POOL_OFF_H2_MAP          = 32;   # added 0.8.0 Bite 6
+    SANDHI_POOL_OFF_ALLOC           = 40;   # added 1.1.0 — Allocator handle
 }
 
 enum SandhiIdleConnOff {
@@ -44,7 +45,7 @@ enum SandhiIdleConnOff {
     SANDHI_IDLE_OFF_LAST_MS  = 8;
 }
 
-var SANDHI_POOL_STRUCT_SIZE      = 40;
+var SANDHI_POOL_STRUCT_SIZE      = 48;
 var SANDHI_IDLE_CONN_STRUCT_SIZE = 16;
 var SANDHI_POOL_DEFAULT_MAX_PER_HOST     = 8;
 var SANDHI_POOL_DEFAULT_IDLE_TIMEOUT_MS  = 90000;  # 90 s — Go default
@@ -53,9 +54,16 @@ var SANDHI_POOL_DEFAULT_IDLE_TIMEOUT_MS  = 90000;  # 90 s — Go default
 # Public API
 # ================================================================
 
-fn sandhi_http_pool_new(max_per_host, idle_timeout_ms) {
-    var p = alloc(SANDHI_POOL_STRUCT_SIZE);
-    store64(p + SANDHI_POOL_OFF_MAP, map_new());
+# Build a connection pool whose internal allocations all flow through
+# `a`. The Allocator handle lives on the pool struct so subsequent
+# `_sandhi_pool_put` calls allocate idle-conn wrappers from the same
+# place — important when consumers want pool churn isolated from the
+# global bump (e.g., a long-lived service backed by an arena it
+# periodically reset). Returns 0 on OOM.
+fn sandhi_http_pool_new_a(a, max_per_host, idle_timeout_ms) {
+    var p = alloc_via(a, SANDHI_POOL_STRUCT_SIZE);
+    if (p == 0) { return 0; }
+    store64(p + SANDHI_POOL_OFF_MAP, map_new_a(a));
     var mph = max_per_host;
     if (mph <= 0) { mph = SANDHI_POOL_DEFAULT_MAX_PER_HOST; }
     var ito = idle_timeout_ms;
@@ -67,8 +75,23 @@ fn sandhi_http_pool_new(max_per_host, idle_timeout_ms) {
     # the same "host:port:tls" cstrs the 1.1 map uses; values are
     # sandhi_h2_conn ptrs (not idle_conn wrappers — h2 is always
     # active so last_used_ms isn't meaningful).
-    store64(p + SANDHI_POOL_OFF_H2_MAP, map_new());
+    store64(p + SANDHI_POOL_OFF_H2_MAP, map_new_a(a));
+    store64(p + SANDHI_POOL_OFF_ALLOC, a);
     return p;
+}
+
+fn sandhi_http_pool_new(max_per_host, idle_timeout_ms) {
+    return sandhi_http_pool_new_a(default_alloc(), max_per_host, idle_timeout_ms);
+}
+
+# Read back the Allocator stored at construction time. Returns
+# default_alloc() if the pool was built before 1.1.0 (legacy callers
+# can't reach this path; the slot is always written by `_new_a`).
+fn _sandhi_pool_alloc(p) {
+    if (p == 0) { return default_alloc(); }
+    var a = load64(p + SANDHI_POOL_OFF_ALLOC);
+    if (a == 0) { return default_alloc(); }
+    return a;
 }
 
 fn sandhi_http_pool_max_per_host(p) {
@@ -141,11 +164,16 @@ fn _sandhi_pool_route_key(host, port, tls) {
     return str_data(str_builder_build(sb));
 }
 
-fn _sandhi_pool_idle_conn_new(conn, now_ms) {
-    var ic = alloc(SANDHI_IDLE_CONN_STRUCT_SIZE);
+fn _sandhi_pool_idle_conn_new_a(a, conn, now_ms) {
+    var ic = alloc_via(a, SANDHI_IDLE_CONN_STRUCT_SIZE);
+    if (ic == 0) { return 0; }
     store64(ic + SANDHI_IDLE_OFF_CONN, conn);
     store64(ic + SANDHI_IDLE_OFF_LAST_MS, now_ms);
     return ic;
+}
+
+fn _sandhi_pool_idle_conn_new(conn, now_ms) {
+    return _sandhi_pool_idle_conn_new_a(default_alloc(), conn, now_ms);
 }
 
 # Non-consuming peek: 1 if the route has at least one 1.1 idle conn
@@ -251,7 +279,15 @@ fn _sandhi_pool_put(pool, host, port, tls, conn) {
         store64(pool + SANDHI_POOL_OFF_TOTAL_IDLE,
         load64(pool + SANDHI_POOL_OFF_TOTAL_IDLE) - 1);
     }
-    var ic = _sandhi_pool_idle_conn_new(conn, clock_now_ms());
+    var ic = _sandhi_pool_idle_conn_new_a(_sandhi_pool_alloc(pool), conn, clock_now_ms());
+    if (ic == 0) {
+        # Allocator failure on the put path — drop the conn on the floor
+        # rather than leaking it. Caller treats put as fire-and-forget,
+        # so there's nothing to surface; the conn close mirrors the
+        # max_per_host eviction path's free-it-here semantics.
+        sandhi_conn_close(conn);
+        return 0;
+    }
     vec_push(v, ic);
     store64(pool + SANDHI_POOL_OFF_TOTAL_IDLE,
     load64(pool + SANDHI_POOL_OFF_TOTAL_IDLE) + 1);
