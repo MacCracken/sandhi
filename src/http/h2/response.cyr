@@ -72,20 +72,24 @@ fn _h2_buf_append(dst, dst_off, src, n) {
     return dst_off + n;
 }
 
-# Decode the accumulated HEADERS block into a sandhi_headers + status.
-# Returns status (0 on bad/missing); fills `headers_out` with non-
-# pseudo response headers.
-fn _h2_decode_response_headers(h2c, hblock, hblock_len, headers_out) {
+# Decode the accumulated HEADERS block into `headers_out`, allocating
+# every transient cell + decoded name/value cstr from `a`. Returns
+# status (0 on bad/missing); the HPACK decode dynamic-table side
+# effects also route through `a` (see hpack.cyr's decode_field_a).
+fn _h2_decode_response_headers_a(a, h2c, hblock, hblock_len, headers_out) {
     var dec = sandhi_h2_conn_dec_table(h2c);
-    var off = alloc(8); store64(off, 0);
-    var no = alloc(8); var vo = alloc(8);
+    var off = alloc_via(a, 8);
+    var no  = alloc_via(a, 8);
+    var vo  = alloc_via(a, 8);
+    if (off == 0 || no == 0 || vo == 0) { return 0; }
+    store64(off, 0);
     var status = 0;
     while (load64(off) < hblock_len) {
-        var r = sandhi_hpack_decode_field(dec, hblock, hblock_len, off, no, vo);
+        var r = sandhi_hpack_decode_field_a(a, dec, hblock, hblock_len, off, no, vo);
         if (r < 0) { return 0; }
         if (r == _SANDHI_HPACK_TBL_UPDATE) {
             # Dynamic-table-size-update — already applied to the
-            # decode table by sandhi_hpack_decode_field.
+            # decode table by sandhi_hpack_decode_field_a.
         } else {
             var name = load64(no);
             var value = load64(vo);
@@ -93,16 +97,16 @@ fn _h2_decode_response_headers(h2c, hblock, hblock_len, headers_out) {
                 if (streq(name, ":status") == 1) {
                     status = _h2_parse_status(value);
                 }
-                # Other pseudo-headers (like :method on the request
-                # side) shouldn't appear on responses; we silently
-                # drop them rather than fail the decode. h2 servers
-                # we'd actually talk to don't send strays.
             } else {
-                sandhi_headers_add(headers_out, name, value);
+                sandhi_headers_add_a(a, headers_out, name, value);
             }
         }
     }
     return status;
+}
+
+fn _h2_decode_response_headers(h2c, hblock, hblock_len, headers_out) {
+    return _h2_decode_response_headers_a(default_alloc(), h2c, hblock, hblock_len, headers_out);
 }
 
 # ================================================================
@@ -134,17 +138,25 @@ fn _h2_handle_ping(h2c, hdr, payload) {
 # Public: receive a complete response on `stream_id`
 # ================================================================
 
-fn sandhi_h2_response_recv(h2c, stream_id) {
-    var hblock = alloc(_SANDHI_H2_HBLOCK_CAP);
+# Receive a complete h2 response on `stream_id`, allocating the
+# header-block scratch, body buffer, per-frame result cell, decoded
+# headers + body, and resp struct from `a`. The recv path is one of
+# the heaviest alloc sites in the codebase (a 1 MB body buffer + per-
+# frame 16-byte result cells in a tight loop) — routing through `a`
+# lets a per-request arena reset reclaim everything in one shot.
+fn sandhi_h2_response_recv_a(a, h2c, stream_id) {
+    var hblock = alloc_via(a, _SANDHI_H2_HBLOCK_CAP);
     var hblock_len = 0;
-    var body = alloc(_SANDHI_H2_BODY_CAP);
+    var body = alloc_via(a, _SANDHI_H2_BODY_CAP);
+    if (hblock == 0 || body == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
     var body_len = 0;
     var headers_complete = 0;
     var stream_complete = 0;
     var fail_kind = SANDHI_OK;
 
     while (stream_complete == 0 && fail_kind == SANDHI_OK) {
-        var result = alloc(16);
+        var result = alloc_via(a, 16);
+        if (result == 0) { fail_kind = SANDHI_ERR_INTERNAL; }
         var n = sandhi_h2_conn_recv_frame(h2c, result);
         if (n < 0) { fail_kind = SANDHI_ERR_PROTOCOL; }
         else {
@@ -221,17 +233,21 @@ fn sandhi_h2_response_recv(h2c, stream_id) {
         }
     }
 
-    if (fail_kind != SANDHI_OK) { return _sandhi_resp_err(fail_kind); }
+    if (fail_kind != SANDHI_OK) { return _sandhi_resp_err_a(a, fail_kind); }
 
     # Decode the accumulated header block.
-    var headers = sandhi_headers_new();
-    var status = _h2_decode_response_headers(h2c, hblock, hblock_len, headers);
-    if (status == 0) { return _sandhi_resp_err(SANDHI_ERR_PROTOCOL); }
+    var headers = sandhi_headers_new_a(a);
+    var status = _h2_decode_response_headers_a(a, h2c, hblock, hblock_len, headers);
+    if (status == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL); }
 
     # Null-terminate body for cstr-style consumers.
     if (body_len < _SANDHI_H2_BODY_CAP) {
         store8(body + body_len, 0);
     }
-    return _sandhi_resp_new(status, body, body_len, headers, SANDHI_OK);
+    return _sandhi_resp_new_a(a, status, body, body_len, headers, SANDHI_OK);
+}
+
+fn sandhi_h2_response_recv(h2c, stream_id) {
+    return sandhi_h2_response_recv_a(default_alloc(), h2c, stream_id);
 }
 

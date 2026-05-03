@@ -318,6 +318,79 @@ fn test_alloc_batch3_webdriver_url_arena() {
     return 0;
 }
 
+# ================================================================
+# Batch 4 — HTTP response/request foundation
+# ================================================================
+
+# response.cyr — central response constructor lands the entire
+# response (headers, body, struct) in a single arena. Reset reclaims
+# everything in one shot — the headline per-request-arena win.
+fn test_alloc_batch4_response_parse_arena() {
+    var a = arena_allocator(8192);
+
+    var raw = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello";
+    var rlen = strlen(raw);
+
+    var resp = sandhi_http_response_parse_a(a, raw, rlen);
+    assert_eq(resp != 0, 1, "response parsed into arena");
+    assert_eq(sandhi_http_status(resp), 200, "status decoded");
+    assert_eq(sandhi_http_body_len(resp), 5, "body len decoded");
+    assert_streq(sandhi_http_body(resp), "hello", "body bytes decoded");
+    assert_eq(sandhi_http_err_kind(resp), SANDHI_OK, "no err");
+    assert_streq(sandhi_headers_get(sandhi_http_headers(resp), "Content-Type"),
+        "text/plain", "header surfaced");
+
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena consumed bytes for headers + body + struct");
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "arena cleared in one shot");
+
+    # Round 2 — same arena, fresh response.
+    var resp2 = sandhi_http_response_parse_a(a, raw, rlen);
+    assert_eq(sandhi_http_status(resp2), 200, "second parse into reset arena");
+    return 0;
+}
+
+# response.cyr — chunked decode through the per-request arena.
+fn test_alloc_batch4_chunked_arena() {
+    var a = arena_allocator(8192);
+    var raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+    var rlen = strlen(raw);
+
+    var resp = sandhi_http_response_parse_a(a, raw, rlen);
+    assert_eq(sandhi_http_status(resp), 200, "chunked status");
+    assert_eq(sandhi_http_body_len(resp), 11, "chunked body len");
+    assert_streq(sandhi_http_body(resp), "hello world", "chunked body content");
+    return 0;
+}
+
+# response.cyr — error responses also flow through `a` (no global-bump
+# leak even on parse failure).
+fn test_alloc_batch4_resp_err_arena() {
+    var a = arena_allocator(2048);
+    var resp = sandhi_http_response_parse_a(a, "not http", 8);
+    assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PROTOCOL, "malformed → PROTOCOL err");
+    assert_eq(sandhi_http_status(resp), 0, "status 0 on err");
+    assert_eq(sandhi_http_headers(resp) != 0, 1, "headers block always non-null");
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "err response was allocated from arena");
+    return 0;
+}
+
+# response.cyr — OOM. fail_after(0) means even the first alloc fails;
+# _resp_new_a returns 0 cleanly. Then the err shortcut also returns 0
+# (since headers_new_a fails → _resp_err_a's headers param is 0, but
+# _resp_err_a still tries to alloc the resp struct itself — which
+# also fails → returns 0).
+fn test_alloc_batch4_resp_oom() {
+    var failer = fail_after_n_allocs(0);
+    var r = _sandhi_resp_new_a(failer, 200, 0, 0, 0, SANDHI_OK);
+    assert_eq(r, 0, "_sandhi_resp_new_a returns 0 on OOM");
+    var r2 = _sandhi_resp_err_a(failer, SANDHI_ERR_PROTOCOL);
+    assert_eq(r2, 0, "_sandhi_resp_err_a returns 0 on OOM");
+    return 0;
+}
+
 # discovery/local.cyr — ctx-bound allocator + qname round-trip.
 fn test_alloc_batch3_local_arena() {
     var a = arena_allocator(2048);
@@ -389,6 +462,18 @@ fn main() {
 
     test_group("alloc/batch3/local_arena");
     test_alloc_batch3_local_arena();
+
+    test_group("alloc/batch4/response_parse_arena");
+    test_alloc_batch4_response_parse_arena();
+
+    test_group("alloc/batch4/chunked_arena");
+    test_alloc_batch4_chunked_arena();
+
+    test_group("alloc/batch4/resp_err_arena");
+    test_alloc_batch4_resp_err_arena();
+
+    test_group("alloc/batch4/resp_oom");
+    test_alloc_batch4_resp_oom();
 
     return assert_summary();
 }

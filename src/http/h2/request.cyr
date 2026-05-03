@@ -81,11 +81,14 @@ fn _h2_emit_authority(h2c, authority, hbuf, off) {
     _SANDHI_H2_REQ_IDX_AUTHORITY, ":authority", authority);
 }
 
-# Emit one user header. Names get lowercased into a fresh alloc so
-# the `sandhi_headers_*` API doesn't have to enforce case.
-fn _h2_emit_user_header(h2c, name, value, hbuf, off) {
+# Emit one user header, allocating the lowercased-name copy from `a`.
+# The HPACK encoder only references the lowercased name during this
+# call, so the alloc is short-lived; arena callers reset after the
+# request is on the wire.
+fn _h2_emit_user_header_a(a, h2c, name, value, hbuf, off) {
     var nlen = strlen(name);
-    var lower = alloc(nlen + 1);
+    var lower = alloc_via(a, nlen + 1);
+    if (lower == 0) { return off; }
     var i = 0;
     while (i < nlen) {
         var ch = load8(name + i);
@@ -98,6 +101,10 @@ fn _h2_emit_user_header(h2c, name, value, hbuf, off) {
     return sandhi_hpack_encode_literal_indexed(enc, hbuf, off, lower, value);
 }
 
+fn _h2_emit_user_header(h2c, name, value, hbuf, off) {
+    return _h2_emit_user_header_a(default_alloc(), h2c, name, value, hbuf, off);
+}
+
 # ================================================================
 # Build a complete header block for a request
 # ================================================================
@@ -108,7 +115,7 @@ fn _h2_emit_user_header(h2c, name, value, hbuf, off) {
 # be 0 for "no extras." `:method`/`:scheme`/`:path`/`:authority` are
 # emitted in that exact order per RFC 7540 §8.1.2.1.
 
-fn sandhi_h2_request_encode_headers(h2c, method, scheme, path, authority,
+fn sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path, authority,
 user_headers, hbuf) {
     var off = 0;
     off = _h2_emit_method(h2c, method, hbuf, off);
@@ -116,17 +123,12 @@ user_headers, hbuf) {
     off = _h2_emit_path(h2c, path, hbuf, off);
     off = _h2_emit_authority(h2c, authority, hbuf, off);
 
-    # Default `te: trailers` (0.9.7) — same shape as the 1.1 builder's
-    # auto-injection. Skip if the caller set TE explicitly so we
-    # don't double-emit; their value still flows through the
-    # forbidden filter below, which keeps `te: trailers` and drops
-    # everything else per RFC 7540 §8.1.2.2.
     var have_te = 0;
     if (user_headers != 0) {
         if (sandhi_headers_has(user_headers, "TE") == 1) { have_te = 1; }
     }
     if (have_te == 0) {
-        off = _h2_emit_user_header(h2c, "te", "trailers", hbuf, off);
+        off = _h2_emit_user_header_a(a, h2c, "te", "trailers", hbuf, off);
     }
 
     if (user_headers != 0) {
@@ -135,17 +137,19 @@ user_headers, hbuf) {
         while (i < n) {
             var name = sandhi_headers_name_at(user_headers, i);
             var value = sandhi_headers_value_at(user_headers, i);
-            # Skip headers that h2 forbids — connection-specific
-            # ones per RFC 7540 §8.1.2.2: connection, keep-alive,
-            # proxy-connection, transfer-encoding, upgrade,
-            # te (except te: trailers, which is the one allowed value).
             if (_h2_header_is_forbidden(name, value) == 0) {
-                off = _h2_emit_user_header(h2c, name, value, hbuf, off);
+                off = _h2_emit_user_header_a(a, h2c, name, value, hbuf, off);
             }
             i = i + 1;
         }
     }
     return off;
+}
+
+fn sandhi_h2_request_encode_headers(h2c, method, scheme, path, authority,
+user_headers, hbuf) {
+    return sandhi_h2_request_encode_headers_a(default_alloc(), h2c, method, scheme, path, authority,
+    user_headers, hbuf);
 }
 
 # 1 if (name, value) is forbidden in an h2 header block per RFC 7540
@@ -218,10 +222,11 @@ fn _h2_streq_ci(a, b) {
 # Returns the allocated stream-id on success (≥ 1), or a negative
 # `_SANDHI_H2_ERR_*` sentinel on failure.
 
-fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
+fn sandhi_h2_request_send_a(a, h2c, method, scheme, path, authority,
 user_headers, body, body_len) {
-    var hbuf = alloc(_SANDHI_H2_REQ_HBUF_CAP);
-    var hlen = sandhi_h2_request_encode_headers(h2c, method, scheme, path,
+    var hbuf = alloc_via(a, _SANDHI_H2_REQ_HBUF_CAP);
+    if (hbuf == 0) { return _SANDHI_H2_ERR_MALFORMED; }
+    var hlen = sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path,
     authority, user_headers, hbuf);
     if (hlen <= 0) { return _SANDHI_H2_ERR_MALFORMED; }
 
@@ -249,5 +254,11 @@ user_headers, body, body_len) {
         if (dr < 0) { return dr; }
     }
     return stream_id;
+}
+
+fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
+user_headers, body, body_len) {
+    return sandhi_h2_request_send_a(default_alloc(), h2c, method, scheme, path, authority,
+    user_headers, body, body_len);
 }
 
