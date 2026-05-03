@@ -343,7 +343,7 @@ fn test_alloc_batch4_response_parse_arena() {
     assert_streq(sandhi_http_body(resp), "hello", "body bytes decoded");
     assert_eq(sandhi_http_err_kind(resp), SANDHI_OK, "no err");
     assert_streq(sandhi_headers_get(sandhi_http_headers(resp), "Content-Type"),
-        "text/plain", "header surfaced");
+    "text/plain", "header surfaced");
 
     var used = arena_used(allocator_state(a));
     assert_eq(used > 0, 1, "arena consumed bytes for headers + body + struct");
@@ -407,7 +407,7 @@ fn test_alloc_batch5_conn_timeout_arena() {
     var a = arena_allocator(2048);
     # ms <= 0 short-circuits without touching `a`.
     assert_eq(_sandhi_conn_set_timeout_ms_a(a, 0, 0, _SANDHI_SO_RCVTIMEO), 0,
-        "ms<=0 returns 0 without alloc");
+    "ms<=0 returns 0 without alloc");
     var used_after_noop = arena_used(allocator_state(a));
     assert_eq(used_after_noop, 0, "no-op didn't touch arena");
 
@@ -420,7 +420,7 @@ fn test_alloc_batch5_conn_timeout_arena() {
     # OOM. fail_after(0) → alloc fails → returns -1.
     var failer = fail_after_n_allocs(0);
     assert_eq(_sandhi_conn_set_timeout_ms_a(failer, 0 - 1, 1000, _SANDHI_SO_RCVTIMEO),
-        0 - 1, "set_timeout_ms_a OOM → -1");
+    0 - 1, "set_timeout_ms_a OOM → -1");
     return 0;
 }
 
@@ -435,7 +435,7 @@ fn test_alloc_batch5_h2_conn_arena() {
     assert_eq(sandhi_h2_conn_enc_table(c) != 0, 1, "enc table allocated");
     assert_eq(sandhi_h2_conn_dec_table(c) != 0, 1, "dec table allocated");
     assert_eq(sandhi_h2_conn_peer_max_frame(c), _SANDHI_H2_DEFAULT_PEER_FRAME,
-        "default peer max-frame initialized");
+    "default peer max-frame initialized");
     # next_stream_id starts at 1 and bumps by 2.
     assert_eq(sandhi_h2_conn_next_stream_id(c), 1, "first stream id = 1");
     assert_eq(sandhi_h2_conn_next_stream_id(c), 3, "second stream id = 3");
@@ -460,9 +460,9 @@ fn test_alloc_batch5_resolve_name_eq_arena() {
     while (i < 39) { store8(&buf + i, load8(labels + i)); i = i + 1; }
 
     assert_eq(_sandhi_resolve_name_eq_a(a, &buf, 39, 0, 13), 1,
-        "identical names compare equal");
+    "identical names compare equal");
     assert_eq(_sandhi_resolve_name_eq_a(a, &buf, 39, 0, 26), 1,
-        "case-insensitive equal");
+    "case-insensitive equal");
 
     var used = arena_used(allocator_state(a));
     assert_eq(used > 0, 1, "name_eq scratch landed in arena");
@@ -563,13 +563,13 @@ fn test_alloc_batch6_stream_result_oom() {
 fn test_alloc_batch5_resolve_oom() {
     var failer = fail_after_n_allocs(0);
     assert_eq(_sandhi_resolve_read_resolv_conf_a(failer), 0 - 1,
-        "resolv.conf read OOM → -1");
+    "resolv.conf read OOM → -1");
     # name_eq with failing alloc → returns 0 (not equal) without
     # crashing.
     var buf[2];
     store8(&buf, 0); store8(&buf + 1, 0);
     assert_eq(_sandhi_resolve_name_eq_a(failer, &buf, 2, 0, 1), 0,
-        "name_eq_a OOM → 0");
+    "name_eq_a OOM → 0");
     return 0;
 }
 

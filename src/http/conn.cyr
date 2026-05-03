@@ -571,8 +571,8 @@ fn _sandhi_conn_open_v6_fully_timed_a(a, addr16, port, use_tls, sni_host, connec
 
 fn _sandhi_conn_open_v6_fully_timed(addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
     return _sandhi_conn_open_v6_fully_timed_a(
-        default_alloc(), addr16, port, use_tls, sni_host,
-        connect_ms, read_ms, write_ms);
+    default_alloc(), addr16, port, use_tls, sni_host,
+    connect_ms, read_ms, write_ms);
 }
 
 fn sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
@@ -611,8 +611,8 @@ fn sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, sni_host, connect_ms, 
 
 fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
     return sandhi_conn_open_fully_timed_a(
-        default_alloc(), addr, port, use_tls, sni_host,
-        connect_ms, read_ms, write_ms);
+    default_alloc(), addr, port, use_tls, sni_host,
+    connect_ms, read_ms, write_ms);
 }
 
 # Send `len` bytes through the connection. Returns bytes sent, 0 on

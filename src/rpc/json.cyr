@@ -209,26 +209,26 @@ fn sandhi_json_build_a(a, o) {
     if (o == 0) { return _sandhi_json_dup_a(a, "{}"); }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{");
-        var n = vec_len(o);
-        var i = 0;
-        while (i < n) {
-            if (i > 0) { str_builder_add_cstr(sb, ","); }
-            var e = vec_get(o, i);
-            var ekey = load64(e);
-            var eval = load64(e + 8);
-            var ekind = load64(e + 16);
-            var escaped_key = sandhi_json_escape_a(a, ekey);
-            str_builder_add_cstr(sb, escaped_key);
-            str_builder_add_cstr(sb, ":");
-            if (ekind == SANDHI_JSON_STRING) {
-                var escaped_val = sandhi_json_escape_a(a, eval);
-                str_builder_add_cstr(sb, escaped_val);
-            } else {
-                str_builder_add_cstr(sb, eval);
-            }
-            i = i + 1;
+    var n = vec_len(o);
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        var e = vec_get(o, i);
+        var ekey = load64(e);
+        var eval = load64(e + 8);
+        var ekind = load64(e + 16);
+        var escaped_key = sandhi_json_escape_a(a, ekey);
+        str_builder_add_cstr(sb, escaped_key);
+        str_builder_add_cstr(sb, ":");
+        if (ekind == SANDHI_JSON_STRING) {
+            var escaped_val = sandhi_json_escape_a(a, eval);
+            str_builder_add_cstr(sb, escaped_val);
+        } else {
+            str_builder_add_cstr(sb, eval);
         }
-        str_builder_add_cstr(sb, "}");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "}");
     var built = str_data(str_builder_build(sb));
     # str_builder_build's output lives on the global bump; dup into
     # `a` so the returned cstr matches the caller's lifetime contract
@@ -278,7 +278,7 @@ fn _sandhi_json_find_key(body, blen, start, key, key_len) {
 }
 
 # Skip past balanced braces starting at `start` (buf[start] == '{').
-    # Returns the offset just past the matching '}'.
+# Returns the offset just past the matching '}'.
 fn _sandhi_json_skip_object(body, blen, start) {
     if (start >= blen || load8(body + start) != 123) { return 0 - 1; }
     var depth = 1;
@@ -371,18 +371,18 @@ fn _sandhi_json_value_range(body, blen, start) {
         return (start << 32) | lenO;
     }
     # Numeric / true / false / null — until ',' '}' ']' or whitespace.
-var ps = start;
-var pe = start;
-while (pe < blen) {
-    var ce = load8(body + pe);
-    if (ce == 44 || ce == 125 || ce == 93 || ce == 32 || ce == 10 || ce == 13 || ce == 9) {
-        var lenN = pe - ps;
-        return (ps << 32) | lenN;
+    var ps = start;
+    var pe = start;
+    while (pe < blen) {
+        var ce = load8(body + pe);
+        if (ce == 44 || ce == 125 || ce == 93 || ce == 32 || ce == 10 || ce == 13 || ce == 9) {
+            var lenN = pe - ps;
+            return (ps << 32) | lenN;
+        }
+        pe = pe + 1;
     }
-    pe = pe + 1;
-}
-var lenT = pe - ps;
-return (ps << 32) | lenT;
+    var lenT = pe - ps;
+    return (ps << 32) | lenT;
 }
 
 # Extract a string at the dotted path, allocating the returned cstr

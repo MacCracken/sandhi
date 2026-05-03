@@ -439,8 +439,8 @@ fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ct
 
 fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms) {
     return _sandhi_stream_body_loop_a(
-        default_alloc(), conn, body_sb, scratch, chunked, status,
-        cb, ctx, cap, deadline_ms);
+    default_alloc(), conn, body_sb, scratch, chunked, status,
+    cb, ctx, cap, deadline_ms);
 }
 
 # Decode as many chunked frames as possible out of `in_sb` into

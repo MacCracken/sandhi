@@ -12,7 +12,7 @@
 #     (left-padded with zeros) + 2 for the bit length.
 #   - At first use, the blob is parsed and a binary decode tree is
 #     built. Each tree node is 24 bytes: { left_ptr, right_ptr,
-    #     symbol_or_minus_1 }. Internal nodes have symbol = -1; leaves
+#     symbol_or_minus_1 }. Internal nodes have symbol = -1; leaves
 #     hold the symbol value 0..256.
 #   - Decode walks the tree bit-by-bit. On reaching a leaf, the
 #     symbol is emitted (or rejected if it's the EOS, symbol 256 —
