@@ -4,6 +4,148 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-05-03
+
+**Allocator-as-first-arg migration.** Threads the cyrius v5.8.33
+`Allocator` vtable through every alloc-touching public + internal
+fn in `src/`. Adds `_a` variants that take the Allocator as the
+first parameter (Zig-style); back-compat wrappers preserve the
+existing API by passing `default_alloc()`. The headline win is the
+**per-request-arena pattern** for HTTP servers: a handler can
+`arena_allocator(N)` at the top of a request, build the parsed URL,
+header block, RPC call, response struct, and body all into the
+same arena, then `reset_via(a)` between requests — zero leakage,
+deterministic memory ceiling, failing-allocator coverage of every
+path. Closes the deferral noted in cyrius v5.8.36's stdlib pass 2.
+
+**Toolchain pin** bumped 5.6.41 → 5.8.36 (`cyrius.cyml [package]`).
+`lib/alloc.cyr` resynced and now ships the v5.8.33 `Allocator`
+vtable + 3 default impls (`bump`/`arena`/`test`) + dispatch helpers
+(`alloc_via`/`realloc_via`/`free_via`/`reset_via`) +
+`default_alloc()` lazy-init singleton; `lib/assert.cyr` ships
+`fail_after_n_allocs(n)` for OOM-handling test coverage.
+
+**792 assertions green** (482 sandhi + 167 h2 + 143 alloc; +143
+over 1.0.0's 649). The new alloc-coverage suite lives in
+`tests/alloc.tcyr` (separate program — sandhi.tcyr is at the
+per-program fixup-table cap per architecture/001).
+
+### Migration shape
+
+The proposal at `docs/proposals/2026-05-03-allocator-migration.md`
+specifies the contract: every alloc-touching public fn gains an
+`_a` variant taking the Allocator as the first arg; internal
+helpers thread the allocator through; back-compat wrappers preserve
+the pre-migration API by passing `default_alloc()`. OOM propagates
+as a 0 return rather than aborting. Doc comments lead every new
+public fn (cyrdoc gate).
+
+Process-wide singletons MUST keep using `default_alloc()` regardless
+of which `_a` variant called them, because they outlive any per-
+request arena: the ALPN wire literals (`_sandhi_alpn_h11_wire` /
+`_sandhi_alpn_h2h11_wire` in `src/http/conn.cyr`), the HPACK static
+table (`_hpack_static_init` in `src/http/h2/hpack.cyr`), the HPACK
+Huffman decode tree (`_hpack_huffman_init` in
+`src/http/h2/huffman.cyr`), and the server-side per-process request
+buffer (`_hsv_req_buf` in `src/server/mod.cyr`). An arena reset in
+one request would corrupt these for every other in-flight request.
+
+For resolver-fn-pointer callbacks whose `(ctx, name)` shape can't
+take an extra Allocator argument, the allocator is stored on the
+ctx struct: daimon's ctx grew from 16 → 24 bytes
+(`src/discovery/daimon.cyr`); local mDNS gained an 8-byte ctx
+(`src/discovery/local.cyr`).
+
+For the connection pool, the Allocator handle lives on the pool
+struct (slot +40) so put/take operations route allocator-aware
+churn through the same arena the pool was built from. The pool
+struct grew from 40 → 48 bytes (`src/http/pool.cyr`).
+
+### Batches
+
+Migration landed in 6 commit-sized bites, bottom-up (leaves first,
+aggregators last).
+
+**Batch 1 — leaves** (6 files, 17 alloc sites):
+`src/http/url.cyr`, `src/http/headers.cyr`,
+`src/discovery/service.cyr`, `src/discovery/daimon.cyr`,
+`src/http/pool.cyr`, `src/http/h2/frame.cyr`. Pool struct +
+daimon ctx grew. `headers_add_a` returns `0 - 2` on OOM (distinct
+from the existing `0 - 1` byte-rejection). +33 assertions.
+
+**Batch 2 — TLS + h2 leaves** (5 files, 24 alloc sites):
+`src/tls_policy/fingerprint.cyr`, `src/tls_policy/policy.cyr`,
+`src/tls_policy/apply.cyr`, `src/http/h2/huffman.cyr`,
+`src/http/h2/hpack.cyr`. SPKI check (DER buffer + digest + hex
+encode + constant-time compare) all flow through `a`. HPACK static
+table + Huffman tree pinned to default_alloc as singletons. +24
+assertions.
+
+**Batch 3 — discovery + rpc** (4 files, 14 alloc sites):
+`src/discovery/local.cyr`, `src/rpc/dispatch.cyr`,
+`src/rpc/webdriver.cyr`, `src/rpc/json.cyr`. The full JSON
+builder + dotted-path extractor + RPC call/wrap surface gained
+`_a` variants. +23 assertions.
+
+**Batch 4 — HTTP response/request foundation** (3 files, 15
+alloc sites): `src/http/response.cyr`, `src/http/h2/response.cyr`,
+`src/http/h2/request.cyr`. THE central `_sandhi_resp_new` is now
+allocator-aware — every HTTP response (1.1 OR h2, success OR error,
+plain OR chunked) flows through one Allocator. The h2 recv path
+(16 KB hblock + 1 MB body + 16-byte result cell per frame) is now
+arena-resettable. Heaviest semantic win of the migration. +18
+assertions.
+
+**Batch 5 — connection layer** (3 files, 37 alloc sites — largest
+by count): `src/http/conn.cyr`, `src/http/h2/conn.cyr`,
+`src/net/resolve.cyr`. ALPN-selected cstr inherits conn lifetime;
+h2 conn struct + enc/dec hpack tables + per-frame send/recv all
+allocator-aware; DNS resolver's `_name_eq` (8 transient cells +
+2 64-byte label bufs — heaviest alloc site in the resolver) +
+v4/v6 query buffers all flow through `a`. The `var a` loop
+counter in `_resolve_parse_response_a*` was renamed to `a_idx` to
+dodge the Allocator-parameter shadow. +19 assertions.
+
+**Batch 6 — client + streaming + server** (6 files, 34 alloc
+sites): `src/http/client.cyr`, `src/http/stream.cyr`,
+`src/http/sse.cyr`, `src/http/retry.cyr`,
+`src/http/h2/dispatch.cyr`, `src/server/mod.cyr`. The full SSE
+parser surface (events vec, ctx struct, per-event dups + structs)
+flows through `a` — re-entrant streams that nest SSE callbacks
+within callbacks each get their own ctx in their own allocator.
+Streaming buffers (`_sandhi_sb_new` allocates `cap+1` bytes per
+buffer) arena-resettable. Server-side request-parsing helpers
+(`get_method`/`get_path`/`find_header`/`url_decode`/`get_param`/
+`path_segment`) all gained `_a` variants — handlers can wire one
+arena through the entire request-handling chain. +26 assertions.
+
+### Fold-into-stdlib note
+
+The `_a` variants are ADR 0005 freeze deviations: ~150 new public
+verbs land in this release. ADR 0005's freeze applied "between
+0.9.2 and the v5.7.0 fold (1.0.0)" — post-fold maintenance patches
+were always going to land as 1.0.x / 1.x.x stdlib patches. This
+release is the first such patch. The cyrius-side update
+(refreshing `cyrius/lib/sandhi.cyr` from this repo's regenerated
+`dist/sandhi.cyr`) is its own small cyrius slot — probably
+v5.8.37 or whichever cyrius version is current at sandhi 1.1.0
+ship.
+
+### Stdlib
+
+- Toolchain pin 5.6.41 → 5.8.36. Brings in v5.8.33-v5.8.36 stdlib
+  changes: `Allocator` vtable, `fail_after_n_allocs` test harness,
+  `vec_new_a` / `vec_push_a` / `map_new_a` / `map_set_a` /
+  `map_grow_a`, `str_from_a` / `str_new_a` / `str_clone_a` /
+  `str_from_int_a`, `default_alloc()` lazy-init.
+- `lib/str.cyr` `str_builder_*` lacks `_a` variants in the pinned
+  stdlib — sandhi's `_a` paths still use the global bump for
+  builder scratch and dup the final cstr into `a` so the returned
+  cstr matches arena lifetime (e.g.,
+  `_sandhi_client_host_header_a`, `_sandhi_wd_session_url_a`,
+  `sandhi_json_build_a`). When a future cyrius release adds
+  `str_builder_new_a` etc., these dups can drop in a follow-up.
+
 ## [1.0.0] — 2026-04-25
 
 **Fold-ready release.** Final sandhi-side tag before the cyrius
