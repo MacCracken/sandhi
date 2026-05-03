@@ -30,23 +30,33 @@ enum SandhiSseOff {
 var SANDHI_SSE_EVENT_STRUCT_SIZE = 40;
 var SANDHI_SSE_RETRY_UNSET = 0 - 1;
 
-fn _sandhi_sse_dup(s) {
+fn _sandhi_sse_dup_a(a, s) {
     if (s == 0) { return 0; }
     var n = strlen(s);
-    var out = alloc(n + 1);
+    var out = alloc_via(a, n + 1);
+    if (out == 0) { return 0; }
     memcpy(out, s, n);
     store8(out + n, 0);
     return out;
 }
 
-fn sandhi_sse_event_new(event_name, data, id, retry_ms) {
-    var e = alloc(SANDHI_SSE_EVENT_STRUCT_SIZE);
+fn _sandhi_sse_dup(s) {
+    return _sandhi_sse_dup_a(default_alloc(), s);
+}
+
+fn sandhi_sse_event_new_a(a, event_name, data, id, retry_ms) {
+    var e = alloc_via(a, SANDHI_SSE_EVENT_STRUCT_SIZE);
+    if (e == 0) { return 0; }
     store64(e + SANDHI_SSE_OFF_EVENT, event_name);
     store64(e + SANDHI_SSE_OFF_DATA, data);
     store64(e + SANDHI_SSE_OFF_ID, id);
     store64(e + SANDHI_SSE_OFF_RETRY, retry_ms);
     store64(e + SANDHI_SSE_OFF_RES, 0);
     return e;
+}
+
+fn sandhi_sse_event_new(event_name, data, id, retry_ms) {
+    return sandhi_sse_event_new_a(default_alloc(), event_name, data, id, retry_ms);
 }
 
 fn sandhi_sse_event_name(e)  { return load64(e + SANDHI_SSE_OFF_EVENT); }
@@ -95,7 +105,7 @@ fn _sandhi_sse_line_empty(buf, line_start, line_end) {
 #   - If line starts with ':' → comment, ignore.
 #   - If line has no ':' → whole line is the field name, value is "".
 #   - Otherwise: name = up-to-first-':', value = after-':'-with-optional-leading-SP-stripped.
-fn _sandhi_sse_parse_field(buf, line_start, line_end, out_name_ptr, out_value_ptr) {
+fn _sandhi_sse_parse_field_a(a, buf, line_start, line_end, out_name_ptr, out_value_ptr) {
     # Strip trailing CR/LF from line_end.
     var le = line_end;
     if (le > line_start && load8(buf + le - 1) == 10) { le = le - 1; }
@@ -113,7 +123,8 @@ fn _sandhi_sse_parse_field(buf, line_start, line_end, out_name_ptr, out_value_pt
 
     var name_len = colon - line_start;
     if (name_len == 0) { return 2; }
-    var name = alloc(name_len + 1);
+    var name = alloc_via(a, name_len + 1);
+    if (name == 0) { return 2; }
     memcpy(name, buf + line_start, name_len);
     store8(name + name_len, 0);
 
@@ -124,7 +135,8 @@ fn _sandhi_sse_parse_field(buf, line_start, line_end, out_name_ptr, out_value_pt
         if (vstart < le && load8(buf + vstart) == 32) { vstart = vstart + 1; }
     }
     var value_len = le - vstart;
-    var value = alloc(value_len + 1);
+    var value = alloc_via(a, value_len + 1);
+    if (value == 0) { return 2; }
     if (value_len > 0) { memcpy(value, buf + vstart, value_len); }
     store8(value + value_len, 0);
 
@@ -133,19 +145,28 @@ fn _sandhi_sse_parse_field(buf, line_start, line_end, out_name_ptr, out_value_pt
     return 0;
 }
 
+fn _sandhi_sse_parse_field(buf, line_start, line_end, out_name_ptr, out_value_ptr) {
+    return _sandhi_sse_parse_field_a(default_alloc(), buf, line_start, line_end, out_name_ptr, out_value_ptr);
+}
+
 # Append a new data-line to an existing data cstr (or build fresh).
 # Caller passes current cstr (may be 0). Returns fresh cstr that's
 # `current + "\n" + addition`. No trailing newline.
-fn _sandhi_sse_data_append(current, addition) {
-    if (current == 0) { return _sandhi_sse_dup(addition); }
+fn _sandhi_sse_data_append_a(a, current, addition) {
+    if (current == 0) { return _sandhi_sse_dup_a(a, addition); }
     var cur_len = strlen(current);
     var add_len = strlen(addition);
-    var out = alloc(cur_len + 1 + add_len + 1);
+    var out = alloc_via(a, cur_len + 1 + add_len + 1);
+    if (out == 0) { return 0; }
     memcpy(out, current, cur_len);
     store8(out + cur_len, 10);  # \n between data lines per spec
     memcpy(out + cur_len + 1, addition, add_len);
     store8(out + cur_len + 1 + add_len, 0);
     return out;
+}
+
+fn _sandhi_sse_data_append(current, addition) {
+    return _sandhi_sse_data_append_a(default_alloc(), current, addition);
 }
 
 # ================================================================
@@ -183,9 +204,10 @@ enum _SandhiSseCtxOff {
 
 var _SANDHI_SSE_CTX_STRUCT_SIZE = 40;
 
-fn _sandhi_sse_ctx_new() {
-    var c = alloc(_SANDHI_SSE_CTX_STRUCT_SIZE);
-    store64(c + _SANDHI_SSE_CTX_OFF_EVENT, _sandhi_sse_dup("message"));
+fn _sandhi_sse_ctx_new_a(a) {
+    var c = alloc_via(a, _SANDHI_SSE_CTX_STRUCT_SIZE);
+    if (c == 0) { return 0; }
+    store64(c + _SANDHI_SSE_CTX_OFF_EVENT, _sandhi_sse_dup_a(a, "message"));
     store64(c + _SANDHI_SSE_CTX_OFF_DATA, 0);
     store64(c + _SANDHI_SSE_CTX_OFF_ID, 0);
     store64(c + _SANDHI_SSE_CTX_OFF_RETRY, SANDHI_SSE_RETRY_UNSET);
@@ -193,13 +215,21 @@ fn _sandhi_sse_ctx_new() {
     return c;
 }
 
-fn _sandhi_sse_ctx_reset(c) {
-    store64(c + _SANDHI_SSE_CTX_OFF_EVENT, _sandhi_sse_dup("message"));
+fn _sandhi_sse_ctx_new() {
+    return _sandhi_sse_ctx_new_a(default_alloc());
+}
+
+fn _sandhi_sse_ctx_reset_a(a, c) {
+    store64(c + _SANDHI_SSE_CTX_OFF_EVENT, _sandhi_sse_dup_a(a, "message"));
     store64(c + _SANDHI_SSE_CTX_OFF_DATA, 0);
     store64(c + _SANDHI_SSE_CTX_OFF_ID, 0);
     store64(c + _SANDHI_SSE_CTX_OFF_RETRY, SANDHI_SSE_RETRY_UNSET);
     store64(c + _SANDHI_SSE_CTX_OFF_HAS_FIELDS, 0);
     return 0;
+}
+
+fn _sandhi_sse_ctx_reset(c) {
+    return _sandhi_sse_ctx_reset_a(default_alloc(), c);
 }
 
 # 0.9.1 P1 — 1 if the wire bytes for this line's value (after the
@@ -228,12 +258,13 @@ fn _sandhi_sse_value_has_nul(buf, line_start, line_end) {
     return 0;
 }
 
-fn _sandhi_sse_apply_line(ctx, buf, line_start, line_end) {
-    var name_cell = alloc(8);
-    var value_cell = alloc(8);
+fn _sandhi_sse_apply_line_a(a, ctx, buf, line_start, line_end) {
+    var name_cell = alloc_via(a, 8);
+    var value_cell = alloc_via(a, 8);
+    if (name_cell == 0 || value_cell == 0) { return 0; }
     store64(name_cell, 0);
     store64(value_cell, 0);
-    var rc = _sandhi_sse_parse_field(buf, line_start, line_end, name_cell, value_cell);
+    var rc = _sandhi_sse_parse_field_a(a, buf, line_start, line_end, name_cell, value_cell);
     if (rc != 0) { return 0; }  # comment or malformed — skip
     var name = load64(name_cell);
     var value = load64(value_cell);
@@ -243,12 +274,8 @@ fn _sandhi_sse_apply_line(ctx, buf, line_start, line_end) {
     } elif (streq(name, "data") == 1) {
         var prev_data = load64(ctx + _SANDHI_SSE_CTX_OFF_DATA);
         store64(ctx + _SANDHI_SSE_CTX_OFF_DATA,
-        _sandhi_sse_data_append(prev_data, value));
+        _sandhi_sse_data_append_a(a, prev_data, value));
     } elif (streq(name, "id") == 1) {
-        # 0.9.1 P1 — WHATWG: "If the field name is 'id' and the
-        # field value does not contain U+0000 NULL, then set the
-        # last event ID buffer to the field value." NUL-bearing id
-        # values are silently ignored.
         if (_sandhi_sse_value_has_nul(buf, line_start, line_end) == 0) {
             store64(ctx + _SANDHI_SSE_CTX_OFF_ID, value);
         }
@@ -259,13 +286,18 @@ fn _sandhi_sse_apply_line(ctx, buf, line_start, line_end) {
     return 0;
 }
 
-# Top-level parse. Allocates a fresh ctx struct per call — re-entrant
-# (a callback that itself calls sandhi_sse_parse runs against its
-# own ctx and can't clobber an outer parse).
-fn sandhi_sse_parse(buf, blen, remaining_out) {
-    var ctx = _sandhi_sse_ctx_new();
+fn _sandhi_sse_apply_line(ctx, buf, line_start, line_end) {
+    return _sandhi_sse_apply_line_a(default_alloc(), ctx, buf, line_start, line_end);
+}
 
-    var events = vec_new();
+# Top-level parse into `a`. The fresh ctx struct, per-event dups,
+# event vec, and event structs all flow through `a`. Re-entrant
+# (a callback that itself calls sandhi_sse_parse_a runs against its
+# own ctx and can't clobber an outer parse).
+fn sandhi_sse_parse_a(a, buf, blen, remaining_out) {
+    var ctx = _sandhi_sse_ctx_new_a(a);
+
+    var events = vec_new_a(a);
     if (buf == 0 || blen <= 0) {
         store64(remaining_out, 0);
         return events;
@@ -280,17 +312,17 @@ fn sandhi_sse_parse(buf, blen, remaining_out) {
             if (_sandhi_sse_line_empty(buf, pos, line_end) == 1) {
                 if (load64(ctx + _SANDHI_SSE_CTX_OFF_HAS_FIELDS) == 1) {
                     var d = load64(ctx + _SANDHI_SSE_CTX_OFF_DATA);
-                    if (d == 0) { d = _sandhi_sse_dup(""); }
-                    var ev = sandhi_sse_event_new(
+                    if (d == 0) { d = _sandhi_sse_dup_a(a, ""); }
+                    var ev = sandhi_sse_event_new_a(a,
                     load64(ctx + _SANDHI_SSE_CTX_OFF_EVENT), d,
                     load64(ctx + _SANDHI_SSE_CTX_OFF_ID),
                     load64(ctx + _SANDHI_SSE_CTX_OFF_RETRY));
-                    vec_push(events, ev);
-                    _sandhi_sse_ctx_reset(ctx);
+                    vec_push_a(a, events, ev);
+                    _sandhi_sse_ctx_reset_a(a, ctx);
                 }
                 consumed = line_end;
             } else {
-                _sandhi_sse_apply_line(ctx, buf, pos, line_end);
+                _sandhi_sse_apply_line_a(a, ctx, buf, pos, line_end);
                 consumed = line_end;
             }
             pos = line_end;
@@ -298,5 +330,9 @@ fn sandhi_sse_parse(buf, blen, remaining_out) {
     }
     store64(remaining_out, consumed);
     return events;
+}
+
+fn sandhi_sse_parse(buf, blen, remaining_out) {
+    return sandhi_sse_parse_a(default_alloc(), buf, blen, remaining_out);
 }
 

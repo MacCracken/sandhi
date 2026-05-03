@@ -24,21 +24,26 @@ var _SANDHI_HTTP_RESP_BUF_SIZE = 262144;  # 256 KB — enough for most API respo
 # src/net/resolve.cyr); on miss, fall through to sandhi_resolve_ipv4
 # which does a real UDP DNS query. Returns the address (net-byte-
 # order uint32), or (0 - 1) on any failure.
-fn _sandhi_client_resolve(host) {
+# Resolve `host` via IPv4 literal then DNS, allocating any DNS scratch
+# from `a`. Returns the address on hit, (0 - 1) on miss.
+fn _sandhi_client_resolve_a(a, host) {
     var lit = sandhi_net_parse_ipv4(host);
     if (lit != 0 - 1) { return lit; }
-    return sandhi_resolve_ipv4(host);
+    return sandhi_resolve_ipv4_a(a, host);
 }
 
-# IPv6 fallback. Returns a freshly-alloc'd 16-byte AAAA buffer or 0.
-# Tried after _sandhi_client_resolve misses on the v4 path; lets us
-# reach v6-only hosts without needing a new public open verb (ADR
-# 0005 freeze). Wire-up into the connect path lives in
-# _sandhi_http_do_impl below — `_sandhi_conn_open_v6_fully_timed`
-# in conn.cyr does the actual socket(AF_INET6) + connect(sockaddr_in6).
-fn _sandhi_client_resolve_v6(host) {
+fn _sandhi_client_resolve(host) {
+    return _sandhi_client_resolve_a(default_alloc(), host);
+}
+
+# IPv6 fallback into `a`. Returns a 16-byte AAAA buffer or 0.
+fn _sandhi_client_resolve_v6_a(a, host) {
     if (host == 0) { return 0; }
-    return sandhi_resolve_ipv6(host);
+    return sandhi_resolve_ipv6_a(a, host);
+}
+
+fn _sandhi_client_resolve_v6(host) {
+    return _sandhi_client_resolve_v6_a(default_alloc(), host);
 }
 
 # ================================================================
@@ -47,13 +52,13 @@ fn _sandhi_client_resolve_v6(host) {
 
 # Combine path + query into a single cstr "path?query" (or just path).
 # Caller owns the returned alloc.
-fn _sandhi_client_full_path(url_struct) {
+fn _sandhi_client_full_path_a(a, url_struct) {
     var path = sandhi_url_path(url_struct);
     var query = sandhi_url_query(url_struct);
     if (query == 0) {
-        # Dup so caller can free uniformly.
         var plen = strlen(path);
-        var out = alloc(plen + 1);
+        var out = alloc_via(a, plen + 1);
+        if (out == 0) { return 0; }
         memcpy(out, path, plen);
         store8(out + plen, 0);
         return out;
@@ -61,7 +66,8 @@ fn _sandhi_client_full_path(url_struct) {
     var plen2 = strlen(path);
     var qlen = strlen(query);
     var total = plen2 + 1 + qlen;
-    var out2 = alloc(total + 1);
+    var out2 = alloc_via(a, total + 1);
+    if (out2 == 0) { return 0; }
     memcpy(out2, path, plen2);
     store8(out2 + plen2, 63);  # '?'
     memcpy(out2 + plen2 + 1, query, qlen);
@@ -69,8 +75,14 @@ fn _sandhi_client_full_path(url_struct) {
     return out2;
 }
 
-# Build the Host header value: "host" for default port, "host:port" otherwise.
-fn _sandhi_client_host_header(url_struct) {
+fn _sandhi_client_full_path(url_struct) {
+    return _sandhi_client_full_path_a(default_alloc(), url_struct);
+}
+
+# Build the Host header value into `a`. The str_builder used in the
+# port-bearing variant is on the global bump; only the final cstr
+# (dup'd into `a`) is tied to the caller's lifetime.
+fn _sandhi_client_host_header_a(a, url_struct) {
     var host = sandhi_url_host(url_struct);
     var port = sandhi_url_port(url_struct);
     var scheme = sandhi_url_scheme(url_struct);
@@ -78,7 +90,8 @@ fn _sandhi_client_host_header(url_struct) {
     if (scheme == SANDHI_URL_HTTPS) { default_port = 443; }
     var hlen = strlen(host);
     if (port == default_port) {
-        var out = alloc(hlen + 1);
+        var out = alloc_via(a, hlen + 1);
+        if (out == 0) { return 0; }
         memcpy(out, host, hlen);
         store8(out + hlen, 0);
         return out;
@@ -87,7 +100,11 @@ fn _sandhi_client_host_header(url_struct) {
     str_builder_add_cstr(sb, host);
     str_builder_add_cstr(sb, ":");
     str_builder_add_int(sb, port);
-    return str_data(str_builder_build(sb));
+    return _sandhi_json_dup_a(a, str_data(str_builder_build(sb)));
+}
+
+fn _sandhi_client_host_header(url_struct) {
+    return _sandhi_client_host_header_a(default_alloc(), url_struct);
 }
 
 # Construct the wire-format request as a Str. user_headers may be 0.
@@ -95,6 +112,10 @@ fn _sandhi_client_host_header(url_struct) {
 # `keep_alive` controls the trailing Connection header — 1 omits it
 # (HTTP/1.1 default is keep-alive); 0 emits "Connection: close" so the
 # peer drops the conn after the response.
+fn _sandhi_client_build_request_a(a, method, full_path, host_header, user_headers, body_len) {
+    return _sandhi_client_build_request_v(method, full_path, host_header, user_headers, body_len, 0);
+}
+
 fn _sandhi_client_build_request(method, full_path, host_header, user_headers, body_len) {
     return _sandhi_client_build_request_v(method, full_path, host_header, user_headers, body_len, 0);
 }
@@ -431,8 +452,9 @@ var SANDHI_HTTP_OPT_STRUCT_SIZE = 64;
 var SANDHI_HTTP_DEFAULT_MAX_HOPS = 5;
 var SANDHI_HTTP_DEFAULT_MAX_BYTES = 262144;
 
-fn sandhi_http_options_new() {
-    var o = alloc(SANDHI_HTTP_OPT_STRUCT_SIZE);
+fn sandhi_http_options_new_a(a) {
+    var o = alloc_via(a, SANDHI_HTTP_OPT_STRUCT_SIZE);
+    if (o == 0) { return 0; }
     store64(o + SANDHI_HTTP_OPT_OFF_FOLLOW, 0);
     store64(o + SANDHI_HTTP_OPT_OFF_MAX_HOPS, SANDHI_HTTP_DEFAULT_MAX_HOPS);
     store64(o + SANDHI_HTTP_OPT_OFF_MAX_BYTES, SANDHI_HTTP_DEFAULT_MAX_BYTES);
@@ -442,6 +464,10 @@ fn sandhi_http_options_new() {
     store64(o + SANDHI_HTTP_OPT_OFF_TOTAL_MS, 0);
     store64(o + SANDHI_HTTP_OPT_OFF_POOL, 0);
     return o;
+}
+
+fn sandhi_http_options_new() {
+    return sandhi_http_options_new_a(default_alloc());
 }
 
 fn sandhi_http_options_follow_redirects(opts, on) {
@@ -536,20 +562,19 @@ fn _sandhi_is_redirect(status) {
 
 # Resolve a Location header value against a base URL. Returns an alloc'd
 # cstr with a fully-qualified URL, or 0 if resolution fails.
-fn _sandhi_resolve_location(base_url, location) {
+fn _sandhi_resolve_location_a(a, base_url, location) {
     if (location == 0) { return 0; }
-    # Absolute — starts with scheme. Just dup.
     if (_sandhi_url_sceq(location, "http://", 7) == 1
     || _sandhi_url_sceq(location, "https://", 8) == 1) {
         var llen = strlen(location);
-        var out = alloc(llen + 1);
+        var out = alloc_via(a, llen + 1);
+        if (out == 0) { return 0; }
         memcpy(out, location, llen);
         store8(out + llen, 0);
         return out;
     }
-    # Relative — must start with '/'. Build scheme://authority + location.
     if (load8(location) != 47) { return 0; }
-    var u = sandhi_url_parse(base_url);
+    var u = sandhi_url_parse_a(a, base_url);
     if (u == 0) { return 0; }
     var sb = str_builder_new();
     if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) {
@@ -558,7 +583,6 @@ fn _sandhi_resolve_location(base_url, location) {
         str_builder_add_cstr(sb, "http://");
     }
     str_builder_add_cstr(sb, sandhi_url_host(u));
-    # Only include port if non-default.
     var scheme = sandhi_url_scheme(u);
     var default_port = 80;
     if (scheme == SANDHI_URL_HTTPS) { default_port = 443; }
@@ -567,7 +591,11 @@ fn _sandhi_resolve_location(base_url, location) {
         str_builder_add_int(sb, sandhi_url_port(u));
     }
     str_builder_add_cstr(sb, location);
-    return str_data(str_builder_build(sb));
+    return _sandhi_json_dup_a(a, str_data(str_builder_build(sb)));
+}
+
+fn _sandhi_resolve_location(base_url, location) {
+    return _sandhi_resolve_location_a(default_alloc(), base_url, location);
 }
 
 # 0.9.0 P0 #4 — case-insensitive cstr compare. Used by the redirect

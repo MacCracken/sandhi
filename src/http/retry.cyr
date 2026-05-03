@@ -33,12 +33,18 @@ var SANDHI_RETRY_DEFAULT_ATTEMPTS = 3;
 var SANDHI_RETRY_DEFAULT_INITIAL  = 50;
 var SANDHI_RETRY_DEFAULT_MAX      = 2000;
 
-fn sandhi_retry_new() {
-    var r = alloc(SANDHI_RETRY_STRUCT_SIZE);
+# Allocate a retry-policy struct from `a`. Returns 0 on OOM.
+fn sandhi_retry_new_a(a) {
+    var r = alloc_via(a, SANDHI_RETRY_STRUCT_SIZE);
+    if (r == 0) { return 0; }
     store64(r + SANDHI_RETRY_OFF_ATTEMPTS, SANDHI_RETRY_DEFAULT_ATTEMPTS);
     store64(r + SANDHI_RETRY_OFF_INITIAL,  SANDHI_RETRY_DEFAULT_INITIAL);
     store64(r + SANDHI_RETRY_OFF_MAX,      SANDHI_RETRY_DEFAULT_MAX);
     return r;
+}
+
+fn sandhi_retry_new() {
+    return sandhi_retry_new_a(default_alloc());
 }
 
 fn sandhi_retry_max_attempts(r, n) {

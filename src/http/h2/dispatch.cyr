@@ -29,9 +29,13 @@
 #
 # Method must be one of GET/POST/PUT/DELETE/PATCH/HEAD. URL is
 # parsed for scheme/host/port/path. user_headers may be 0.
-fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len) {
-    var u = sandhi_url_parse(url);
-    if (u == 0) { return _sandhi_resp_err(SANDHI_ERR_PARSE); }
+# Send an h2 request and recv the response into `a`. The URL parse,
+# authority builder, full-path combine, request-encode scratch, and
+# entire response struct/body all flow through `a` — so a per-request
+# arena reset reclaims the whole exchange.
+fn sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len) {
+    var u = sandhi_url_parse_a(a, url);
+    if (u == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PARSE); }
 
     var scheme = "http";
     if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { scheme = "https"; }
@@ -50,7 +54,7 @@ fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len) {
         str_builder_add_cstr(sb, host);
         str_builder_add_cstr(sb, ":");
         str_builder_add_int(sb, port);
-        authority = str_data(str_builder_build(sb));
+        authority = _sandhi_json_dup_a(a, str_data(str_builder_build(sb)));
     }
 
     # Path: encode like the 1.1 client — path + "?query" if present.
@@ -59,7 +63,8 @@ fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len) {
     if (query != 0) {
         var pathlen = strlen(path);
         var qlen = strlen(query);
-        var fp = alloc(pathlen + 1 + qlen + 1);
+        var fp = alloc_via(a, pathlen + 1 + qlen + 1);
+        if (fp == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
         memcpy(fp, path, pathlen);
         store8(fp + pathlen, 63);  # '?'
         memcpy(fp + pathlen + 1, query, qlen);
@@ -67,11 +72,15 @@ fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len) {
         full_path = fp;
     }
 
-    var stream_id = sandhi_h2_request_send(h2c, method, scheme, full_path,
+    var stream_id = sandhi_h2_request_send_a(a, h2c, method, scheme, full_path,
     authority, user_headers,
     body, body_len);
-    if (stream_id < 0) { return _sandhi_resp_err(SANDHI_ERR_PROTOCOL); }
-    return sandhi_h2_response_recv(h2c, stream_id);
+    if (stream_id < 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL); }
+    return sandhi_h2_response_recv_a(a, h2c, stream_id);
+}
+
+fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len) {
+    return sandhi_h2_request_a(default_alloc(), h2c, method, url, user_headers, body, body_len);
 }
 
 # ================================================================

@@ -20,6 +20,10 @@ include "src/http/h2/huffman.cyr"
 include "src/http/h2/hpack.cyr"
 include "src/http/h2/frame.cyr"
 include "src/http/h2/conn.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/http/retry.cyr"
+include "src/server/mod.cyr"
 include "src/tls_policy/policy.cyr"
 include "src/tls_policy/fingerprint.cyr"
 include "src/rpc/json.cyr"
@@ -471,6 +475,90 @@ fn test_alloc_batch5_resolve_name_eq_arena() {
     return 0;
 }
 
+# ================================================================
+# Batch 6 — client + streaming + server
+# ================================================================
+
+# client.cyr / retry.cyr — options + retry struct in arena.
+fn test_alloc_batch6_options_arena() {
+    var a = arena_allocator(2048);
+    var opts = sandhi_http_options_new_a(a);
+    assert_eq(opts != 0, 1, "options_new_a");
+    assert_eq(sandhi_http_options_bytes(opts), SANDHI_HTTP_DEFAULT_MAX_BYTES, "default max bytes");
+    sandhi_http_options_max_hops(opts, 7);
+    assert_eq(sandhi_http_options_hops(opts), 7, "max_hops setter survives");
+
+    var retry = sandhi_retry_new_a(a);
+    assert_eq(retry != 0, 1, "retry_new_a");
+    assert_eq(_sandhi_retry_attempts(retry), SANDHI_RETRY_DEFAULT_ATTEMPTS, "default attempts");
+
+    var failer = fail_after_n_allocs(0);
+    assert_eq(sandhi_http_options_new_a(failer), 0, "options_new_a OOM → 0");
+    assert_eq(sandhi_retry_new_a(failer), 0, "retry_new_a OOM → 0");
+    return 0;
+}
+
+# server/mod.cyr — request parsing helpers all flow through `a`.
+fn test_alloc_batch6_server_parse_arena() {
+    var a = arena_allocator(4096);
+    var req = "GET /api/users?id=42 HTTP/1.1\r\nHost: example.com\r\nUser-Agent: probe\r\n\r\n";
+    var rlen = strlen(req);
+
+    var method = sandhi_server_get_method_a(a, req, rlen);
+    assert_streq(method, "GET", "method extracted");
+    var path = sandhi_server_get_path_a(a, req, rlen);
+    assert_streq(path, "/api/users?id=42", "path extracted");
+    var ua = sandhi_server_find_header_a(a, req, rlen, "User-Agent");
+    assert_streq(ua, "probe", "header extracted");
+    var bare = sandhi_server_path_only_a(a, path);
+    assert_streq(bare, "/api/users", "path_only stripped query");
+    var id = sandhi_server_get_param_a(a, path, "id");
+    assert_streq(id, "42", "query param extracted");
+    var seg = sandhi_server_path_segment_a(a, path, 1);
+    assert_streq(seg, "users", "path segment extracted");
+
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "all helpers landed in arena");
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "arena cleared in one shot");
+
+    var failer = fail_after_n_allocs(0);
+    assert_eq(sandhi_server_get_method_a(failer, req, rlen), 0, "get_method_a OOM → 0");
+    return 0;
+}
+
+# sse.cyr — full SSE parse round-trip into arena.
+fn test_alloc_batch6_sse_parse_arena() {
+    var a = arena_allocator(4096);
+    var stream = "event: tick\ndata: hello\ndata: world\nid: 7\n\n";
+    var slen = strlen(stream);
+
+    var rem_cell = alloc_via(a, 8);
+    var events = sandhi_sse_parse_a(a, stream, slen, rem_cell);
+    assert_eq(events != 0, 1, "events vec allocated");
+    assert_eq(vec_len(events), 1, "one event parsed");
+    var ev = vec_get(events, 0);
+    assert_streq(sandhi_sse_event_name(ev), "tick", "event name");
+    assert_streq(sandhi_sse_event_data(ev), "hello\nworld", "data lines joined");
+    assert_streq(sandhi_sse_event_id(ev), "7", "id captured");
+
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "sse parse arena cleared");
+
+    var failer = fail_after_n_allocs(0);
+    assert_eq(_sandhi_sse_dup_a(failer, "x"), 0, "_sse_dup_a OOM → 0");
+    return 0;
+}
+
+# stream.cyr — _stream_result_a / _sb_new_a / _chunk_state_new_a OOM.
+fn test_alloc_batch6_stream_result_oom() {
+    var failer = fail_after_n_allocs(0);
+    assert_eq(_sandhi_stream_result_a(failer, 0, 0, 0, 0), 0, "stream_result_a OOM → 0");
+    assert_eq(_sandhi_sb_new_a(failer, 1024), 0, "sb_new_a OOM → 0");
+    assert_eq(_sandhi_chunk_state_new_a(failer), 0, "chunk_state_new_a OOM → 0");
+    return 0;
+}
+
 # resolve.cyr — OOM on resolv.conf read returns -1 cleanly.
 fn test_alloc_batch5_resolve_oom() {
     var failer = fail_after_n_allocs(0);
@@ -580,6 +668,18 @@ fn main() {
 
     test_group("alloc/batch5/resolve_oom");
     test_alloc_batch5_resolve_oom();
+
+    test_group("alloc/batch6/options_arena");
+    test_alloc_batch6_options_arena();
+
+    test_group("alloc/batch6/server_parse_arena");
+    test_alloc_batch6_server_parse_arena();
+
+    test_group("alloc/batch6/sse_parse_arena");
+    test_alloc_batch6_sse_parse_arena();
+
+    test_group("alloc/batch6/stream_result_oom");
+    test_alloc_batch6_stream_result_oom();
 
     return assert_summary();
 }

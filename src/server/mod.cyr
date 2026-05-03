@@ -77,25 +77,36 @@ fn _hsv_next_nl(buf, start, end) {
 # ================================================================
 
 # Method from the request line — "GET", "POST", etc. Returns "" on malformed.
-fn sandhi_server_get_method(buf, blen) {
+# Extract the request method into `a`. Returns "" on malformed; 0 on
+# OOM (caller can distinguish by null-checking; "" is non-zero).
+fn sandhi_server_get_method_a(a, buf, blen) {
     var sp = _hsv_find(buf, blen, " ", 1);
     if (sp < 0) { return ""; }
-    var out = alloc(sp + 1);
+    var out = alloc_via(a, sp + 1);
+    if (out == 0) { return 0; }
     memcpy(out, buf, sp);
     store8(out + sp, 0);
     return out;
 }
 
-# Path-and-query from the request line — "/foo?bar=baz". Returns "" on malformed.
-fn sandhi_server_get_path(buf, blen) {
+fn sandhi_server_get_method(buf, blen) {
+    return sandhi_server_get_method_a(default_alloc(), buf, blen);
+}
+
+fn sandhi_server_get_path_a(a, buf, blen) {
     var sp1 = _hsv_find(buf, blen, " ", 1);
     if (sp1 < 0) { return ""; }
     var sp2 = _hsv_find(buf + sp1 + 1, blen - sp1 - 1, " ", 1);
     if (sp2 < 0) { return ""; }
-    var out = alloc(sp2 + 1);
+    var out = alloc_via(a, sp2 + 1);
+    if (out == 0) { return 0; }
     memcpy(out, buf + sp1 + 1, sp2);
     store8(out + sp2, 0);
     return out;
+}
+
+fn sandhi_server_get_path(buf, blen) {
+    return sandhi_server_get_path_a(default_alloc(), buf, blen);
 }
 
 # Offset of the body start (after \r\n\r\n) — 0 - 1 if no headers terminator.
@@ -107,7 +118,7 @@ fn sandhi_server_body_offset(buf, blen) {
 
 # Case-insensitive header lookup. Returns the value cstr (trimmed of leading
 # SP and trailing CR), or 0 if the header is absent.
-fn sandhi_server_find_header(buf, blen, name) {
+fn sandhi_server_find_header_a(a, buf, blen, name) {
     var nlen = strlen(name);
     var headers_end = _hsv_find(buf, blen, "\r\n\r\n", 4);
     if (headers_end < 0) { headers_end = blen; }
@@ -124,7 +135,8 @@ fn sandhi_server_find_header(buf, blen, name) {
             var ve = line_end;
             if (ve > vs && load8(buf + ve - 1) == 13) { ve = ve - 1; }
             var vlen = ve - vs;
-            var out = alloc(vlen + 1);
+            var out = alloc_via(a, vlen + 1);
+            if (out == 0) { return 0; }
             memcpy(out, buf + vs, vlen);
             store8(out + vlen, 0);
             return out;
@@ -132,6 +144,10 @@ fn sandhi_server_find_header(buf, blen, name) {
         line_start = line_end + 1;
     }
     return 0;
+}
+
+fn sandhi_server_find_header(buf, blen, name) {
+    return sandhi_server_find_header_a(default_alloc(), buf, blen, name);
 }
 
 # Content-Length value — 0 if header absent or malformed.
@@ -241,12 +257,13 @@ fn sandhi_server_request_has_cl_te_conflict(buf, blen) {
 # ================================================================
 
 # "/foo?bar=baz" → "/foo". Returns the input unchanged if there's no '?'.
-fn sandhi_server_path_only(path) {
+fn sandhi_server_path_only_a(a, path) {
     if (path == 0) { return path; }
     var i = 0;
     while (load8(path + i) != 0) {
         if (load8(path + i) == 63) {
-            var out = alloc(i + 1);
+            var out = alloc_via(a, i + 1);
+            if (out == 0) { return 0; }
             memcpy(out, path, i);
             store8(out + i, 0);
             return out;
@@ -256,11 +273,15 @@ fn sandhi_server_path_only(path) {
     return path;
 }
 
-# Percent-decode (%20 → ' ', + → ' '). Returns alloc'd cstr.
-fn sandhi_server_url_decode(s) {
+fn sandhi_server_path_only(path) {
+    return sandhi_server_path_only_a(default_alloc(), path);
+}
+
+fn sandhi_server_url_decode_a(a, s) {
     if (s == 0) { return ""; }
     var slen = strlen(s);
-    var out = alloc(slen + 1);
+    var out = alloc_via(a, slen + 1);
+    if (out == 0) { return 0; }
     var si = 0;
     var oi = 0;
     while (si < slen) {
@@ -291,9 +312,13 @@ fn sandhi_server_url_decode(s) {
     return out;
 }
 
+fn sandhi_server_url_decode(s) {
+    return sandhi_server_url_decode_a(default_alloc(), s);
+}
+
 # Query parameter value, percent-decoded. 0 if not found.
 # Example: sandhi_server_get_param("/a?foo=1&bar=hello%20world", "bar") → "hello world"
-fn sandhi_server_get_param(path, name) {
+fn sandhi_server_get_param_a(a, path, name) {
     if (path == 0) { return 0; }
     var plen = strlen(path);
     var qmark = 0 - 1;
@@ -312,10 +337,11 @@ fn sandhi_server_get_param(path, name) {
             var vs = pi + nlen + 1;
             var ve = vs;
             while (ve < plen && load8(path + ve) != 38) { ve = ve + 1; }
-            var raw = alloc(ve - vs + 1);
+            var raw = alloc_via(a, ve - vs + 1);
+            if (raw == 0) { return 0; }
             memcpy(raw, path + vs, ve - vs);
             store8(raw + ve - vs, 0);
-            return sandhi_server_url_decode(raw);
+            return sandhi_server_url_decode_a(a, raw);
         }
         while (pi < plen && load8(path + pi) != 38) { pi = pi + 1; }
         pi = pi + 1;
@@ -323,11 +349,13 @@ fn sandhi_server_get_param(path, name) {
     return 0;
 }
 
-# Nth segment of a path. Indices 0-based. sandhi_server_path_segment("/a/b/c", 0) → "a".
-# Strips a leading "/" before counting. Returns 0 if n is out of range.
-fn sandhi_server_path_segment(path, n) {
+fn sandhi_server_get_param(path, name) {
+    return sandhi_server_get_param_a(default_alloc(), path, name);
+}
+
+fn sandhi_server_path_segment_a(a, path, n) {
     if (path == 0) { return 0; }
-    var path_only = sandhi_server_path_only(path);
+    var path_only = sandhi_server_path_only_a(a, path);
     var plen = strlen(path_only);
     var seg = 0;
     var ss = 0;
@@ -339,7 +367,8 @@ fn sandhi_server_path_segment(path, n) {
         if (c == 47 || c == 0) {
             if (seg == n) {
                 var slen = pi - ss;
-                var out = alloc(slen + 1);
+                var out = alloc_via(a, slen + 1);
+                if (out == 0) { return 0; }
                 memcpy(out, path_only + ss, slen);
                 store8(out + slen, 0);
                 return out;
@@ -350,6 +379,10 @@ fn sandhi_server_path_segment(path, n) {
         pi = pi + 1;
     }
     return 0;
+}
+
+fn sandhi_server_path_segment(path, n) {
+    return sandhi_server_path_segment_a(default_alloc(), path, n);
 }
 
 # ================================================================
@@ -545,11 +578,16 @@ var SANDHI_SERVER_OPT_STRUCT_SIZE = 16;
 var SANDHI_SERVER_DEFAULT_IDLE_MS = 30000;
 var SANDHI_SERVER_DEFAULT_MAX_CONNS = 128;
 
-fn sandhi_server_options_new() {
-    var o = alloc(SANDHI_SERVER_OPT_STRUCT_SIZE);
+fn sandhi_server_options_new_a(a) {
+    var o = alloc_via(a, SANDHI_SERVER_OPT_STRUCT_SIZE);
+    if (o == 0) { return 0; }
     store64(o + SANDHI_SERVER_OPT_OFF_IDLE_MS, SANDHI_SERVER_DEFAULT_IDLE_MS);
     store64(o + SANDHI_SERVER_OPT_OFF_MAX_CONNS, SANDHI_SERVER_DEFAULT_MAX_CONNS);
     return o;
+}
+
+fn sandhi_server_options_new() {
+    return sandhi_server_options_new_a(default_alloc());
 }
 
 fn sandhi_server_options_idle_ms(opts, ms) {
@@ -588,7 +626,10 @@ fn sandhi_server_run(addr, port, handler_fp, ctx) {
 # to bound slow/idle peers (slowloris guard). max_conns is accepted
 # but not honored today — server stays single-threaded until 0.8.0.
 fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts) {
-    if (_hsv_req_buf == 0) { _hsv_req_buf = alloc(HSV_REQ_BUF_SIZE); }
+    # _hsv_req_buf is a process-wide singleton shared across every
+    # accepted connection — it must outlive any per-request arena, so
+    # always allocate from the global bump.
+    if (_hsv_req_buf == 0) { _hsv_req_buf = alloc_via(default_alloc(), HSV_REQ_BUF_SIZE); }
 
     var idle_ms = sandhi_server_options_get_idle_ms(opts);
 
