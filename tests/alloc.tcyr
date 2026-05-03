@@ -19,6 +19,7 @@ include "src/http/pool.cyr"
 include "src/http/h2/huffman.cyr"
 include "src/http/h2/hpack.cyr"
 include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
 include "src/tls_policy/policy.cyr"
 include "src/tls_policy/fingerprint.cyr"
 include "src/rpc/json.cyr"
@@ -391,6 +392,99 @@ fn test_alloc_batch4_resp_oom() {
     return 0;
 }
 
+# ================================================================
+# Batch 5 — connection layer
+# ================================================================
+
+# conn.cyr — _set_timeout_ms_a allocates a 16-byte timeval into `a`.
+# We can't easily exercise the open path (needs a real network),
+# but the timeval helper is deterministic.
+fn test_alloc_batch5_conn_timeout_arena() {
+    var a = arena_allocator(2048);
+    # ms <= 0 short-circuits without touching `a`.
+    assert_eq(_sandhi_conn_set_timeout_ms_a(a, 0, 0, _SANDHI_SO_RCVTIMEO), 0,
+        "ms<=0 returns 0 without alloc");
+    var used_after_noop = arena_used(allocator_state(a));
+    assert_eq(used_after_noop, 0, "no-op didn't touch arena");
+
+    # ms>0 with fd=-1 — alloc happens, syscall fails. We only assert
+    # the alloc landed in `a` (used > 0).
+    _sandhi_conn_set_timeout_ms_a(a, 0 - 1, 1000, _SANDHI_SO_RCVTIMEO);
+    var used_after_set = arena_used(allocator_state(a));
+    assert_eq(used_after_set > 0, 1, "timeval allocated into arena");
+
+    # OOM. fail_after(0) → alloc fails → returns -1.
+    var failer = fail_after_n_allocs(0);
+    assert_eq(_sandhi_conn_set_timeout_ms_a(failer, 0 - 1, 1000, _SANDHI_SO_RCVTIMEO),
+        0 - 1, "set_timeout_ms_a OOM → -1");
+    return 0;
+}
+
+# h2/conn.cyr — h2 conn struct + enc/dec hpack tables all land in `a`.
+fn test_alloc_batch5_h2_conn_arena() {
+    var a = arena_allocator(8192);
+    # Underlying sandhi_conn ptr can be 0 — h2_conn_new just stores
+    # the value, doesn't dereference.
+    var c = sandhi_h2_conn_new_a(a, 0);
+    assert_eq(c != 0, 1, "h2_conn_new_a built struct in arena");
+    assert_eq(sandhi_h2_conn_underlying(c), 0, "underlying ptr stored");
+    assert_eq(sandhi_h2_conn_enc_table(c) != 0, 1, "enc table allocated");
+    assert_eq(sandhi_h2_conn_dec_table(c) != 0, 1, "dec table allocated");
+    assert_eq(sandhi_h2_conn_peer_max_frame(c), _SANDHI_H2_DEFAULT_PEER_FRAME,
+        "default peer max-frame initialized");
+    # next_stream_id starts at 1 and bumps by 2.
+    assert_eq(sandhi_h2_conn_next_stream_id(c), 1, "first stream id = 1");
+    assert_eq(sandhi_h2_conn_next_stream_id(c), 3, "second stream id = 3");
+
+    var failer = fail_after_n_allocs(0);
+    assert_eq(sandhi_h2_conn_new_a(failer, 0), 0, "h2_conn_new_a OOM → 0");
+    return 0;
+}
+
+# resolve.cyr — _name_eq_a's 8 transient cells round-trip into `a`.
+# Build two compressed-name buffers and compare.
+fn test_alloc_batch5_resolve_name_eq_arena() {
+    var a = arena_allocator(4096);
+
+    # Build a tiny DNS-like buf with two names to compare. Layout:
+    # offset 0: "example.com" labels = 07 e x a m p l e 03 c o m 00
+    # offset 13: same again
+    # offset 26: "EXAMPLE.com" — case-different
+    var buf[39];
+    var labels = "\x07example\x03com\x00\x07example\x03com\x00\x07EXAMPLE\x03com\x00";
+    var i = 0;
+    while (i < 39) { store8(&buf + i, load8(labels + i)); i = i + 1; }
+
+    assert_eq(_sandhi_resolve_name_eq_a(a, &buf, 39, 0, 13), 1,
+        "identical names compare equal");
+    assert_eq(_sandhi_resolve_name_eq_a(a, &buf, 39, 0, 26), 1,
+        "case-insensitive equal");
+
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "name_eq scratch landed in arena");
+
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "arena reset reclaimed scratch");
+
+    # Round 2 — same arena.
+    assert_eq(_sandhi_resolve_name_eq_a(a, &buf, 39, 0, 13), 1, "round 2 still works");
+    return 0;
+}
+
+# resolve.cyr — OOM on resolv.conf read returns -1 cleanly.
+fn test_alloc_batch5_resolve_oom() {
+    var failer = fail_after_n_allocs(0);
+    assert_eq(_sandhi_resolve_read_resolv_conf_a(failer), 0 - 1,
+        "resolv.conf read OOM → -1");
+    # name_eq with failing alloc → returns 0 (not equal) without
+    # crashing.
+    var buf[2];
+    store8(&buf, 0); store8(&buf + 1, 0);
+    assert_eq(_sandhi_resolve_name_eq_a(failer, &buf, 2, 0, 1), 0,
+        "name_eq_a OOM → 0");
+    return 0;
+}
+
 # discovery/local.cyr — ctx-bound allocator + qname round-trip.
 fn test_alloc_batch3_local_arena() {
     var a = arena_allocator(2048);
@@ -474,6 +568,18 @@ fn main() {
 
     test_group("alloc/batch4/resp_oom");
     test_alloc_batch4_resp_oom();
+
+    test_group("alloc/batch5/conn_timeout_arena");
+    test_alloc_batch5_conn_timeout_arena();
+
+    test_group("alloc/batch5/h2_conn_arena");
+    test_alloc_batch5_h2_conn_arena();
+
+    test_group("alloc/batch5/resolve_name_eq_arena");
+    test_alloc_batch5_resolve_name_eq_arena();
+
+    test_group("alloc/batch5/resolve_oom");
+    test_alloc_batch5_resolve_oom();
 
     return assert_summary();
 }
