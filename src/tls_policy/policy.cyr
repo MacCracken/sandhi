@@ -34,17 +34,23 @@ enum SandhiTlsPolicyOff {
 
 var SANDHI_TLS_POLICY_STRUCT_SIZE = 48;
 
-fn _sandhi_tls_policy_dup(s) {
+fn _sandhi_tls_policy_dup_a(a, s) {
     if (s == 0) { return 0; }
     var n = strlen(s);
-    var out = alloc(n + 1);
+    var out = alloc_via(a, n + 1);
+    if (out == 0) { return 0; }
     memcpy(out, s, n);
     store8(out + n, 0);
     return out;
 }
 
-fn _sandhi_tls_policy_empty() {
-    var p = alloc(SANDHI_TLS_POLICY_STRUCT_SIZE);
+fn _sandhi_tls_policy_dup(s) {
+    return _sandhi_tls_policy_dup_a(default_alloc(), s);
+}
+
+fn _sandhi_tls_policy_empty_a(a) {
+    var p = alloc_via(a, SANDHI_TLS_POLICY_STRUCT_SIZE);
+    if (p == 0) { return 0; }
     store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, 0);
     store64(p + SANDHI_TLS_POLICY_OFF_PINNED, 0);
     store64(p + SANDHI_TLS_POLICY_OFF_MTLS_CERT, 0);
@@ -54,45 +60,62 @@ fn _sandhi_tls_policy_empty() {
     return p;
 }
 
+fn _sandhi_tls_policy_empty() {
+    return _sandhi_tls_policy_empty_a(default_alloc());
+}
+
 # ================================================================
 # Constructors
 # ================================================================
 
-# Default policy — standard system trust store, peer verification on.
-# Identical to `sandhi_conn_open`'s current behavior; explicit policy
-# lets the caller make the intent visible even when it matches defaults.
+# Default policy allocated from `a`. Returns 0 on OOM.
+fn sandhi_tls_policy_new_default_a(a) {
+    return _sandhi_tls_policy_empty_a(a);
+}
+
 fn sandhi_tls_policy_new_default() {
-    return _sandhi_tls_policy_empty();
+    return sandhi_tls_policy_new_default_a(default_alloc());
 }
 
-# Pin to an SPKI fingerprint — a SHA-256 hash of the server's Subject
-# Public Key Info (DER), hex-encoded. Handshake rejects any cert
-# whose SPKI hash differs. Delimiters + case in `spki_hex` are
-# ignored at comparison time (see fingerprint.cyr).
-fn sandhi_tls_policy_new_pinned(spki_hex) {
-    var p = _sandhi_tls_policy_empty();
+# Pinned policy allocated from `a`. The caller-supplied hex is dup'd
+# into `a` so the policy is self-contained against arena reset.
+fn sandhi_tls_policy_new_pinned_a(a, spki_hex) {
+    var p = _sandhi_tls_policy_empty_a(a);
+    if (p == 0) { return 0; }
     store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_PINNED);
-    store64(p + SANDHI_TLS_POLICY_OFF_PINNED, _sandhi_tls_policy_dup(spki_hex));
+    store64(p + SANDHI_TLS_POLICY_OFF_PINNED, _sandhi_tls_policy_dup_a(a, spki_hex));
     return p;
 }
 
-# Present a client certificate during the TLS handshake (mTLS).
-# Both files are PEM-encoded. Paths are duplicated into the policy;
-# caller keeps ownership of the strings it passed in.
-fn sandhi_tls_policy_new_mtls(cert_path, key_path) {
-    var p = _sandhi_tls_policy_empty();
+fn sandhi_tls_policy_new_pinned(spki_hex) {
+    return sandhi_tls_policy_new_pinned_a(default_alloc(), spki_hex);
+}
+
+# mTLS policy allocated from `a`. Cert + key paths are dup'd into `a`.
+fn sandhi_tls_policy_new_mtls_a(a, cert_path, key_path) {
+    var p = _sandhi_tls_policy_empty_a(a);
+    if (p == 0) { return 0; }
     store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_MTLS);
-    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_CERT, _sandhi_tls_policy_dup(cert_path));
-    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_KEY, _sandhi_tls_policy_dup(key_path));
+    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_CERT, _sandhi_tls_policy_dup_a(a, cert_path));
+    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_KEY, _sandhi_tls_policy_dup_a(a, key_path));
     return p;
 }
 
-# Override the CA trust store with a specific bundle file.
-fn sandhi_tls_policy_new_trust_store(bundle_path) {
-    var p = _sandhi_tls_policy_empty();
+fn sandhi_tls_policy_new_mtls(cert_path, key_path) {
+    return sandhi_tls_policy_new_mtls_a(default_alloc(), cert_path, key_path);
+}
+
+# Trust-store-override policy allocated from `a`.
+fn sandhi_tls_policy_new_trust_store_a(a, bundle_path) {
+    var p = _sandhi_tls_policy_empty_a(a);
+    if (p == 0) { return 0; }
     store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_CUSTOM_TRUST);
-    store64(p + SANDHI_TLS_POLICY_OFF_TRUST_STORE, _sandhi_tls_policy_dup(bundle_path));
+    store64(p + SANDHI_TLS_POLICY_OFF_TRUST_STORE, _sandhi_tls_policy_dup_a(a, bundle_path));
     return p;
+}
+
+fn sandhi_tls_policy_new_trust_store(bundle_path) {
+    return sandhi_tls_policy_new_trust_store_a(default_alloc(), bundle_path);
 }
 
 # ================================================================
@@ -105,10 +128,15 @@ fn sandhi_tls_policy_new_trust_store(bundle_path) {
 #               sandhi_tls_policy_new_pinned(fp),
 #               sandhi_tls_policy_new_mtls(cert, key));
 
-fn sandhi_tls_policy_combine(a, b) {
+# Combine two policies into a fresh struct allocated from `alloc`.
+# Right-hand fields win; left-hand fills the gaps. Field cstrs are
+# NOT re-dup'd — the resulting struct shares string ownership with
+# its inputs (caller must keep them alive). Returns 0 on OOM.
+fn sandhi_tls_policy_combine_a(alloc, a, b) {
     if (a == 0) { return b; }
     if (b == 0) { return a; }
-    var out = _sandhi_tls_policy_empty();
+    var out = _sandhi_tls_policy_empty_a(alloc);
+    if (out == 0) { return 0; }
     var fa = load64(a + SANDHI_TLS_POLICY_OFF_FLAGS);
     var fb = load64(b + SANDHI_TLS_POLICY_OFF_FLAGS);
     store64(out + SANDHI_TLS_POLICY_OFF_FLAGS, fa | fb);
@@ -134,6 +162,10 @@ fn sandhi_tls_policy_combine(a, b) {
     else              { store64(out + SANDHI_TLS_POLICY_OFF_TRUST_STORE, trust_a); }
 
     return out;
+}
+
+fn sandhi_tls_policy_combine(a, b) {
+    return sandhi_tls_policy_combine_a(default_alloc(), a, b);
 }
 
 # ================================================================

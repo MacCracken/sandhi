@@ -139,15 +139,12 @@ fn _sandhi_apply_hook(hook_ctx, ssl_ctx) {
     return 0;
 }
 
-# Post-handshake SPKI check. Returns 1 if the peer's SPKI hash
-# matches `expected_hex`, 0 on any failure (cert missing, pubkey
-# extraction failure, hash mismatch). Frees the X509 + EVP_PKEY it
-# pulls along the way.
-#
-# tls_ctx is the stdlib `tls_connect`-shaped 24-byte struct
-# (ssl_ctx / ssl / sock at offsets 0/8/16); we read SSL from
-# offset 8.
-fn _sandhi_check_spki(tls_ctx, expected_hex) {
+# Post-handshake SPKI check, allocating all scratch (DER buffer,
+# pointer cell, digest, hex string) from `a`. Returns 1 on match,
+# 0 on any failure (cert missing, pubkey extraction failure, hash
+# mismatch, OOM). Frees the X509 + EVP_PKEY it pulls. None of the
+# allocs escape; an arena reset after this call reclaims everything.
+fn _sandhi_check_spki_a(a, tls_ctx, expected_hex) {
     _sandhi_apply_resolve_fns();
     if (tls_ctx == 0 || expected_hex == 0) { return 0; }
     if (_sandhi_apply_get_peer_cert_fp == 0)   { return 0; }
@@ -176,20 +173,32 @@ fn _sandhi_check_spki(tls_ctx, expected_hex) {
         fncall1(_sandhi_apply_x509_free_fp, x509);
         return 0;
     }
-    var der = alloc(size);
-    var p_cell = alloc(8);
+    var der = alloc_via(a, size);
+    var p_cell = alloc_via(a, 8);
+    if (der == 0 || p_cell == 0) {
+        fncall1(_sandhi_apply_evp_pkey_free_fp, pkey);
+        fncall1(_sandhi_apply_x509_free_fp, x509);
+        return 0;
+    }
     store64(p_cell, der);
     var written = fncall2(_sandhi_apply_i2d_pubkey_fp, pkey, p_cell);
     fncall1(_sandhi_apply_evp_pkey_free_fp, pkey);
     fncall1(_sandhi_apply_x509_free_fp, x509);
     if (written <= 0) { return 0; }
 
-    # SHA-256 the SPKI DER, hex-encode, constant-time compare.
-    var digest = alloc(32);
+    # SHA-256 the SPKI DER, hex-encode, constant-time compare. The hex
+    # encoding + compare-time normalize buffers all flow through `a`.
+    var digest = alloc_via(a, 32);
+    if (digest == 0) { return 0; }
     sha256(der, written, digest);
-    var actual_hex = sandhi_fp_encode_bytes(digest, 32);
-    if (sandhi_fp_eq(actual_hex, expected_hex) == 1) { return 1; }
+    var actual_hex = sandhi_fp_encode_bytes_a(a, digest, 32);
+    if (actual_hex == 0) { return 0; }
+    if (sandhi_fp_eq_a(a, actual_hex, expected_hex) == 1) { return 1; }
     return 0;
+}
+
+fn _sandhi_check_spki(tls_ctx, expected_hex) {
+    return _sandhi_check_spki_a(default_alloc(), tls_ctx, expected_hex);
 }
 
 # Apply the given policy while opening a connection. `addr` + `port`
@@ -205,7 +214,14 @@ fn _sandhi_check_spki(tls_ctx, expected_hex) {
 # default verify path. Callers wanting "best effort" behavior pass
 # `sandhi_tls_policy_new_default()` explicitly (no enforcement
 # requirements).
-fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
+# Open a TLS-policy-driven connection, allocating the per-connection
+# scratch (hook ctx struct + post-handshake SPKI check buffers) from
+# `a`. The conn struct itself is owned by the connection layer (Batch
+# 5 routes that through an Allocator); only the hook ctx + SPKI scratch
+# land in `a` here.
+#
+# Returns the conn struct on success or 0 on failure / OOM.
+fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy) {
     if (use_tls == 0) {
         return sandhi_conn_open(addr, port, 0, sni_host);
     }
@@ -244,7 +260,11 @@ fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
         protos = _sandhi_alpn_h2h11_wire;
         plen   = _sandhi_alpn_h2h11_wire_len;
     }
-    var hook_ctx = alloc(24);
+    var hook_ctx = alloc_via(a, 24);
+    if (hook_ctx == 0) {
+        _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+        return 0;
+    }
     store64(hook_ctx,      protos);
     store64(hook_ctx + 8,  plen);
     store64(hook_ctx + 16, policy);
@@ -263,7 +283,7 @@ fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
     # Post-handshake SPKI check.
     if (pinned != 0) {
         var tls_ctx = sandhi_conn_tls_ctx(conn);
-        if (_sandhi_check_spki(tls_ctx, pinned) == 0) {
+        if (_sandhi_check_spki_a(a, tls_ctx, pinned) == 0) {
             sandhi_conn_close(conn);
             _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
             return 0;
@@ -271,5 +291,9 @@ fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
     }
 
     return conn;
+}
+
+fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
+    return sandhi_conn_open_with_policy_a(default_alloc(), addr, port, use_tls, sni_host, policy);
 }
 

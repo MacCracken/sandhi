@@ -33,13 +33,13 @@ fn _sandhi_fp_is_hex(c) {
     return 0;
 }
 
-# Normalize an SPKI hex string: strip delimiters (: space tab),
-# lowercase. Returns a fresh alloc'd cstr. Returns 0 if input is 0.
-# Non-hex, non-delimiter bytes are rejected — returns 0.
-fn sandhi_fp_normalize(hex) {
+# Normalize an SPKI hex string into `a`: strip delimiters (: space tab),
+# lowercase. Returns a fresh cstr or 0 on null input / invalid byte / OOM.
+fn sandhi_fp_normalize_a(a, hex) {
     if (hex == 0) { return 0; }
     var slen = strlen(hex);
-    var out = alloc(slen + 1);
+    var out = alloc_via(a, slen + 1);
+    if (out == 0) { return 0; }
     var oi = 0;
     var i = 0;
     while (i < slen) {
@@ -60,6 +60,10 @@ fn sandhi_fp_normalize(hex) {
     return out;
 }
 
+fn sandhi_fp_normalize(hex) {
+    return sandhi_fp_normalize_a(default_alloc(), hex);
+}
+
 # Case- and delimiter-insensitive equality. Returns 1 if the two
 # strings represent the same hex fingerprint, 0 otherwise. Either
 # operand being 0 returns 0 (null-safe; absent pin never matches).
@@ -71,6 +75,27 @@ fn sandhi_fp_normalize(hex) {
 # enough that timing-side-channel doesn't matter in absolute terms,
 # but the pattern matters — defensive compares should always be
 # constant-time, full stop.
+# Constant-time equality with normalization done in `alloc`. The two
+# scratch normalized buffers don't escape, so an arena allocator with
+# reset_via(a) afterwards is the natural fit.
+fn sandhi_fp_eq_a(alloc, a, b) {
+    if (a == 0 || b == 0) { return 0; }
+    var na = sandhi_fp_normalize_a(alloc, a);
+    var nb = sandhi_fp_normalize_a(alloc, b);
+    if (na == 0 || nb == 0) { return 0; }
+    var la = strlen(na);
+    var lb = strlen(nb);
+    if (la != lb) { return 0; }
+    var diff = 0;
+    var i = 0;
+    while (i < la) {
+        diff = diff | (load8(na + i) ^ load8(nb + i));
+        i = i + 1;
+    }
+    if (diff == 0) { return 1; }
+    return 0;
+}
+
 fn sandhi_fp_eq(a, b) {
     if (a == 0 || b == 0) { return 0; }
     var na = sandhi_fp_normalize(a);
@@ -104,10 +129,11 @@ fn sandhi_fp_byte_length(hex) {
     return len / 2;
 }
 
-# Encode raw SHA-256 bytes (or any digest buffer) as lowercase hex.
-# Caller passes the digest + its length; we return a fresh alloc'd cstr.
-fn sandhi_fp_encode_bytes(bytes, nbytes) {
-    var out = alloc(nbytes * 2 + 1);
+# Encode raw SHA-256 bytes (or any digest buffer) as lowercase hex
+# allocated from `a`. Returns 0 on OOM.
+fn sandhi_fp_encode_bytes_a(a, bytes, nbytes) {
+    var out = alloc_via(a, nbytes * 2 + 1);
+    if (out == 0) { return 0; }
     var i = 0;
     while (i < nbytes) {
         var b = load8(bytes + i);
@@ -123,4 +149,8 @@ fn sandhi_fp_encode_bytes(bytes, nbytes) {
     }
     store8(out + nbytes * 2, 0);
     return out;
+}
+
+fn sandhi_fp_encode_bytes(bytes, nbytes) {
+    return sandhi_fp_encode_bytes_a(default_alloc(), bytes, nbytes);
 }

@@ -133,10 +133,15 @@ fn _hpack_static_init_d() {
     return 0;
 }
 
+# Build the 61-entry static table. Always allocates from
+# `default_alloc()` — the parallel name + value vecs are process-wide
+# singletons consulted by every HPACK encode/decode and must outlive
+# any per-request arena.
 fn _hpack_static_init() {
     if (_hpack_static_inited == 1) { return 0; }
-    _hpack_static_names  = vec_new();
-    _hpack_static_values = vec_new();
+    var ga = default_alloc();
+    _hpack_static_names  = vec_new_a(ga);
+    _hpack_static_values = vec_new_a(ga);
     _hpack_static_init_a();
     _hpack_static_init_b();
     _hpack_static_init_c();
@@ -191,15 +196,25 @@ enum SandhiHpackTableOff {
 var SANDHI_HPACK_TABLE_STRUCT_SIZE = 32;
 var SANDHI_HPACK_ENTRY_OVERHEAD    = 32;
 
-fn sandhi_hpack_table_new(max_size) {
-    var t = alloc(SANDHI_HPACK_TABLE_STRUCT_SIZE);
-    store64(t + SANDHI_HPACK_TBL_OFF_NAMES, vec_new());
-    store64(t + SANDHI_HPACK_TBL_OFF_VALUES, vec_new());
+# Build a dynamic table from `a`. The struct + parallel name/value
+# vecs all flow through `a`. Note: subsequent `_table_add` calls also
+# allocate (rebuilt name/value vecs on every insert at the head); use
+# the `_table_add_a` variant to keep that churn in `a` too. Returns
+# 0 on OOM.
+fn sandhi_hpack_table_new_a(a, max_size) {
+    var t = alloc_via(a, SANDHI_HPACK_TABLE_STRUCT_SIZE);
+    if (t == 0) { return 0; }
+    store64(t + SANDHI_HPACK_TBL_OFF_NAMES, vec_new_a(a));
+    store64(t + SANDHI_HPACK_TBL_OFF_VALUES, vec_new_a(a));
     store64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE, 0);
     var ms = max_size;
     if (ms <= 0) { ms = SANDHI_HPACK_DEFAULT_TABLE_SIZE; }
     store64(t + SANDHI_HPACK_TBL_OFF_MAX_SIZE, ms);
     return t;
+}
+
+fn sandhi_hpack_table_new(max_size) {
+    return sandhi_hpack_table_new_a(default_alloc(), max_size);
 }
 
 fn sandhi_hpack_table_count(t) {
@@ -240,32 +255,33 @@ fn _hpack_table_evict_until_fits(t, need) {
     return 0;
 }
 
-# Insert (name, value) at the head (newest). Evicts as needed.
-# If the entry is larger than max_size, the table is emptied and
-# the entry dropped (RFC 7541 §4.4).
-fn sandhi_hpack_table_add(t, name, value) {
+# Insert (name, value) at the head (newest), allocating the rebuilt
+# parallel vecs from `a`. Evicts as needed. If the entry is larger
+# than max_size, the table is emptied and the entry dropped
+# (RFC 7541 §4.4). Returns 0 on success — silently ignores OOM on
+# the rebuilt vecs since dropping the insert is the same observable
+# behavior as the §4.4 over-budget drop.
+fn sandhi_hpack_table_add_a(a, t, name, value) {
     if (t == 0) { return 0; }
     var sz = _hpack_entry_size(name, value);
     var max = load64(t + SANDHI_HPACK_TBL_OFF_MAX_SIZE);
     if (sz > max) {
-        # Drop everything; new entry doesn't fit.
-        _hpack_table_evict_until_fits(t, max + 1);  # forces full eviction
+        _hpack_table_evict_until_fits(t, max + 1);
         return 0;
     }
     _hpack_table_evict_until_fits(t, sz);
     var names = load64(t + SANDHI_HPACK_TBL_OFF_NAMES);
     var values = load64(t + SANDHI_HPACK_TBL_OFF_VALUES);
-    # Insert at index 0 — vec doesn't have insert-at-front, so
-    # rebuild via a temp swap.
-    var new_names = vec_new();
-    var new_values = vec_new();
-    vec_push(new_names, name);
-    vec_push(new_values, value);
+    var new_names = vec_new_a(a);
+    var new_values = vec_new_a(a);
+    if (new_names == 0 || new_values == 0) { return 0; }
+    vec_push_a(a, new_names, name);
+    vec_push_a(a, new_values, value);
     var i = 0;
     var n = vec_len(names);
     while (i < n) {
-        vec_push(new_names, vec_get(names, i));
-        vec_push(new_values, vec_get(values, i));
+        vec_push_a(a, new_names, vec_get(names, i));
+        vec_push_a(a, new_values, vec_get(values, i));
         i = i + 1;
     }
     store64(t + SANDHI_HPACK_TBL_OFF_NAMES, new_names);
@@ -273,6 +289,10 @@ fn sandhi_hpack_table_add(t, name, value) {
     store64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE,
     load64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE) + sz);
     return 0;
+}
+
+fn sandhi_hpack_table_add(t, name, value) {
+    return sandhi_hpack_table_add_a(default_alloc(), t, name, value);
 }
 
 # Update max_size; shrink immediately if needed (peer sent a
@@ -395,15 +415,15 @@ fn _hpack_string_encode(out, off, s) {
     return p + raw_len;
 }
 
-# Decode a string. Returns 0 on success and writes a freshly-alloc'd
-# NUL-terminated cstr to `out_cell`. On Huffman input, returns
-# _SANDHI_HPACK_ERR_HUFFMAN (will be replaced by real decode in
-# Bite 2b).
-fn _hpack_string_decode(buf, blen, off_cell, out_cell) {
+# Decode a string into `a`. Both the transient length cell and the
+# returned cstr (or Huffman-decoded cstr) live in `a`; arena reset
+# after the caller has copied/consumed the string reclaims everything.
+fn _hpack_string_decode_a(a, buf, blen, off_cell, out_cell) {
     var off = load64(off_cell);
     if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     var huffman = (load8(buf + off) & 0x80) >> 7;
-    var len_cell = alloc(8);
+    var len_cell = alloc_via(a, 8);
+    if (len_cell == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     store64(len_cell, 0);
     var ir = _hpack_int_decode(buf, blen, off_cell, 7, len_cell);
     if (ir < 0) { return ir; }
@@ -411,8 +431,7 @@ fn _hpack_string_decode(buf, blen, off_cell, out_cell) {
     var soff = load64(off_cell);
     if (soff + slen > blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     if (huffman == 1) {
-        # Bite 2b: decode via the HPACK Huffman tree.
-        var dec = sandhi_hpack_huffman_decode(buf, soff, slen);
+        var dec = sandhi_hpack_huffman_decode_a(a, buf, soff, slen);
         if (dec == 0) {
             store64(off_cell, soff + slen);
             return _SANDHI_HPACK_ERR_HUFFMAN;
@@ -421,7 +440,8 @@ fn _hpack_string_decode(buf, blen, off_cell, out_cell) {
         store64(out_cell, dec);
         return 0;
     }
-    var s = alloc(slen + 1);
+    var s = alloc_via(a, slen + 1);
+    if (s == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     var i = 0;
     while (i < slen) {
         store8(s + i, load8(buf + soff + i));
@@ -431,6 +451,10 @@ fn _hpack_string_decode(buf, blen, off_cell, out_cell) {
     store64(off_cell, soff + slen);
     store64(out_cell, s);
     return 0;
+}
+
+fn _hpack_string_decode(buf, blen, off_cell, out_cell) {
+    return _hpack_string_decode_a(default_alloc(), buf, blen, off_cell, out_cell);
 }
 
 # ================================================================
@@ -503,14 +527,20 @@ fn sandhi_hpack_encode_table_size_update(out, off, new_max_size) {
 
 var _SANDHI_HPACK_TBL_UPDATE = 1;  # not zero so caller can distinguish
 
-fn sandhi_hpack_decode_field(t, buf, blen, off_cell, name_out, value_out) {
+# Decode one HPACK header field into `a`. Every transient cell + the
+# decoded name + value cstrs live in `a`. The dynamic-table side-effect
+# (incremental-indexing inserts via `_table_add_a`) also routes through
+# `a` so per-request callers can wire up an arena that owns both the
+# decoded headers AND the dynamic-table churn from this hop.
+fn sandhi_hpack_decode_field_a(a, t, buf, blen, off_cell, name_out, value_out) {
     var off = load64(off_cell);
     if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     var first = load8(buf + off);
 
     if ((first & 0x80) != 0) {
         # 1xxxxxxx — Indexed Header Field.
-        var idx_cell = alloc(8);
+        var idx_cell = alloc_via(a, 8);
+        if (idx_cell == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
         var ir = _hpack_int_decode(buf, blen, off_cell, 7, idx_cell);
         if (ir < 0) { return ir; }
         var idx = load64(idx_cell);
@@ -520,36 +550,41 @@ fn sandhi_hpack_decode_field(t, buf, blen, off_cell, name_out, value_out) {
 
     if ((first & 0xC0) == 0x40) {
         # 01xxxxxx — Literal with Incremental Indexing.
-        var idx_cell = alloc(8);
+        var idx_cell = alloc_via(a, 8);
+        if (idx_cell == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
         var ir = _hpack_int_decode(buf, blen, off_cell, 6, idx_cell);
         if (ir < 0) { return ir; }
         var name_idx = load64(idx_cell);
         var name = 0;
-        var name_held = alloc(8);
+        var name_held = alloc_via(a, 8);
+        if (name_held == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
         store64(name_held, 0);
         if (name_idx == 0) {
-            var sr = _hpack_string_decode(buf, blen, off_cell, name_held);
+            var sr = _hpack_string_decode_a(a, buf, blen, off_cell, name_held);
             if (sr < 0) { return sr; }
             name = load64(name_held);
         } else {
-            var v_unused = alloc(8);
+            var v_unused = alloc_via(a, 8);
+            if (v_unused == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
             var lr = sandhi_hpack_lookup(t, name_idx, name_held, v_unused);
             if (lr < 0) { return lr; }
             name = load64(name_held);
         }
-        var val_cell = alloc(8);
-        var sr2 = _hpack_string_decode(buf, blen, off_cell, val_cell);
+        var val_cell = alloc_via(a, 8);
+        if (val_cell == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
+        var sr2 = _hpack_string_decode_a(a, buf, blen, off_cell, val_cell);
         if (sr2 < 0) { return sr2; }
         var value = load64(val_cell);
         store64(name_out, name);
         store64(value_out, value);
-        sandhi_hpack_table_add(t, name, value);
+        sandhi_hpack_table_add_a(a, t, name, value);
         return 0;
     }
 
     if ((first & 0xE0) == 0x20) {
         # 001xxxxx — Dynamic Table Size Update.
-        var sz_cell = alloc(8);
+        var sz_cell = alloc_via(a, 8);
+        if (sz_cell == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
         var ir = _hpack_int_decode(buf, blen, off_cell, 5, sz_cell);
         if (ir < 0) { return ir; }
         sandhi_hpack_table_set_max_size(t, load64(sz_cell));
@@ -559,28 +594,36 @@ fn sandhi_hpack_decode_field(t, buf, blen, off_cell, name_out, value_out) {
     }
 
     # 0000xxxx (no-index) or 0001xxxx (never-index) — 4-bit prefix.
-    var idx_cell = alloc(8);
+    var idx_cell = alloc_via(a, 8);
+    if (idx_cell == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     var ir = _hpack_int_decode(buf, blen, off_cell, 4, idx_cell);
     if (ir < 0) { return ir; }
     var name_idx = load64(idx_cell);
     var name = 0;
-    var name_held = alloc(8);
+    var name_held = alloc_via(a, 8);
+    if (name_held == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     store64(name_held, 0);
     if (name_idx == 0) {
-        var sr = _hpack_string_decode(buf, blen, off_cell, name_held);
+        var sr = _hpack_string_decode_a(a, buf, blen, off_cell, name_held);
         if (sr < 0) { return sr; }
         name = load64(name_held);
     } else {
-        var v_unused = alloc(8);
+        var v_unused = alloc_via(a, 8);
+        if (v_unused == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
         var lr = sandhi_hpack_lookup(t, name_idx, name_held, v_unused);
         if (lr < 0) { return lr; }
         name = load64(name_held);
     }
-    var val_cell = alloc(8);
-    var sr2 = _hpack_string_decode(buf, blen, off_cell, val_cell);
+    var val_cell = alloc_via(a, 8);
+    if (val_cell == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
+    var sr2 = _hpack_string_decode_a(a, buf, blen, off_cell, val_cell);
     if (sr2 < 0) { return sr2; }
     store64(name_out, name);
     store64(value_out, load64(val_cell));
     return 0;
+}
+
+fn sandhi_hpack_decode_field(t, buf, blen, off_cell, name_out, value_out) {
+    return sandhi_hpack_decode_field_a(default_alloc(), t, buf, blen, off_cell, name_out, value_out);
 }
 
