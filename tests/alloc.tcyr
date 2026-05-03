@@ -22,9 +22,12 @@ include "src/http/h2/frame.cyr"
 include "src/tls_policy/policy.cyr"
 include "src/tls_policy/fingerprint.cyr"
 include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
 include "src/discovery/service.cyr"
 include "src/discovery/chain.cyr"
 include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
 include "src/main.cyr"  # sandhi_version() — referenced by http/client.cyr's UA builder
 
 # ================================================================
@@ -242,6 +245,102 @@ fn test_alloc_batch2_hpack_table_arena() {
 }
 
 # ================================================================
+# Batch 3 — discovery + rpc
+# ================================================================
+
+# rpc/json.cyr — build a nested JSON object into an arena, parse a
+# response body via dotted-path extraction also routed through the
+# arena, then reset to reclaim everything.
+fn test_alloc_batch3_json_arena() {
+    var a = arena_allocator(8192);
+    var inner = sandhi_json_obj_new_a(a);
+    sandhi_json_add_string_a(a, inner, "browser", "firefox");
+    sandhi_json_add_int_a(a, inner, "w3c", 1);
+
+    var outer = sandhi_json_obj_new_a(a);
+    sandhi_json_add_object_a(a, outer, "capabilities", inner);
+    sandhi_json_add_bool_a(a, outer, "strict", 1);
+
+    var wire = sandhi_json_build_a(a, outer);
+    assert_eq(wire != 0, 1, "json_build_a into arena");
+    # Extract from the rendered wire — proves both build + extract
+    # round-trip into `a`.
+    var got = sandhi_json_get_string_a(a, wire, "capabilities.browser");
+    assert_streq(got, "firefox", "nested object string extraction");
+    assert_eq(sandhi_json_get_int_a(a, wire, "capabilities.w3c"), 1, "int extraction");
+    assert_eq(sandhi_json_has_path_a(a, wire, "missing"), 0, "absent path → 0");
+
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena consumed bytes");
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "json arena cleared");
+
+    var failer = fail_after_n_allocs(0);
+    assert_eq(sandhi_json_get_string_a(failer, "{\"x\":\"y\"}", "x"), 0, "get_string_a OOM → 0");
+    return 0;
+}
+
+# rpc/dispatch.cyr — wrap a synthetic HTTP response into an rpc-resp
+# struct using `_a`. Uses a faked HTTP response built directly via
+# _sandhi_resp_new since we don't want a live transport call here.
+fn test_alloc_batch3_dispatch_wrap_arena() {
+    var a = arena_allocator(4096);
+
+    # Build a JSON-RPC error envelope body.
+    var body = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":42,\"message\":\"boom\"},\"id\":1}";
+    var blen = strlen(body);
+    var hr = _sandhi_resp_new(200, body, blen, sandhi_headers_new(), SANDHI_OK);
+    var rpc = _sandhi_rpc_wrap_a(a, hr, SANDHI_RPC_DIALECT_JSONRPC);
+    assert_eq(rpc != 0, 1, "rpc resp built in arena");
+    assert_eq(sandhi_rpc_err_kind(rpc), SANDHI_ERR_REMOTE, "json-rpc error envelope detected");
+    assert_streq(sandhi_rpc_err_message(rpc), "boom", "error message extracted");
+    assert_eq(sandhi_rpc_http_status(rpc), 200, "http status preserved");
+
+    var failer = fail_after_n_allocs(0);
+    var rpc_oom = _sandhi_rpc_resp_new_a(failer, 0, 0, 0, 0, 0);
+    assert_eq(rpc_oom, 0, "_sandhi_rpc_resp_new_a OOM → 0");
+    return 0;
+}
+
+# rpc/webdriver.cyr — URL builders into an arena.
+fn test_alloc_batch3_webdriver_url_arena() {
+    var a = arena_allocator(4096);
+    var u1 = _sandhi_wd_join_a(a, "http://drv:4444", "/status");
+    assert_streq(u1, "http://drv:4444/status", "_wd_join_a no-trailing");
+    var u2 = _sandhi_wd_join_a(a, "http://drv:4444/", "/status");
+    assert_streq(u2, "http://drv:4444/status", "_wd_join_a trailing-slash trimmed");
+
+    var u3 = _sandhi_wd_session_url_a(a, "http://drv:4444", "abc123", "/element");
+    assert_streq(u3, "http://drv:4444/session/abc123/element", "_wd_session_url_a built");
+
+    var failer = fail_after_n_allocs(0);
+    assert_eq(_sandhi_wd_join_a(failer, "http://drv", "/x"), 0, "_wd_join_a OOM → 0");
+    return 0;
+}
+
+# discovery/local.cyr — ctx-bound allocator + qname round-trip.
+fn test_alloc_batch3_local_arena() {
+    var a = arena_allocator(2048);
+
+    var qn = _sandhi_local_qname_a(a, "printer");
+    assert_streq(qn, "printer.local", "qname appends .local");
+    var qn2 = _sandhi_local_qname_a(a, "host.local");
+    assert_streq(qn2, "host.local", "qname passthrough on .local suffix");
+
+    # Resolver wrapper carries the allocator handle on its ctx.
+    var r = sandhi_discovery_local_resolver_a(a);
+    assert_eq(r != 0, 1, "local_resolver_a built");
+    assert_eq(sandhi_resolver_fn(r) == &_sandhi_local_lookup, 1, "fn ptr wired");
+    var ctx = sandhi_resolver_ctx(r);
+    assert_eq(ctx != 0, 1, "resolver ctx allocated");
+    assert_eq(load64(ctx) == a, 1, "ctx +0 carries allocator handle");
+
+    var failer = fail_after_n_allocs(0);
+    assert_eq(_sandhi_local_qname_a(failer, "printer"), 0, "qname_a OOM → 0");
+    return 0;
+}
+
+# ================================================================
 # Runner
 # ================================================================
 
@@ -278,6 +377,18 @@ fn main() {
 
     test_group("alloc/batch2/hpack_table_arena");
     test_alloc_batch2_hpack_table_arena();
+
+    test_group("alloc/batch3/json_arena");
+    test_alloc_batch3_json_arena();
+
+    test_group("alloc/batch3/dispatch_wrap_arena");
+    test_alloc_batch3_dispatch_wrap_arena();
+
+    test_group("alloc/batch3/webdriver_url_arena");
+    test_alloc_batch3_webdriver_url_arena();
+
+    test_group("alloc/batch3/local_arena");
+    test_alloc_batch3_local_arena();
 
     return assert_summary();
 }

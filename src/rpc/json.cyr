@@ -31,95 +31,138 @@ enum SandhiJsonKind {
     SANDHI_JSON_RAW    = 1;
 }
 
-fn _sandhi_json_entry_new(key, value, kind) {
-    var e = alloc(24);
+fn _sandhi_json_entry_new_a(a, key, value, kind) {
+    var e = alloc_via(a, 24);
+    if (e == 0) { return 0; }
     store64(e, key);
     store64(e + 8, value);
     store64(e + 16, kind);
     return e;
 }
 
-# Object = vec of entries (reuses stdlib vec).
-fn sandhi_json_obj_new() {
-    return vec_new();
+fn _sandhi_json_entry_new(key, value, kind) {
+    return _sandhi_json_entry_new_a(default_alloc(), key, value, kind);
 }
 
-# Copy a cstr into a fresh alloc (builder owns its own copies).
-fn _sandhi_json_dup(s) {
+# Build a fresh empty object backed by `a`. Returns 0 on OOM.
+fn sandhi_json_obj_new_a(a) {
+    return vec_new_a(a);
+}
+
+fn sandhi_json_obj_new() {
+    return sandhi_json_obj_new_a(default_alloc());
+}
+
+# Copy a cstr into a fresh alloc owned by `a`. Returns 0 on null
+# input or OOM.
+fn _sandhi_json_dup_a(a, s) {
     if (s == 0) { return 0; }
     var n = strlen(s);
-    var out = alloc(n + 1);
+    var out = alloc_via(a, n + 1);
+    if (out == 0) { return 0; }
     memcpy(out, s, n);
     store8(out + n, 0);
     return out;
 }
 
-fn sandhi_json_add_string(o, key, value) {
-    vec_push(o, _sandhi_json_entry_new(
-    _sandhi_json_dup(key),
-    _sandhi_json_dup(value),
+fn _sandhi_json_dup(s) {
+    return _sandhi_json_dup_a(default_alloc(), s);
+}
+
+# Append a string field to `o`, allocating the dup'd key + value into `a`.
+fn sandhi_json_add_string_a(a, o, key, value) {
+    vec_push_a(a, o, _sandhi_json_entry_new_a(a,
+    _sandhi_json_dup_a(a, key),
+    _sandhi_json_dup_a(a, value),
     SANDHI_JSON_STRING));
     return 0;
 }
 
-fn sandhi_json_add_int(o, key, value) {
+fn sandhi_json_add_string(o, key, value) {
+    return sandhi_json_add_string_a(default_alloc(), o, key, value);
+}
+
+fn sandhi_json_add_int_a(a, o, key, value) {
     var tmp[24];
     var n = fmt_int_buf(value, &tmp);
-    var out = alloc(n + 1);
+    var out = alloc_via(a, n + 1);
+    if (out == 0) { return 0; }
     memcpy(out, &tmp, n);
     store8(out + n, 0);
-    vec_push(o, _sandhi_json_entry_new(
-    _sandhi_json_dup(key),
+    vec_push_a(a, o, _sandhi_json_entry_new_a(a,
+    _sandhi_json_dup_a(a, key),
     out,
     SANDHI_JSON_RAW));
     return 0;
 }
 
-fn sandhi_json_add_bool(o, key, value) {
+fn sandhi_json_add_int(o, key, value) {
+    return sandhi_json_add_int_a(default_alloc(), o, key, value);
+}
+
+fn sandhi_json_add_bool_a(a, o, key, value) {
     var raw = "false";
     if (value == 1) { raw = "true"; }
-    vec_push(o, _sandhi_json_entry_new(
-    _sandhi_json_dup(key),
-    _sandhi_json_dup(raw),
+    vec_push_a(a, o, _sandhi_json_entry_new_a(a,
+    _sandhi_json_dup_a(a, key),
+    _sandhi_json_dup_a(a, raw),
+    SANDHI_JSON_RAW));
+    return 0;
+}
+
+fn sandhi_json_add_bool(o, key, value) {
+    return sandhi_json_add_bool_a(default_alloc(), o, key, value);
+}
+
+fn sandhi_json_add_null_a(a, o, key) {
+    vec_push_a(a, o, _sandhi_json_entry_new_a(a,
+    _sandhi_json_dup_a(a, key),
+    _sandhi_json_dup_a(a, "null"),
     SANDHI_JSON_RAW));
     return 0;
 }
 
 fn sandhi_json_add_null(o, key) {
-    vec_push(o, _sandhi_json_entry_new(
-    _sandhi_json_dup(key),
-    _sandhi_json_dup("null"),
-    SANDHI_JSON_RAW));
-    return 0;
+    return sandhi_json_add_null_a(default_alloc(), o, key);
 }
 
-# Embed a child object as a nested value. The child is serialized in
-# place — caller keeps the child handle valid until build returns.
-fn sandhi_json_add_object(o, key, child) {
-    var rendered = sandhi_json_build(child);
-    vec_push(o, _sandhi_json_entry_new(
-    _sandhi_json_dup(key),
+# Embed a child object as a nested value, allocating into `a`. The
+# child is serialized into `a` here — caller's handle on the child
+# stays valid for the lifetime of `a`.
+fn sandhi_json_add_object_a(a, o, key, child) {
+    var rendered = sandhi_json_build_a(a, child);
+    vec_push_a(a, o, _sandhi_json_entry_new_a(a,
+    _sandhi_json_dup_a(a, key),
     rendered,
     SANDHI_JSON_RAW));
     return 0;
 }
 
-# Embed a pre-built raw JSON fragment (for arrays or externally-built
-# structures). No escaping — caller vouches for the syntax.
-fn sandhi_json_add_raw(o, key, raw_cstr) {
-    vec_push(o, _sandhi_json_entry_new(
-    _sandhi_json_dup(key),
-    _sandhi_json_dup(raw_cstr),
+fn sandhi_json_add_object(o, key, child) {
+    return sandhi_json_add_object_a(default_alloc(), o, key, child);
+}
+
+# Embed a pre-built raw JSON fragment, dup'd into `a`.
+fn sandhi_json_add_raw_a(a, o, key, raw_cstr) {
+    vec_push_a(a, o, _sandhi_json_entry_new_a(a,
+    _sandhi_json_dup_a(a, key),
+    _sandhi_json_dup_a(a, raw_cstr),
     SANDHI_JSON_RAW));
     return 0;
 }
 
-# Escape a string for JSON: wraps in quotes, escapes \" \\ and control
-# bytes per RFC 8259. Writes into a fresh alloc. The quotes are part
-# of the output.
-fn sandhi_json_escape(s) {
+fn sandhi_json_add_raw(o, key, raw_cstr) {
+    return sandhi_json_add_raw_a(default_alloc(), o, key, raw_cstr);
+}
+
+# Escape a string for JSON, allocating the result into `a`. The
+# str_builder scratch still flows through the global bump (str_builder
+# lacks `_a` variants in the pinned stdlib); only the final cstr lands
+# in `a`. Returns 0 on OOM.
+fn sandhi_json_escape_a(a, s) {
     if (s == 0) {
-        var nul = alloc(5);
+        var nul = alloc_via(a, 5);
+        if (nul == 0) { return 0; }
         memcpy(nul, "\"\"", 2);
         store8(nul + 2, 0);
         return nul;
@@ -155,10 +198,15 @@ fn sandhi_json_escape(s) {
     return str_data(str_builder_build(sb));
 }
 
-# Render the object as a cstr: {"k":"v","k2":raw}. No whitespace for
-# minimum on-wire cost. Caller owns the returned alloc.
-fn sandhi_json_build(o) {
-    if (o == 0) { return _sandhi_json_dup("{}"); }
+fn sandhi_json_escape(s) {
+    return sandhi_json_escape_a(default_alloc(), s);
+}
+
+# Render the object as a cstr allocated from `a`. Per-entry escape
+# scratch also flows through `a`; the str_builder used for assembly
+# remains on the global bump (see comment on sandhi_json_escape_a).
+fn sandhi_json_build_a(a, o) {
+    if (o == 0) { return _sandhi_json_dup_a(a, "{}"); }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{");
         var n = vec_len(o);
@@ -169,11 +217,11 @@ fn sandhi_json_build(o) {
             var ekey = load64(e);
             var eval = load64(e + 8);
             var ekind = load64(e + 16);
-            var escaped_key = sandhi_json_escape(ekey);
+            var escaped_key = sandhi_json_escape_a(a, ekey);
             str_builder_add_cstr(sb, escaped_key);
             str_builder_add_cstr(sb, ":");
             if (ekind == SANDHI_JSON_STRING) {
-                var escaped_val = sandhi_json_escape(eval);
+                var escaped_val = sandhi_json_escape_a(a, eval);
                 str_builder_add_cstr(sb, escaped_val);
             } else {
                 str_builder_add_cstr(sb, eval);
@@ -181,7 +229,15 @@ fn sandhi_json_build(o) {
             i = i + 1;
         }
         str_builder_add_cstr(sb, "}");
-    return str_data(str_builder_build(sb));
+    var built = str_data(str_builder_build(sb));
+    # str_builder_build's output lives on the global bump; dup into
+    # `a` so the returned cstr matches the caller's lifetime contract
+    # (arena reset must reclaim it). Cheap — JSON bodies are small.
+    return _sandhi_json_dup_a(a, built);
+}
+
+fn sandhi_json_build(o) {
+    return sandhi_json_build_a(default_alloc(), o);
 }
 
 # ================================================================
@@ -247,22 +303,21 @@ fn _sandhi_json_skip_object(body, blen, start) {
     return p;
 }
 
-# Extract the raw value at a dotted path. Returns (offset, length)
-# encoded as (off << 32) | len — or (0 - 1) if not found. Private;
-# higher-level verbs decode into cstr.
-fn _sandhi_json_path_range(body, blen, path) {
+# Walk a dotted path, allocating per-segment scratch in `a`. The
+# segments are transient — arena reset after this returns reclaims
+# them. Returns (off << 32) | len encoding a value range, or 0 - 1.
+fn _sandhi_json_path_range_a(a, body, blen, path) {
     var scope_start = 0;
     var scope_end = blen;
     var pi = 0;
     var plen = strlen(path);
-    # Walk segments separated by '.'.
     while (pi < plen) {
-        # Extract next segment [pi, seg_end).
         var seg_end = pi;
         while (seg_end < plen && load8(path + seg_end) != 46) { seg_end = seg_end + 1; }
         var seg_len = seg_end - pi;
         if (seg_len == 0) { return 0 - 1; }
-        var seg = alloc(seg_len + 1);
+        var seg = alloc_via(a, seg_len + 1);
+        if (seg == 0) { return 0 - 1; }
         memcpy(seg, path + pi, seg_len);
         store8(seg + seg_len, 0);
 
@@ -270,10 +325,8 @@ fn _sandhi_json_path_range(body, blen, path) {
         if (vpos < 0) { return 0 - 1; }
 
         if (seg_end >= plen) {
-            # Terminal segment — find the value range.
             return _sandhi_json_value_range(body, blen, vpos);
         }
-        # Non-terminal — must be an object we descend into.
         if (load8(body + vpos) != 123) { return 0 - 1; }
         scope_start = vpos + 1;
         scope_end = _sandhi_json_skip_object(body, blen, vpos);
@@ -281,6 +334,10 @@ fn _sandhi_json_path_range(body, blen, path) {
         pi = seg_end + 1;
     }
     return 0 - 1;
+}
+
+fn _sandhi_json_path_range(body, blen, path) {
+    return _sandhi_json_path_range_a(default_alloc(), body, blen, path);
 }
 
 # Given an offset at the start of a JSON value (quote, brace, digit,
@@ -328,35 +385,49 @@ var lenT = pe - ps;
 return (ps << 32) | lenT;
 }
 
-# Extract a string value at a dotted path. Returns an alloc'd cstr
-# without the surrounding quotes, or 0 if not found.
-fn sandhi_json_get_string(body, path) {
+# Extract a string at the dotted path, allocating the returned cstr
+# from `a`. Returns 0 if not found or on OOM.
+fn sandhi_json_get_string_a(a, body, path) {
     if (body == 0 || path == 0) { return 0; }
     var blen = strlen(body);
-    var r = _sandhi_json_path_range(body, blen, path);
+    var r = _sandhi_json_path_range_a(a, body, blen, path);
     if (r == 0 - 1) { return 0; }
     var off = r >> 32;
     var len = r & 0xFFFFFFFF;
-    var out = alloc(len + 1);
+    var out = alloc_via(a, len + 1);
+    if (out == 0) { return 0; }
     memcpy(out, body + off, len);
     store8(out + len, 0);
     return out;
 }
 
-# Extract an integer value at a dotted path. Returns 0 if absent or
-# non-numeric; caller should pre-check with sandhi_json_has_path if
-# zero vs absent needs to be distinguished.
-fn sandhi_json_get_int(body, path) {
-    var v = sandhi_json_get_string(body, path);
+fn sandhi_json_get_string(body, path) {
+    return sandhi_json_get_string_a(default_alloc(), body, path);
+}
+
+# Extract an integer at the dotted path. Returns 0 if absent or
+# non-numeric; caller should pre-check with sandhi_json_has_path
+# if zero vs absent needs to be distinguished. The transient string
+# the int is parsed from lives in `a`.
+fn sandhi_json_get_int_a(a, body, path) {
+    var v = sandhi_json_get_string_a(a, body, path);
     if (v == 0) { return 0; }
     return atoi(v);
 }
 
-# 1 if the path exists (any value), 0 otherwise.
-fn sandhi_json_has_path(body, path) {
+fn sandhi_json_get_int(body, path) {
+    return sandhi_json_get_int_a(default_alloc(), body, path);
+}
+
+# 1 if the path exists, 0 otherwise. Path scratch lives in `a`.
+fn sandhi_json_has_path_a(a, body, path) {
     if (body == 0 || path == 0) { return 0; }
     var blen = strlen(body);
-    if (_sandhi_json_path_range(body, blen, path) == 0 - 1) { return 0; }
+    if (_sandhi_json_path_range_a(a, body, blen, path) == 0 - 1) { return 0; }
     return 1;
+}
+
+fn sandhi_json_has_path(body, path) {
+    return sandhi_json_has_path_a(default_alloc(), body, path);
 }
 

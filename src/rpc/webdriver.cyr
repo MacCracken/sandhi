@@ -17,14 +17,16 @@
 
 # Join base URL and a path. Handles trailing-slash presence or absence
 # on base. Path must start with '/'.
-fn _sandhi_wd_join(base, path) {
+# Join base + path into `a`. Returns 0 on OOM.
+fn _sandhi_wd_join_a(a, base, path) {
     var blen = strlen(base);
     var plen = strlen(path);
     var has_trailing = 0;
     if (blen > 0 && load8(base + blen - 1) == 47) { has_trailing = 1; }
     var total = blen + plen;
     if (has_trailing == 1) { total = blen + plen - 1; }
-    var out = alloc(total + 1);
+    var out = alloc_via(a, total + 1);
+    if (out == 0) { return 0; }
     memcpy(out, base, blen);
     var at = blen;
     if (has_trailing == 1) { at = blen - 1; }
@@ -33,16 +35,21 @@ fn _sandhi_wd_join(base, path) {
     return out;
 }
 
-# base + "/session/{id}" + suffix  → full URL. suffix may be "" for
-# session-root endpoints.
-fn _sandhi_wd_session_url(base, session_id, suffix) {
+fn _sandhi_wd_join(base, path) {
+    return _sandhi_wd_join_a(default_alloc(), base, path);
+}
+
+# Build base + "/session/{id}" + suffix into `a`. The trim-copy of the
+# base lives in `a`; the str_builder scratch still uses the global bump,
+# but the final cstr is dup'd into `a` so arena reset reclaims it.
+fn _sandhi_wd_session_url_a(a, base, session_id, suffix) {
     var sb = str_builder_new();
     var blen = strlen(base);
     var has_trailing = 0;
     if (blen > 0 && load8(base + blen - 1) == 47) { has_trailing = 1; }
     if (has_trailing == 1) {
-        # Trim the slash.
-        var trimmed = alloc(blen);
+        var trimmed = alloc_via(a, blen);
+        if (trimmed == 0) { return 0; }
         memcpy(trimmed, base, blen - 1);
         store8(trimmed + blen - 1, 0);
         str_builder_add_cstr(sb, trimmed);
@@ -54,7 +61,11 @@ fn _sandhi_wd_session_url(base, session_id, suffix) {
     if (suffix != 0 && strlen(suffix) > 0) {
         str_builder_add_cstr(sb, suffix);
     }
-    return str_data(str_builder_build(sb));
+    return _sandhi_json_dup_a(a, str_data(str_builder_build(sb)));
+}
+
+fn _sandhi_wd_session_url(base, session_id, suffix) {
+    return _sandhi_wd_session_url_a(default_alloc(), base, session_id, suffix);
 }
 
 # ================================================================

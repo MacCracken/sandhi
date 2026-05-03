@@ -28,9 +28,10 @@ var _SANDHI_MDNS_GROUP = 0;
 var _SANDHI_MDNS_PORT  = 5353;
 var _SANDHI_MDNS_TIMEOUT_MS = 500;
 
-# Build a `<name>.local` cstr — caller-owned alloc. If `name` already
-# ends in `.local` (case-insensitive), passes it through.
-fn _sandhi_local_qname(name) {
+# Build a `<name>.local` cstr in `a`. If `name` already ends in
+# `.local` (case-insensitive), the input is dup'd into `a`; otherwise
+# the suffix is appended. Returns 0 on OOM.
+fn _sandhi_local_qname_a(a, name) {
     var nlen = strlen(name);
     var has_suffix = 0;
     if (nlen >= 6) {
@@ -41,7 +42,6 @@ fn _sandhi_local_qname(name) {
         var c3 = load8(s + 3);
         var c4 = load8(s + 4);
         var c5 = load8(s + 5);
-        # Lowercase compare on the suffix.
         if (c0 == 46) {  # '.'
             if ((c1 == 108 || c1 == 76) && (c2 == 111 || c2 == 79)
             && (c3 == 99 || c3 == 67) && (c4 == 97 || c4 == 65)
@@ -51,12 +51,14 @@ fn _sandhi_local_qname(name) {
         }
     }
     if (has_suffix == 1) {
-        var dup = alloc(nlen + 1);
+        var dup = alloc_via(a, nlen + 1);
+        if (dup == 0) { return 0; }
         memcpy(dup, name, nlen);
         store8(dup + nlen, 0);
         return dup;
     }
-    var out = alloc(nlen + 7);
+    var out = alloc_via(a, nlen + 7);
+    if (out == 0) { return 0; }
     memcpy(out, name, nlen);
     store8(out + nlen + 0, 46);   # '.'
     store8(out + nlen + 1, 108);  # 'l'
@@ -66,6 +68,10 @@ fn _sandhi_local_qname(name) {
     store8(out + nlen + 5, 108);  # 'l'
     store8(out + nlen + 6, 0);
     return out;
+}
+
+fn _sandhi_local_qname(name) {
+    return _sandhi_local_qname_a(default_alloc(), name);
 }
 
 # Build the mDNS query packet. Same wire format as the unicast DNS
@@ -89,20 +95,33 @@ fn _sandhi_local_build_query(id, qname, out) {
     return qi + 4;
 }
 
-# Issue an mDNS query and return the resolved IPv4 address (in
-# sock_connect format: bytes packed network-byte-order into a
-# host-endian int), or 0 on any failure / timeout / miss. Reuses
-# the unicast resolver's response parser since the wire format is
-# identical past the question section.
-fn _sandhi_local_query(name) {
+# Local resolver context (8 bytes):
+#   +0  alloc  (Allocator handle the lookup callback uses; 0 → default)
+# Carried so the resolver-fn-pointer `(ctx, name)` shape can pull an
+# Allocator without growing the callback signature — same approach as
+# daimon's ctx struct.
+var _SANDHI_LOCAL_CTX_SIZE = 8;
+
+fn _sandhi_discovery_local_ctx_new_a(a) {
+    var c = alloc_via(a, _SANDHI_LOCAL_CTX_SIZE);
+    if (c == 0) { return 0; }
+    store64(c, a);
+    return c;
+}
+
+# Issue an mDNS query, allocating the qname / qbuf / rbuf scratch into
+# `a`. Returns the resolved IPv4 address or 0 on any failure / OOM.
+fn _sandhi_local_query_a(a, name) {
     if (name == 0) { return 0; }
     if (_SANDHI_MDNS_GROUP == 0) {
         _SANDHI_MDNS_GROUP = 224 | (0 << 8) | (0 << 16) | (251 << 24);
     }
 
-    var qname = _sandhi_local_qname(name);
+    var qname = _sandhi_local_qname_a(a, name);
+    if (qname == 0) { return 0; }
     var txid = _sandhi_resolve_random_u16();
-    var qbuf = alloc(_SANDHI_RESOLVE_BUF_SIZE);
+    var qbuf = alloc_via(a, _SANDHI_RESOLVE_BUF_SIZE);
+    if (qbuf == 0) { return 0; }
     var qlen = _sandhi_local_build_query(txid, qname, qbuf);
     if (qlen < 0) { return 0; }
 
@@ -119,36 +138,50 @@ fn _sandhi_local_query(name) {
     var sr = sock_send(fd, qbuf, qlen);
     if (is_err_result(sr) == 1) { sock_close(fd); return 0; }
 
-    var rbuf = alloc(_SANDHI_RESOLVE_BUF_SIZE);
+    var rbuf = alloc_via(a, _SANDHI_RESOLVE_BUF_SIZE);
+    if (rbuf == 0) { sock_close(fd); return 0; }
     var rr = sock_recv(fd, rbuf, _SANDHI_RESOLVE_BUF_SIZE);
     sock_close(fd);
     if (is_err_result(rr) == 1) { return 0; }
     var rlen = payload(rr);
     if (rlen <= 0) { return 0; }
 
-    # _sandhi_resolve_parse_response returns 0 - 1 on any failure (we
-    # treat that as a miss too — same semantics chain expects).
     var ip = _sandhi_resolve_parse_response(rbuf, rlen, txid);
     if (ip == 0 - 1) { return 0; }
     return ip;
 }
 
-# Resolver callback. Returns a sandhi_service on hit, 0 on miss.
-fn _sandhi_local_lookup(ctx, name) {
-    if (name == 0) { return 0; }
-    var ip = _sandhi_local_query(name);
-    if (ip == 0) { return 0; }
-    # Build a service struct. host = canonical mDNS name (`<name>.local`)
-    # so callers can emit it in URLs / logs; ipv4 carries the resolved
-    # address so connect() can skip another lookup.
-    var qname = _sandhi_local_qname(name);
-    return sandhi_service_new(name, qname, 0, ip);
+fn _sandhi_local_query(name) {
+    return _sandhi_local_query_a(default_alloc(), name);
 }
 
-# Build the mDNS resolver. Plug into a chain alongside daimon-backed
-# or unicast-DNS resolvers; first-hit wins.
+# Resolver callback. Reads the Allocator from ctx (0 → default) and
+# threads it through the query + service-build path.
+fn _sandhi_local_lookup(ctx, name) {
+    if (name == 0) { return 0; }
+    var a = default_alloc();
+    if (ctx != 0) {
+        var stored = load64(ctx);
+        if (stored != 0) { a = stored; }
+    }
+    var ip = _sandhi_local_query_a(a, name);
+    if (ip == 0) { return 0; }
+    var qname = _sandhi_local_qname_a(a, name);
+    if (qname == 0) { return 0; }
+    return sandhi_service_new_a(a, name, qname, 0, ip);
+}
+
+# Build the mDNS resolver backed by `a`. Both the resolver wrapper and
+# its ctx are allocated from `a`; the lookup callback also routes its
+# transient + service-struct allocations through `a`. Returns 0 on OOM.
+fn sandhi_discovery_local_resolver_a(a) {
+    var ctx = _sandhi_discovery_local_ctx_new_a(a);
+    if (ctx == 0) { return 0; }
+    return sandhi_resolver_new_a(a, &_sandhi_local_lookup, ctx);
+}
+
 fn sandhi_discovery_local_resolver() {
-    return sandhi_resolver_new(&_sandhi_local_lookup, 0);
+    return sandhi_discovery_local_resolver_a(default_alloc());
 }
 
 # 1 — wired since 0.9.3. Always available on Linux (multicast UDP is
