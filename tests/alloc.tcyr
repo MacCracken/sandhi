@@ -33,6 +33,8 @@ include "src/tls_policy/fingerprint.cyr"
 include "src/rpc/json.cyr"
 include "src/rpc/dispatch.cyr"
 include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
 include "src/discovery/service.cyr"
 include "src/discovery/chain.cyr"
 include "src/discovery/daimon.cyr"
@@ -958,6 +960,74 @@ fn test_alloc_123e_auto_body_bearing_arena() {
 }
 
 # ================================================================
+# 1.2.4 — Batch F: RPC dialect `_a` (closes the optimization arc)
+# ================================================================
+# Paint-on-top wrappers atop `sandhi_rpc_call_a` (paired since
+# 1.1.0). Each `_a` threads `a` through URL build, JSON envelope
+# build, and the underlying RPC dispatch. Since the dialect verbs
+# don't have a clean "garbage URL → arena err-resp" path the way
+# the http verbs do (they call `sandhi_rpc_call` which goes
+# through `_sandhi_http_dispatch` with a non-arena-aware error
+# path under garbage URLs), the tests here focus on the JSON
+# envelope build threading: `_sandhi_mcp_build_request_a` is the
+# canonical case — it calls every json_*_a helper.
+
+# mcp build_request — the dialect's body-builder threads `a`
+# through every json_*_a primitive. Verifies the helper
+# produces a non-empty JSON-RPC envelope and the arena consumes
+# the bytes (and reset reclaims).
+fn test_alloc_124f_mcp_build_request_arena() {
+    var a = arena_allocator(2048);
+    var body = _sandhi_mcp_build_request_a(a, "tools/list", 0);
+    assert_eq(body != 0, 1, "mcp build_request_a non-zero");
+    # Sanity check: result is a JSON-RPC envelope starting with `{`.
+    assert_eq(load8(body) == 123, 1, "envelope starts with '{'");
+
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena consumed");
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "reset reclaims");
+    return 0;
+}
+
+# mcp build_request with params — same path with the
+# json_add_raw_a branch exercised.
+fn test_alloc_124f_mcp_build_request_with_params_arena() {
+    var a = arena_allocator(2048);
+    var body = _sandhi_mcp_build_request_a(a, "tools/call",
+    "{\"name\":\"echo\"}");
+    assert_eq(body != 0, 1, "mcp build_request_a with params non-zero");
+    return 0;
+}
+
+# wd helpers — `_sandhi_wd_build_path_a` and
+# `_sandhi_wd_build_element_suffix_a` are the path-construction
+# leaves used by extract_element_id_a and the element_*_a verbs.
+fn test_alloc_124f_wd_build_helpers_arena() {
+    var a = arena_allocator(1024);
+    var path = _sandhi_wd_build_path_a(a, "value.", "elem-1");
+    assert_streq(path, "value.elem-1", "build_path_a concat");
+    var suffix = _sandhi_wd_build_element_suffix_a(a, "abc", "/click");
+    assert_streq(suffix, "/element/abc/click", "build_element_suffix_a concat");
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena consumed");
+    return 0;
+}
+
+# wd join helper round-trip — the URL builder used by every
+# webdriver `_a` verb.
+fn test_alloc_124f_wd_join_arena() {
+    var a = arena_allocator(1024);
+    var url = _sandhi_wd_join_a(a, "http://wd.local:4444", "/session");
+    assert_streq(url, "http://wd.local:4444/session", "join_a concat");
+    var sess_url = _sandhi_wd_session_url_a(a, "http://wd.local:4444",
+    "abc-123", "/url");
+    assert_streq(sess_url, "http://wd.local:4444/session/abc-123/url",
+    "session_url_a concat");
+    return 0;
+}
+
+# ================================================================
 # Runner
 # ================================================================
 
@@ -1099,6 +1169,18 @@ fn main() {
 
     test_group("alloc/123e/auto_body_bearing_arena");
     test_alloc_123e_auto_body_bearing_arena();
+
+    test_group("alloc/124f/mcp_build_request_arena");
+    test_alloc_124f_mcp_build_request_arena();
+
+    test_group("alloc/124f/mcp_build_request_with_params_arena");
+    test_alloc_124f_mcp_build_request_with_params_arena();
+
+    test_group("alloc/124f/wd_build_helpers_arena");
+    test_alloc_124f_wd_build_helpers_arena();
+
+    test_group("alloc/124f/wd_join_arena");
+    test_alloc_124f_wd_join_arena();
 
     return assert_summary();
 }

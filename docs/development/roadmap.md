@@ -55,6 +55,7 @@ details, state.md the current snapshot.
 - **1.2.1** — Batches B + C bundled: redirect-following + auto-dispatch + retry threading. Closes 1.2.0's partial-arena leaks. New `_a` variants: `_sandhi_http_follow_a`, `_sandhi_strip_sensitive_headers_a`, `_sandhi_http_try_h2_promote_a`, `_sandhi_http_auto_once_a`, `_sandhi_http_auto_follow_a`, `sandhi_http_request_auto_a`, `_sandhi_http_retry_a`. Bundled per cyrius v5.10.0 "items sharing the same cascade" rule (retry calls auto). 824 assertions green (482 + 167 + 175).
 - **1.2.2** — Batch D: top-level public verbs `_a`. First release with consumer-visible end-to-end arena adoption. +6 `_a` verbs (`sandhi_http_get_a` / `_post_a` / `_put_a` / `_patch_a` / `_delete_a` / `_head_a`) — thin wrappers calling `_sandhi_http_dispatch_a`. Public-surface change documented (mirrors `sandhi_http_stream_a` shape). 837 assertions green (482 + 167 + 188).
 - **1.2.3** — Batch E: opts / retry / auto user-facing `_a`. +12 verbs (2 `_opts` + 4 `_retry` + 6 `_auto`). Paint-on-top wrappers since dispatch / retry / auto paths are already `_a`-threaded. Total post-1.1.0 public `_a` surface for HTTP request path: 18 verbs. 851 assertions green (482 + 167 + 202).
+- **1.2.4** — Batch F: RPC dialect `_a` (closes the optimization arc). +30 verbs across mcp (5) / webdriver (14) / appium (11) + 3 internal helpers. Plus internal `_sandhi_mcp_build_request_a`, `_sandhi_wd_build_path_a`, `_sandhi_wd_build_element_suffix_a`. Cumulative arc total: +49 public `_a` verbs (1.2.0–1.2.4); every alloc-touching public path has an `_a` counterpart. 861 assertions green (482 + 167 + 212). **Hot-path allocator review arc CLOSED.**
 
 ## What's next
 
@@ -128,18 +129,13 @@ demonstrated):
   Confirmed at slot entry: only `get_opts` and
   `post_opts` exist as `_opts` verbs (not all six
   methods). `request_auto_a` already shipped at 1.2.1.
-- **1.2.4 — Batch F**: RPC dialect entries — closes
-  the hot-path allocator review arc.
-  - `sandhi_rpc_mcp_call_a` / `_call_with_headers_a` /
-    `_stream_a` (3 MCP-over-HTTP verbs).
-  - Plus the dialect-specific verbs in
-    `src/rpc/webdriver.cyr` (sessions / navigation /
-    elements / exec) and `src/rpc/appium.cyr`
-    (contexts / app lifecycle / mobile exec) that
-    allocate request envelopes.
-  - Plus `sandhi_rpc_call_a` / `_with_headers_a` if the
-    underlying dispatch needs threading.
-  Survey at slot entry to confirm exact scope.
+- ~~**1.2.4 — Batch F**~~ ✅ shipped 2026-05-08. +30
+  public `_a` verbs across MCP (5) / WebDriver (14) /
+  Appium (11). `sandhi_rpc_call_a` / `_with_headers_a`
+  were already paired (1.1.0). `sandhi_rpc_mcp_error_code`
+  intentionally not paired — no allocation. **Hot-path
+  allocator review arc CLOSED**; cumulative +49 public
+  `_a` verbs landed across 1.2.0–1.2.4.
 
 #### 1.2.x — optimization candidates (profile-justified)
 

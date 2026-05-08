@@ -4,6 +4,108 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.4] — 2026-05-08
+
+**Batch F — RPC dialect `_a` (closes the optimization arc).**
+Final batch of the hot-path allocator review opened at 1.2.0.
+Paint-on-top wrappers atop `sandhi_rpc_call_a` (paired since
+1.1.0). The MCP / WebDriver / Appium dialects now thread the
+allocator end-to-end through URL construction, JSON envelope
+build, and the RPC dispatch.
+
+### Added (30 new public `_a` verbs)
+
+- **rpc/mcp** (5): `sandhi_rpc_mcp_call_a`,
+  `sandhi_rpc_mcp_call_with_headers_a`,
+  `sandhi_rpc_mcp_result_raw_a`,
+  `sandhi_rpc_mcp_error_message_a`,
+  `sandhi_rpc_mcp_stream_a`. Plus internal helper
+  `_sandhi_mcp_build_request_a` threading every
+  `sandhi_json_*_a` call. Note: `sandhi_rpc_mcp_error_code`
+  is intentionally not paired — it returns an int via
+  `sandhi_json_get_int` (no allocation).
+- **rpc/webdriver** (14): `sandhi_wd_new_session_a`,
+  `sandhi_wd_extract_session_id_a`,
+  `sandhi_wd_delete_session_a`, `sandhi_wd_navigate_to_a`,
+  `sandhi_wd_get_url_a`, `sandhi_wd_get_title_a`,
+  `sandhi_wd_find_element_a`,
+  `sandhi_wd_extract_element_id_a`,
+  `sandhi_wd_element_click_a`, `sandhi_wd_element_text_a`,
+  `sandhi_wd_element_attribute_a`,
+  `sandhi_wd_element_send_keys_a`, `sandhi_wd_status_a`,
+  `sandhi_wd_execute_script_a`. Plus internal helpers
+  `_sandhi_wd_build_path_a` and
+  `_sandhi_wd_build_element_suffix_a`.
+- **rpc/appium** (11): `sandhi_ap_new_session_a`,
+  `sandhi_ap_get_contexts_a`, `sandhi_ap_set_context_a`,
+  `sandhi_ap_current_context_a`, `sandhi_ap_install_app_a`,
+  `sandhi_ap_remove_app_a`, `sandhi_ap_activate_app_a`,
+  `sandhi_ap_terminate_app_a`, `sandhi_ap_mobile_exec_a`,
+  `sandhi_ap_source_a`, `sandhi_ap_screenshot_a`.
+
+All bare versions stay as back-compat wrappers passing
+`default_alloc()`. Public-surface change: **+30 `_a` verbs**.
+
+### Optimization arc summary (1.2.0 → 1.2.4)
+
+The hot-path allocator review opened at 1.2.0 closes here.
+Cumulative public-surface changes across the arc:
+
+- **1.2.0 Batch A** — internal foundation; +0 public verbs
+  (internal `_a`s only). Audit findings + buggy
+  `_sandhi_client_build_request_a` fixed.
+- **1.2.1 Batches B+C** — internal cascade closure
+  (redirect / auto / retry / sensitive-headers); +1 public
+  verb (`sandhi_http_request_auto_a`).
+- **1.2.2 Batch D** — top-level public verbs;
+  +6 (`sandhi_http_get_a` / `_post_a` / `_put_a` /
+  `_patch_a` / `_delete_a` / `_head_a`).
+- **1.2.3 Batch E** — opts / retry / auto user-facing;
+  +12 (2 `_opts` + 4 `_retry` + 6 `_auto`).
+- **1.2.4 Batch F** — RPC dialects; +30 (5 mcp + 14
+  webdriver + 11 appium).
+
+**Total post-1.1.0 public `_a` surface: +49 verbs** —
+every public alloc-touching path now has an `_a`
+counterpart letting consumers pass an arena allocator
+end-to-end. The 1.1.0 migration intent is fully
+realized.
+
+### Verified
+
+- `tests/alloc.tcyr` gains 4 new test groups (10
+  assertions) under `alloc/124f/`:
+  `mcp_build_request_arena`,
+  `mcp_build_request_with_params_arena`,
+  `wd_build_helpers_arena`, `wd_join_arena`. The dialect
+  verbs themselves don't have a clean "garbage URL → arena
+  err-resp" path (their `sandhi_rpc_call` invocation goes
+  through `_sandhi_http_dispatch` whose error path predates
+  the arena-aware shape), so coverage focuses on the JSON
+  envelope build and URL helpers.
+- `tests/alloc.tcyr` includes extended: pulled in
+  `src/rpc/appium.cyr` and `src/rpc/mcp.cyr` so the test
+  program reaches the new `_a` variants.
+- 212/212 alloc tests pass (202 pre-existing + 10 new).
+- 482/482 `tests/sandhi.tcyr`, 167/167 `tests/h2.tcyr` —
+  no regression. **Total: 861 assertions green** (+10
+  over 1.2.3's 851).
+- `cyrius lint` — 0 warnings on `src/rpc/mcp.cyr`,
+  `src/rpc/webdriver.cyr`, `src/rpc/appium.cyr`.
+  `cyrfmt --check` clean on touched files.
+
+### Pinned next
+
+The **hot-path allocator review arc is now closed**.
+Further allocator work moves into the "Optimization-grade,
+profile first" bucket of the roadmap — wait for profile
+evidence on a real workload before evangelizing
+arena-per-request adoption to AGNOS consumers.
+
+The next active arc is **1.3.x — TLS arc** (live-network
+TLS-policy gate, session-resumption cache, TLS 1.3 0-RTT)
+per the post-fold roadmap.
+
 ## [1.2.3] — 2026-05-08
 
 **Batch E — opts / retry / auto user-facing `_a`.**

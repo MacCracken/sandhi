@@ -4,6 +4,8 @@
 
 ## Version
 
+**1.2.4** — 2026-05-08. **Batch F — RPC dialect `_a` (closes the optimization arc).** Final batch of the hot-path allocator review opened at 1.2.0. Paint-on-top wrappers atop `sandhi_rpc_call_a` (paired since 1.1.0). +30 new public `_a` verbs across MCP / WebDriver / Appium dialects: 5 MCP (`sandhi_rpc_mcp_call_a` / `_call_with_headers_a` / `_result_raw_a` / `_error_message_a` / `_stream_a`); 14 WebDriver (`sandhi_wd_new_session_a` / `_extract_session_id_a` / `_delete_session_a` / `_navigate_to_a` / `_get_url_a` / `_get_title_a` / `_find_element_a` / `_extract_element_id_a` / `_element_click_a` / `_element_text_a` / `_element_attribute_a` / `_element_send_keys_a` / `_status_a` / `_execute_script_a`); 11 Appium (`sandhi_ap_new_session_a` / `_get_contexts_a` / `_set_context_a` / `_current_context_a` / `_install_app_a` / `_remove_app_a` / `_activate_app_a` / `_terminate_app_a` / `_mobile_exec_a` / `_source_a` / `_screenshot_a`). Plus internal helpers `_sandhi_mcp_build_request_a`, `_sandhi_wd_build_path_a`, `_sandhi_wd_build_element_suffix_a`. `sandhi_rpc_mcp_error_code` intentionally NOT paired — returns an int (`sandhi_json_get_int`), no allocation. Bare versions stay as back-compat wrappers. **Optimization-arc cumulative**: +49 public `_a` verbs across 1.2.0–1.2.4 (1 + 6 + 12 + 30); every alloc-touching public path now has an `_a` counterpart. The 1.1.0 migration intent is fully realized — consumers can use a per-request arena end-to-end through every public verb. **861 assertions green** (482 sandhi + 167 h2 + 212 alloc; +10 over 1.2.3's 851). New `alloc/124f/` test groups (4): `mcp_build_request_arena`, `mcp_build_request_with_params_arena`, `wd_build_helpers_arena`, `wd_join_arena`. Coverage focuses on JSON envelope build and URL helpers; the dialect verbs themselves don't have a clean garbage-URL→arena-err-resp test path (their `sandhi_rpc_call` invocation predates the arena-aware error shape). `tests/alloc.tcyr` includes extended with `src/rpc/appium.cyr` and `src/rpc/mcp.cyr`. `cyrius lint` 0 warnings on touched files; `cyrfmt --check` clean. **Hot-path allocator review arc CLOSED.** Further allocator work moves to "Optimization-grade, profile first" — wait for real-workload profile evidence. Next active arc: 1.3.x TLS.
+
 **1.2.3** — 2026-05-08. **Batch E — opts / retry / auto user-facing `_a`.** Paint-on-top wrappers atop the dispatch / retry / auto paths threaded by 1.2.0–1.2.2. +12 new public `_a` verbs: 2 `_opts` (`sandhi_http_get_opts_a` / `_post_opts_a`); 4 `_retry` (`sandhi_http_get_retry_a` / `_head_retry_a` / `_put_retry_a` / `_delete_retry_a`); 6 `_auto` (`sandhi_http_get_auto_a` / `_head_auto_a` / `_post_auto_a` / `_put_auto_a` / `_patch_auto_a` / `_delete_auto_a`). Combined with 1.2.2's Batch D (6 verbs), the total post-1.1.0 public `_a` surface for the HTTP request path is now 18 new public verbs, all consumer-callable end-to-end with arena allocators. Bare versions stay as back-compat wrappers passing `default_alloc()`. **851 assertions green** (482 sandhi + 167 h2 + 202 alloc; +14 over 1.2.2's 837). New `alloc/123e/` test groups (4): `opts_arena`, `retry_arena`, `auto_body_less_arena`, `auto_body_bearing_arena`. `cyrius lint` 0 warnings on touched files; `cyrfmt --check` clean. Remaining for Batch F (1.2.4): RPC dialect entries — closes the hot-path allocator review arc.
 
 **1.2.2** — 2026-05-08. **Batch D — top-level public verbs `_a`.** First release with consumer-visible end-to-end arena adoption. Internal cascade has been fully `_a`-threaded since 1.2.1; this slot paints the public-verb wrappers on top. Net public-surface change: +6 `_a` verbs (`sandhi_http_get_a` / `_post_a` / `_put_a` / `_patch_a` / `_delete_a` / `_head_a`). Each is a thin wrapper calling `_sandhi_http_dispatch_a(a, ...)`; bare versions become back-compat wrappers passing `default_alloc()`. Consumer pattern that's now possible end-to-end: `var arena = arena_allocator(8192); var headers = sandhi_headers_new_a(arena); var resp = sandhi_http_get_a(arena, url, headers); reset_via(arena);` — body / headers / status all live in `arena`. Mirrors the `sandhi_http_stream_a` (1.1.0) and `sandhi_h2_request_a` (1.1.0) pairing pattern. **837 assertions green** (482 sandhi + 167 h2 + 188 alloc; +13 over 1.2.1's 824). New `alloc/122d/` test groups (5): `get_arena`, `post_arena`, `delete_head_arena`, `put_patch_arena`, `get_arena_round_trip`. `cyrius lint` 0 warnings; `cyrfmt --check` clean.
@@ -97,9 +99,9 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | `src/http/stream.cyr` | 440 | **M3.5 done** — streaming HTTP + incremental chunked decoder + callback-per-event dispatch. 0.7.1: `sandhi_http_stream_opts` honors `max_response_bytes`. 0.7.2: also honors `read_ms`/`write_ms`; EAGAIN→TIMEOUT in read+body loops. 0.7.3: connect_ms + total_ms threaded via `sandhi_conn_open_fully_timed` + per-recv deadline check in body loop. |
 | `src/rpc/json.cyr` | 365 | **M3 done** — nested JSON build + dotted-path extract |
 | `src/rpc/dispatch.cyr` | 186 | **M3 done** — JSON-over-HTTP + dialect-aware error envelopes. 0.7.2: trace-wrap on `sandhi_rpc_call` / `_with_headers`. |
-| `src/rpc/webdriver.cyr` | 231 | **M3 done** — W3C WebDriver surface (sessions, navigation, elements, exec) |
-| `src/rpc/appium.cyr` | 139 | **M3 done** — Appium extensions (contexts, app lifecycle, mobile exec) |
-| `src/rpc/mcp.cyr` | 104 | **M3 done** — MCP-over-HTTP transport (JSON-RPC 2.0 envelope) |
+| `src/rpc/webdriver.cyr` | 307 | **M3 done** — W3C WebDriver surface (sessions, navigation, elements, exec). 1.2.4 Batch F: 14 public `_a` verbs + 2 internal helper `_a` variants threading allocator through URL build, JSON envelope, and `sandhi_rpc_call_a`. |
+| `src/rpc/appium.cyr` | 184 | **M3 done** — Appium extensions (contexts, app lifecycle, mobile exec). 1.2.4 Batch F: 11 public `_a` verbs threading allocator through URL build, JSON envelope, and `sandhi_rpc_call_a`. |
+| `src/rpc/mcp.cyr` | 148 | **M3 done** — MCP-over-HTTP transport (JSON-RPC 2.0 envelope). 1.2.4 Batch F: 5 public `_a` verbs (`call`, `call_with_headers`, `result_raw`, `error_message`, `stream`) + internal `_sandhi_mcp_build_request_a`. `sandhi_rpc_mcp_error_code` intentionally NOT paired (no allocation). |
 | `src/rpc/mod.cyr` | 17 | dialect-index module |
 | `src/discovery/service.cyr` | 75 | **M4 done** — service + resolver type vocabulary |
 | `src/discovery/chain.cyr` | 61 | **M4 done** — fallback sequence of resolvers |
@@ -164,16 +166,15 @@ No external git deps. sandhi is pure-stdlib-composition.
 
 Post-fold release sequence (see `roadmap.md` for full detail):
 
-**Currently shipped** — all releases through 1.2.3 (Batch
-E: opts / retry / auto user-facing `_a`). The fold landed at
-1.0.0; 1.1.0 was the allocator migration; 1.1.1–1.1.2 closed
-the 0.9.9 audit deferrals; 1.2.0 opened the optimization arc;
-1.2.1 closed the internal-cascade threading; 1.2.2 shipped
-consumer-visible end-to-end arena adoption (GET-family);
-1.2.3 paints the `_opts` / `_retry` / `_auto` family wrappers.
-Total post-1.1.0 public `_a` surface for the HTTP request
-path: 18 new verbs. Remaining: RPC dialect entries (Batch F /
-1.2.4) — closes the hot-path allocator review arc.
+**Currently shipped** — all releases through 1.2.4 (Batch
+F: RPC dialect `_a`). The fold landed at 1.0.0; 1.1.0 was
+the allocator migration; 1.1.1–1.1.2 closed the 0.9.9 audit
+deferrals; 1.2.0–1.2.4 ran the hot-path allocator review
+arc to closure. **+49 public `_a` verbs across the arc**
+covering every alloc-touching public path: HTTP top-level
+(6) + opts/retry/auto (12) + auto-dispatch (1) + RPC
+dialects (30 — mcp 5, wd 14, ap 11). Hot-path allocator
+review arc CLOSED.
 
 **Pinned next** — split into two arcs (cyrius v5.10.0
 ONE-thing-per-slot principle; bundling justified only when
@@ -182,14 +183,22 @@ items share a cascade):
 - **1.2.x — optimization arc**. Profile-driven hot-path
   optimization; sibling cohort to cyrius v5.10.x's
   optimization arc.
-  - **1.2.4 — Batch F**: RPC dialect entries — closes
-    the hot-path allocator review arc.
-    `sandhi_rpc_mcp_call_a` / `_call_with_headers_a` /
-    `_stream_a` (3); plus the dialect-specific verbs
-    in `src/rpc/webdriver.cyr` and `src/rpc/appium.cyr`
-    that allocate request envelopes; plus
-    `sandhi_rpc_call_a` / `_with_headers_a` if the
-    underlying dispatch needs threading.
+  - ~~**1.2.4 — Batch F**~~ ✅ shipped 2026-05-08.
+    +30 RPC dialect `_a` verbs (5 mcp + 14 webdriver +
+    11 appium). **Hot-path allocator review arc CLOSED**;
+    further allocator work waits for profile evidence.
+
+- **1.3.x — TLS arc** (next active arc). Sandhi-owned
+  policy + state work over stdlib `tls_connect`.
+  - **1.3.0** — live-network TLS policy gate (lead;
+    pure CI infra, mirrors cyrius `_tls_live_gate`
+    skip-cleanly cascade).
+  - **1.3.1** — session-resumption cache in `tls_policy`
+    (sandhi-side cache keyed by `(host, port, alpn)`,
+    respecting 0.9.0 cred-strip rules).
+  - **1.3.2** — TLS 1.3 0-RTT (opt-in via
+    `sandhi_http_options_allow_0rtt`; replay-safe
+    methods only per RFC 8446 §8).
   - **1.2.x — profile-justified candidates** (no
     pre-committed ordering, lands once Batch A-F closes
     the orchestrator gap and there's evidence to act on):
@@ -203,18 +212,6 @@ items share a cascade):
     for `net_connect_nb` in `lib/net.cyr` vs.
     documenting parallel evolution; default to the
     document-only path).
-
-- **1.3.x — TLS arc**. Sandhi-owned policy + state work
-  over stdlib `tls_connect`.
-  - **1.3.0** — live-network TLS policy gate (lead;
-    pure CI infra, mirrors cyrius `_tls_live_gate`
-    skip-cleanly cascade).
-  - **1.3.1** — session-resumption cache in `tls_policy`
-    (sandhi-side cache keyed by `(host, port, alpn)`,
-    respecting 0.9.0 cred-strip rules).
-  - **1.3.2** — TLS 1.3 0-RTT (opt-in via
-    `sandhi_http_options_allow_0rtt`; replay-safe
-    methods only per RFC 8446 §8).
 
 **Not sandhi's slot** (filed in state for the same reason
 roadmap surfaces it — drop-back protection): `tls_connect`
