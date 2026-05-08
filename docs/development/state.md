@@ -4,6 +4,8 @@
 
 ## Version
 
+**1.2.6** — 2026-05-08. **OOM-guard audit on 1.2.0–1.2.4 `_a` additions.** Bug-class fix slot. Found two systemic gaps where `_a` variants chained through stdlib alloc-points without null-checking: **Pattern A** (2 sites) — `_sandhi_http_exchange_a` and `_keepalive_a` did `var rbuf = alloc_via(a, cap+1); sandhi_conn_recv_all_deadline(conn, rbuf=0, ...)` → SIGSEGV; **Pattern B** (~12 sites across `src/rpc/{webdriver,appium,mcp}.cyr`) — `var body_obj = sandhi_json_obj_new_a(a); sandhi_json_add_*_a(a, body_obj=0, ...)` → `vec_push_a(a, v=0, ...)` → `load64(v+8)` on null → SIGSEGV (stdlib `vec_push_a` doesn't null-check `v` — caller's responsibility per its contract). Fixed every site: null-check after the alloc, return either `_sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL)` (HTTP path) or `_sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0)` (RPC path) or `_sandhi_stream_result_a(a, 0, 0, SANDHI_ERR_INTERNAL, 0)` (mcp_stream). Helpers `_sandhi_wd_build_path_a` / `_sandhi_wd_build_element_suffix_a` null-check after `str_builder_new_a` and return 0; mcp `_sandhi_mcp_build_request_a` returns 0 (propagated through callers via `sandhi_rpc_call_a`'s existing null-body handling). **885 assertions green** (482 sandhi + 167 h2 + 236 alloc; +10 over 1.2.5's 875). New `alloc/126/` test groups (9): `exchange_path_arena`, `wd_navigate_to_oom`, `wd_find_element_oom`, `wd_element_attribute_oom`, `wd_build_helper_oom`, `ap_set_context_oom`, `ap_new_session_oom`, `mcp_build_request_oom`, `mcp_stream_oom`. Without these guards, at least 7 of these tests would have SIGSEGV'd. `cyrius lint` 0 warnings; `cyrfmt --check` clean. Future `_a` verb additions should land with their OOM regression test in the same patch.
+
 **1.2.5** — 2026-05-08. **Profile instrumentation — opens the next optimization arc.** New `src/obs/prof.cyr` (~140 lines) with per-request per-phase timing captures + recv-buffer cap/used tracking. Default-off; runtime toggle via `sandhi_prof_enable(1)`. 5 phase boundaries captured inside `_sandhi_http_do_impl_a`: URL_PARSE_END, DNS_END, CONN_OPEN_END, REQ_BUILD_END, EXCHANGE_END. Plus recv-buffer recording inside `_sandhi_http_exchange_a` and `_keepalive_a` (cap + nread). Public surface: 8 verbs (`sandhi_prof_enable` / `_enabled` / `_reset` / `_capture` / `_record_recv` / `_get` / `_recv_cap` / `_recv_used`) + `SANDHI_PROF_PHASE_*` enum. Cost: ~500 ns/request when enabled (5 × `clock_now_ns()`); zero overhead when disabled (one branch per capture). Mirrors cyrius v5.10.0's `_prof_*_end` capture pattern, adapted for runtime (sandhi is called many times per process — captures reset per request rather than print once at exit). **Why now**: 1.2.0–1.2.4's profile-justified candidates mostly turned out to be no-ops or wait-for-consumer-ask on close inspection. Rather than ship more speculation, this slot installs the measurement so the next optimization picks land with data. **875 assertions green** (482 sandhi + 167 h2 + 226 alloc; +14 over 1.2.4's 861). New `alloc/125/` test groups (5): `prof_disabled_default`, `prof_capture_monotonic`, `prof_reset_clears`, `prof_recv_buf`, `prof_real_request_arena`. 14 program/test files updated to include `src/obs/prof.cyr` after `src/obs/trace.cyr`. `cyrius.cyml` `[lib].modules` registers prof.cyr after trace.cyr. `cyrius lint` 0 warnings; `cyrfmt --check` clean.
 
 **1.2.4** — 2026-05-08. **Batch F — RPC dialect `_a` (closes the optimization arc).** Final batch of the hot-path allocator review opened at 1.2.0. Paint-on-top wrappers atop `sandhi_rpc_call_a` (paired since 1.1.0). +30 new public `_a` verbs across MCP / WebDriver / Appium dialects: 5 MCP (`sandhi_rpc_mcp_call_a` / `_call_with_headers_a` / `_result_raw_a` / `_error_message_a` / `_stream_a`); 14 WebDriver (`sandhi_wd_new_session_a` / `_extract_session_id_a` / `_delete_session_a` / `_navigate_to_a` / `_get_url_a` / `_get_title_a` / `_find_element_a` / `_extract_element_id_a` / `_element_click_a` / `_element_text_a` / `_element_attribute_a` / `_element_send_keys_a` / `_status_a` / `_execute_script_a`); 11 Appium (`sandhi_ap_new_session_a` / `_get_contexts_a` / `_set_context_a` / `_current_context_a` / `_install_app_a` / `_remove_app_a` / `_activate_app_a` / `_terminate_app_a` / `_mobile_exec_a` / `_source_a` / `_screenshot_a`). Plus internal helpers `_sandhi_mcp_build_request_a`, `_sandhi_wd_build_path_a`, `_sandhi_wd_build_element_suffix_a`. `sandhi_rpc_mcp_error_code` intentionally NOT paired — returns an int (`sandhi_json_get_int`), no allocation. Bare versions stay as back-compat wrappers. **Optimization-arc cumulative**: +49 public `_a` verbs across 1.2.0–1.2.4 (1 + 6 + 12 + 30); every alloc-touching public path now has an `_a` counterpart. The 1.1.0 migration intent is fully realized — consumers can use a per-request arena end-to-end through every public verb. **861 assertions green** (482 sandhi + 167 h2 + 212 alloc; +10 over 1.2.3's 851). New `alloc/124f/` test groups (4): `mcp_build_request_arena`, `mcp_build_request_with_params_arena`, `wd_build_helpers_arena`, `wd_join_arena`. Coverage focuses on JSON envelope build and URL helpers; the dialect verbs themselves don't have a clean garbage-URL→arena-err-resp test path (their `sandhi_rpc_call` invocation predates the arena-aware error shape). `tests/alloc.tcyr` includes extended with `src/rpc/appium.cyr` and `src/rpc/mcp.cyr`. `cyrius lint` 0 warnings on touched files; `cyrfmt --check` clean. **Hot-path allocator review arc CLOSED.** Further allocator work moves to "Optimization-grade, profile first" — wait for real-workload profile evidence. Next active arc: 1.3.x TLS.
@@ -169,15 +171,18 @@ No external git deps. sandhi is pure-stdlib-composition.
 
 Post-fold release sequence (see `roadmap.md` for full detail):
 
-**Currently shipped** — all releases through 1.2.5 (profile
-instrumentation). The fold landed at 1.0.0; 1.1.0 was the
-allocator migration; 1.1.1–1.1.2 closed the 0.9.9 audit
-deferrals; 1.2.0–1.2.4 ran the hot-path allocator review
-arc to closure (+49 public `_a` verbs); 1.2.5 added the
-profile instrumentation that opens the next optimization
-arc with measurement instead of speculation. Total post-
-1.1.0 public surface additions: 49 `_a` verbs + 8 prof
-verbs = 57.
+**Currently shipped** — all releases through 1.2.6 (OOM-guard
+audit). The fold landed at 1.0.0; 1.1.0 was the allocator
+migration; 1.1.1–1.1.2 closed the 0.9.9 audit deferrals;
+1.2.0–1.2.4 ran the hot-path allocator review arc to closure
+(+49 public `_a` verbs); 1.2.5 added profile instrumentation;
+1.2.6 closed the OOM-guard gaps left by the 1.2.0–1.2.4
+additions (~14 fixed sites). Total post-1.1.0 public surface
+additions: 49 `_a` verbs + 8 prof verbs = 57. Internal
+robustness post-1.2.6: every `_a` chain through
+`sandhi_json_obj_new_a` or `str_builder_new_a` is null-
+guarded; SIGSEGV-on-OOM patterns from the dialect verbs
+are closed.
 
 **Pinned next** — split into two arcs (cyrius v5.10.0
 ONE-thing-per-slot principle; bundling justified only when

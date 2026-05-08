@@ -34,6 +34,11 @@ fn _sandhi_mcp_alloc_id() {
 fn _sandhi_mcp_build_request_a(a, method, params_json) {
     var id = _sandhi_mcp_alloc_id();
     var o = sandhi_json_obj_new_a(a);
+    # 1.2.6 OOM guard. Returning 0 here is propagated through the
+    # callers (sandhi_rpc_mcp_call_a etc.) — they pass the (possibly
+    # 0) build result as `body_json` to `sandhi_rpc_call_a`, which
+    # already null-checks and sends bodyless on 0.
+    if (o == 0) { return 0; }
     sandhi_json_add_string_a(a, o, "jsonrpc", "2.0");
     sandhi_json_add_int_a(a, o, "id", id);
     sandhi_json_add_string_a(a, o, "method", method);
@@ -135,8 +140,15 @@ fn sandhi_rpc_mcp_error_message(resp) {
 
 fn sandhi_rpc_mcp_stream_a(a, endpoint_url, method_name, params_json, cb, ctx) {
     var body = _sandhi_mcp_build_request_a(a, method_name, params_json);
+    # 1.2.6 OOM guard. `strlen(0)` would walk past 0; if the JSON
+    # build OOM'd, bail. `sandhi_http_stream_a` returns a stream-
+    # result struct so we mirror its err shape via the helper that
+    # `_sandhi_stream_result_a` exposes (or 0 fallback if even that
+    # OOMs in the same allocator).
+    if (body == 0) { return _sandhi_stream_result_a(a, 0, 0, SANDHI_ERR_INTERNAL, 0); }
     var body_len = strlen(body);
     var headers = sandhi_headers_new_a(a);
+    if (headers == 0) { return _sandhi_stream_result_a(a, 0, 0, SANDHI_ERR_INTERNAL, 0); }
     sandhi_headers_set_a(a, headers, "Content-Type", "application/json");
     sandhi_headers_set_a(a, headers, "Accept", "text/event-stream");
     return sandhi_http_stream_a(a, endpoint_url, "POST", headers, body, body_len, cb, ctx);

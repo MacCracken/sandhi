@@ -131,6 +131,7 @@ fn sandhi_wd_delete_session(base_url, session_id) {
 fn sandhi_wd_navigate_to_a(a, base_url, session_id, target_url) {
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, "/url");
     var body_obj = sandhi_json_obj_new_a(a);
+    if (body_obj == 0) { return _sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0); }
     sandhi_json_add_string_a(a, body_obj, "url", target_url);
     return sandhi_rpc_call_a(a, url, "POST", sandhi_json_build_a(a, body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
 }
@@ -172,6 +173,7 @@ fn sandhi_wd_get_title(base_url, session_id) {
 fn sandhi_wd_find_element_a(a, base_url, session_id, strategy, selector) {
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, "/element");
     var body_obj = sandhi_json_obj_new_a(a);
+    if (body_obj == 0) { return _sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0); }
     sandhi_json_add_string_a(a, body_obj, "using", strategy);
     sandhi_json_add_string_a(a, body_obj, "value", selector);
     return sandhi_rpc_call_a(a, url, "POST", sandhi_json_build_a(a, body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
@@ -201,6 +203,7 @@ fn sandhi_wd_extract_element_id(resp) {
 
 fn _sandhi_wd_build_path_a(a, prefix, tail) {
     var sb = str_builder_new_a(a);
+    if (sb == 0) { return 0; }
     str_builder_add_cstr_a(a, sb, prefix);
     str_builder_add_cstr_a(a, sb, tail);
     return str_data(str_builder_build_a(a, sb));
@@ -235,6 +238,7 @@ fn sandhi_wd_element_text(base_url, session_id, element_id) {
 # GET /session/{id}/element/{eid}/attribute/{name}
 fn sandhi_wd_element_attribute_a(a, base_url, session_id, element_id, attr_name) {
     var sb = str_builder_new_a(a);
+    if (sb == 0) { return _sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0); }
     str_builder_add_cstr_a(a, sb, "/element/");
     str_builder_add_cstr_a(a, sb, element_id);
     str_builder_add_cstr_a(a, sb, "/attribute/");
@@ -253,6 +257,7 @@ fn sandhi_wd_element_send_keys_a(a, base_url, session_id, element_id, text) {
     var suffix = _sandhi_wd_build_element_suffix_a(a, element_id, "/value");
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, suffix);
     var body_obj = sandhi_json_obj_new_a(a);
+    if (body_obj == 0) { return _sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0); }
     sandhi_json_add_string_a(a, body_obj, "text", text);
     return sandhi_rpc_call_a(a, url, "POST", sandhi_json_build_a(a, body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
 }
@@ -263,6 +268,7 @@ fn sandhi_wd_element_send_keys(base_url, session_id, element_id, text) {
 
 fn _sandhi_wd_build_element_suffix_a(a, element_id, tail) {
     var sb = str_builder_new_a(a);
+    if (sb == 0) { return 0; }
     str_builder_add_cstr_a(a, sb, "/element/");
     str_builder_add_cstr_a(a, sb, element_id);
     str_builder_add_cstr_a(a, sb, tail);
@@ -292,6 +298,7 @@ fn sandhi_wd_status(base_url) {
 fn sandhi_wd_execute_script_a(a, base_url, session_id, script, args_json) {
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, "/execute/sync");
     var body_obj = sandhi_json_obj_new_a(a);
+    if (body_obj == 0) { return _sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0); }
     sandhi_json_add_string_a(a, body_obj, "script", script);
     if (args_json != 0) {
         sandhi_json_add_raw_a(a, body_obj, "args", args_json);

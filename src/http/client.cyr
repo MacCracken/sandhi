@@ -404,6 +404,13 @@ fn _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms)
     var cap = max_bytes;
     if (cap <= 0) { cap = _SANDHI_HTTP_RESP_BUF_SIZE; }
     var rbuf = alloc_via(a, cap + 1);
+    # 1.2.6 OOM guard: if the recv buffer can't be allocated, close
+    # the conn and surface INTERNAL — without this, recv_all_deadline
+    # would write to address 0 and SIGSEGV.
+    if (rbuf == 0) {
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL);
+    }
     var nread = sandhi_conn_recv_all_deadline(conn, rbuf, cap, deadline_ms);
     sandhi_conn_close(conn);
     sandhi_prof_record_recv(cap, nread);
@@ -455,6 +462,15 @@ deadline_ms, pool, host, port, use_tls) {
     var cap = max_bytes;
     if (cap <= 0) { cap = _SANDHI_HTTP_RESP_BUF_SIZE; }
     var rbuf = alloc_via(a, cap + 1);
+    # 1.2.6 OOM guard: request + body have already been sent by
+    # this point, so the conn is mid-exchange. Close (don't pool-
+    # put) so the next request gets a fresh handshake; the peer
+    # sees an abrupt close mid-response, which is the same shape
+    # as a network drop and well within the keep-alive contract.
+    if (rbuf == 0) {
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL);
+    }
     var nread = _sandhi_http_recv_framed(conn, rbuf, cap, deadline_ms);
     sandhi_prof_record_recv(cap, nread);
     if (nread == 0 - _SANDHI_EAGAIN) {

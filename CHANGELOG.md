@@ -4,6 +4,93 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.6] — 2026-05-08
+
+**OOM-guard audit on 1.2.0–1.2.4 `_a` additions.** Bug-class
+fix slot. During 1.2.0 dev the OOM regression test for
+`_sandhi_client_build_request_va` caught a SIGSEGV: when
+`str_builder_new_a` returned 0, the next `str_builder_add_cstr_a`
+dereferenced null. The fix at the time was a single guard. This
+slot walks every `_a` variant added across 1.2.0–1.2.4 looking
+for the same pattern and closes the systemic gaps.
+
+### Findings — two patterns, ~14 sites
+
+**Pattern A — recv-buffer alloc in HTTP exchange** (2 sites
+in `src/http/client.cyr`):
+- `_sandhi_http_exchange_a`: `var rbuf = alloc_via(a, cap+1)`
+  followed by `sandhi_conn_recv_all_deadline(conn, rbuf=0, ...)`
+  → SIGSEGV on rbuf dereference inside the recv loop.
+- `_sandhi_http_exchange_keepalive_a`: same shape, with the
+  added quirk that the request + body have already been sent
+  by the time we OOM, so the conn must be closed (don't pool-
+  put a mid-response conn).
+
+Fix: null-check after `alloc_via`, close the conn, return
+`_sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL)`.
+
+**Pattern B — `sandhi_json_obj_new_a` + `_add_*_a` chain in
+RPC dialect verbs** (~12 sites across `src/rpc/{webdriver,
+appium,mcp}.cyr`):
+- `var body_obj = sandhi_json_obj_new_a(a)` returns 0 on OOM.
+- Subsequent `sandhi_json_add_string_a(a, body_obj=0, ...)`
+  calls `vec_push_a(a, v=0, ...)` which does `load64(v + 8)`
+  unguarded → SIGSEGV.
+- Stdlib `vec_push_a` doesn't null-check `v` (matches its
+  contract: caller's responsibility).
+
+Fix at every call site: null-check after `sandhi_json_obj_new_a`,
+return `_sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0)`.
+
+Same shape applied to:
+- `_sandhi_wd_build_path_a` and `_sandhi_wd_build_element_suffix_a`
+  helpers — null-check after `str_builder_new_a`, return 0.
+- `sandhi_wd_navigate_to_a`, `_find_element_a`,
+  `_element_attribute_a`, `_element_send_keys_a`,
+  `_execute_script_a`.
+- `sandhi_ap_new_session_a` (3 nested obj_new_a — 3 guards),
+  `_set_context_a`, `_install_app_a`, `_remove_app_a`,
+  `_activate_app_a`, `_terminate_app_a`, `_mobile_exec_a`
+  (which has both an obj_new_a and a str_builder_new_a path).
+- `_sandhi_mcp_build_request_a` (returns 0 cleanly, propagated
+  through callers via `sandhi_rpc_call_a`'s existing null-body
+  handling).
+- `sandhi_rpc_mcp_stream_a` (guards both build_request and
+  headers_new; returns `_sandhi_stream_result_a(a, 0, 0,
+  SANDHI_ERR_INTERNAL, 0)`).
+
+### Verified
+
+- `tests/alloc.tcyr` gains 9 new test groups (10 assertions)
+  under `alloc/126/`: `exchange_path_arena`,
+  `wd_navigate_to_oom`, `wd_find_element_oom`,
+  `wd_element_attribute_oom`, `wd_build_helper_oom`,
+  `ap_set_context_oom`, `ap_new_session_oom`,
+  `mcp_build_request_oom`, `mcp_stream_oom`.
+- Each OOM test drives a `fail_after_n_allocs(0)` allocator
+  through the public verb. Without the guards, at least 7
+  of these would have SIGSEGV'd (Pattern B sites). With the
+  guards, every path returns gracefully — either an
+  err-resp with `SANDHI_ERR_INTERNAL` or 0 if the err-resp
+  alloc itself OOMs (double-OOM).
+- 236/236 alloc tests pass (226 pre-existing + 10 new).
+- 482/482 `tests/sandhi.tcyr`, 167/167 `tests/h2.tcyr` —
+  no regression. **Total: 885 assertions green** (+10 over
+  1.2.5's 875).
+- `cyrius lint` 0 warnings on touched files. `cyrfmt --check`
+  clean.
+
+### Pinned next
+
+The OOM-class audit is closed for 1.2.0–1.2.4. Future `_a`
+verb additions should land with their OOM regression test
+in the same patch.
+
+- **1.2.7+** — profile-justified optimizations once
+  real-workload prof data lands (1.2.5 captures available).
+- **1.3.0** — live-network TLS-policy gate. **Awaiting**
+  cyrius-side hook extensions for 1.3.1 / 1.3.2.
+
 ## [1.2.5] — 2026-05-08
 
 **Profile instrumentation — opens the next optimization arc.**

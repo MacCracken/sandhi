@@ -1137,6 +1137,143 @@ fn test_alloc_125_prof_real_request_arena() {
 }
 
 # ================================================================
+# 1.2.6 — OOM-guard audit on 1.2.0–1.2.4 `_a` additions
+# ================================================================
+# During 1.2.0 dev, the OOM regression test for
+# `_sandhi_client_build_request_va` caught a SIGSEGV — when
+# `str_builder_new_a` returned 0, the next `str_builder_add_cstr_a`
+# dereferenced null. The fix was a single guard. This audit walked
+# every `_a` variant added 1.2.0–1.2.4 looking for the same pattern
+# and found two systemic gaps:
+#   Pattern A — `alloc_via` for recv buffer in
+#     `_sandhi_http_exchange_a` and `_keepalive_a`. Without the
+#     guard, `sandhi_conn_recv_all_deadline(conn, rbuf=0, ...)`
+#     writes to address 0 → SIGSEGV.
+#   Pattern B — `sandhi_json_obj_new_a(a)` chain in dialect verbs.
+#     `vec_push_a` (which `sandhi_json_add_*_a` calls) does NOT
+#     null-check `v`; it does `load64(v + 8)` directly → SIGSEGV.
+# Tests below drive each fixed path under `fail_after_n_allocs(0)`
+# and assert the expected graceful return.
+
+# Pattern A: exchange recv-buffer alloc OOM. Drive via the public
+# `sandhi_http_get_a` against an unparseable URL — we early-return
+# at PARSE before reaching exchange, so this test exercises the
+# err-resp path threading. The actual exchange-OOM SIGSEGV path
+# can't be reached without a working network conn; the guard is
+# defensive but its presence is verified by reading the source.
+fn test_alloc_126_exchange_path_arena() {
+    var a = arena_allocator(4096);
+    var resp = sandhi_http_get_a(a, "garbage://x", 0);
+    assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE,
+    "exchange path err-resp threads through arena");
+    return 0;
+}
+
+# Pattern B: webdriver `navigate_to_a` JSON envelope OOM. Drive
+# the body_obj=0 path via fail_after_n_allocs(0). Without the
+# guard, the next sandhi_json_add_string_a would SIGSEGV on
+# vec_push_a(v=0).
+fn test_alloc_126_wd_navigate_to_oom() {
+    var failer = fail_after_n_allocs(0);
+    var resp = sandhi_wd_navigate_to_a(failer, "http://wd.local",
+    "abc-123", "https://example.com");
+    # Either the resp itself is 0 (double-OOM during _sandhi_rpc_resp_new_a)
+    # or its err_kind is INTERNAL. Either way: no SIGSEGV.
+    if (resp == 0) {
+        assert_eq(1, 1, "double-OOM returned 0 cleanly");
+        return 0;
+    }
+    assert_eq(sandhi_rpc_err_kind(resp), SANDHI_ERR_INTERNAL,
+    "single-OOM returned INTERNAL err-resp");
+    return 0;
+}
+
+# Pattern B: webdriver `find_element_a` — same shape with two adds.
+fn test_alloc_126_wd_find_element_oom() {
+    var failer = fail_after_n_allocs(0);
+    var resp = sandhi_wd_find_element_a(failer, "http://wd.local",
+    "abc-123", "css selector", "#x");
+    if (resp == 0) { assert_eq(1, 1, "double-OOM 0"); return 0; }
+    assert_eq(sandhi_rpc_err_kind(resp), SANDHI_ERR_INTERNAL,
+    "find_element_a OOM → INTERNAL");
+    return 0;
+}
+
+# Pattern B: webdriver `element_attribute_a` — uses str_builder for
+# URL construction (different shape from json_obj_new chains). The
+# guard is on `str_builder_new_a`.
+fn test_alloc_126_wd_element_attribute_oom() {
+    var failer = fail_after_n_allocs(0);
+    var resp = sandhi_wd_element_attribute_a(failer, "http://wd.local",
+    "abc-123", "elem-1", "href");
+    if (resp == 0) { assert_eq(1, 1, "double-OOM 0"); return 0; }
+    assert_eq(sandhi_rpc_err_kind(resp), SANDHI_ERR_INTERNAL,
+    "element_attribute_a OOM → INTERNAL");
+    return 0;
+}
+
+# Pattern B: webdriver helper `_sandhi_wd_build_path_a` returns 0
+# on OOM at str_builder_new_a (was SIGSEGVing on the next add_cstr
+# before the 1.2.6 guard).
+fn test_alloc_126_wd_build_helper_oom() {
+    var failer = fail_after_n_allocs(0);
+    assert_eq(_sandhi_wd_build_path_a(failer, "value.", "key"), 0,
+    "build_path_a OOM → 0");
+    assert_eq(_sandhi_wd_build_element_suffix_a(failer, "abc", "/click"), 0,
+    "build_element_suffix_a OOM → 0");
+    return 0;
+}
+
+# Pattern B: appium `set_context_a` — paint-on-top of the same
+# json_obj_new_a chain as webdriver verbs.
+fn test_alloc_126_ap_set_context_oom() {
+    var failer = fail_after_n_allocs(0);
+    var resp = sandhi_ap_set_context_a(failer, "http://wd.local",
+    "abc-123", "NATIVE_APP");
+    if (resp == 0) { assert_eq(1, 1, "double-OOM 0"); return 0; }
+    assert_eq(sandhi_rpc_err_kind(resp), SANDHI_ERR_INTERNAL,
+    "set_context_a OOM → INTERNAL");
+    return 0;
+}
+
+# Pattern B: appium `new_session_a` — three nested json_obj_new_a
+# calls (always / caps / root); each was a SIGSEGV waiting for OOM
+# at the corresponding alloc index before the 1.2.6 fix.
+fn test_alloc_126_ap_new_session_oom() {
+    var failer = fail_after_n_allocs(0);
+    var resp = sandhi_ap_new_session_a(failer, "http://wd.local",
+    "Android", "UiAutomator2", 0);
+    if (resp == 0) { assert_eq(1, 1, "double-OOM 0"); return 0; }
+    assert_eq(sandhi_rpc_err_kind(resp), SANDHI_ERR_INTERNAL,
+    "new_session_a OOM → INTERNAL");
+    return 0;
+}
+
+# Pattern B: mcp `_sandhi_mcp_build_request_a` returns 0 on the
+# json_obj_new_a OOM. Verifies the helper itself; the higher-level
+# `sandhi_rpc_mcp_call_a` propagates the 0 body to
+# `sandhi_rpc_call_a` which already null-checks and sends bodyless.
+fn test_alloc_126_mcp_build_request_oom() {
+    var failer = fail_after_n_allocs(0);
+    assert_eq(_sandhi_mcp_build_request_a(failer, "tools/list", 0), 0,
+    "mcp_build_request_a OOM → 0");
+    return 0;
+}
+
+# Pattern B: mcp `sandhi_rpc_mcp_stream_a` — the build_request_a
+# OOM and the headers_new_a OOM are both guarded; either path
+# returns a stream-result struct with err=INTERNAL.
+fn test_alloc_126_mcp_stream_oom() {
+    var failer = fail_after_n_allocs(0);
+    var sr = sandhi_rpc_mcp_stream_a(failer, "http://daimon.local/mcp",
+    "tools/list", 0, 0, 0);
+    if (sr == 0) { assert_eq(1, 1, "double-OOM 0"); return 0; }
+    assert_eq(sandhi_stream_err(sr), SANDHI_ERR_INTERNAL,
+    "stream_a OOM → INTERNAL");
+    return 0;
+}
+
+# ================================================================
 # Runner
 # ================================================================
 
@@ -1305,6 +1442,33 @@ fn main() {
 
     test_group("alloc/125/prof_real_request_arena");
     test_alloc_125_prof_real_request_arena();
+
+    test_group("alloc/126/exchange_path_arena");
+    test_alloc_126_exchange_path_arena();
+
+    test_group("alloc/126/wd_navigate_to_oom");
+    test_alloc_126_wd_navigate_to_oom();
+
+    test_group("alloc/126/wd_find_element_oom");
+    test_alloc_126_wd_find_element_oom();
+
+    test_group("alloc/126/wd_element_attribute_oom");
+    test_alloc_126_wd_element_attribute_oom();
+
+    test_group("alloc/126/wd_build_helper_oom");
+    test_alloc_126_wd_build_helper_oom();
+
+    test_group("alloc/126/ap_set_context_oom");
+    test_alloc_126_ap_set_context_oom();
+
+    test_group("alloc/126/ap_new_session_oom");
+    test_alloc_126_ap_new_session_oom();
+
+    test_group("alloc/126/mcp_build_request_oom");
+    test_alloc_126_mcp_build_request_oom();
+
+    test_group("alloc/126/mcp_stream_oom");
+    test_alloc_126_mcp_stream_oom();
 
     return assert_summary();
 }
