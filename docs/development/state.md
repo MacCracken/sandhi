@@ -4,6 +4,8 @@
 
 ## Version
 
+**1.1.1** — 2026-05-08. **`Proxy-Authenticate` trailer-forbidden + cyrius 5.10.0 pin.** First post-fold patch from the 1.1.x small-fixes lane. `_sandhi_resp_trailer_forbidden` in `src/http/response.cyr` adds `Proxy-Authenticate` to the RFC 7230 §4.1.2 forbidden-name list, completing the proxy-auth pair after 0.9.9 landed `Proxy-Authorization` / `Connection` / `Cookie`. Originally deferred from 0.9.9 on per-program-fixup-cap grounds (architecture/001); the cap re-baselined post-fold once consumers stopped re-concatenating sandhi's `src/`, so the addition lands cleanly. **Toolchain pin** bumped 5.8.36 → 5.10.0 (mechanical — v5.10.0 is profile-instrumentation only, `api-surface: unchanged`, byte-identical self-host). `programs/_trailers_probe.cyr` extended: section [4] now asserts the full forbidden-list coverage end-to-end — `Content-Length` / `Authorization` (0.9.4), `Connection` / `Cookie` / `Proxy-Authorization` (0.9.9), `Proxy-Authenticate` (1.1.1). 11 PASS / 11 total in the probe; the 0.9.9 audit additions were never asserted in the probe, so the fill-in lands symmetrically. **792 assertions green** (482 sandhi + 167 h2 + 143 alloc; no regression — forbidden-list helper has no unit test in `sandhi.tcyr` per per-program fixup cap). `cyrius lint` 0 warnings on the touched file; `cyrfmt --check` clean. ADR 0005's surface freeze applied "between 0.9.2 and 1.0.0" — this is a 1.x.x stdlib-patch landing per the post-fold maintenance shape.
+
 **1.1.0** — 2026-05-03. **Allocator-as-first-arg migration.** Threads the cyrius v5.8.33 `Allocator` vtable through every alloc-touching public + internal fn in `src/`. Toolchain pin bumped 5.6.41 → 5.8.36 to pick up the v5.8.33-v5.8.36 stdlib changes (`Allocator` vtable + 3 default impls + `default_alloc()` lazy singleton + `fail_after_n_allocs(n)` test harness + `_a` variants for vec / hashmap / str). Migration landed in 6 commit-sized bites, bottom-up: Batch 1 leaves (url / headers / service / daimon / pool / h2-frame; 17 sites; pool struct grew 40→48, daimon ctx 16→24); Batch 2 TLS + h2 leaves (fingerprint / policy / apply / huffman / hpack; 24 sites; HPACK static + Huffman tree pinned to default_alloc as singletons); Batch 3 discovery + rpc (local / dispatch / webdriver / json; 14 sites; local resolver gained an 8-byte allocator-bearing ctx); Batch 4 HTTP response/request foundation (response / h2-response / h2-request; 15 sites; the central `_sandhi_resp_new` is now allocator-aware — every response, 1.1 OR h2, OK OR err, plain OR chunked, lives in one allocator); Batch 5 connection layer (conn / h2-conn / resolve; 37 sites — largest by count; ALPN cstr inherits conn lifetime, h2 conn struct + enc/dec hpack tables + per-frame send/recv, DNS resolver's `_name_eq` 8-cell scratch + v4/v6 query bufs); Batch 6 client + streaming + server (client / stream / sse / retry / h2-dispatch / server-mod; 34 sites; full SSE parser + streaming buffers + server-side request-parsing helpers all `_a`-variant). Process-wide singletons that MUST stay on default_alloc: ALPN wire literals (conn.cyr), HPACK static table (hpack.cyr), HPACK Huffman tree (huffman.cyr), server `_hsv_req_buf` (server/mod.cyr) — an arena reset would corrupt them for every other in-flight request. **792 assertions green** (482 sandhi + 167 h2 + 143 alloc; +143 over 1.0.0's 649). New `tests/alloc.tcyr` separate program (sandhi.tcyr is at the per-program fixup-table cap per architecture/001) — 28 test groups across all 6 batches, covering per-request-arena round-trips + reset semantics + OOM via `fail_after_n_allocs`. `cyrius fmt --check` clean on all 28 touched files; `cyrius lint` introduced 0 new warnings (2 pre-existing: huffman.cyr blob literal long-line per architecture/001, json.cyr `blen` linter false-positive). `dist/sandhi.cyr` regenerated (10530 lines, 139 `_a` variants in the bundle). Public-surface impact: ~150 new public verbs (the `_a` variants); the original `sandhi_*` verbs all preserved as back-compat wrappers passing `default_alloc()`. ADR 0005's surface freeze applied "between 0.9.2 and the v5.7.0 fold (1.0.0)" — post-fold maintenance patches were always going to land as 1.x.x stdlib patches; this is the first such patch. Cyrius-side update (refreshing `cyrius/lib/sandhi.cyr` from this repo's regenerated `dist/sandhi.cyr`) is its own small cyrius slot, not tracked here.
 
 **1.0.0** — 2026-04-25. **Fold-ready release.** Final sandhi-side tag before the v5.7.0 cyrius release vendors `dist/sandhi.cyr` as stdlib's `lib/sandhi.cyr`. Sandhi-side closeout: (a) 19 transitional `http_*` aliases dropped from `src/server/mod.cyr` so they don't ship as permanent stdlib API at fold time; tests + smoke updated to call the canonical `sandhi_server_*` names; (b) public-surface confirmation pass — diffed `fn sandhi_*` declarations between the 0.9.2 freeze tag and 1.0.0; 35 dead `*_version` accessors retired in 0.9.3 (all confirmed unused), 2 names added in 0.9.8 (`sandhi_hpack_huffman_encode` / `sandhi_hpack_huffman_encoded_len`) symmetric with the public decoder shipped 0.8.0; net 278 verbs at fold time; (c) README + CLAUDE.md updated to reflect the v5.7.0 fold as the active target. **649 assertions green** (482 sandhi + 167 h2). Repo enters **maintenance mode** post-fold; subsequent patches land via the Cyrius release cycle on the cyrius-side, not this repo. Fold-event acceptance (consumer-repo builds against 5.7.0 stdlib without `[deps.sandhi]` pins, byte-identity of `dist/sandhi.cyr` to `lib/sandhi.cyr` at fold commit, no `lib/http_server.cyr` includes survive in AGNOS) is checked at the cyrius v5.7.0 release gate.
@@ -56,7 +58,7 @@
 
 ## Toolchain
 
-- **Cyrius pin**: `5.6.41` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `5.10.0` (in `cyrius.cyml [package].cyrius`)
 
 ## Fold-into-stdlib status
 
@@ -152,17 +154,14 @@ No external git deps. sandhi is pure-stdlib-composition.
 
 Post-fold release sequence (see `roadmap.md` for full detail):
 
-**Currently shipped** — all releases through 1.1.0 (allocator-as-first-arg
-migration). The fold landed at 1.0.0 (vendored into Cyrius stdlib at v5.7.0);
-1.1.0 was the first post-fold patch.
+**Currently shipped** — all releases through 1.1.1
+(`Proxy-Authenticate` trailer-forbidden + cyrius 5.10.0 pin).
+The fold landed at 1.0.0 (vendored into Cyrius stdlib at v5.7.0);
+1.1.0 was the allocator migration; 1.1.1 is the first 1.1.x
+small-fixes-lane landing.
 
 **Pinned next**:
 
-- **1.1.1** — `Proxy-Authenticate` trailer-forbidden. Single
-  string-literal addition rounding out the proxy-auth pair
-  landed at 0.9.9 (`Proxy-Authorization`). Deferred from
-  the 0.9.9 audit on per-program-fixup-cap grounds; cap
-  re-baselines post-fold.
 - **1.1.2** — Request-builder dup-prevention. Caller-
   supplied `Host` / `Content-Length` / `Transfer-Encoding` /
   `Connection` in `user_headers` filtered at build time

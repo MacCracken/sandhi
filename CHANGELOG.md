@@ -4,6 +4,56 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-05-08
+
+**`Proxy-Authenticate` trailer-forbidden + cyrius 5.10.0 pin.**
+First post-fold patch from the 1.1.x small-fixes lane. Single
+audit deferral landing — no public-surface change.
+
+### Changed
+
+- **http**: `_sandhi_resp_trailer_forbidden` in
+  `src/http/response.cyr` adds `Proxy-Authenticate` to the
+  forbidden-name list, rounding out the proxy-auth pair after
+  the 0.9.9 audit landed `Proxy-Authorization` /
+  `Connection` / `Cookie`. RFC 7230 §4.1.2 trailer-filter
+  parity for the proxy-auth challenge; consumers' auth
+  machinery typically ignores trailer-side challenges, but
+  filtering closes the symmetric position in the
+  forbidden-name lists across client and server paths and
+  prevents a malicious server from injecting an unexpected
+  `Proxy-Authenticate` post-body via the trailer block.
+  Originally deferred from the 0.9.9 audit on per-program-
+  fixup-cap grounds (architecture/001); the cap re-baselined
+  post-fold once consumers stopped re-concatenating sandhi's
+  `src/`, so the addition lands cleanly here.
+- **Toolchain pin** bumped 5.8.36 → 5.10.0 (`cyrius.cyml
+  [package]`). v5.10.0 ships compile-time profile
+  instrumentation only (`api-surface: unchanged`,
+  byte-identical self-host); mechanical bump. The v5.9.x
+  stdlib accumulation lands here too via `cyrius deps`
+  resync: `lib/args.cyr`, `lib/fnptr.cyr`, `lib/fs.cyr`,
+  `lib/hashmap.cyr`, `lib/sigil.cyr`, `lib/str.cyr` (~540
+  net lines added, mostly `_a`-variant fill-in symmetric
+  to the 1.1.0 migration). 792 assertions still green
+  across the resync — no sandhi behavior change.
+
+### Verified
+
+- `programs/_trailers_probe.cyr` extended: section [4]
+  asserts the full forbidden-list coverage end-to-end —
+  `Content-Length` (0.9.4), `Authorization` (0.9.4),
+  `Connection` (0.9.9), `Cookie` (0.9.9),
+  `Proxy-Authorization` (0.9.9), and the new
+  `Proxy-Authenticate` (1.1.1). 11 PASS / 11 total. The
+  0.9.9 audit additions (Connection / Cookie /
+  Proxy-Authorization) were never asserted in the probe;
+  this fills that gap symmetrically.
+- **792 assertions green** (482 sandhi + 167 h2 + 143
+  alloc; no regression). Forbidden-list helper has no unit
+  test in `tests/sandhi.tcyr` — coverage stays in the
+  probe per the per-program fixup cap.
+
 ## [1.1.0] — 2026-05-03
 
 **Allocator-as-first-arg migration.** Threads the cyrius v5.8.33

@@ -49,6 +49,7 @@ details, state.md the current snapshot.
 - **0.9.10** — pool stale-skip hardening: `_sandhi_pool_has_idle` peek now ignores conns past `idle_timeout_ms` so ALPN promotion fires deterministically
 - **1.0.0** — fold-ready release. Transitional `http_*` aliases dropped; final `dist/sandhi.cyr` regenerated; vendored into Cyrius stdlib at v5.7.0
 - **1.1.0** — allocator-as-first-arg migration. 6 commit-sized bites; ~150 new `_a` public verbs alongside back-compat wrappers. Toolchain pin 5.6.41 → 5.8.36. 792 assertions green (482 sandhi + 167 h2 + 143 alloc)
+- **1.1.1** — `Proxy-Authenticate` trailer-forbidden (rounds out 0.9.9 proxy-auth pair); toolchain pin 5.8.36 → 5.10.0 (mechanical, profile-instrumentation only)
 
 ## What's next
 
@@ -60,13 +61,9 @@ The 1.0.x window's per-program-fixup-cap deferrals re-baseline
 post-fold (consumers' tests no longer re-concatenate sandhi's
 `src/`), so both items below land cleanly here.*
 
-- **1.1.1 — `Proxy-Authenticate` trailer-forbidden** —
-  rounds out the proxy-auth pair landed at 0.9.9
-  (`Proxy-Authorization`). Single string-literal addition;
-  lower priority than the three landed names since it's a
-  response challenge, not an injectable credential vector.
-  Also unblocks the symmetric position in the
-  forbidden-name lists across client and server paths.
+- ~~**1.1.1 — `Proxy-Authenticate` trailer-forbidden**~~
+  ✅ landed 2026-05-08 (also bumped toolchain pin 5.8.36
+  → 5.10.0).
 - **1.1.2 — Request-builder dup-prevention** —
   caller-supplied `Host` / `Content-Length` /
   `Transfer-Encoding` / `Connection` in `user_headers`

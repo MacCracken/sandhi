@@ -55,8 +55,12 @@ fn main() {
     alloc_init();
     var fails = 0;
 
-    # Chunked body with both allowed and forbidden trailers.
-    var raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: Server-Timing\r\n\r\n5\r\nhello\r\n0\r\nServer-Timing: db;dur=12.4\r\nX-Custom: ok\r\nContent-Length: 9999\r\nAuthorization: Bearer hijack\r\n\r\n";
+    # Chunked body with both allowed and forbidden trailers. The
+    # forbidden block exercises the original 0.9.4 filter set
+    # (Content-Length, Authorization), the 0.9.9 audit additions
+    # (Connection, Cookie, Proxy-Authorization), and the 1.1.1
+    # round-out (Proxy-Authenticate).
+    var raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: Server-Timing\r\n\r\n5\r\nhello\r\n0\r\nServer-Timing: db;dur=12.4\r\nX-Custom: ok\r\nContent-Length: 9999\r\nAuthorization: Bearer hijack\r\nConnection: close\r\nCookie: sid=hijack\r\nProxy-Authorization: Basic abc\r\nProxy-Authenticate: Basic realm=foo\r\n\r\n";
     var r = sandhi_http_response_parse(raw, strlen(raw));
 
     say("[1] status decoded\n");
@@ -87,6 +91,14 @@ fn main() {
     fails = fails + check("    Content-Length filtered", clen == 0);
     var auth = sandhi_headers_get(h, "Authorization");
     fails = fails + check("    Authorization filtered", auth == 0);
+    var conn = sandhi_headers_get(h, "Connection");
+    fails = fails + check("    Connection filtered (0.9.9)", conn == 0);
+    var cookie = sandhi_headers_get(h, "Cookie");
+    fails = fails + check("    Cookie filtered (0.9.9)", cookie == 0);
+    var pauthz = sandhi_headers_get(h, "Proxy-Authorization");
+    fails = fails + check("    Proxy-Authorization filtered (0.9.9)", pauthz == 0);
+    var pauthn = sandhi_headers_get(h, "Proxy-Authenticate");
+    fails = fails + check("    Proxy-Authenticate filtered (1.1.1)", pauthn == 0);
 
     say("[5] no trailers — backward compat with existing chunked\n");
     var raw2 = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
