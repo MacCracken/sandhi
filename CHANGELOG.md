@@ -4,6 +4,92 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.7] — 2026-05-08
+
+**Batch G — server `_a` paint + OOM guards.** Closes the same
+SIGSEGV-on-OOM gap that 1.2.6 found in the RPC dialect verbs,
+this time on the server send-path. Four `_send_*` verbs in
+`src/server/mod.cyr` were using `str_builder_new()`
+(default_alloc) without null-check before the next
+`str_builder_add_cstr_a` — same exact pattern as the dialect
+verbs from 1.2.6. Painted `_a` variants on top + landed the
+guards in the same patch, per the 1.2.6 process note ("future
+`_a` verb additions should land with their OOM regression
+test").
+
+### Added (4 new public `_a` verbs)
+
+- `sandhi_server_send_status_a(a, cfd, code, msg)`
+- `sandhi_server_send_response_a(a, cfd, code, msg, content_type, body, body_len, extra_headers)`
+- `sandhi_server_send_204_a(a, cfd, extra_headers)`
+- `sandhi_server_send_chunked_start_a(a, cfd, code, content_type, extra_headers)`
+
+All four thread `a` through `str_builder_new_a` /
+`_add_cstr_a` / `_add_int_a` / `_build_a`. Bare versions
+become back-compat wrappers passing `default_alloc()`.
+
+### Return shape
+
+The bare versions historically returned 0 (success only —
+sock_send errors silently dropped, separate quality issue not
+in scope). The `_a` variants return:
+- **0** on success (str_builder built + sock_send invoked).
+- **-1** on OOM (str_builder_new_a returned 0; sock_send not
+  called). Matches the lib/str.cyr `_sb_grow_a` `0 - 1`
+  convention.
+
+Bare versions return whatever the `_a` returns — under
+`default_alloc()` that's always 0 in practice. Arena callers
+get the OOM signal.
+
+### NOT paired (intentionally)
+
+- **`sandhi_server_send_chunk`** / **`_send_chunked_end`**:
+  use stack-local `var hexbuf[32]` for the chunk-length
+  encoding; no allocation. No `_a` needed.
+- **`sandhi_server_recv_request`**: reads into a caller-
+  supplied buffer; no allocation. No `_a` needed.
+- **`sandhi_server_run`** / **`_run_opts`**: server lifecycle,
+  not per-request. The one alloc (`_hsv_req_buf` lazy
+  singleton) is intentionally pinned to `default_alloc()`
+  (process-wide singleton, outlives any per-request arena).
+- **`sandhi_server_options_*`** getters / setters: pure
+  load64/store64. No allocation.
+- **Status accessors** (`sandhi_server_body_offset`,
+  `_content_length`, `_request_has_dup_smuggling_header`,
+  `_request_has_cl_te_conflict`): pure search/parse, return
+  int. No allocation.
+
+### Verified
+
+- `tests/alloc.tcyr` gains 5 new test groups (7 assertions)
+  under `alloc/127g/`: `send_status_oom`,
+  `send_response_oom`, `send_204_oom`,
+  `send_chunked_start_oom`, `send_status_arena_roundtrip`.
+- Each OOM test drives `fail_after_n_allocs(0)` through
+  the `_a` and asserts -1 return. Without the guards,
+  these would have SIGSEGV'd identical to the rpc dialect
+  cases 1.2.6 fixed.
+- 243/243 alloc tests pass (236 pre-existing + 7 new).
+- 482/482 `tests/sandhi.tcyr`, 167/167 `tests/h2.tcyr` —
+  no regression. **Total: 892 assertions green** (+7 over
+  1.2.6's 885).
+- `cyrius lint` 0 warnings on `src/server/mod.cyr`.
+  `cyrfmt --check` clean.
+
+### Pinned next
+
+The OOM-guard audit story is now complete for every `_a`
+verb shipped post-1.1.0 (1.2.0–1.2.7). The 1.1.0 era
+additions remain unaudited; could open as a future slot
+if a leaf-level gap surfaces.
+
+- **1.2.8+** — open. Wait for cyrius-side TLS hooks
+  (1.3.1/1.3.2 unblockers), or pick another sandhi-side
+  item if one surfaces.
+- **1.3.0** — live-network TLS-policy gate. **Awaiting**
+  cyrius-side hook extensions.
+
 ## [1.2.6] — 2026-05-08
 
 **OOM-guard audit on 1.2.0–1.2.4 `_a` additions.** Bug-class

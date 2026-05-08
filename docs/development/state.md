@@ -4,6 +4,8 @@
 
 ## Version
 
+**1.2.7** — 2026-05-08. **Batch G — server `_a` paint + OOM guards.** Closes the same SIGSEGV-on-OOM gap 1.2.6 found in RPC dialect verbs, this time on the server send-path. 4 server `_send_*` verbs in `src/server/mod.cyr` were using `str_builder_new()` (default_alloc) without null-check; painted `_a` variants on top + landed the guards in the same patch. New verbs: `sandhi_server_send_status_a` / `_send_response_a` / `_send_204_a` / `_send_chunked_start_a`. Each threads `a` through `str_builder_*_a` and returns 0 on success, -1 on OOM. Bare versions become back-compat wrappers passing `default_alloc()`. Public surface change: +4 `_a` verbs. Intentionally not paired: `_send_chunk` / `_send_chunked_end` (stack-local hexbuf, no alloc); `_recv_request` (caller-supplied buf); `_run` / `_run_opts` (lifecycle, singleton `_hsv_req_buf` pinned to default_alloc by design); options getters/setters (pure load64/store64); status accessors (`_body_offset`, `_content_length`, `_request_has_dup_smuggling_header`, `_request_has_cl_te_conflict` — int returns). **892 assertions green** (482 sandhi + 167 h2 + 243 alloc; +7 over 1.2.6's 885). New `alloc/127g/` test groups (5): 4 OOM tests + 1 arena round-trip. Each OOM test drives `fail_after_n_allocs(0)` and asserts -1 return — without guards, would have SIGSEGV'd. `cyrius lint` 0 warnings; `cyrfmt --check` clean. The OOM-guard audit story is now complete for every `_a` verb shipped post-1.1.0 (1.2.0–1.2.7).
+
 **1.2.6** — 2026-05-08. **OOM-guard audit on 1.2.0–1.2.4 `_a` additions.** Bug-class fix slot. Found two systemic gaps where `_a` variants chained through stdlib alloc-points without null-checking: **Pattern A** (2 sites) — `_sandhi_http_exchange_a` and `_keepalive_a` did `var rbuf = alloc_via(a, cap+1); sandhi_conn_recv_all_deadline(conn, rbuf=0, ...)` → SIGSEGV; **Pattern B** (~12 sites across `src/rpc/{webdriver,appium,mcp}.cyr`) — `var body_obj = sandhi_json_obj_new_a(a); sandhi_json_add_*_a(a, body_obj=0, ...)` → `vec_push_a(a, v=0, ...)` → `load64(v+8)` on null → SIGSEGV (stdlib `vec_push_a` doesn't null-check `v` — caller's responsibility per its contract). Fixed every site: null-check after the alloc, return either `_sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL)` (HTTP path) or `_sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0)` (RPC path) or `_sandhi_stream_result_a(a, 0, 0, SANDHI_ERR_INTERNAL, 0)` (mcp_stream). Helpers `_sandhi_wd_build_path_a` / `_sandhi_wd_build_element_suffix_a` null-check after `str_builder_new_a` and return 0; mcp `_sandhi_mcp_build_request_a` returns 0 (propagated through callers via `sandhi_rpc_call_a`'s existing null-body handling). **885 assertions green** (482 sandhi + 167 h2 + 236 alloc; +10 over 1.2.5's 875). New `alloc/126/` test groups (9): `exchange_path_arena`, `wd_navigate_to_oom`, `wd_find_element_oom`, `wd_element_attribute_oom`, `wd_build_helper_oom`, `ap_set_context_oom`, `ap_new_session_oom`, `mcp_build_request_oom`, `mcp_stream_oom`. Without these guards, at least 7 of these tests would have SIGSEGV'd. `cyrius lint` 0 warnings; `cyrfmt --check` clean. Future `_a` verb additions should land with their OOM regression test in the same patch.
 
 **1.2.5** — 2026-05-08. **Profile instrumentation — opens the next optimization arc.** New `src/obs/prof.cyr` (~140 lines) with per-request per-phase timing captures + recv-buffer cap/used tracking. Default-off; runtime toggle via `sandhi_prof_enable(1)`. 5 phase boundaries captured inside `_sandhi_http_do_impl_a`: URL_PARSE_END, DNS_END, CONN_OPEN_END, REQ_BUILD_END, EXCHANGE_END. Plus recv-buffer recording inside `_sandhi_http_exchange_a` and `_keepalive_a` (cap + nread). Public surface: 8 verbs (`sandhi_prof_enable` / `_enabled` / `_reset` / `_capture` / `_record_recv` / `_get` / `_recv_cap` / `_recv_used`) + `SANDHI_PROF_PHASE_*` enum. Cost: ~500 ns/request when enabled (5 × `clock_now_ns()`); zero overhead when disabled (one branch per capture). Mirrors cyrius v5.10.0's `_prof_*_end` capture pattern, adapted for runtime (sandhi is called many times per process — captures reset per request rather than print once at exit). **Why now**: 1.2.0–1.2.4's profile-justified candidates mostly turned out to be no-ops or wait-for-consumer-ask on close inspection. Rather than ship more speculation, this slot installs the measurement so the next optimization picks land with data. **875 assertions green** (482 sandhi + 167 h2 + 226 alloc; +14 over 1.2.4's 861). New `alloc/125/` test groups (5): `prof_disabled_default`, `prof_capture_monotonic`, `prof_reset_clears`, `prof_recv_buf`, `prof_real_request_arena`. 14 program/test files updated to include `src/obs/prof.cyr` after `src/obs/trace.cyr`. `cyrius.cyml` `[lib].modules` registers prof.cyr after trace.cyr. `cyrius lint` 0 warnings; `cyrfmt --check` clean.
@@ -118,7 +120,7 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | `src/tls_policy/fingerprint.cyr` | 102 | **M5 done** — SPKI hex normalize / compare / encode helpers |
 | `src/tls_policy/apply.cyr` | 91 | **M5 partial** — surface shipped; enforcement stubbed (awaiting stdlib TLS-init) |
 | `src/tls_policy/mod.cyr` | 28 | dialect-index module |
-| `src/server/mod.cyr` | 546 | **M1 done** — verbatim lift from `lib/http_server.cyr`. 0.7.2: `sandhi_server_options_*` struct + `http_server_run_opts` variant; per-connection SO_RCVTIMEO (slowloris guard; 30 s default). `max_conns` option defined but not enforced — concurrent accept model lands 0.8.0. |
+| `src/server/mod.cyr` | 710 | **M1 done** — verbatim lift from `lib/http_server.cyr`. 0.7.2: `sandhi_server_options_*` struct + `http_server_run_opts` variant; per-connection SO_RCVTIMEO (slowloris guard; 30 s default). `max_conns` option defined but not enforced — concurrent accept model lands 0.8.0. 1.2.7 Batch G: 4 server `_send_*` `_a` paint pairs (`_send_status_a`, `_send_response_a`, `_send_204_a`, `_send_chunked_start_a`) + OOM guards mirroring 1.2.6's RPC dialect fix. `_a` returns 0 on success, -1 on OOM. |
 
 Build outputs:
 - `build/sandhi-smoke` — link-proof smoke program.
@@ -171,18 +173,18 @@ No external git deps. sandhi is pure-stdlib-composition.
 
 Post-fold release sequence (see `roadmap.md` for full detail):
 
-**Currently shipped** — all releases through 1.2.6 (OOM-guard
-audit). The fold landed at 1.0.0; 1.1.0 was the allocator
-migration; 1.1.1–1.1.2 closed the 0.9.9 audit deferrals;
-1.2.0–1.2.4 ran the hot-path allocator review arc to closure
-(+49 public `_a` verbs); 1.2.5 added profile instrumentation;
-1.2.6 closed the OOM-guard gaps left by the 1.2.0–1.2.4
-additions (~14 fixed sites). Total post-1.1.0 public surface
-additions: 49 `_a` verbs + 8 prof verbs = 57. Internal
-robustness post-1.2.6: every `_a` chain through
-`sandhi_json_obj_new_a` or `str_builder_new_a` is null-
-guarded; SIGSEGV-on-OOM patterns from the dialect verbs
-are closed.
+**Currently shipped** — all releases through 1.2.7 (Batch G
+server `_a`). The fold landed at 1.0.0; 1.1.0 was the
+allocator migration; 1.1.1–1.1.2 closed the 0.9.9 audit
+deferrals; 1.2.0–1.2.4 ran the hot-path allocator review
+arc to closure (+49 public `_a` verbs); 1.2.5 added profile
+instrumentation (+8 verbs); 1.2.6 closed OOM-guard gaps in
+1.2.0–1.2.4 additions (~14 sites); 1.2.7 painted server
+`_send_*` `_a` family + closed the same OOM gap on server
+side (+4 verbs, 4 OOM guards). **Total post-1.1.0 public
+surface: 53 `_a` verbs + 8 prof verbs = 61.** Internal
+robustness: every public `_a` chain through stdlib
+allocators is null-guarded post-1.2.7.
 
 **Pinned next** — split into two arcs (cyrius v5.10.0
 ONE-thing-per-slot principle; bundling justified only when

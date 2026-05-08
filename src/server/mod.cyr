@@ -391,48 +391,71 @@ fn sandhi_server_path_segment(path, n) {
 
 # Minimal status response with Content-Length: 0.
 # e.g. sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
-fn sandhi_server_send_status(cfd, code, msg) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 ");
-    str_builder_add_int(sb, code);
-    str_builder_add_cstr(sb, " ");
-    str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    var s = str_data(str_builder_build(sb));
+# 1.2.7 Batch G: each `_send_*` gains an `_a` variant that threads
+# `a` through `str_builder_*_a`. Bare versions stay as back-compat
+# wrappers passing `default_alloc()`. Return shape: `_a` returns 0
+# on success, `-1` on OOM (str_builder_new_a returned 0). Bare
+# versions return whatever `_a` returns — under default_alloc that's
+# always 0 in practice. Closes the SIGSEGV-on-OOM gap that mirrored
+# the 1.2.6 RPC dialect findings.
+fn sandhi_server_send_status_a(a, cfd, code, msg) {
+    var sb = str_builder_new_a(a);
+    if (sb == 0) { return 0 - 1; }
+    str_builder_add_cstr_a(a, sb, "HTTP/1.1 ");
+    str_builder_add_int_a(a, sb, code);
+    str_builder_add_cstr_a(a, sb, " ");
+    str_builder_add_cstr_a(a, sb, msg);
+    str_builder_add_cstr_a(a, sb, "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    var s = str_data(str_builder_build_a(a, sb));
     sock_send(cfd, s, strlen(s));
     return 0;
 }
 
+fn sandhi_server_send_status(cfd, code, msg) {
+    return sandhi_server_send_status_a(default_alloc(), cfd, code, msg);
+}
+
 # Full response. extra_headers is a cstr (each line CRLF-terminated) or 0.
 # e.g. sandhi_server_send_response(cfd, 200, "OK", "application/json", body, len, 0);
-fn sandhi_server_send_response(cfd, code, msg, content_type, body, body_len, extra_headers) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 ");
-    str_builder_add_int(sb, code);
-    str_builder_add_cstr(sb, " ");
-    str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, "\r\nContent-Type: ");
-    str_builder_add_cstr(sb, content_type);
-    str_builder_add_cstr(sb, "\r\nContent-Length: ");
-    str_builder_add_int(sb, body_len);
-    str_builder_add_cstr(sb, "\r\n");
-    if (extra_headers != 0) { str_builder_add_cstr(sb, extra_headers); }
-    str_builder_add_cstr(sb, "Connection: close\r\n\r\n");
-    var head = str_data(str_builder_build(sb));
+fn sandhi_server_send_response_a(a, cfd, code, msg, content_type, body, body_len, extra_headers) {
+    var sb = str_builder_new_a(a);
+    if (sb == 0) { return 0 - 1; }
+    str_builder_add_cstr_a(a, sb, "HTTP/1.1 ");
+    str_builder_add_int_a(a, sb, code);
+    str_builder_add_cstr_a(a, sb, " ");
+    str_builder_add_cstr_a(a, sb, msg);
+    str_builder_add_cstr_a(a, sb, "\r\nContent-Type: ");
+    str_builder_add_cstr_a(a, sb, content_type);
+    str_builder_add_cstr_a(a, sb, "\r\nContent-Length: ");
+    str_builder_add_int_a(a, sb, body_len);
+    str_builder_add_cstr_a(a, sb, "\r\n");
+    if (extra_headers != 0) { str_builder_add_cstr_a(a, sb, extra_headers); }
+    str_builder_add_cstr_a(a, sb, "Connection: close\r\n\r\n");
+    var head = str_data(str_builder_build_a(a, sb));
     sock_send(cfd, head, strlen(head));
     if (body_len > 0) { sock_send(cfd, body, body_len); }
     return 0;
 }
 
+fn sandhi_server_send_response(cfd, code, msg, content_type, body, body_len, extra_headers) {
+    return sandhi_server_send_response_a(default_alloc(), cfd, code, msg,
+    content_type, body, body_len, extra_headers);
+}
+
 # 204 No Content with optional extra headers (CRLF-terminated cstr or 0).
-fn sandhi_server_send_204(cfd, extra_headers) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 204 No Content\r\n");
-    if (extra_headers != 0) { str_builder_add_cstr(sb, extra_headers); }
-    str_builder_add_cstr(sb, "Content-Length: 0\r\nConnection: close\r\n\r\n");
-    var s = str_data(str_builder_build(sb));
+fn sandhi_server_send_204_a(a, cfd, extra_headers) {
+    var sb = str_builder_new_a(a);
+    if (sb == 0) { return 0 - 1; }
+    str_builder_add_cstr_a(a, sb, "HTTP/1.1 204 No Content\r\n");
+    if (extra_headers != 0) { str_builder_add_cstr_a(a, sb, extra_headers); }
+    str_builder_add_cstr_a(a, sb, "Content-Length: 0\r\nConnection: close\r\n\r\n");
+    var s = str_data(str_builder_build_a(a, sb));
     sock_send(cfd, s, strlen(s));
     return 0;
+}
+
+fn sandhi_server_send_204(cfd, extra_headers) {
+    return sandhi_server_send_204_a(default_alloc(), cfd, extra_headers);
 }
 
 # ================================================================
@@ -449,18 +472,23 @@ fn sandhi_server_send_204(cfd, extra_headers) {
 # Transfer-Encoding: chunked. Follow with repeated sandhi_server_send_chunk calls
 # and finish with sandhi_server_send_chunked_end. extra_headers is a cstr of
 # CRLF-terminated header lines or 0.
-fn sandhi_server_send_chunked_start(cfd, code, content_type, extra_headers) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 ");
-    str_builder_add_int(sb, code);
-    str_builder_add_cstr(sb, " OK\r\nContent-Type: ");
-    str_builder_add_cstr(sb, content_type);
-    str_builder_add_cstr(sb, "\r\nTransfer-Encoding: chunked\r\n");
-    if (extra_headers != 0) { str_builder_add_cstr(sb, extra_headers); }
-    str_builder_add_cstr(sb, "Connection: close\r\n\r\n");
-    var head = str_data(str_builder_build(sb));
+fn sandhi_server_send_chunked_start_a(a, cfd, code, content_type, extra_headers) {
+    var sb = str_builder_new_a(a);
+    if (sb == 0) { return 0 - 1; }
+    str_builder_add_cstr_a(a, sb, "HTTP/1.1 ");
+    str_builder_add_int_a(a, sb, code);
+    str_builder_add_cstr_a(a, sb, " OK\r\nContent-Type: ");
+    str_builder_add_cstr_a(a, sb, content_type);
+    str_builder_add_cstr_a(a, sb, "\r\nTransfer-Encoding: chunked\r\n");
+    if (extra_headers != 0) { str_builder_add_cstr_a(a, sb, extra_headers); }
+    str_builder_add_cstr_a(a, sb, "Connection: close\r\n\r\n");
+    var head = str_data(str_builder_build_a(a, sb));
     sock_send(cfd, head, strlen(head));
     return 0;
+}
+
+fn sandhi_server_send_chunked_start(cfd, code, content_type, extra_headers) {
+    return sandhi_server_send_chunked_start_a(default_alloc(), cfd, code, content_type, extra_headers);
 }
 
 # Send one chunk of a chunked-transfer response. Emits the chunk-length

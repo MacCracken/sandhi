@@ -1274,6 +1274,70 @@ fn test_alloc_126_mcp_stream_oom() {
 }
 
 # ================================================================
+# 1.2.7 — Batch G: server `_a` + OOM guards
+# ================================================================
+# `sandhi_server_send_status_a` / `_send_response_a` / `_send_204_a`
+# / `_send_chunked_start_a` paint on `str_builder_*_a`. Same OOM
+# guard pattern as 1.2.6 — `str_builder_new_a` returns 0 on OOM,
+# next `str_builder_add_cstr_a` would deref null.
+#
+# Return shape: `_a` returns 0 on success, -1 on OOM. Bare versions
+# return whatever `_a` returns (always 0 under default_alloc in
+# practice). The OOM path returns -1 before reaching `sock_send`,
+# so we can drive these tests with cfd=-1 (invalid fd, but the OOM
+# return preempts any sock_send call).
+
+fn test_alloc_127g_send_status_oom() {
+    var failer = fail_after_n_allocs(0);
+    # cfd is irrelevant on OOM since we return -1 before sock_send.
+    var rc = sandhi_server_send_status_a(failer, 0 - 1, 200, "OK");
+    assert_eq(rc, 0 - 1, "send_status_a OOM → -1");
+    return 0;
+}
+
+fn test_alloc_127g_send_response_oom() {
+    var failer = fail_after_n_allocs(0);
+    var rc = sandhi_server_send_response_a(failer, 0 - 1, 200, "OK",
+    "application/json", "{}", 2, 0);
+    assert_eq(rc, 0 - 1, "send_response_a OOM → -1");
+    return 0;
+}
+
+fn test_alloc_127g_send_204_oom() {
+    var failer = fail_after_n_allocs(0);
+    var rc = sandhi_server_send_204_a(failer, 0 - 1, 0);
+    assert_eq(rc, 0 - 1, "send_204_a OOM → -1");
+    return 0;
+}
+
+fn test_alloc_127g_send_chunked_start_oom() {
+    var failer = fail_after_n_allocs(0);
+    var rc = sandhi_server_send_chunked_start_a(failer, 0 - 1, 200,
+    "text/event-stream", 0);
+    assert_eq(rc, 0 - 1, "send_chunked_start_a OOM → -1");
+    return 0;
+}
+
+# Arena round-trip: build into the arena, reset, build again. We
+# can't drive sock_send (no server), but we can verify the success
+# path returns 0 and the arena consumed bytes matches expectations.
+# Drive against a closed fd (fd 0 / stdin) — sock_send will fail
+# silently (the existing impls ignore sock_send return), but the
+# `_a` builder's success/OOM logic completes through.
+fn test_alloc_127g_send_status_arena_roundtrip() {
+    var a = arena_allocator(2048);
+    var rc = sandhi_server_send_status_a(a, 0 - 1, 404, "Not Found");
+    # cfd=-1 makes sock_send fail; our impl ignores that. Builder
+    # completed → 0 returned.
+    assert_eq(rc, 0, "send_status_a success returns 0");
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena consumed");
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "reset reclaims");
+    return 0;
+}
+
+# ================================================================
 # Runner
 # ================================================================
 
@@ -1469,6 +1533,21 @@ fn main() {
 
     test_group("alloc/126/mcp_stream_oom");
     test_alloc_126_mcp_stream_oom();
+
+    test_group("alloc/127g/send_status_oom");
+    test_alloc_127g_send_status_oom();
+
+    test_group("alloc/127g/send_response_oom");
+    test_alloc_127g_send_response_oom();
+
+    test_group("alloc/127g/send_204_oom");
+    test_alloc_127g_send_204_oom();
+
+    test_group("alloc/127g/send_chunked_start_oom");
+    test_alloc_127g_send_chunked_start_oom();
+
+    test_group("alloc/127g/send_status_arena_roundtrip");
+    test_alloc_127g_send_status_arena_roundtrip();
 
     return assert_summary();
 }
