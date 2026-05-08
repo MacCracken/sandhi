@@ -150,37 +150,64 @@ No external git deps. sandhi is pure-stdlib-composition.
 
 ## Next
 
-Release sequence toward v5.7.0 fold (see `roadmap.md` for full detail):
+Post-fold release sequence (see `roadmap.md` for full detail):
 
-- **0.7.1** ✅ — quick-wins from the 0.7.0 review
-- **0.7.2** ✅ — reliability + observability: read/write timeouts, retry wrappers, DNS hardening (incl. 4 P1 security items pulled forward), AAAA resolver, opt-in sakshi spans, server idle-timeout
-- **0.7.3** ✅ — `connect_ms` (non-blocking connect via O_NONBLOCK + poll + SO_ERROR) + `total_ms` (monotonic-deadline threading). Full timeout surface complete.
-- **0.8.0** ✅ — HTTP/2 + connection pool (8 bites). Pool + 1.1 keep-alive, full HPACK + Huffman decode, h2 frames + lifecycle, ALPN surface (runtime stubbed), public `sandhi_h2_request` verb.
-- **0.8.1** ✅ — `sandhi_http_request_auto` + per-method auto verbs. Pool h2-take → 1.1 fallback. ALPN-advertise upstream-ask filed.
-- **0.9.0** ✅ — Phase 1 security: 5 P0s from the 0.7.0 audit.
-- **0.9.1** ✅ — Phase 2 P1 sweep: 7 hardening fixes.
-- **0.9.2** ✅ — Pre-fold closeout: server `http_*` → `sandhi_server_*` rename + transitional aliases, first `dist/sandhi.cyr` via `cyrius distlib`, surface freeze in CLAUDE.md.
-- **0.9.3** ✅ — Stub-elimination + CI hardening. All upstream TLS blockers cleared (5.6.39/40/41); ALPN runtime + TLS policy enforcement + mDNS resolver + IPv6 client integration + bracketed IPv6 URLs + retry jitter all wired. Versioning collapsed to `SANDHI_VERSION` literal.
-- **0.9.4** ✅ — Versioning refactor (auto-generated `src/version_str.cyr` via `scripts/version-bump.sh`) + chunked response trailers (RFC 7230 §4.1.2; allowed-list filtering against smuggling vectors).
-- **0.9.5** ✅ — h2 redirect-following hoisted to the auto layer (re-evaluates h2 per hop) + retry routing through `sandhi_http_request_auto` (retries inherit h2 selection).
-- **0.9.6** ✅ — ALPN-driven h2 auto-promotion via `_sandhi_http_try_h2_promote`: open advertising `h2,http/1.1`, branch on `sandhi_conn_alpn_is_h2` (h2 → preface/SETTINGS/cache; 1.1 → donate to pool's 1.1 slot via `_sandhi_pool_has_idle`-gated put). First release where live h2 fires end-to-end via the auto path.
-- **0.9.7** ✅ — `TE: trailers` request signaling on both 1.1 and h2 paths; h2 forbidden filter loosened to allow `te: trailers` (the one value RFC 7540 §8.1.2.2 permits) while still dropping other TE values like `te: gzip`.
-- **0.9.8** ✅ — HPACK Huffman encode wired into `_hpack_string_encode`. Encoder picks Huffman over raw when strictly shorter; byte-exact against the RFC 7541 C.4.1 reference vector.
-- **0.9.9** ✅ — Internal P1 self-audit. Trailer forbidden-name list expanded (Connection / Cookie / Proxy-Authorization). Two findings deferred to 1.0.x for fixup-cap reasons. ALPN, Huffman, redirect cred-strip, h2 forbidden filter all audited and sound.
-- **0.9.10** ✅ — `_sandhi_pool_has_idle` stale-skip hardening. Pool peek now ignores conns past `idle_timeout_ms`, so ALPN promotion fires on routes whose only 1.1 entries are stale.
-- **1.0.0** ✅ (this release) — fold-ready. Transitional `http_*` aliases dropped; surface confirmed against 0.9.2 freeze; final `dist/sandhi.cyr` regenerated for v5.7.0 cyrius release to vendor.
-- **Post-1.0.0** — repo in maintenance mode. The cyrius v5.7.0 release gate checks fold acceptance: consumer repos build against 5.7.0 stdlib without `[deps.sandhi]` pins; `dist/sandhi.cyr` byte-identical to `lib/sandhi.cyr`; no `lib/http_server.cyr` includes survive in AGNOS.
+**Currently shipped** — all releases through 1.1.0 (allocator-as-first-arg
+migration). The fold landed at 1.0.0 (vendored into Cyrius stdlib at v5.7.0);
+1.1.0 was the first post-fold patch.
+
+**Pinned next**:
+
+- **1.1.1** — `Proxy-Authenticate` trailer-forbidden. Single
+  string-literal addition rounding out the proxy-auth pair
+  landed at 0.9.9 (`Proxy-Authorization`). Deferred from
+  the 0.9.9 audit on per-program-fixup-cap grounds; cap
+  re-baselines post-fold.
+- **1.1.2** — Request-builder dup-prevention. Caller-
+  supplied `Host` / `Content-Length` / `Transfer-Encoding` /
+  `Connection` in `user_headers` filtered at build time
+  (symmetric to `sandhi_headers_smuggle_dup` server-side
+  shipped 0.9.1). Implementation prototyped at 0.9.9 but
+  exceeded the per-program fixup cap; cap re-baselines
+  post-fold.
+- **1.2.0** — **true TLS + optimization pass**. Sandhi-side
+  companion to the Cyrius v5.9.x → v5.10.x native-TLS
+  work.
+  - **True TLS**: session-resumption cache in `tls_policy`
+    (long-pinned for "the v5.9.x native-TLS transition"
+    moment); live-network TLS-policy gate (mirrors the
+    cyrius `_tls_live_gate` shape); TLS 1.3 0-RTT opt-in
+    (replay-safe methods only); `tls_connect` native-
+    transport prep (audit hook surface for fdlopen
+    assumptions).
+  - **Optimization pass**: hot-path allocator review
+    (1.1.0 `_a`-variants in per-request paths); HPACK
+    Huffman tie-break for short tokens; `_sandhi_resp_new`
+    allocation collapse; connection-pool LRU eviction
+    behind option flag; **`_sandhi_conn_connect_nb`
+    factoring candidate** — Cyrius v5.9.42 added
+    `regression_network_probe` in `lib/regression.cyr`
+    with same non-blocking-connect+poll+SO_ERROR
+    mechanics; decide at slot entry whether to factor
+    a shared `net_connect_nb` primitive or leave the
+    parallel impls intentional.
+
+**Post-1.2.0** — items wait for their unblock signal
+(consumer ask / stdlib prerequisite / profile evidence).
+See `roadmap.md` for the full bucket list.
 
 **Under-v1 milestone back-matter**:
 
-All M2–M5 must land before the Cyrius v5.7.0 fold event (public surface freezes at fold per ADR 0002).
-
 1. ~~**M1 — `lib/http_server.cyr` lift-and-shift.**~~ ✅ landed 2026-04-24 (v0.2.0).
-2. ~~**M2 — `sandhi::http::client` real implementation.**~~ ✅ landed 2026-04-24 (v0.3.0). HTTPS runtime still blocked on stdlib TLS-init (see issue doc); compiles clean, runs fine over plain HTTP.
+2. ~~**M2 — `sandhi::http::client` real implementation.**~~ ✅ landed 2026-04-24 (v0.3.0).
 3. ~~**M3 — `sandhi::rpc` WebDriver + Appium + MCP.**~~ ✅ landed 2026-04-24 (v0.4.0).
-3.5. ~~**M3.5 — SSE streaming.**~~ ✅ landed 2026-04-24 (v0.7.0). WHATWG SSE parser, incremental chunked decode, callback-per-event dispatch, MCP-over-SSE wrapper. Verified against synthetic byte streams; live-HTTPS SSE waits on the libssl pthread-lock fix like every other HTTPS path.
-4. ~~**M4 — `sandhi::discovery` chain resolver + daimon integration.**~~ ✅ landed 2026-04-24 (v0.5.0). Service + resolver vocabulary, chain fallback, daimon HTTP resolver, register/deregister. **Cross-repo**: daimon-side registry endpoints are specified but not yet committed to daimon's roadmap — coordination doc at `docs/issues/2026-04-24-daimon-registry-endpoints.md`. mDNS lookup stubbed — impl awaits multicast primitives in stdlib net.cyr.
-5. ~~**M5 — `sandhi::tls_policy` cert pinning + mTLS.**~~ ✅ **surface** landed 2026-04-24 (v0.6.0). Policy constructors, fingerprint helpers, `sandhi_conn_open_with_policy` integration point all shipped + unit-tested. **Enforcement stubbed** pending stdlib TLS-init fix — filling in is a focused ~50-line patch (exact OpenSSL calls enumerated in `src/tls_policy/apply.cyr` TODO list). Native TLS transition at Cyrius v5.9.x is a transport swap beneath this policy surface — no consumer-facing API change.
-6. **Fold-into-stdlib at v5.7.0** — one event: stdlib deletes `lib/http_server.cyr`, adds `lib/sandhi.cyr`, consumers migrate their includes in the same release. 5.6.YY releases carry the deprecation warning. Checked at the Cyrius release gate, not in this repo.
+3.5. ~~**M3.5 — SSE streaming.**~~ ✅ landed 2026-04-24 (v0.7.0).
+4. ~~**M4 — `sandhi::discovery` chain resolver + daimon integration.**~~ ✅ landed 2026-04-24 (v0.5.0). Cross-repo daimon-side registry endpoints still tracked at `docs/issues/2026-04-24-daimon-registry-endpoints.md`. mDNS lookup stubbed — impl awaits multicast primitives in stdlib net.cyr.
+5. ~~**M5 — `sandhi::tls_policy` cert pinning + mTLS.**~~ ✅ **surface** landed 2026-04-24 (v0.6.0); enforcement filled in 0.9.3. Native-TLS-transport audit pinned for 1.2.0 (no consumer-facing API change expected).
+6. ~~**M6 — Fold-into-stdlib at v5.7.0.**~~ ✅ landed at sandhi 1.0.0 / Cyrius v5.7.0.
 
-Receipts-oriented: sandhi's fold-into-stdlib moment is the anchor for a short-form article ("sandhi folded — the service-boundary layer has a home") in the same micro-article shape as [what-5.5.x-taught-5.6.x.md](https://github.com/MacCracken/agnosticos/blob/main/docs/articles/what-5.5.x-taught-5.6.x.md) and [micro-work-and-agent-deferment.md](https://github.com/MacCracken/agnosticos/blob/main/docs/articles/micro-work-and-agent-deferment.md). Outlined at fold time, not before.
+Receipts-oriented: sandhi's fold-into-stdlib moment shipped 2026-04-25; the
+short-form article ("sandhi folded — the service-boundary layer has a home")
+in the [what-5.5.x-taught-5.6.x.md](https://github.com/MacCracken/agnosticos/blob/main/docs/articles/what-5.5.x-taught-5.6.x.md) /
+[micro-work-and-agent-deferment.md](https://github.com/MacCracken/agnosticos/blob/main/docs/articles/micro-work-and-agent-deferment.md)
+shape is still pending.

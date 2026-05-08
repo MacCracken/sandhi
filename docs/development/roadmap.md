@@ -1,23 +1,25 @@
 # sandhi — Roadmap
 
-> Forward-looking sequencing toward fold-into-Cyrius-stdlib. State
-> lives in [`state.md`](state.md); shipped releases live in
+> Forward-looking sequencing post-fold. State lives in
+> [`state.md`](state.md); shipped releases live in
 > [`../../CHANGELOG.md`](../../CHANGELOG.md). This file is the
 > remaining work.
 
-## Guiding objective
+## Guiding objective (post-fold)
 
-**Fold into Cyrius stdlib at v5.7.0** via a clean-break fold (see
-[ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)) —
-revised from the original "before v5.6.x closeout" target. At
-v5.7.0 stdlib deletes `lib/http_server.cyr` and gains
-`lib/sandhi.cyr` in one event; 5.6.YY releases emit a deprecation
-warning on any include of `lib/http_server.cyr`. The public surface
-is frozen at 0.9.2 per [ADR 0005](../adr/0005-public-surface-freeze-at-0-9-2.md):
-between 0.9.2 and 1.0.0 no new public verbs land, since every name
-becomes a permanent stdlib API at fold time.
+**Fold landed at Cyrius v5.7.0 (sandhi 1.0.0)** per [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md).
+Cyrius stdlib vendors `dist/sandhi.cyr` as `lib/sandhi.cyr`;
+consumers `include "lib/sandhi.cyr"` and drop their
+`[deps.sandhi]` pins.
 
-## Shipped (M0 through 0.9.9)
+This repo is now in **post-fold maintenance**. Patches still
+land here first — `dist/sandhi.cyr` is regenerated and the
+cyrius-side `lib/sandhi.cyr` refresh is a small cyrius slot
+that picks up the change. The public surface is no longer
+frozen (ADR 0005's freeze applied "between 0.9.2 and 1.0.0";
+post-fold patches are explicitly allowed per the 1.1.0 ship).
+
+## Shipped (M0 through 1.1.0)
 
 Compressed log — one line per release. CHANGELOG carries the
 details, state.md the current snapshot.
@@ -45,56 +47,158 @@ details, state.md the current snapshot.
 - **0.9.8** — HPACK Huffman encode wired into `_hpack_string_encode`; byte-exact RFC 7541 C.4.1 reference
 - **0.9.9** — internal P1 self-audit: trailer forbidden list expanded; ALPN/Huffman/redirect/h2 filter audited sound
 - **0.9.10** — pool stale-skip hardening: `_sandhi_pool_has_idle` peek now ignores conns past `idle_timeout_ms` so ALPN promotion fires deterministically
+- **1.0.0** — fold-ready release. Transitional `http_*` aliases dropped; final `dist/sandhi.cyr` regenerated; vendored into Cyrius stdlib at v5.7.0
+- **1.1.0** — allocator-as-first-arg migration. 6 commit-sized bites; ~150 new `_a` public verbs alongside back-compat wrappers. Toolchain pin 5.6.41 → 5.8.36. 792 assertions green (482 sandhi + 167 h2 + 143 alloc)
 
-## What's left
+## What's next
 
-### M6 — Fold into Cyrius stdlib (v1.0.0) — clean-break at v5.7.0
+### 1.1.x — post-fold patch window (deferred-from-audit + small fixups)
 
-*Per [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md): one event at the Cyrius v5.7.0 release gate, not a separate sandhi milestone. The 5.6.YY window is the notice period; 5.7.0 is the cutover.*
+*Small, well-scoped patches that don't fit the optimization-
+pass shape of 1.2.0. Each ships independently when ready.
+The 1.0.x window's per-program-fixup-cap deferrals re-baseline
+post-fold (consumers' tests no longer re-concatenate sandhi's
+`src/`), so both items below land cleanly here.*
 
-**Pre-fold (this repo)**:
-- Documentation pass — confirm CLAUDE.md / state.md / roadmap.md / CHANGELOG / ADRs all reflect 0.9.9 final state
-- Public-surface freeze confirmation — re-walk every `sandhi_*` name against the 0.9.2 surface; nothing leaked in 0.9.3-0.9.9
-- Final `dist/sandhi.cyr` regeneration via `cyrius distlib` — this is the bundle stdlib vendors
-- Consumer pin uplift coordination via `docs/issues/` paste-ready docs (yantra, daimon, hoosh, ifran, sit, ark, mela, vidya)
+- **1.1.1 — `Proxy-Authenticate` trailer-forbidden** —
+  rounds out the proxy-auth pair landed at 0.9.9
+  (`Proxy-Authorization`). Single string-literal addition;
+  lower priority than the three landed names since it's a
+  response challenge, not an injectable credential vector.
+  Also unblocks the symmetric position in the
+  forbidden-name lists across client and server paths.
+- **1.1.2 — Request-builder dup-prevention** —
+  caller-supplied `Host` / `Content-Length` /
+  `Transfer-Encoding` / `Connection` in `user_headers`
+  currently emit alongside the auto-injected versions,
+  creating dup-header smuggling vectors on the wire.
+  Server-side counterpart (`sandhi_headers_smuggle_dup`)
+  landed at 0.9.1; this is the symmetric client-side
+  filter applied at build time. Implementation prototyped
+  at 0.9.9 but tipped the per-program fixup cap. Cap re-
+  baselines post-fold.
 
-**v5.7.0 (the fold event, on the cyrius-side)**:
-- Cyrius stdlib adds `lib/sandhi.cyr` vendored from `dist/sandhi.cyr`
-- Cyrius stdlib deletes `lib/http_server.cyr` — no alias, no passthrough, no empty stub
-- Downstream consumers' 5.7.0-compatible tags switch `include "lib/http_server.cyr"` → `include "lib/sandhi.cyr"`, and any `[deps.sandhi]` pin is dropped
-- sandhi repo enters maintenance mode; subsequent patches land via the Cyrius release cycle
+Either of these can absorb additional small patches when a
+consumer files something — the 1.1.x window is intentionally
+a "small fixes" lane separate from 1.2.0's optimization pass.
 
-**Acceptance** (checked at the 5.7.0 release gate, not in this repo):
-- Consumer repos (yantra, hoosh, ifran, daimon, mela, vidya, sit-remote, ark-remote) build against 5.7.0 stdlib without `[deps.sandhi]` pins
-- `dist/sandhi.cyr` is byte-identical to `lib/sandhi.cyr` at the fold commit
-- No include of `lib/http_server.cyr` survives anywhere in AGNOS
+### 1.2.0 — true TLS + optimization pass
 
-### Post-v1 (1.0.x stdlib-patch window)
+**Theme**: take TLS from "wired up over fdlopen-libssl" to
+"production-grade across the policy surface", paired with a
+profile-driven optimization pass on the hot paths. This is
+the natural sandhi-side companion to the Cyrius v5.9.x →
+v5.10.x native-TLS work.
 
-*The fold freezes the public surface, so anything below lands via
-the Cyrius release cycle, not sandhi's. Items grouped by trigger.*
+**True TLS work**:
 
-**Deferred from the 0.9.9 audit** — both prototyped, both ran into
-`tests/sandhi.tcyr`'s per-program fixup cap (architecture/001).
-Once sandhi is folded into `lib/sandhi.cyr`, the per-program cap
-re-baselines (consumers' tests no longer re-concatenate all of
-sandhi's src), so both land cleanly as 1.0.x patches.
+- **Session-resumption cache in `tls_policy`** — long-pinned
+  ("right moment is the v5.9.x native-TLS transition" per
+  the M5 closeout note). Sandhi-side cache holds session
+  tickets (TLS 1.3) / session IDs (TLS 1.2) keyed by
+  `(host, port, alpn)`; hands them to `tls_connect` on
+  reuse. Closes a meaningful TTFB gap on repeated requests
+  to the same authority. Keying must respect the 0.9.0
+  cred-strip rules (no resumption across different
+  authentication contexts).
+- **Live-network TLS-policy gate** — exercise the four
+  policy modes (`default` / `pinned` / `mtls` /
+  `trust_store`) end-to-end against real endpoints, not
+  synthetic fixtures. The `pinned` and `trust_store`
+  modes shipped at 0.6.0 with surface tests; `mtls` is
+  unverified post-stub-fill (0.9.3). Add a probe-style
+  test (mirroring the cyrius `_tls_live_gate` shape) so
+  regressions in the policy-enforcement path don't sneak
+  past unit tests.
+- **TLS 1.3 0-RTT (early data) — opt-in** — only for
+  GET / HEAD / OPTIONS where the request is replay-safe
+  per RFC 8446 §8. Behind an explicit options flag
+  (`sandhi_http_options_allow_0rtt`) — the replay-attack
+  surface means default-off is the only safe default.
+  Pairs with session-resumption since 0-RTT requires a
+  cached session.
+- **`tls_connect` native-transport prep** — when Cyrius
+  ships native TLS (v5.10.x or later — currently
+  fdlopen-libssl), the `tls_connect_with_ctx_hook` /
+  ALPN / SNI / SPKI surfaces need to keep working
+  byte-identical. Audit the hook surface for any
+  fdlopen-leaning assumptions; document the ones that
+  must hold across the transport swap. No code change
+  in this slot if the hook surface is already
+  abstraction-clean — but the audit itself is a real
+  deliverable.
 
-- **Trailer-forbidden list — `Proxy-Authenticate`** — would round
-  out the proxy-auth pair landed at 0.9.9 (`Proxy-Authorization`).
-  Single string-literal addition; lower priority than the three
-  landed names since it's a response challenge to the client, not
-  an injectable credential vector.
-- **Request-builder dup-prevention** — caller-supplied `Host` /
-  `Content-Length` / `Transfer-Encoding` / `Connection` in
-  `user_headers` currently emit alongside the auto-injected
-  versions, creating dup-header smuggling vectors on the wire. The
-  server-side counterpart (`sandhi_headers_smuggle_dup`) landed at
-  0.9.1; this is the symmetric client-side filter applied at build
-  time. Implementation prototyped in 0.9.9 as a hand-rolled byte
-  compare in `_sandhi_client_name_is_reserved` (no string literals)
-  but the per-character bit ops still tipped the cap. Caller
-  currently owns the contract — don't pass these in `user_headers`.
+**Optimization pass** (each item: profile first, justify
+with numbers):
+
+- **Hot-path allocator review** — the 1.1.0 `_a`-variant
+  surface lets consumers pass arena allocators; sandhi's
+  internal helpers default to `default_alloc()` for
+  process-wide singletons (HPACK static / Huffman tree /
+  ALPN literals) but per-request data should ride the
+  caller's arena. Walk `src/http/` + `src/rpc/` looking
+  for cases where back-compat wrappers (calling
+  `default_alloc()`) leak into per-request paths.
+- **HPACK Huffman tie-break for short tokens** — current
+  encoder picks Huffman over raw when *strictly* shorter;
+  ties go to raw. Some short cookies / opaque tokens
+  benefit from a tie-breaker that favors Huffman to keep
+  dynamic-table state more compact. Profile-gated.
+- **`_sandhi_resp_new` allocation collapse** — the
+  central response-builder allocates header storage,
+  body buffer, and Str header separately. If the call
+  shape is hot enough, fuse into a single allocation
+  with internal offset slicing.
+- **Connection-pool LRU eviction** — current pool evicts
+  on idle-timeout only; under sustained pressure the
+  oldest-but-recently-touched entries can hold slots
+  that newer routes would benefit from. LRU policy
+  behind an option flag; default keeps current
+  semantics until profiling shows benefit.
+- **`_sandhi_conn_connect_nb` factoring candidate
+  (Cyrius v5.9.42)** — Cyrius v5.9.42 carved out
+  `lib/regression.cyr` and exposes
+  `regression_network_probe(addr_ipv4, port,
+  timeout_ms)` — same non-blocking-connect + poll +
+  SO_ERROR-readback mechanics as sandhi's
+  `_sandhi_conn_connect_nb` in
+  [`src/http/conn.cyr`](https://github.com/MacCracken/sandhi/blob/main/src/http/conn.cyr).
+  Two reasonable directions, decide at slot entry:
+  (a) factor sandhi's helper into a stdlib-shaped
+      `net_connect_nb(fd, addr, port, timeout_ms)`
+      primitive in `lib/net.cyr` (or a new
+      `lib/net_extra.cyr`), then `regression_network_probe`
+      compose-uses it for its socket+probe shape.
+      Cleaner, but a stdlib API addition that needs
+      its own slot in the cyrius cycle.
+  (b) leave sandhi's helper as is; just document the
+      shape duplication so future readers know both
+      exist. No code change.
+  Default to (b) unless profiling surfaces a hot-path
+  reason to extract (which it likely won't —
+  connect-nb runs once per conn-open, not per
+  request). Either way, document the choice in the
+  slot's CHANGELOG so the parallel evolution is
+  intentional rather than accidental.
+
+**Acceptance criteria for 1.2.0**:
+- Session resumption cache hits documented via the
+  existing `sakshi.tracing` boundaries (no new public
+  span verbs).
+- Live-network TLS policy gate runs in CI with the
+  same skip-cleanly cascade as the cyrius
+  `_tls_live_gate` (cc5 / dlopen-helper / network /
+  upstream cert reachable).
+- 0-RTT path verified against a known TLS 1.3 endpoint;
+  default-off behavior unchanged from 1.1.x.
+- At least one optimization-pass item lands with a
+  measured improvement; the others can defer to
+  1.2.1+ or stay parked under "profile-grade".
+
+### Post-1.2.0 — wait-for-trigger
+
+*Same shape as before — items grouped by what unblocks
+them, not by version pin.*
 
 **Wait-for-second-consumer-ask**:
 
@@ -106,13 +210,11 @@ sandhi's src), so both land cleanly as 1.0.x patches.
 **Wait-for-stdlib-prerequisite**:
 
 - **mDNS lookup + publishing** — blocked on stdlib `net.cyr` multicast primitives (`IP_ADD_MEMBERSHIP` / `IP_MULTICAST_TTL` / `IP_MULTICAST_LOOP` / `SO_REUSEPORT` / `IP_MULTICAST_IF`). Request as a targeted stdlib patch when multicast becomes a priority for any consumer. The 0.9.3 unicast-response (QU bit) implementation works against most responders without multicast support.
-- **Session-resumption cache in tls_policy** — right moment is the v5.9.x native-TLS transition.
 - **Fuzzing harness** — Cyrius toolchain doesn't ship AFL/libFuzzer equivalent yet. Revisit when it does.
 
 **Optimization-grade, profile first**:
 
-- **HPACK Huffman encode for short binary tokens** — current encoder picks Huffman over raw when strictly shorter; ties go to raw. Some short cookies / opaque tokens could benefit from a tie-breaker that favors Huffman to keep dynamic-table state more compact. Wait for evidence.
-- **Arena-per-request allocator** — profile first; stdlib `alloc` may already be a bump allocator under the hood.
+- **Arena-per-request allocator** — the 1.1.0 `_a`-variant surface enables this; consumer-side opt-in. Profile the alloc traffic on a real workload before evangelizing.
 - **SIMD / hot-path micro-optimization** — Cyrius has no SIMD intrinsics; byte-at-a-time is perfectly adequate at SSE / HTTP / HPACK parsing rates observed so far.
 
 **Won't ship without strong cause**:
@@ -122,7 +224,7 @@ sandhi's src), so both land cleanly as 1.0.x patches.
 
 ## What sandhi does NOT plan to do
 
-Explicit non-goals (to survive the fold-into-stdlib filter):
+Explicit non-goals (preserved from pre-fold; still hold):
 
 - **Reimplement network primitives.** Those stay in stdlib.
 - **Ship its own config parser.** Stdlib `cyml.cyr` / `toml.cyr` handle that.
@@ -132,6 +234,15 @@ Explicit non-goals (to survive the fold-into-stdlib filter):
 
 ## Why this roadmap exists
 
-The fold-into-stdlib target is aggressive — sandhi's sibling-crate phase is the 5.6.x window, with the fold happening in one event at the v5.7.0 release gate. That constraint forced scope discipline through the 0.x sequence: minimum viable + what existing consumers actually need + nothing speculative. M6's acceptance criteria are checked at the 5.7.0 release gate by existing repos continuing to build, not by new features landing in this repo.
+Pre-fold, this file documented the path to v5.7.0. Post-fold,
+its job is keeping the post-v1 patch window honest:
+1.1.x catches small deferrals from the freeze period; 1.2.0
+is the first real new-work release (true TLS + optimization);
+beyond that, items wait for their unblock signal rather than
+landing speculatively.
 
-See [ADR 0001](../adr/0001-sandhi-is-a-composer-not-a-reimplementer.md) for the naming + thesis, [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md) for the clean-break fold decision, [ADR 0005](../adr/0005-public-surface-freeze-at-0-9-2.md) for the surface freeze, and [`state.md`](state.md) for live progress.
+See [ADR 0001](../adr/0001-sandhi-is-a-composer-not-a-reimplementer.md)
+for the naming + thesis, [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)
+for the (now-shipped) clean-break fold decision, [ADR 0005](../adr/0005-public-surface-freeze-at-0-9-2.md)
+for the surface freeze (now lifted post-1.0.0), and
+[`state.md`](state.md) for live progress.
