@@ -52,6 +52,7 @@ details, state.md the current snapshot.
 - **1.1.1** — `Proxy-Authenticate` trailer-forbidden (rounds out 0.9.9 proxy-auth pair); toolchain pin 5.8.36 → 5.10.0 (mechanical, profile-instrumentation only); CI fmt-check fix (broken `diff <(... --check) FILE` always reported drift — read exit code instead)
 - **1.1.2** — request-builder dup-prevention. `_sandhi_client_build_request_v` filters caller-supplied `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` out of `user_headers` (symmetric to `sandhi_headers_smuggle_dup` server-side at 0.9.1). 21-assert probe at `programs/_dup_prevention_probe.cyr`. 1.1.x small-fixes lane closed.
 - **1.2.0** — hot-path allocator review Batch A: audit findings + request-orchestrator foundation. Audit found the 1.1.0 leaf-level migration was clean (zero `_a` fns calling bare paired helpers); the real leak was the *orchestration layer* above the leaves having no `_a` counterparts. Fixed buggy `_sandhi_client_build_request_a` (was dropping `a` on the floor); added `_a` variants for `_sandhi_http_do` / `_do_impl` / `_dispatch` / `_exchange` / `_exchange_keepalive` + `_sandhi_client_build_request_va`. Cyrius/lib.tls.cyr native-transport prep dropped from sandhi (filed cyrius-side instead). 804 assertions green (482 + 167 + 155).
+- **1.2.1** — Batches B + C bundled: redirect-following + auto-dispatch + retry threading. Closes 1.2.0's partial-arena leaks. New `_a` variants: `_sandhi_http_follow_a`, `_sandhi_strip_sensitive_headers_a`, `_sandhi_http_try_h2_promote_a`, `_sandhi_http_auto_once_a`, `_sandhi_http_auto_follow_a`, `sandhi_http_request_auto_a`, `_sandhi_http_retry_a`. Bundled per cyrius v5.10.0 "items sharing the same cascade" rule (retry calls auto). 824 assertions green (482 + 167 + 175).
 
 ## What's next
 
@@ -106,21 +107,27 @@ literals, HPACK static, Huffman tree, server `_hsv_req_buf`
 documented at their callsites as intentional, not leaks.
 
 **Batches still to land** (each its own slot per the
-ONE-thing principle):
+ONE-thing principle, modulo cascade-bundling like 1.2.1
+demonstrated):
 
-- **1.2.1 — Batch B**: `_sandhi_http_follow_a` +
-  `_sandhi_http_retry_a`. Closes the partial-arena leak on
-  `follow=1` and `_retry` callers (1.2.0 left those paths
-  on `default_alloc()` as documented Batch A scope-out).
-- **1.2.2 — Batch C**: `_sandhi_http_auto_*_a` family
-  (`_auto_once`, `_auto_follow`, `_try_h2_promote`).
-- **1.2.3 — Batch D**: top-level public verbs
-  (`sandhi_http_get_a` / `_post_a` / `_put_a` / `_patch_a`
-  / `_delete_a` / `_head_a`). First slot where consumer-
-  visible end-to-end arena adoption ships.
-- **1.2.4 — Batch E**: `_opts` / `_retry` / `_auto`
+- ~~**1.2.1 — Batches B + C bundled**~~ ✅ shipped
+  2026-05-08. Discovered at slot entry that retry's
+  cascade depends on the auto path (it's been calling
+  `sandhi_http_request_auto` since 0.9.5 for h2 pool
+  selection); user-direction bundled the two cascades
+  rather than route retry through the older
+  `_sandhi_http_dispatch` and regress h2 selection
+  temporarily.
+- **1.2.2 — Batch D**: top-level public verbs
+  (`sandhi_http_get_a` / `_post_a` / `_put_a` /
+  `_patch_a` / `_delete_a` / `_head_a`). First slot
+  where consumer-visible end-to-end arena adoption
+  ships. Post-1.2.1, the internal cascade is fully
+  `_a`-threaded; Batch D just paints the public-verb
+  wrappers on top — should be a clean, small slot.
+- **1.2.3 — Batch E**: `_opts` / `_retry` / `_auto`
   user-facing variants.
-- **1.2.5 — Batch F**: RPC dialect entries
+- **1.2.4 — Batch F**: RPC dialect entries
   (`sandhi_rpc_mcp_call` and friends).
 
 #### 1.2.x — optimization candidates (profile-justified)

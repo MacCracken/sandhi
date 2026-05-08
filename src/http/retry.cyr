@@ -116,12 +116,22 @@ fn _sandhi_retry_should_retry(response) {
 # conn for the route, the retry uses h2; otherwise it falls back to
 # the 1.1 path. Pre-0.9.5 retries went straight to
 # `_sandhi_http_dispatch` and were 1.1-only regardless of pool state.
-fn _sandhi_http_retry(method, url, user_headers, body, body_len, opts, retry) {
+# 1.2.1: `_a` threads `a` through every attempt (each call to
+# sandhi_http_request_auto_a routes through the auto-dispatch path
+# that itself threads `a` to per-hop _do_a / sandhi_h2_request_a /
+# pool_take_h2 routes uniformly). One subtle note: each attempt's
+# response struct lives in `a`; if the caller plans to inspect the
+# *intermediate* failed response between retries, they must save
+# its data before the next attempt — sandhi may overwrite the arena
+# bytes when an arena_allocator is reused. Practically retry callers
+# only inspect the last response, which the back-compat shape
+# already returns.
+fn _sandhi_http_retry_a(a, method, url, user_headers, body, body_len, opts, retry) {
     var attempts = _sandhi_retry_attempts(retry);
     var backoff = _sandhi_retry_initial(retry);
     var max_backoff = _sandhi_retry_max(retry);
     var tried = 0;
-    var r = sandhi_http_request_auto(method, url, user_headers, body, body_len, opts);
+    var r = sandhi_http_request_auto_a(a, method, url, user_headers, body, body_len, opts);
     tried = 1;
     while (tried < attempts) {
         if (_sandhi_retry_should_retry(r) == 0) { return r; }
@@ -130,10 +140,14 @@ fn _sandhi_http_retry(method, url, user_headers, body, body_len, opts, retry) {
         _sandhi_retry_jitter_sleep(ceiling);
         backoff = backoff * 2;
         if (backoff > max_backoff) { backoff = max_backoff; }
-        r = sandhi_http_request_auto(method, url, user_headers, body, body_len, opts);
+        r = sandhi_http_request_auto_a(a, method, url, user_headers, body, body_len, opts);
         tried = tried + 1;
     }
     return r;
+}
+
+fn _sandhi_http_retry(method, url, user_headers, body, body_len, opts, retry) {
+    return _sandhi_http_retry_a(default_alloc(), method, url, user_headers, body, body_len, opts, retry);
 }
 
 # ================================================================

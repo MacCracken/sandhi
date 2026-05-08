@@ -20,6 +20,10 @@ include "src/http/h2/huffman.cyr"
 include "src/http/h2/hpack.cyr"
 include "src/http/h2/frame.cyr"
 include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
 include "src/http/sse.cyr"
 include "src/http/stream.cyr"
 include "src/http/retry.cyr"
@@ -702,6 +706,108 @@ fn test_alloc_120a_build_request_oom() {
 }
 
 # ================================================================
+# 1.2.1 — Batch B+C: redirect / retry / auto-dispatch path
+# ================================================================
+# Closes the partial-arena leak 1.2.0 left on `follow=1` and the
+# auto-dispatch / retry paths. `_a` variants now exist for
+# `_sandhi_http_follow`, `_sandhi_http_auto_once`,
+# `_sandhi_http_auto_follow`, `sandhi_http_request_auto`,
+# `_sandhi_http_retry`, `_sandhi_http_try_h2_promote`, and
+# `_sandhi_strip_sensitive_headers`. Bare versions stay as
+# back-compat wrappers passing `default_alloc()`.
+
+# strip_sensitive_headers — arena alloc + reset.
+fn test_alloc_121bc_strip_sensitive_arena() {
+    var a = arena_allocator(2048);
+    var src = sandhi_headers_new_a(a);
+    sandhi_headers_set_a(a, src, "Authorization", "Bearer xyz");
+    sandhi_headers_set_a(a, src, "X-Trace", "ok");
+    sandhi_headers_set_a(a, src, "Cookie", "sid=abc");
+
+    var stripped = _sandhi_strip_sensitive_headers_a(a, src);
+    assert_eq(stripped != 0, 1, "strip returns a fresh block");
+    assert_eq(sandhi_headers_count(stripped), 1, "only X-Trace survives");
+    assert_eq(sandhi_headers_get(stripped, "Authorization"), 0, "Authorization stripped");
+    assert_eq(sandhi_headers_get(stripped, "Cookie"), 0, "Cookie stripped");
+    assert_streq(sandhi_headers_get(stripped, "X-Trace"), "ok", "X-Trace passes");
+
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena consumed");
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "arena reset");
+    return 0;
+}
+
+# strip_sensitive_headers — OOM on the new headers block returns 0
+# cleanly without crashing on the subsequent add_a calls.
+fn test_alloc_121bc_strip_sensitive_oom() {
+    var a = arena_allocator(2048);
+    var src = sandhi_headers_new_a(a);
+    sandhi_headers_set_a(a, src, "X-Trace", "ok");
+
+    var failer = fail_after_n_allocs(0);
+    var stripped = _sandhi_strip_sensitive_headers_a(failer, src);
+    assert_eq(stripped, 0, "OOM at fresh-block alloc → returns 0");
+    return 0;
+}
+
+# follow_a — driver-level err-resp goes into the arena. Drive against
+# an unparseable URL (no Location header to follow) so we exercise the
+# arena-bound `_do_a` call inside follow_a and the err-resp it builds.
+fn test_alloc_121bc_follow_err_resp_arena() {
+    var a = arena_allocator(4096);
+    var resp = _sandhi_http_follow_a(a, "GET", "not-a-valid-url", 0, 0, 0,
+    5, 0, 0, 0, 0, 0, 0);
+    assert_eq(resp != 0, 1, "follow_a constructed err-resp");
+    assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE, "URL parse fail");
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena consumed by follow_a path");
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "arena reset");
+    return 0;
+}
+
+# auto_once_a — pool=0 (no pool) path falls through to _do_a; with an
+# unparseable URL we exercise the err-resp construction.
+fn test_alloc_121bc_auto_once_err_resp_arena() {
+    var a = arena_allocator(4096);
+    var opts = sandhi_http_options_new_a(a);
+    var resp = _sandhi_http_auto_once_a(a, "GET", "not-a-valid-url", 0, 0, 0, opts);
+    assert_eq(resp != 0, 1, "auto_once_a constructed err-resp");
+    assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE, "URL parse fail");
+    return 0;
+}
+
+# request_auto_a — opts with follow=0 routes through auto_once_a;
+# arena threads end-to-end.
+fn test_alloc_121bc_request_auto_arena() {
+    var a = arena_allocator(4096);
+    var opts = sandhi_http_options_new_a(a);
+    var resp = sandhi_http_request_auto_a(a, "GET", "garbage://x", 0, 0, 0, opts);
+    assert_eq(resp != 0, 1, "request_auto_a built err-resp");
+    assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE, "URL parse fail");
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena consumed");
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "arena reset reclaims");
+    return 0;
+}
+
+# retry_a — single attempt against a failing URL (PARSE is non-
+# retryable per `_sandhi_retry_should_retry`, so the loop returns
+# immediately after the first attempt). Arena threads through.
+fn test_alloc_121bc_retry_non_retryable_arena() {
+    var a = arena_allocator(4096);
+    var opts = sandhi_http_options_new_a(a);
+    var policy = sandhi_retry_new_a(a);
+    var resp = _sandhi_http_retry_a(a, "GET", "garbage://x", 0, 0, 0, opts, policy);
+    assert_eq(resp != 0, 1, "retry_a returned a response");
+    assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE,
+    "PARSE is non-retryable; first attempt returned");
+    return 0;
+}
+
+# ================================================================
 # Runner
 # ================================================================
 
@@ -798,6 +904,24 @@ fn main() {
 
     test_group("alloc/120a/build_request_oom");
     test_alloc_120a_build_request_oom();
+
+    test_group("alloc/121bc/strip_sensitive_arena");
+    test_alloc_121bc_strip_sensitive_arena();
+
+    test_group("alloc/121bc/strip_sensitive_oom");
+    test_alloc_121bc_strip_sensitive_oom();
+
+    test_group("alloc/121bc/follow_err_resp_arena");
+    test_alloc_121bc_follow_err_resp_arena();
+
+    test_group("alloc/121bc/auto_once_err_resp_arena");
+    test_alloc_121bc_auto_once_err_resp_arena();
+
+    test_group("alloc/121bc/request_auto_arena");
+    test_alloc_121bc_request_auto_arena();
+
+    test_group("alloc/121bc/retry_non_retryable_arena");
+    test_alloc_121bc_retry_non_retryable_arena();
 
     return assert_summary();
 }

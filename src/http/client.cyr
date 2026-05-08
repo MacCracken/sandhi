@@ -723,9 +723,10 @@ fn _sandhi_url_is_https_downgrade(prev_url, next_url) {
 # `Authorization`, `Cookie`, and `Proxy-Authorization` stripped.
 # Used when a redirect crosses authorities — the caller's secret
 # wasn't intended for the new origin.
-fn _sandhi_strip_sensitive_headers(src) {
+fn _sandhi_strip_sensitive_headers_a(a, src) {
     if (src == 0) { return 0; }
-    var out = sandhi_headers_new();
+    var out = sandhi_headers_new_a(a);
+    if (out == 0) { return 0; }
     var n = sandhi_headers_count(src);
     var i = 0;
     while (i < n) {
@@ -735,10 +736,14 @@ fn _sandhi_strip_sensitive_headers(src) {
         if (_sandhi_streq_ci(name, "authorization") == 1)        { keep = 0; }
         if (_sandhi_streq_ci(name, "cookie") == 1)               { keep = 0; }
         if (_sandhi_streq_ci(name, "proxy-authorization") == 1)  { keep = 0; }
-        if (keep == 1) { sandhi_headers_add(out, name, value); }
+        if (keep == 1) { sandhi_headers_add_a(a, out, name, value); }
         i = i + 1;
     }
     return out;
+}
+
+fn _sandhi_strip_sensitive_headers(src) {
+    return _sandhi_strip_sensitive_headers_a(default_alloc(), src);
 }
 
 # Redirect-following driver. Keep compact — each iteration reassigns
@@ -759,7 +764,7 @@ fn _sandhi_strip_sensitive_headers(src) {
 #     original authority gets the full headers again. (curl does
 #     the same; matches RFC 7235 §2.2 spirit even though the spec
 #     doesn't mandate.)
-fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
+fn _sandhi_http_follow_a(a, method, url, headers, body, body_len, max_hops,
 max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
     var m = method;
     var u = url;
@@ -767,13 +772,13 @@ max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
     var bl = body_len;
     var h = headers;
     var hops = 0;
-    var r = _sandhi_http_do(m, u, h, b, bl, max_bytes,
+    var r = _sandhi_http_do_a(a, m, u, h, b, bl, max_bytes,
     connect_ms, read_ms, write_ms, total_ms, pool);
     while (hops < max_hops) {
         if (_sandhi_is_redirect(sandhi_http_status(r)) == 0) { return r; }
         var loc = sandhi_headers_get(sandhi_http_headers(r), "Location");
         if (loc == 0) { return r; }
-        var next = _sandhi_resolve_location(u, loc);
+        var next = _sandhi_resolve_location_a(a, u, loc);
         if (next == 0) { return r; }
 
         # Refuse https→http downgrade — surface the redirect response
@@ -786,16 +791,22 @@ max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
 
         # Strip sensitive headers if crossing authorities.
         if (_sandhi_url_same_authority(u, next) == 0) {
-            h = _sandhi_strip_sensitive_headers(h);
+            h = _sandhi_strip_sensitive_headers_a(a, h);
         }
 
         if (sandhi_http_status(r) == 303) { m = "GET"; b = 0; bl = 0; }
         u = next;
         hops = hops + 1;
-        r = _sandhi_http_do(m, u, h, b, bl, max_bytes,
+        r = _sandhi_http_do_a(a, m, u, h, b, bl, max_bytes,
         connect_ms, read_ms, write_ms, total_ms, pool);
     }
     return r;
+}
+
+fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
+max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
+    return _sandhi_http_follow_a(default_alloc(), method, url, headers, body, body_len,
+    max_hops, max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
 }
 
 # ================================================================
@@ -803,13 +814,9 @@ max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
 # ================================================================
 
 # Core dispatch. Opts == 0 means single request; opts with follow == 1
-# engages the redirect-following driver up to max_hops.
-# 1.2.0: `_a` variant routes the no-redirect path through `_do_a`
-# (allocator threaded end-to-end). The redirect-follow path still
-# routes through bare `_sandhi_http_follow` — `_follow_a` lands in
-# 1.2.1 (Batch B). For follow=1 callers, the per-request arena is
-# bypassed for now; documented as a partial-arena leak that closes
-# at 1.2.1.
+# engages the redirect-following driver up to max_hops. 1.2.1: both
+# the no-follow and follow paths thread `a` end-to-end (the 1.2.0
+# partial-arena leak on follow=1 is closed).
 fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts) {
     var max_bytes = sandhi_http_options_bytes(opts);
     var read_ms = sandhi_http_options_get_read_ms(opts);
@@ -819,8 +826,7 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts) {
     var pool = sandhi_http_options_get_pool(opts);
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
-        # 1.2.1 will replace this with _sandhi_http_follow_a.
-        return _sandhi_http_follow(method, url, headers, body, body_len, hops,
+        return _sandhi_http_follow_a(a, method, url, headers, body, body_len, hops,
         max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
     }
     return _sandhi_http_do_a(a, method, url, headers, body, body_len,

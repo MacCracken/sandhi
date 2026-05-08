@@ -4,6 +4,109 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-05-08
+
+**Batches B + C bundled — redirect-following + auto-dispatch
++ retry threading.** Closes the 1.2.0 partial-arena leaks on
+`follow=1` and the auto-dispatch / retry call paths. Batch B
+(`_sandhi_http_follow_a`) and Batch C (`_sandhi_http_auto_*_a`
+family + `_sandhi_http_retry_a`) bundled into one slot per
+the cyrius v5.10.0 "items sharing the same cascade" rule —
+retry calls auto, so they're a single cascade rather than
+two independent slots.
+
+### Changed
+
+- **http**: new `_sandhi_http_follow_a` — redirect chain
+  driver with `a` threaded through every hop. Each
+  `_sandhi_http_do_a` call lands in the caller's arena;
+  cross-authority cred-strip uses `_sandhi_strip_sensitive_headers_a`;
+  Location resolution uses `_sandhi_resolve_location_a`.
+  Closes the 1.2.0 TODO at `_sandhi_http_dispatch_a`'s
+  follow=1 branch (the bare `_sandhi_http_follow` call is
+  replaced by `_sandhi_http_follow_a(a, ...)`).
+- **http**: new `_sandhi_strip_sensitive_headers_a` —
+  cross-authority redirect cred-strip now allocates the
+  filtered headers block from `a`. Bare version stays as
+  back-compat. OOM on the fresh-block alloc returns 0
+  cleanly (matches the 1.1.0 graceful-OOM pattern).
+- **http/h2**: new `_sandhi_http_try_h2_promote_a` —
+  ALPN-promotion path threads `a` through DNS resolve
+  + non-blocking connect + ALPN handshake. The h2 conn
+  stored in the pool keeps using `sandhi_h2_conn_new`'s
+  internal allocator (h2 conn outlives any per-request
+  arena, so it's intentionally pool-scoped).
+- **http/h2**: new `_sandhi_http_auto_once_a` — h2 take /
+  ALPN promote / 1.1 fallback all uniformly threaded:
+  pool h2-take routes through `sandhi_h2_request_a(a, ...)`,
+  ALPN promote via `_try_h2_promote_a`, and the 1.1 fall-
+  through via `_sandhi_http_do_a(a, ...)`.
+- **http/h2**: new `_sandhi_http_auto_follow_a` and
+  `sandhi_http_request_auto_a` — auto-dispatch redirect
+  chain + top-level dispatcher with per-hop `a` threading.
+- **http**: new `_sandhi_http_retry_a` in
+  `src/http/retry.cyr` — retry-with-backoff loop now
+  routes each attempt through `sandhi_http_request_auto_a(a, ...)`,
+  inheriting the h2 pool selection that 0.9.5 wired up
+  while threading the caller's allocator through the
+  full retry loop. Note: each attempt's response struct
+  lives in `a`; arena callers who reuse the arena across
+  attempts overwrite the previous response's bytes —
+  retry callers typically only inspect the last response,
+  which the back-compat shape already returns.
+- All bare versions (`_follow`, `_auto_once`, `_auto_follow`,
+  `request_auto`, `_retry`, `_try_h2_promote`,
+  `_strip_sensitive_headers`) preserved as back-compat
+  wrappers calling the `_a` variant with `default_alloc()`.
+  Public surface unchanged in this slot.
+
+### Verified
+
+- `tests/alloc.tcyr` gains 6 new test groups (20
+  assertions) under `alloc/121bc/`:
+  1. `strip_sensitive_arena` — `_a` filters
+     Authorization / Cookie / Proxy-Authorization, leaves
+     non-reserved headers, arena round-trip + reset.
+  2. `strip_sensitive_oom` — `fail_after_n_allocs(0)`
+     returns 0 from the fresh-block alloc gracefully.
+  3. `follow_err_resp_arena` — `_follow_a` against an
+     unparseable URL exercises the per-hop `_do_a` path
+     and surfaces the err-resp through the arena.
+  4. `auto_once_err_resp_arena` — `_auto_once_a`
+     no-pool path falls through to `_do_a` correctly.
+  5. `request_auto_arena` — top-level `request_auto_a`
+     routes the no-redirect case end-to-end into the
+     arena; reset reclaims.
+  6. `retry_non_retryable_arena` — `_retry_a` returns
+     after one attempt on PARSE (non-retryable per
+     `_sandhi_retry_should_retry`); arena threads through.
+- `tests/alloc.tcyr` includes extended: pulled in
+  `src/http/h2/request.cyr`, `_/response.cyr`,
+  `_/pool_glue.cyr`, `_/dispatch.cyr` so the test
+  program can reach the new `_a` variants in the
+  auto-dispatch path.
+- 175/175 alloc tests pass (155 pre-existing + 20 new).
+- 482/482 `tests/sandhi.tcyr`, 167/167 `tests/h2.tcyr` —
+  no regression. **Total: 824 assertions green** (+20
+  over 1.2.0's 804).
+- `cyrius lint` 0 warnings on `src/http/client.cyr`,
+  `src/http/h2/dispatch.cyr`, `src/http/retry.cyr`.
+  `cyrfmt --check` clean on touched files.
+
+### Pinned next
+
+- **1.2.2 — Batch D**: top-level public verbs
+  (`sandhi_http_get_a` / `_post_a` / `_put_a` /
+  `_patch_a` / `_delete_a` / `_head_a`). First slot where
+  consumer-visible end-to-end arena adoption ships
+  (post-Batch-B+C, the internal cascade is fully `_a`-
+  threaded; Batch D just paints the public-verb wrappers
+  on top).
+- **1.2.3 — Batch E**: `_opts` / `_retry` / `_auto`
+  user-facing variants.
+- **1.2.4 — Batch F**: RPC dialect entries
+  (`sandhi_rpc_mcp_call` and friends).
+
 ## [1.2.0] — 2026-05-08
 
 **Hot-path allocator review — Batch A: request-orchestrator
