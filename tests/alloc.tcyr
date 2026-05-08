@@ -882,6 +882,82 @@ fn test_alloc_122d_get_arena_round_trip() {
 }
 
 # ================================================================
+# 1.2.3 — Batch E: opts / retry / auto user-facing `_a`
+# ================================================================
+# Paint-on-top wrappers since 1.2.0–1.2.2 already threaded the
+# underlying dispatch / retry / auto paths. Each test exercises
+# the per-method `_a` against an unparseable URL so the err-resp
+# allocates entirely in the arena and reset reclaims cleanly.
+
+# _opts variants — paint on `_sandhi_http_dispatch_a`.
+fn test_alloc_123e_opts_arena() {
+    var a = arena_allocator(4096);
+    var opts = sandhi_http_options_new_a(a);
+
+    var r1 = sandhi_http_get_opts_a(a, "garbage://x", 0, opts);
+    assert_eq(sandhi_http_err_kind(r1), SANDHI_ERR_PARSE, "get_opts_a PARSE err");
+
+    var body = "x";
+    var r2 = sandhi_http_post_opts_a(a, "garbage://x", 0, body, 1, opts);
+    assert_eq(sandhi_http_err_kind(r2), SANDHI_ERR_PARSE, "post_opts_a PARSE err");
+
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena consumed");
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "reset reclaims");
+    return 0;
+}
+
+# _retry variants — paint on `_sandhi_http_retry_a`. PARSE is
+# non-retryable so each returns after one attempt.
+fn test_alloc_123e_retry_arena() {
+    var a = arena_allocator(4096);
+    var opts = sandhi_http_options_new_a(a);
+    var policy = sandhi_retry_new_a(a);
+
+    var r1 = sandhi_http_get_retry_a(a, "garbage://x", 0, opts, policy);
+    assert_eq(sandhi_http_err_kind(r1), SANDHI_ERR_PARSE, "get_retry_a PARSE err");
+    var r2 = sandhi_http_head_retry_a(a, "garbage://x", 0, opts, policy);
+    assert_eq(sandhi_http_err_kind(r2), SANDHI_ERR_PARSE, "head_retry_a PARSE err");
+    var body = "x";
+    var r3 = sandhi_http_put_retry_a(a, "garbage://x", 0, body, 1, opts, policy);
+    assert_eq(sandhi_http_err_kind(r3), SANDHI_ERR_PARSE, "put_retry_a PARSE err");
+    var r4 = sandhi_http_delete_retry_a(a, "garbage://x", 0, opts, policy);
+    assert_eq(sandhi_http_err_kind(r4), SANDHI_ERR_PARSE, "delete_retry_a PARSE err");
+    return 0;
+}
+
+# _auto variants — paint on `sandhi_http_request_auto_a`. No
+# pool attached so the path falls through to `_sandhi_http_do_a`
+# (just like the test for `auto_once_err_resp_arena` at 1.2.1).
+fn test_alloc_123e_auto_body_less_arena() {
+    var a = arena_allocator(4096);
+    var opts = sandhi_http_options_new_a(a);
+
+    var r1 = sandhi_http_get_auto_a(a, "garbage://x", 0, opts);
+    assert_eq(sandhi_http_err_kind(r1), SANDHI_ERR_PARSE, "get_auto_a PARSE err");
+    var r2 = sandhi_http_head_auto_a(a, "garbage://x", 0, opts);
+    assert_eq(sandhi_http_err_kind(r2), SANDHI_ERR_PARSE, "head_auto_a PARSE err");
+    var r3 = sandhi_http_delete_auto_a(a, "garbage://x", 0, opts);
+    assert_eq(sandhi_http_err_kind(r3), SANDHI_ERR_PARSE, "delete_auto_a PARSE err");
+    return 0;
+}
+
+fn test_alloc_123e_auto_body_bearing_arena() {
+    var a = arena_allocator(4096);
+    var opts = sandhi_http_options_new_a(a);
+    var body = "x";
+
+    var r1 = sandhi_http_post_auto_a(a, "garbage://x", 0, body, 1, opts);
+    assert_eq(sandhi_http_err_kind(r1), SANDHI_ERR_PARSE, "post_auto_a PARSE err");
+    var r2 = sandhi_http_put_auto_a(a, "garbage://x", 0, body, 1, opts);
+    assert_eq(sandhi_http_err_kind(r2), SANDHI_ERR_PARSE, "put_auto_a PARSE err");
+    var r3 = sandhi_http_patch_auto_a(a, "garbage://x", 0, body, 1, opts);
+    assert_eq(sandhi_http_err_kind(r3), SANDHI_ERR_PARSE, "patch_auto_a PARSE err");
+    return 0;
+}
+
+# ================================================================
 # Runner
 # ================================================================
 
@@ -1011,6 +1087,18 @@ fn main() {
 
     test_group("alloc/122d/get_arena_round_trip");
     test_alloc_122d_get_arena_round_trip();
+
+    test_group("alloc/123e/opts_arena");
+    test_alloc_123e_opts_arena();
+
+    test_group("alloc/123e/retry_arena");
+    test_alloc_123e_retry_arena();
+
+    test_group("alloc/123e/auto_body_less_arena");
+    test_alloc_123e_auto_body_less_arena();
+
+    test_group("alloc/123e/auto_body_bearing_arena");
+    test_alloc_123e_auto_body_bearing_arena();
 
     return assert_summary();
 }

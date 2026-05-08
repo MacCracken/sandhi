@@ -54,6 +54,7 @@ details, state.md the current snapshot.
 - **1.2.0** — hot-path allocator review Batch A: audit findings + request-orchestrator foundation. Audit found the 1.1.0 leaf-level migration was clean (zero `_a` fns calling bare paired helpers); the real leak was the *orchestration layer* above the leaves having no `_a` counterparts. Fixed buggy `_sandhi_client_build_request_a` (was dropping `a` on the floor); added `_a` variants for `_sandhi_http_do` / `_do_impl` / `_dispatch` / `_exchange` / `_exchange_keepalive` + `_sandhi_client_build_request_va`. Cyrius/lib.tls.cyr native-transport prep dropped from sandhi (filed cyrius-side instead). 804 assertions green (482 + 167 + 155).
 - **1.2.1** — Batches B + C bundled: redirect-following + auto-dispatch + retry threading. Closes 1.2.0's partial-arena leaks. New `_a` variants: `_sandhi_http_follow_a`, `_sandhi_strip_sensitive_headers_a`, `_sandhi_http_try_h2_promote_a`, `_sandhi_http_auto_once_a`, `_sandhi_http_auto_follow_a`, `sandhi_http_request_auto_a`, `_sandhi_http_retry_a`. Bundled per cyrius v5.10.0 "items sharing the same cascade" rule (retry calls auto). 824 assertions green (482 + 167 + 175).
 - **1.2.2** — Batch D: top-level public verbs `_a`. First release with consumer-visible end-to-end arena adoption. +6 `_a` verbs (`sandhi_http_get_a` / `_post_a` / `_put_a` / `_patch_a` / `_delete_a` / `_head_a`) — thin wrappers calling `_sandhi_http_dispatch_a`. Public-surface change documented (mirrors `sandhi_http_stream_a` shape). 837 assertions green (482 + 167 + 188).
+- **1.2.3** — Batch E: opts / retry / auto user-facing `_a`. +12 verbs (2 `_opts` + 4 `_retry` + 6 `_auto`). Paint-on-top wrappers since dispatch / retry / auto paths are already `_a`-threaded. Total post-1.1.0 public `_a` surface for HTTP request path: 18 verbs. 851 assertions green (482 + 167 + 202).
 
 ## What's next
 
@@ -122,23 +123,23 @@ demonstrated):
 - ~~**1.2.2 — Batch D**~~ ✅ shipped 2026-05-08. Six
   public-verb `_a` wrappers; +6 to public surface; first
   consumer-visible end-to-end arena adoption shipped.
-- **1.2.3 — Batch E**: `_opts` / `_retry` / `_auto`
-  user-facing variants. Per-method `_a` variants for
-  each:
-  - `sandhi_http_get_opts_a` / `_post_opts_a` / etc.
-    (6 verbs — paint on `_sandhi_http_dispatch_a`).
-  - `sandhi_http_get_retry_a` / `_head_retry_a` /
-    `_put_retry_a` / `_delete_retry_a` (4 verbs — paint
-    on `_sandhi_http_retry_a`).
-  - `sandhi_http_get_auto_a` / `_post_auto_a` / etc. +
-    `sandhi_http_request_auto_a` (already exists since
-    1.2.1) — 7 verbs total.
-  Same paint-on-top shape as 1.2.2; all underlying
-  paths are `_a`-threaded.
-- **1.2.4 — Batch F**: RPC dialect entries
-  (`sandhi_rpc_mcp_call_a`, `sandhi_rpc_call_a`, plus
-  webdriver / appium / mcp-stream verbs). Closes the
-  hot-path allocator review arc.
+- ~~**1.2.3 — Batch E**~~ ✅ shipped 2026-05-08. +12
+  `_a` verbs (2 `_opts` + 4 `_retry` + 6 `_auto`).
+  Confirmed at slot entry: only `get_opts` and
+  `post_opts` exist as `_opts` verbs (not all six
+  methods). `request_auto_a` already shipped at 1.2.1.
+- **1.2.4 — Batch F**: RPC dialect entries — closes
+  the hot-path allocator review arc.
+  - `sandhi_rpc_mcp_call_a` / `_call_with_headers_a` /
+    `_stream_a` (3 MCP-over-HTTP verbs).
+  - Plus the dialect-specific verbs in
+    `src/rpc/webdriver.cyr` (sessions / navigation /
+    elements / exec) and `src/rpc/appium.cyr`
+    (contexts / app lifecycle / mobile exec) that
+    allocate request envelopes.
+  - Plus `sandhi_rpc_call_a` / `_with_headers_a` if the
+    underlying dispatch needs threading.
+  Survey at slot entry to confirm exact scope.
 
 #### 1.2.x — optimization candidates (profile-justified)
 

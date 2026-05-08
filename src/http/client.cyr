@@ -896,11 +896,22 @@ fn sandhi_http_head(url, user_headers) {
 
 # _opts variants — pass a sandhi_http_options_new() with
 # follow_redirects enabled to opt into redirect chasing.
+# 1.2.3 Batch E: each gains an `_a` variant; bare versions stay
+# as back-compat wrappers passing `default_alloc()`. Underlying
+# `_sandhi_http_dispatch_a` has been `_a`-threaded since 1.2.0.
+fn sandhi_http_get_opts_a(a, url, user_headers, opts) {
+    return _sandhi_http_dispatch_a(a, "GET", url, user_headers, 0, 0, opts);
+}
+
 fn sandhi_http_get_opts(url, user_headers, opts) {
-    return _sandhi_http_dispatch("GET", url, user_headers, 0, 0, opts);
+    return sandhi_http_get_opts_a(default_alloc(), url, user_headers, opts);
+}
+
+fn sandhi_http_post_opts_a(a, url, user_headers, body, body_len, opts) {
+    return _sandhi_http_dispatch_a(a, "POST", url, user_headers, body, body_len, opts);
 }
 
 fn sandhi_http_post_opts(url, user_headers, body, body_len, opts) {
-    return _sandhi_http_dispatch("POST", url, user_headers, body, body_len, opts);
+    return sandhi_http_post_opts_a(default_alloc(), url, user_headers, body, body_len, opts);
 }
 

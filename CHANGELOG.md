@@ -4,6 +4,58 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.3] — 2026-05-08
+
+**Batch E — opts / retry / auto user-facing `_a`.**
+Paint-on-top wrappers atop the dispatch / retry / auto paths
+threaded by 1.2.0–1.2.2.
+
+### Added (12 new public `_a` verbs)
+
+- **http**: `_opts` family (2 verbs) — `sandhi_http_get_opts_a`,
+  `sandhi_http_post_opts_a`. Thin wrappers calling
+  `_sandhi_http_dispatch_a(a, ...)`.
+- **http**: `_retry` family (4 verbs) — `sandhi_http_get_retry_a`,
+  `sandhi_http_head_retry_a`, `sandhi_http_put_retry_a`,
+  `sandhi_http_delete_retry_a`. Thin wrappers calling
+  `_sandhi_http_retry_a(a, ...)`.
+- **http/h2**: `_auto` family (6 verbs) —
+  `sandhi_http_get_auto_a`, `sandhi_http_head_auto_a`,
+  `sandhi_http_post_auto_a`, `sandhi_http_put_auto_a`,
+  `sandhi_http_patch_auto_a`, `sandhi_http_delete_auto_a`.
+  Thin wrappers calling `sandhi_http_request_auto_a(a, ...)`.
+  Note: `sandhi_http_request_auto_a` itself shipped at 1.2.1
+  as part of Batch C; the per-method paint lands here.
+
+All bare versions stay as back-compat wrappers passing
+`default_alloc()`. Public-surface change: **+12 `_a` verbs**.
+Combined with Batch D (1.2.2 — 6 verbs), the total post-1.1.0
+public `_a` surface for the HTTP request path is now **18 new
+public verbs**, all consumer-callable end-to-end with arena
+allocators.
+
+### Verified
+
+- `tests/alloc.tcyr` gains 4 new test groups (14
+  assertions) under `alloc/123e/`: `opts_arena`,
+  `retry_arena`, `auto_body_less_arena`,
+  `auto_body_bearing_arena`. Each drives an unparseable
+  URL so the err-resp path threads `a` end-to-end.
+- 202/202 alloc tests pass (188 pre-existing + 14 new).
+- 482/482 `tests/sandhi.tcyr`, 167/167 `tests/h2.tcyr` —
+  no regression. **Total: 851 assertions green** (+14
+  over 1.2.2's 837).
+- `cyrius lint` — 0 warnings on `src/http/client.cyr`,
+  `src/http/retry.cyr`, `src/http/h2/dispatch.cyr`.
+  `cyrfmt --check` clean on touched files.
+
+### Pinned next
+
+- **1.2.4 — Batch F**: RPC dialect entries
+  (`sandhi_rpc_mcp_call_a`, `sandhi_rpc_call_a` +
+  webdriver / appium / mcp-stream verbs). Closes the
+  hot-path allocator review arc.
+
 ## [1.2.2] — 2026-05-08
 
 **Batch D — top-level public verbs `_a`.** First release with

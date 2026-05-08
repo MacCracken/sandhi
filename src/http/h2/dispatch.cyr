@@ -277,27 +277,55 @@ fn sandhi_http_request_auto(method, url, user_headers, body, body_len, opts) {
 
 # Convenience verbs matching the 1.1 surface. Body-less methods drop
 # body+body_len; body-bearing ones forward through.
+# 1.2.3 Batch E: per-method `_auto_a` wrappers paint on
+# `sandhi_http_request_auto_a` (which has been `_a`-threaded since
+# 1.2.1). Bare versions stay as back-compat wrappers passing
+# `default_alloc()`.
+fn sandhi_http_get_auto_a(a, url, user_headers, opts) {
+    return sandhi_http_request_auto_a(a, "GET", url, user_headers, 0, 0, opts);
+}
+
 fn sandhi_http_get_auto(url, user_headers, opts) {
-    return sandhi_http_request_auto("GET", url, user_headers, 0, 0, opts);
+    return sandhi_http_get_auto_a(default_alloc(), url, user_headers, opts);
+}
+
+fn sandhi_http_head_auto_a(a, url, user_headers, opts) {
+    return sandhi_http_request_auto_a(a, "HEAD", url, user_headers, 0, 0, opts);
 }
 
 fn sandhi_http_head_auto(url, user_headers, opts) {
-    return sandhi_http_request_auto("HEAD", url, user_headers, 0, 0, opts);
+    return sandhi_http_head_auto_a(default_alloc(), url, user_headers, opts);
+}
+
+fn sandhi_http_post_auto_a(a, url, user_headers, body, body_len, opts) {
+    return sandhi_http_request_auto_a(a, "POST", url, user_headers, body, body_len, opts);
 }
 
 fn sandhi_http_post_auto(url, user_headers, body, body_len, opts) {
-    return sandhi_http_request_auto("POST", url, user_headers, body, body_len, opts);
+    return sandhi_http_post_auto_a(default_alloc(), url, user_headers, body, body_len, opts);
+}
+
+fn sandhi_http_put_auto_a(a, url, user_headers, body, body_len, opts) {
+    return sandhi_http_request_auto_a(a, "PUT", url, user_headers, body, body_len, opts);
 }
 
 fn sandhi_http_put_auto(url, user_headers, body, body_len, opts) {
-    return sandhi_http_request_auto("PUT", url, user_headers, body, body_len, opts);
+    return sandhi_http_put_auto_a(default_alloc(), url, user_headers, body, body_len, opts);
+}
+
+fn sandhi_http_patch_auto_a(a, url, user_headers, body, body_len, opts) {
+    return sandhi_http_request_auto_a(a, "PATCH", url, user_headers, body, body_len, opts);
 }
 
 fn sandhi_http_patch_auto(url, user_headers, body, body_len, opts) {
-    return sandhi_http_request_auto("PATCH", url, user_headers, body, body_len, opts);
+    return sandhi_http_patch_auto_a(default_alloc(), url, user_headers, body, body_len, opts);
+}
+
+fn sandhi_http_delete_auto_a(a, url, user_headers, opts) {
+    return sandhi_http_request_auto_a(a, "DELETE", url, user_headers, 0, 0, opts);
 }
 
 fn sandhi_http_delete_auto(url, user_headers, opts) {
-    return sandhi_http_request_auto("DELETE", url, user_headers, 0, 0, opts);
+    return sandhi_http_delete_auto_a(default_alloc(), url, user_headers, opts);
 }
 
