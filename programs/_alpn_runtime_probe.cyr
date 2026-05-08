@@ -7,6 +7,7 @@
 include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
 include "src/http/headers.cyr"
 include "src/http/url.cyr"
 include "src/http/conn.cyr"

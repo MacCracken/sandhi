@@ -283,7 +283,9 @@ fn _sandhi_http_clamp_ms(raw_ms, deadline_ms) {
 # `_sandhi_pool_alloc`) — pool entries outlive any per-request arena.
 fn _sandhi_http_do_impl_a(a, method, url, user_headers, body, body_len, max_bytes,
 connect_ms, read_ms, write_ms, total_ms, pool) {
+    sandhi_prof_reset();
     var u = sandhi_url_parse_a(a, url);
+    sandhi_prof_capture(SANDHI_PROF_PHASE_URL_PARSE_END);
     if (u == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PARSE); }
 
     # v4-first, v6-fallback. Most production hosts have v4 (often
@@ -294,8 +296,12 @@ connect_ms, read_ms, write_ms, total_ms, pool) {
     var addr6 = 0;
     if (addr == 0 - 1) {
         addr6 = _sandhi_client_resolve_v6_a(a, sandhi_url_host(u));
-        if (addr6 == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_DISCOVERY); }
+        if (addr6 == 0) {
+            sandhi_prof_capture(SANDHI_PROF_PHASE_DNS_END);
+            return _sandhi_resp_err_a(a, SANDHI_ERR_DISCOVERY);
+        }
     }
+    sandhi_prof_capture(SANDHI_PROF_PHASE_DNS_END);
 
     # Compute monotonic deadline if total_ms is set. Passed through to
     # exchange so the recv loop can break early. A fresh deadline
@@ -330,23 +336,30 @@ connect_ms, read_ms, write_ms, total_ms, pool) {
             eff_connect, read_ms, write_ms);
         }
         if (conn == 0) {
+            sandhi_prof_capture(SANDHI_PROF_PHASE_CONN_OPEN_END);
             var oe = sandhi_conn_last_open_err();
             if (oe == SANDHI_CONN_OPEN_TIMEOUT) { return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT); }
             if (oe == SANDHI_CONN_OPEN_TLS)     { return _sandhi_resp_err_a(a, SANDHI_ERR_TLS); }
             return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT);
         }
     }
+    sandhi_prof_capture(SANDHI_PROF_PHASE_CONN_OPEN_END);
 
     var full_path = _sandhi_client_full_path_a(a, u);
     var host_hdr = _sandhi_client_host_header_a(a, u);
     var req = _sandhi_client_build_request_va(a, method, full_path, host_hdr,
     user_headers, body_len, keep_alive);
+    sandhi_prof_capture(SANDHI_PROF_PHASE_REQ_BUILD_END);
 
+    var resp = 0;
     if (keep_alive == 1) {
-        return _sandhi_http_exchange_keepalive_a(a, conn, req, body, body_len, max_bytes,
+        resp = _sandhi_http_exchange_keepalive_a(a, conn, req, body, body_len, max_bytes,
         deadline_ms, pool, host, port, use_tls);
+    } else {
+        resp = _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms);
     }
-    return _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms);
+    sandhi_prof_capture(SANDHI_PROF_PHASE_EXCHANGE_END);
+    return resp;
 }
 
 fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
@@ -393,6 +406,7 @@ fn _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms)
     var rbuf = alloc_via(a, cap + 1);
     var nread = sandhi_conn_recv_all_deadline(conn, rbuf, cap, deadline_ms);
     sandhi_conn_close(conn);
+    sandhi_prof_record_recv(cap, nread);
     if (nread == 0 - _SANDHI_EAGAIN) { return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT); }
     if (nread < 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT); }
     return sandhi_http_response_parse_a(a, rbuf, nread);
@@ -442,6 +456,7 @@ deadline_ms, pool, host, port, use_tls) {
     if (cap <= 0) { cap = _SANDHI_HTTP_RESP_BUF_SIZE; }
     var rbuf = alloc_via(a, cap + 1);
     var nread = _sandhi_http_recv_framed(conn, rbuf, cap, deadline_ms);
+    sandhi_prof_record_recv(cap, nread);
     if (nread == 0 - _SANDHI_EAGAIN) {
         sandhi_conn_close(conn);
         return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT);

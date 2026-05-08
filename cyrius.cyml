@@ -52,6 +52,7 @@ modules = [
     "src/version_str.cyr",
     "src/error.cyr",
     "src/obs/trace.cyr",
+    "src/obs/prof.cyr",
     "src/http/headers.cyr",
     "src/http/url.cyr",
     "src/http/conn.cyr",

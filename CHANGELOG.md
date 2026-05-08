@@ -4,6 +4,100 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.5] — 2026-05-08
+
+**Profile instrumentation — opens the next optimization arc.**
+1.2.0–1.2.4 closed the hot-path allocator review with
+speculation-driven candidates that mostly didn't pan out
+on close inspection (HPACK Huffman tie-break is a no-op
+when huff_len == raw_len; `_sandhi_resp_new` is already a
+single 48-byte alloc; pool LRU waits for second consumer).
+This slot adds the measurement tooling so future
+optimization picks land with profile data, not guesses.
+Mirrors cyrius v5.10.0's `_prof_*_end` capture pattern,
+adapted for runtime (sandhi is called many times per
+process; captures reset per request).
+
+### Added
+
+- **obs/prof** — new module `src/obs/prof.cyr` (~140
+  lines). Default-off; enable via `sandhi_prof_enable(1)`.
+- **Phase enum** (5 captured boundaries):
+  `SANDHI_PROF_PHASE_REQUEST_START` (0),
+  `_URL_PARSE_END` (1), `_DNS_END` (2),
+  `_CONN_OPEN_END` (3), `_REQ_BUILD_END` (4),
+  `_EXCHANGE_END` (5).
+- **Public surface** (8 verbs): `sandhi_prof_enable`,
+  `sandhi_prof_enabled`, `sandhi_prof_reset`,
+  `sandhi_prof_capture`, `sandhi_prof_record_recv`,
+  `sandhi_prof_get`, `sandhi_prof_recv_cap`,
+  `sandhi_prof_recv_used`. Plus the
+  `SANDHI_PROF_PHASE_*` enum constants.
+
+### Wired into
+
+- `_sandhi_http_do_impl_a` (`src/http/client.cyr`) —
+  reset at entry; capture at each phase boundary.
+  Captures fire on both success and error-path early
+  returns where the exit point is informative.
+- `_sandhi_http_exchange_a` and
+  `_sandhi_http_exchange_keepalive_a` —
+  `sandhi_prof_record_recv(cap, nread)` after the recv
+  loop closes.
+
+### Cost
+
+- Disabled (default): one global-load + early-return per
+  capture point; one branch per phase boundary. Zero
+  allocations, zero syscalls.
+- Enabled: one `clock_now_ns()` per capture (single
+  `syscall(228, 4, &ts)` ≈ 100 ns on x86_64); five
+  captures per request = ~500 ns/request overhead.
+  Negligible against any real network round-trip.
+
+### Verified
+
+- `tests/alloc.tcyr` gains 5 new test groups (14
+  assertions) under `alloc/125/`:
+  `prof_disabled_default`, `prof_capture_monotonic`,
+  `prof_reset_clears`, `prof_recv_buf`,
+  `prof_real_request_arena`.
+- 226/226 alloc tests pass (212 pre-existing + 14 new).
+- 482/482 `tests/sandhi.tcyr`, 167/167 `tests/h2.tcyr` —
+  no regression. **Total: 875 assertions green** (+14
+  over 1.2.4's 861).
+- `cyrius lint` 0 warnings; `cyrfmt --check` clean.
+- 14 program/test files updated to include
+  `src/obs/prof.cyr` after `src/obs/trace.cyr`.
+- `cyrius.cyml` `[lib].modules` registers
+  `src/obs/prof.cyr` immediately after
+  `src/obs/trace.cyr` so consumers including
+  `lib/sandhi.cyr` post-fold get the prof surface
+  for free.
+
+### Why now
+
+After 1.2.0–1.2.4 realized the 1.1.0 migration intent,
+the natural next move was profile-driven optimization.
+But every profile-justified candidate I'd seeded into
+the roadmap turned out to be either a no-op or a
+wait-for-consumer-ask. Rather than ship more speculation,
+this slot installs the measurement so the next
+optimization picks are concrete: when 1.2.6+ proposes a
+hot-path change, the CHANGELOG will show before/after
+numbers from these captures, not "profile-grade"
+hand-waving.
+
+### Pinned next
+
+- **1.2.6+** — profile-justified optimizations once
+  real-workload data lands (consumer code enables prof
+  captures and reports). No pre-committed picks.
+- **1.3.0** — live-network TLS-policy gate. Pure CI
+  infra; no cyrius dep. **Awaiting** cyrius-side hook
+  extensions for 1.3.1 (session resumption) and 1.3.2
+  (TLS 1.3 0-RTT) — to be filed against `lib/tls.cyr`.
+
 ## [1.2.4] — 2026-05-08
 
 **Batch F — RPC dialect `_a` (closes the optimization arc).**

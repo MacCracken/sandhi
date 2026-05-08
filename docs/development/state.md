@@ -4,6 +4,8 @@
 
 ## Version
 
+**1.2.5** — 2026-05-08. **Profile instrumentation — opens the next optimization arc.** New `src/obs/prof.cyr` (~140 lines) with per-request per-phase timing captures + recv-buffer cap/used tracking. Default-off; runtime toggle via `sandhi_prof_enable(1)`. 5 phase boundaries captured inside `_sandhi_http_do_impl_a`: URL_PARSE_END, DNS_END, CONN_OPEN_END, REQ_BUILD_END, EXCHANGE_END. Plus recv-buffer recording inside `_sandhi_http_exchange_a` and `_keepalive_a` (cap + nread). Public surface: 8 verbs (`sandhi_prof_enable` / `_enabled` / `_reset` / `_capture` / `_record_recv` / `_get` / `_recv_cap` / `_recv_used`) + `SANDHI_PROF_PHASE_*` enum. Cost: ~500 ns/request when enabled (5 × `clock_now_ns()`); zero overhead when disabled (one branch per capture). Mirrors cyrius v5.10.0's `_prof_*_end` capture pattern, adapted for runtime (sandhi is called many times per process — captures reset per request rather than print once at exit). **Why now**: 1.2.0–1.2.4's profile-justified candidates mostly turned out to be no-ops or wait-for-consumer-ask on close inspection. Rather than ship more speculation, this slot installs the measurement so the next optimization picks land with data. **875 assertions green** (482 sandhi + 167 h2 + 226 alloc; +14 over 1.2.4's 861). New `alloc/125/` test groups (5): `prof_disabled_default`, `prof_capture_monotonic`, `prof_reset_clears`, `prof_recv_buf`, `prof_real_request_arena`. 14 program/test files updated to include `src/obs/prof.cyr` after `src/obs/trace.cyr`. `cyrius.cyml` `[lib].modules` registers prof.cyr after trace.cyr. `cyrius lint` 0 warnings; `cyrfmt --check` clean.
+
 **1.2.4** — 2026-05-08. **Batch F — RPC dialect `_a` (closes the optimization arc).** Final batch of the hot-path allocator review opened at 1.2.0. Paint-on-top wrappers atop `sandhi_rpc_call_a` (paired since 1.1.0). +30 new public `_a` verbs across MCP / WebDriver / Appium dialects: 5 MCP (`sandhi_rpc_mcp_call_a` / `_call_with_headers_a` / `_result_raw_a` / `_error_message_a` / `_stream_a`); 14 WebDriver (`sandhi_wd_new_session_a` / `_extract_session_id_a` / `_delete_session_a` / `_navigate_to_a` / `_get_url_a` / `_get_title_a` / `_find_element_a` / `_extract_element_id_a` / `_element_click_a` / `_element_text_a` / `_element_attribute_a` / `_element_send_keys_a` / `_status_a` / `_execute_script_a`); 11 Appium (`sandhi_ap_new_session_a` / `_get_contexts_a` / `_set_context_a` / `_current_context_a` / `_install_app_a` / `_remove_app_a` / `_activate_app_a` / `_terminate_app_a` / `_mobile_exec_a` / `_source_a` / `_screenshot_a`). Plus internal helpers `_sandhi_mcp_build_request_a`, `_sandhi_wd_build_path_a`, `_sandhi_wd_build_element_suffix_a`. `sandhi_rpc_mcp_error_code` intentionally NOT paired — returns an int (`sandhi_json_get_int`), no allocation. Bare versions stay as back-compat wrappers. **Optimization-arc cumulative**: +49 public `_a` verbs across 1.2.0–1.2.4 (1 + 6 + 12 + 30); every alloc-touching public path now has an `_a` counterpart. The 1.1.0 migration intent is fully realized — consumers can use a per-request arena end-to-end through every public verb. **861 assertions green** (482 sandhi + 167 h2 + 212 alloc; +10 over 1.2.3's 851). New `alloc/124f/` test groups (4): `mcp_build_request_arena`, `mcp_build_request_with_params_arena`, `wd_build_helpers_arena`, `wd_join_arena`. Coverage focuses on JSON envelope build and URL helpers; the dialect verbs themselves don't have a clean garbage-URL→arena-err-resp test path (their `sandhi_rpc_call` invocation predates the arena-aware error shape). `tests/alloc.tcyr` includes extended with `src/rpc/appium.cyr` and `src/rpc/mcp.cyr`. `cyrius lint` 0 warnings on touched files; `cyrfmt --check` clean. **Hot-path allocator review arc CLOSED.** Further allocator work moves to "Optimization-grade, profile first" — wait for real-workload profile evidence. Next active arc: 1.3.x TLS.
 
 **1.2.3** — 2026-05-08. **Batch E — opts / retry / auto user-facing `_a`.** Paint-on-top wrappers atop the dispatch / retry / auto paths threaded by 1.2.0–1.2.2. +12 new public `_a` verbs: 2 `_opts` (`sandhi_http_get_opts_a` / `_post_opts_a`); 4 `_retry` (`sandhi_http_get_retry_a` / `_head_retry_a` / `_put_retry_a` / `_delete_retry_a`); 6 `_auto` (`sandhi_http_get_auto_a` / `_head_auto_a` / `_post_auto_a` / `_put_auto_a` / `_patch_auto_a` / `_delete_auto_a`). Combined with 1.2.2's Batch D (6 verbs), the total post-1.1.0 public `_a` surface for the HTTP request path is now 18 new public verbs, all consumer-callable end-to-end with arena allocators. Bare versions stay as back-compat wrappers passing `default_alloc()`. **851 assertions green** (482 sandhi + 167 h2 + 202 alloc; +14 over 1.2.2's 837). New `alloc/123e/` test groups (4): `opts_arena`, `retry_arena`, `auto_body_less_arena`, `auto_body_bearing_arena`. `cyrius lint` 0 warnings on touched files; `cyrfmt --check` clean. Remaining for Batch F (1.2.4): RPC dialect entries — closes the hot-path allocator review arc.
@@ -88,6 +90,7 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | `src/http/retry.cyr` | 192 | **0.7.2 new** — retry-with-backoff wrappers for idempotent methods (GET/HEAD/PUT/DELETE). Exponential 2× capped at max_backoff_ms. 0.9.3: AWS-style full-jitter sleep replaces fixed-exponential (thundering-herd guard). 0.9.5: `_sandhi_http_retry` routes through `sandhi_http_request_auto` so retries inherit h2 selection when the pool has an h2 conn for the route. 1.2.1: `_a` variant `_sandhi_http_retry_a` threads allocator through every attempt via `sandhi_http_request_auto_a`. |
 | `src/http/h2/dispatch.cyr` | 331 | **0.8.1 new** — `sandhi_http_request_auto` (per-method `_get_auto` / `_head_auto` / `_post_auto` / `_put_auto` / `_patch_auto` / `_delete_auto`). Pool h2-take → 1.1 single-shot fallback. 0.9.5: redirect-following hoisted to this layer — new `_sandhi_http_auto_once` (per-hop dispatch) + `_sandhi_http_auto_follow` (mirrors 1.1 follow's security semantics; each hop re-evaluates h2 selection). 0.9.6: ALPN-driven h2 auto-promotion — `_sandhi_http_try_h2_promote` opens advertising `h2,http/1.1`, runs preface + SETTINGS on h2-pick and caches via `sandhi_http_pool_put_h2`, donates conn to 1.1 pool slot on http/1.1-pick. First release where live h2 fires end-to-end via the auto path. 1.2.1: `_a` variants for the entire family (`_try_h2_promote_a`, `_auto_once_a`, `_auto_follow_a`, `sandhi_http_request_auto_a`) thread allocator through h2 take / promote / 1.1 fallback uniformly. |
 | `src/obs/trace.cyr` | 57 | **0.7.2 new** — opt-in sakshi-span wrapper. Default off; `sandhi_trace_enable(1)` turns on emission. Boundary spans: `sandhi.http` / `sandhi.dns.v4` / `sandhi.dns.v6` / `sandhi.rpc`. |
+| `src/obs/prof.cyr` | 140 | **1.2.5 new** — per-request per-phase timing instrumentation + recv-buffer cap/used tracking. Default off; runtime toggle via `sandhi_prof_enable(1)`. 5 phase boundaries (URL_PARSE_END / DNS_END / CONN_OPEN_END / REQ_BUILD_END / EXCHANGE_END) captured inside `_sandhi_http_do_impl_a`. 8 public verbs + `SANDHI_PROF_PHASE_*` enum. ~500 ns/request when enabled; zero overhead disabled. |
 | `src/error.cyr` | 33 | scaffold — error kinds defined |
 | `src/http/headers.cyr` | 258 | **M2 done** — key-value store, case-insensitive lookup, wire-format serialize + parse |
 | `src/http/url.cyr` | 193 | **M2 done** — http/https parser with CRLF hardening |
@@ -166,15 +169,15 @@ No external git deps. sandhi is pure-stdlib-composition.
 
 Post-fold release sequence (see `roadmap.md` for full detail):
 
-**Currently shipped** — all releases through 1.2.4 (Batch
-F: RPC dialect `_a`). The fold landed at 1.0.0; 1.1.0 was
-the allocator migration; 1.1.1–1.1.2 closed the 0.9.9 audit
+**Currently shipped** — all releases through 1.2.5 (profile
+instrumentation). The fold landed at 1.0.0; 1.1.0 was the
+allocator migration; 1.1.1–1.1.2 closed the 0.9.9 audit
 deferrals; 1.2.0–1.2.4 ran the hot-path allocator review
-arc to closure. **+49 public `_a` verbs across the arc**
-covering every alloc-touching public path: HTTP top-level
-(6) + opts/retry/auto (12) + auto-dispatch (1) + RPC
-dialects (30 — mcp 5, wd 14, ap 11). Hot-path allocator
-review arc CLOSED.
+arc to closure (+49 public `_a` verbs); 1.2.5 added the
+profile instrumentation that opens the next optimization
+arc with measurement instead of speculation. Total post-
+1.1.0 public surface additions: 49 `_a` verbs + 8 prof
+verbs = 57.
 
 **Pinned next** — split into two arcs (cyrius v5.10.0
 ONE-thing-per-slot principle; bundling justified only when
@@ -188,30 +191,36 @@ items share a cascade):
     11 appium). **Hot-path allocator review arc CLOSED**;
     further allocator work waits for profile evidence.
 
-- **1.3.x — TLS arc** (next active arc). Sandhi-owned
-  policy + state work over stdlib `tls_connect`.
+- **1.3.x — TLS arc** (partially blocked on cyrius).
+  Sandhi-owned policy + state work over stdlib
+  `tls_connect`.
   - **1.3.0** — live-network TLS policy gate (lead;
     pure CI infra, mirrors cyrius `_tls_live_gate`
-    skip-cleanly cascade).
-  - **1.3.1** — session-resumption cache in `tls_policy`
-    (sandhi-side cache keyed by `(host, port, alpn)`,
-    respecting 0.9.0 cred-strip rules).
-  - **1.3.2** — TLS 1.3 0-RTT (opt-in via
-    `sandhi_http_options_allow_0rtt`; replay-safe
-    methods only per RFC 8446 §8).
-  - **1.2.x — profile-justified candidates** (no
-    pre-committed ordering, lands once Batch A-F closes
-    the orchestrator gap and there's evidence to act on):
-    HPACK Huffman tie-break; `_sandhi_resp_new`
-    allocation collapse; connection-pool LRU eviction
-    behind option flag; `_sandhi_conn_connect_nb`
-    factoring decision (cyrius v5.9.42 added
-    `regression_network_probe` with the same
-    non-blocking-connect+poll+SO_ERROR mechanics —
-    decide at slot entry between filing a cyrius issue
-    for `net_connect_nb` in `lib/net.cyr` vs.
-    documenting parallel evolution; default to the
-    document-only path).
+    skip-cleanly cascade). **Independent of cyrius —
+    can ship anytime.**
+  - **1.3.1** — session-resumption cache. **Blocked on
+    cyrius**: `lib/tls.cyr` doesn't expose
+    `SSL_get1_session` / `SSL_set_session` /
+    `SSL_CTX_sess_set_*` callbacks today. The
+    `tls_connect_with_ctx_hook` surface is one-shot
+    per CTX and can't reach SSL-instance-level session
+    APIs. File a cyrius issue requesting hook
+    extensions; pairs with the existing `lib/tls.cyr`
+    hook-surface contract audit (filed at 1.2.0).
+  - **1.3.2** — TLS 1.3 0-RTT. **Blocked on cyrius**:
+    needs `SSL_write_early_data` /
+    `SSL_read_early_data` exposure. Bundle the request
+    with 1.3.1's hook ask.
+  - **1.2.6+ — profile-justified optimizations**.
+    Now that the prof captures landed at 1.2.5, the
+    next picks wait for real-workload data. The
+    earlier roadmap candidates (HPACK Huffman tie-break,
+    `_sandhi_resp_new` collapse, pool LRU,
+    `_sandhi_conn_connect_nb` factoring) all turned out
+    to be either no-ops or wait-for-consumer-ask on
+    close inspection — not picking them speculatively.
+    Defer until prof captures from a real workload show
+    where time and bytes actually go.
 
 **Not sandhi's slot** (filed in state for the same reason
 roadmap surfaces it — drop-back protection): `tls_connect`

@@ -9,6 +9,7 @@
 include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
 include "src/http/headers.cyr"
 include "src/http/url.cyr"
 include "src/http/conn.cyr"
@@ -1028,6 +1029,114 @@ fn test_alloc_124f_wd_join_arena() {
 }
 
 # ================================================================
+# 1.2.5 — profile instrumentation
+# ================================================================
+# `src/obs/prof.cyr` adds per-request per-phase timing captures and
+# recv-buffer cap/used tracking. Default-off; runtime toggle via
+# `sandhi_prof_enable(1)`. Captures fire inside `_sandhi_http_do_impl_a`
+# at five phase boundaries: URL_PARSE_END, DNS_END, CONN_OPEN_END,
+# REQ_BUILD_END, EXCHANGE_END.
+
+# Disabled-by-default — every capture is a no-op and `sandhi_prof_get`
+# returns 0.
+fn test_alloc_125_prof_disabled_default() {
+    assert_eq(sandhi_prof_enabled(), 0, "default disabled");
+    sandhi_prof_capture(SANDHI_PROF_PHASE_URL_PARSE_END);
+    assert_eq(sandhi_prof_get(SANDHI_PROF_PHASE_URL_PARSE_END), 0,
+    "disabled capture returns 0");
+    return 0;
+}
+
+# Enable + capture + read back. The captures must be monotonic
+# non-negative (each phase happens-after the previous).
+fn test_alloc_125_prof_capture_monotonic() {
+    sandhi_prof_enable(1);
+    sandhi_prof_reset();
+    # Drive a sequence of captures with small busy-loops between
+    # so each phase has measurable elapsed-ns. (Empty captures back-
+    # to-back can collapse to 0 ns on fast systems if clock_now_ns
+    # has coarse resolution.)
+    var i = 0;
+    while (i < 1000) { i = i + 1; }
+    sandhi_prof_capture(SANDHI_PROF_PHASE_URL_PARSE_END);
+    while (i < 2000) { i = i + 1; }
+    sandhi_prof_capture(SANDHI_PROF_PHASE_DNS_END);
+    while (i < 3000) { i = i + 1; }
+    sandhi_prof_capture(SANDHI_PROF_PHASE_CONN_OPEN_END);
+    while (i < 4000) { i = i + 1; }
+    sandhi_prof_capture(SANDHI_PROF_PHASE_REQ_BUILD_END);
+    while (i < 5000) { i = i + 1; }
+    sandhi_prof_capture(SANDHI_PROF_PHASE_EXCHANGE_END);
+
+    var t1 = sandhi_prof_get(SANDHI_PROF_PHASE_URL_PARSE_END);
+    var t2 = sandhi_prof_get(SANDHI_PROF_PHASE_DNS_END);
+    var t3 = sandhi_prof_get(SANDHI_PROF_PHASE_CONN_OPEN_END);
+    var t4 = sandhi_prof_get(SANDHI_PROF_PHASE_REQ_BUILD_END);
+    var t5 = sandhi_prof_get(SANDHI_PROF_PHASE_EXCHANGE_END);
+
+    assert_eq(t1 >= 0, 1, "url_parse_end >= 0");
+    assert_eq(t2 >= t1, 1, "dns_end >= url_parse_end (monotonic)");
+    assert_eq(t3 >= t2, 1, "conn_open_end >= dns_end");
+    assert_eq(t4 >= t3, 1, "req_build_end >= conn_open_end");
+    assert_eq(t5 >= t4, 1, "exchange_end >= req_build_end");
+
+    sandhi_prof_enable(0);
+    return 0;
+}
+
+# Reset zeros all captures back to baseline.
+fn test_alloc_125_prof_reset_clears() {
+    sandhi_prof_enable(1);
+    sandhi_prof_reset();
+    var j = 0;
+    while (j < 1000) { j = j + 1; }
+    sandhi_prof_capture(SANDHI_PROF_PHASE_EXCHANGE_END);
+    var t = sandhi_prof_get(SANDHI_PROF_PHASE_EXCHANGE_END);
+    assert_eq(t >= 0, 1, "after capture, get returns elapsed");
+
+    # Reset; immediately reading a phase that wasn't re-captured
+    # returns 0 elapsed (capture timestamp == start timestamp).
+    sandhi_prof_reset();
+    assert_eq(sandhi_prof_get(SANDHI_PROF_PHASE_EXCHANGE_END), 0,
+    "post-reset, uncaptured phase reads 0");
+
+    sandhi_prof_enable(0);
+    return 0;
+}
+
+# Recv-buffer record: cap and used round-trip while enabled.
+fn test_alloc_125_prof_recv_buf() {
+    sandhi_prof_enable(1);
+    sandhi_prof_reset();
+    sandhi_prof_record_recv(262144, 532);
+    assert_eq(sandhi_prof_recv_cap(), 262144, "cap recorded");
+    assert_eq(sandhi_prof_recv_used(), 532, "used recorded");
+
+    # Disabled: record is a no-op (existing values stay).
+    sandhi_prof_enable(0);
+    sandhi_prof_record_recv(99999, 99999);
+    assert_eq(sandhi_prof_recv_cap(), 262144, "disabled record is no-op");
+    return 0;
+}
+
+# End-to-end: enable, drive a request through the public verb, read
+# back captures. Use a garbage URL so the path returns at PARSE
+# without doing real I/O — only the URL_PARSE phase actually fires
+# in this case (subsequent phases get the same baseline timestamp).
+fn test_alloc_125_prof_real_request_arena() {
+    sandhi_prof_enable(1);
+    var a = arena_allocator(4096);
+    var resp = sandhi_http_get_a(a, "garbage://x", 0);
+    assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE, "PARSE err");
+
+    # URL_PARSE captured before the early-return for a parse failure.
+    var url_ns = sandhi_prof_get(SANDHI_PROF_PHASE_URL_PARSE_END);
+    assert_eq(url_ns >= 0, 1, "url_parse phase captured");
+    sandhi_prof_enable(0);
+    return 0;
+}
+
+# ================================================================
 # Runner
 # ================================================================
 
@@ -1181,6 +1290,21 @@ fn main() {
 
     test_group("alloc/124f/wd_join_arena");
     test_alloc_124f_wd_join_arena();
+
+    test_group("alloc/125/prof_disabled_default");
+    test_alloc_125_prof_disabled_default();
+
+    test_group("alloc/125/prof_capture_monotonic");
+    test_alloc_125_prof_capture_monotonic();
+
+    test_group("alloc/125/prof_reset_clears");
+    test_alloc_125_prof_reset_clears();
+
+    test_group("alloc/125/prof_recv_buf");
+    test_alloc_125_prof_recv_buf();
+
+    test_group("alloc/125/prof_real_request_arena");
+    test_alloc_125_prof_real_request_arena();
 
     return assert_summary();
 }

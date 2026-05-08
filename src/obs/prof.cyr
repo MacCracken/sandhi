@@ -1,0 +1,141 @@
+# sandhi/obs/prof — runtime per-request profile instrumentation.
+#
+# Mirrors the cyrius v5.10.0 `_prof_*_end` capture pattern but
+# adapted for runtime (sandhi is called many times per process, so
+# captures reset per request rather than printing once at exit).
+#
+# Off by default — every capture is a single global-load comparison
+# against `_sandhi_prof_enabled` and an early return; production
+# overhead is one branch per phase boundary. Consumers that want
+# numbers call `sandhi_prof_enable(1)` once at process start (or
+# selectively around requests they care about) and then read back
+# the per-phase elapsed-ns via `sandhi_prof_get(SANDHI_PROF_PHASE_*)`
+# after the request completes.
+#
+# Phase model — captures during `_sandhi_http_do_impl_a`:
+#   PHASE_REQUEST_START   = 0  (reset at request entry)
+#   PHASE_URL_PARSE_END   = 1  (after sandhi_url_parse_a)
+#   PHASE_DNS_END         = 2  (after _sandhi_client_resolve(_v6)?_a)
+#   PHASE_CONN_OPEN_END   = 3  (after pool take or open_fully_timed_a)
+#   PHASE_REQ_BUILD_END   = 4  (after _sandhi_client_build_request_va)
+#   PHASE_EXCHANGE_END    = 5  (after _sandhi_http_exchange*_a)
+#
+# Each capture records a ns timestamp; `sandhi_prof_get(phase)`
+# returns elapsed ns from PHASE_REQUEST_START to that phase. The
+# pool-take fast path doesn't reach the connect step, so
+# PHASE_CONN_OPEN_END equals the prior phase's timestamp on a pool
+# hit (zero elapsed). Same for IPv6 fallback inside DNS — the v6
+# resolution is captured under the unified DNS phase.
+#
+# Plus recv-buffer waste tracking: `sandhi_prof_recv_cap()` is the
+# bytes allocated for the recv buffer; `sandhi_prof_recv_used()` is
+# the bytes actually received. The ratio is the over-allocation
+# factor, useful for tuning the default 256 KB cap.
+#
+# This module is the first slot of a future optimization arc — the
+# captures stay constant across slots, but the analysis driving the
+# next optimization picks lands as separate work using these numbers.
+
+enum SandhiProfPhase {
+    SANDHI_PROF_PHASE_REQUEST_START   = 0;
+    SANDHI_PROF_PHASE_URL_PARSE_END   = 1;
+    SANDHI_PROF_PHASE_DNS_END         = 2;
+    SANDHI_PROF_PHASE_CONN_OPEN_END   = 3;
+    SANDHI_PROF_PHASE_REQ_BUILD_END   = 4;
+    SANDHI_PROF_PHASE_EXCHANGE_END    = 5;
+}
+
+var SANDHI_PROF_PHASE_COUNT = 6;
+
+# Module-level state. Six slot per-phase timestamps + the cap/used
+# pair. All zero at process start; reset at every request entry
+# when profiling is enabled.
+var _sandhi_prof_enabled = 0;
+var _sandhi_prof_ts_0 = 0;
+var _sandhi_prof_ts_1 = 0;
+var _sandhi_prof_ts_2 = 0;
+var _sandhi_prof_ts_3 = 0;
+var _sandhi_prof_ts_4 = 0;
+var _sandhi_prof_ts_5 = 0;
+var _sandhi_prof_recv_cap_v = 0;
+var _sandhi_prof_recv_used_v = 0;
+
+# ================================================================
+# Public surface
+# ================================================================
+
+# Toggle profiling on/off. Default 0 = every capture is a no-op.
+fn sandhi_prof_enable(on) {
+    _sandhi_prof_enabled = on;
+    return 0;
+}
+
+fn sandhi_prof_enabled() {
+    return _sandhi_prof_enabled;
+}
+
+# Reset per-request state at request entry. Records PHASE_REQUEST_START.
+# No-op when profiling is disabled.
+fn sandhi_prof_reset() {
+    if (_sandhi_prof_enabled == 0) { return 0; }
+    var now = clock_now_ns();
+    _sandhi_prof_ts_0 = now;
+    _sandhi_prof_ts_1 = now;
+    _sandhi_prof_ts_2 = now;
+    _sandhi_prof_ts_3 = now;
+    _sandhi_prof_ts_4 = now;
+    _sandhi_prof_ts_5 = now;
+    _sandhi_prof_recv_cap_v = 0;
+    _sandhi_prof_recv_used_v = 0;
+    return 0;
+}
+
+# Capture timestamp for `phase`. No-op when profiling is disabled.
+# Phase ordering matters — capture in the order phases complete.
+fn sandhi_prof_capture(phase) {
+    if (_sandhi_prof_enabled == 0) { return 0; }
+    var now = clock_now_ns();
+    if (phase == SANDHI_PROF_PHASE_URL_PARSE_END) { _sandhi_prof_ts_1 = now; }
+    if (phase == SANDHI_PROF_PHASE_DNS_END)       { _sandhi_prof_ts_2 = now; }
+    if (phase == SANDHI_PROF_PHASE_CONN_OPEN_END) { _sandhi_prof_ts_3 = now; }
+    if (phase == SANDHI_PROF_PHASE_REQ_BUILD_END) { _sandhi_prof_ts_4 = now; }
+    if (phase == SANDHI_PROF_PHASE_EXCHANGE_END)  { _sandhi_prof_ts_5 = now; }
+    return 0;
+}
+
+# Record the recv-buffer cap (allocated) and used (actually received).
+# Called once per exchange, just before `sandhi_conn_close`. No-op
+# when profiling is disabled.
+fn sandhi_prof_record_recv(cap, used) {
+    if (_sandhi_prof_enabled == 0) { return 0; }
+    _sandhi_prof_recv_cap_v = cap;
+    _sandhi_prof_recv_used_v = used;
+    return 0;
+}
+
+# Read elapsed ns from PHASE_REQUEST_START to `phase`. Returns 0
+# when profiling is disabled or for PHASE_REQUEST_START itself.
+fn sandhi_prof_get(phase) {
+    if (_sandhi_prof_enabled == 0) { return 0; }
+    if (phase == SANDHI_PROF_PHASE_REQUEST_START) { return 0; }
+    var start = _sandhi_prof_ts_0;
+    if (phase == SANDHI_PROF_PHASE_URL_PARSE_END) { return _sandhi_prof_ts_1 - start; }
+    if (phase == SANDHI_PROF_PHASE_DNS_END)       { return _sandhi_prof_ts_2 - start; }
+    if (phase == SANDHI_PROF_PHASE_CONN_OPEN_END) { return _sandhi_prof_ts_3 - start; }
+    if (phase == SANDHI_PROF_PHASE_REQ_BUILD_END) { return _sandhi_prof_ts_4 - start; }
+    if (phase == SANDHI_PROF_PHASE_EXCHANGE_END)  { return _sandhi_prof_ts_5 - start; }
+    return 0;
+}
+
+# Bytes allocated for the recv buffer in the most-recent exchange.
+fn sandhi_prof_recv_cap() {
+    return _sandhi_prof_recv_cap_v;
+}
+
+# Bytes actually received in the most-recent exchange. The ratio
+# `recv_used / recv_cap` is the over-allocation factor — values
+# near 1.0 mean the cap is well-tuned, near 0 means we allocated
+# 100KB+ for a 200-byte response.
+fn sandhi_prof_recv_used() {
+    return _sandhi_prof_recv_used_v;
+}
