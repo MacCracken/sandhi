@@ -298,6 +298,14 @@ fn sandhi_sse_parse_a(a, buf, blen, remaining_out) {
     var ctx = _sandhi_sse_ctx_new_a(a);
 
     var events = vec_new_a(a);
+    # 1.2.8 OOM guard: subsequent `vec_push_a(a, events, ev)` calls
+    # would SIGSEGV on null events; bail early so the caller gets
+    # `events == 0` and can detect OOM the same way they detect any
+    # other vec construction failure.
+    if (events == 0) {
+        store64(remaining_out, 0);
+        return 0;
+    }
     if (buf == 0 || blen <= 0) {
         store64(remaining_out, 0);
         return events;

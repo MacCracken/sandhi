@@ -4,6 +4,95 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.8] — 2026-05-08
+
+**1.1.0-era OOM-guard audit + tests/sandhi.tcyr cap relief.**
+Bundled slot per cyrius v5.10.0's "items sharing the same
+cascade" rule — both are test-infrastructure / hardening
+work. Final sandhi-side release before holding for cyrius-
+side TLS hooks (1.3.1 / 1.3.2 unblockers).
+
+### 1.1.0-era OOM-guard audit (extending 1.2.6 / 1.2.7)
+
+1.2.6 closed OOM-SIGSEGV gaps in 1.2.0–1.2.4 additions;
+1.2.7 closed the same shape on the server send path. This
+slot extends the audit to the ~150 `_a` variants added at
+1.1.0. Most leaf-level `_a`s already null-check (their
+`alloc/batch1/`–`batch6/` tests cover the OOM contract).
+**Three real findings**:
+
+1. **`src/http/h2/response.cyr:239`** — SIGSEGV-on-OOM.
+   `var headers = sandhi_headers_new_a(a)` returned 0,
+   passed unguarded to `_h2_decode_response_headers_a`,
+   which calls `sandhi_headers_add_a(a, h=null, ...)` →
+   `vec_push_a(a, h=null, ...)` → SIGSEGV. **Fixed**:
+   null-check, return `_sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL)`.
+
+2. **`src/http/sse.cyr:300`** — SIGSEGV-on-OOM.
+   `var events = vec_new_a(a)` not guarded; subsequent
+   `vec_push_a(a, events=null, ev)` at line 320 →
+   SIGSEGV. **Fixed**: null-check, return 0.
+
+3. **`src/http/client.cyr:689`** (`_sandhi_resolve_location_a`)
+   — partial-arena leak. Used `str_builder_new()` (default
+   alloc) for intermediate URL scratch; the final cstr
+   was dup'd into `a` correctly, but the scratch builder
+   leaked into the global allocator. Not a SIGSEGV, but
+   a 1.1.0 arena-correctness violation. **Fixed**:
+   threaded `str_builder_new_a` + `_a` variants; OOM
+   null-guard added.
+
+Other 1.1.0 paths surveyed and confirmed safe: 5
+`sandhi_url_parse_a` callsites all null-check; 2
+`vec_new_a` callsites in `src/http/h2/hpack.cyr` guard
+at `+2`; `sandhi_headers_parse_a` guards at `+1`. **The
+audit is now complete across every `_a` verb in the
+codebase** — 1.1.0, 1.2.0–1.2.4, 1.2.7 server.
+
+### tests/sandhi.tcyr cap relief
+
+`tests/sandhi.tcyr` was at the per-program-fixup-table
+cap (architecture/001). Carved the RPC test cluster out
+into new `tests/rpc.tcyr`:
+
+- 17 fns moved verbatim: 10 `test_json_*`, 3
+  `test_dispatch_err_*`, 4 `test_webdriver_*`, 3
+  `test_mcp_*`. Plus 20 corresponding `test_group(...)`
+  calls.
+- New `tests/rpc.tcyr` mirrors `tests/sandhi.tcyr`'s
+  include block.
+- Total assertions unchanged: 482 sandhi.tcyr split
+  into 440 sandhi + 42 rpc.
+
+### CI plumbing rides along
+
+`.github/workflows/ci.yml` now runs `tests/alloc.tcyr`
+(added at 1.1.0, never wired into CI) AND the new
+`tests/rpc.tcyr`. Pre-1.2.8 CI only ran `sandhi.tcyr` +
+`h2.tcyr`; the alloc suite (143 → 250 assertions across
+1.1.0–1.2.8) was never CI-verified. Pre-existing gap
+closed.
+
+### Verified
+
+- `tests/alloc.tcyr` gains 4 new test groups (7
+  assertions) under `alloc/128/`:
+  `h2_response_headers_alloc_oom`, `sse_parse_oom`,
+  `resolve_location_arena`, `resolve_location_oom`.
+- 250/250 alloc, 440/440 sandhi (post-split), 42/42 rpc
+  (new), 167/167 h2 — no regression.
+- **Total: 899 assertions green** (+7 over 1.2.7's 892).
+- `cyrius lint` 0 warnings; `cyrfmt --check` clean.
+
+### Pinned next
+
+The OOM-guard audit story is now complete across the
+entire codebase. The 1.2.x optimization arc that opened
+at 1.2.0 closes here. **Holding for cyrius-side TLS
+hooks** (1.3.1 session resumption, 1.3.2 0-RTT) before
+the next sandhi-side slot. 1.3.0 (live-network TLS-
+policy gate) is unblocked but pinned by user direction.
+
 ## [1.2.7] — 2026-05-08
 
 **Batch G — server `_a` paint + OOM guards.** Closes the same

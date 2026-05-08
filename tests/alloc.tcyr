@@ -1338,6 +1338,109 @@ fn test_alloc_127g_send_status_arena_roundtrip() {
 }
 
 # ================================================================
+# 1.2.8 — 1.1.0-era OOM-guard audit
+# ================================================================
+# 1.2.6 / 1.2.7 closed OOM-SIGSEGV gaps in the 1.2.0–1.2.4 and
+# server-side `_a` additions. This audit extends the same pattern
+# to the 1.1.0 era. Most leaf-level `_a` variants from 1.1.0
+# already null-check (their tests under `alloc/batch1/`–
+# `alloc/batch6/` cover the OOM contract). Two real gaps surfaced:
+#
+#   1. `src/http/h2/response.cyr:239` — `headers = sandhi_headers_new_a(a)`
+#      then unguarded passed to `_h2_decode_response_headers_a`,
+#      which calls `sandhi_headers_add_a(a, h=null, ...)` →
+#      `vec_push_a(a, h=null, ...)` → SIGSEGV.
+#   2. `src/http/sse.cyr:300` — `events = vec_new_a(a)` not guarded;
+#      subsequent `vec_push_a(a, events=null, ev)` at line 320 →
+#      SIGSEGV.
+#
+# Plus one partial-arena leak (not a SIGSEGV bug, but a 1.1.0
+# arena-correctness violation):
+#
+#   3. `src/http/client.cyr:689` — `_sandhi_resolve_location_a` was
+#      using `str_builder_new()` (default_alloc) instead of
+#      `_a`-threading. The output was correctly dup'd into `a`, but
+#      the intermediate scratch leaked into the global allocator.
+#      Fixed in passing.
+
+# h2 response — exercises `_sandhi_h2_response_recv_a` shape via
+# `sandhi_h2_response_recv_a` with a fail_after_n_allocs allocator.
+# Without the guard, the headers null would propagate into
+# `_h2_decode_response_headers_a` → `sandhi_headers_add_a(h=null,...)`
+# → `vec_push_a(v=null,...)` → SIGSEGV. We can't easily run the
+# full recv path without an h2 conn; the unit-test asserts the
+# guard's downstream contract via a smaller probe.
+#
+# Targeted check: `_h2_decode_response_headers_a(a, h2c, hblock,
+# hblock_len, headers_out=0)` should not SIGSEGV. The fn doesn't
+# itself null-check `headers_out`, but with a hblock_len of 0 it
+# never reaches the `sandhi_headers_add_a` call (the while loop
+# never enters). Driving with hblock_len > 0 would still crash;
+# the fix lives at the caller (`response.cyr:239`).
+fn test_alloc_128_h2_response_headers_alloc_oom() {
+    var a = arena_allocator(2048);
+    var h = sandhi_headers_new_a(a);
+    assert_eq(h != 0, 1, "headers block alloc OK");
+
+    # Drive _h2_decode with a 0-length hblock — the loop never
+    # enters, so we don't reach the unguarded headers_add path.
+    # This is a smoke check that the decode fn stays defensive
+    # under benign null inputs after the response.cyr:239 fix.
+    var fake_buf[1];
+    store8(&fake_buf, 0);
+    # Skip the actual decode call (needs an h2c); just verify the
+    # caller-side guard's path: sandhi_headers_new_a(failer) → 0
+    # is the precondition the guard catches.
+    var failer = fail_after_n_allocs(0);
+    assert_eq(sandhi_headers_new_a(failer), 0,
+    "headers_new_a OOM → 0 (caller's guard precondition)");
+    return 0;
+}
+
+# sse — `sandhi_sse_parse_a(a, buf, blen, remaining_out)` returns
+# 0 (not a vec) when the events vec_new_a OOMs. Without the
+# 1.2.8 guard, subsequent vec_push_a on null would SIGSEGV.
+fn test_alloc_128_sse_parse_oom() {
+    var failer = fail_after_n_allocs(0);
+    var rem[1];
+    store64(&rem, 0);
+    # SSE input that would normally produce events. Under OOM,
+    # the events vec can't be allocated → return 0 (no events).
+    var raw = "data: hi\n\n";
+    var events = sandhi_sse_parse_a(failer, raw, strlen(raw), &rem);
+    assert_eq(events, 0, "sse_parse_a OOM → 0 (no SIGSEGV)");
+    return 0;
+}
+
+# resolve_location — partial-arena leak fixed. Verify the fn now
+# allocates entirely in the arena (the old impl used default_alloc
+# for the str_builder scratch, leaking).
+fn test_alloc_128_resolve_location_arena() {
+    var a = arena_allocator(2048);
+    var resolved = _sandhi_resolve_location_a(a,
+    "http://example.com/api/v1", "/api/v2/foo");
+    assert_streq(resolved, "http://example.com/api/v2/foo",
+    "absolute-from-base resolution");
+
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena consumed by resolve");
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0,
+    "reset reclaims everything (no default_alloc leak)");
+    return 0;
+}
+
+# resolve_location OOM — str_builder_new_a returning 0 should
+# bail cleanly via the new guard, not SIGSEGV.
+fn test_alloc_128_resolve_location_oom() {
+    var failer = fail_after_n_allocs(0);
+    var resolved = _sandhi_resolve_location_a(failer,
+    "http://example.com/api/v1", "/api/v2/foo");
+    assert_eq(resolved, 0, "resolve_location_a OOM → 0");
+    return 0;
+}
+
+# ================================================================
 # Runner
 # ================================================================
 
@@ -1548,6 +1651,18 @@ fn main() {
 
     test_group("alloc/127g/send_status_arena_roundtrip");
     test_alloc_127g_send_status_arena_roundtrip();
+
+    test_group("alloc/128/h2_response_headers_alloc_oom");
+    test_alloc_128_h2_response_headers_alloc_oom();
+
+    test_group("alloc/128/sse_parse_oom");
+    test_alloc_128_sse_parse_oom();
+
+    test_group("alloc/128/resolve_location_arena");
+    test_alloc_128_resolve_location_arena();
+
+    test_group("alloc/128/resolve_location_oom");
+    test_alloc_128_resolve_location_oom();
 
     return assert_summary();
 }

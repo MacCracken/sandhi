@@ -144,6 +144,19 @@ jobs:
       - name: Test (h2)
         run: cyrius test tests/h2.tcyr
 
+      - name: Test (alloc)
+        # Added at 1.1.0 (allocator-as-first-arg migration) but never
+        # wired into CI until 1.2.8. Carries the per-request-arena
+        # round-trip + OOM coverage for every `_a` variant.
+        run: cyrius test tests/alloc.tcyr
+
+      - name: Test (rpc)
+        # Carved out of tests/sandhi.tcyr at 1.2.8 to relieve the
+        # per-program-fixup-table cap (architecture/001). Covers the
+        # JSON builder/extractor, RPC dispatch err-envelope extraction,
+        # WebDriver URL helpers, and MCP envelope shape.
+        run: cyrius test tests/rpc.tcyr
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest

@@ -237,6 +237,10 @@ fn sandhi_h2_response_recv_a(a, h2c, stream_id) {
 
     # Decode the accumulated header block.
     var headers = sandhi_headers_new_a(a);
+    # 1.2.8 OOM guard: `_h2_decode_response_headers_a` calls
+    # `sandhi_headers_add_a(a, headers, ...)` which calls
+    # `vec_push_a(a, h=null, ...)` → SIGSEGV. Bail with INTERNAL.
+    if (headers == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
     var status = _h2_decode_response_headers_a(a, h2c, hblock, hblock_len, headers);
     if (status == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL); }
 
