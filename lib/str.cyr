@@ -21,7 +21,7 @@ struct Str { data; len; }
 # pointed-to data is NOT copied — the Str shares the cstr's storage
 # (same as the back-compat str_from). For an owning copy, use
 # str_clone_a / str_dup_a.
-fn str_from_a(a, cstr) {
+fn str_from_a(a, cstr): Str {
     var slen = strlen(cstr);
     var s = alloc_via(a, 16);
     if (s == 0) { return 0; }
@@ -32,14 +32,14 @@ fn str_from_a(a, cstr) {
 
 # Create a Str from a C string literal. v5.8.35 wrapper —
 # delegates to str_from_a with default_alloc().
-fn str_from(cstr) {
+fn str_from(cstr): Str {
     return str_from_a(default_alloc(), cstr);
 }
 
 # v5.8.35 — Allocator-as-first-arg variant of str_new. Allocates
 # the 16-byte Str header through `a`. Data buffer is borrowed,
 # not copied. Returns 0 on OOM.
-fn str_new_a(a, data, len) {
+fn str_new_a(a, data, len): Str {
     var s = alloc_via(a, 16);
     if (s == 0) { return 0; }
     store64(s, data);
@@ -48,7 +48,7 @@ fn str_new_a(a, data, len) {
 }
 
 # Create a Str from buffer + length. v5.8.35 wrapper.
-fn str_new(data, len) {
+fn str_new(data, len): Str {
     return str_new_a(default_alloc(), data, len);
 }
 

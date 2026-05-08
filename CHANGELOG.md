@@ -4,6 +4,145 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-05-08
+
+**Hot-path allocator review — Batch A: request-orchestrator
+foundation + audit findings.** Opens the 1.2.x optimization
+arc. Sandhi-side companion to cyrius v5.10.x's optimization
+theme; ONE-thing-per-slot principle applied — each subsequent
+batch lands in its own slot.
+
+### Audit findings
+
+The 1.1.0 leaf-level migration was clean — automated scan of
+all 78 `_a` paired fns across `src/http/` + `src/rpc/` found
+**zero** cases of an `_a` variant calling a bare paired
+helper (i.e. no `_a` fn silently dropped its allocator into
+`default_alloc()` via a paired but bare-form call).
+
+**The real leak**: the request-orchestration layer above the
+leaves was never `_a`-converted. `sandhi_http_get` / `_post`
+/ `_put` / `_patch` / `_delete` / `_head` (and their
+`_opts` / `_retry` / `_auto` variants) had no `_a`
+counterparts, and the internal orchestrators (`_do` /
+`_do_impl` / `_dispatch` / `_follow` / `_retry` /
+`_try_h2_promote` / `_auto_once` / `_auto_follow`) all ran
+on `default_alloc()` regardless. A consumer using the 1.1.0
+`_a` leaves to build an arena-bound headers block had no way
+to *use* that arena across the request: `sandhi_http_get`
+dropped right back to the global allocator at the entry
+point. Reference shapes that DID get the migration end-to-end:
+`sandhi_http_stream` / `sandhi_h2_request` (see `_a`
+counterparts).
+
+**Quantified gap** (this CHANGELOG is the audit's permanent
+record):
+- Internal orchestrators needing `_a`: 7 fns
+  (`_sandhi_http_do`, `_do_impl`, `_dispatch`, `_follow`,
+  `_retry`, `_try_h2_promote`, `_auto_once`/`_auto_follow`).
+- Public top-level verbs needing `_a`: ~26
+  (HTTP GET-family + opts / retry / auto + RPC dialect entries).
+- Accessors deliberately not paired (no alloc): ~30
+  (`sandhi_http_status`, `_body`, `_headers`, etc. — pure
+  load64/store64 on response/options/pool structs).
+- Singletons that MUST stay on `default_alloc`: 4 (ALPN
+  literals, HPACK static, HPACK Huffman tree, server
+  `_hsv_req_buf` — all process-wide, outlive any per-
+  request arena).
+
+### Changed (Batch A — internal orchestrator foundation)
+
+- **http**: `_sandhi_client_build_request_a` was buggy —
+  accepted `a` and silently dropped it, calling the bare
+  `_v` impl (which used `default_alloc()` throughout).
+  Renamed the real impl to `_sandhi_client_build_request_va`
+  (variadic with allocator) and fixed all four entry points
+  (`_a` / bare / `_v` / `_va`) to thread `a` correctly via
+  `str_builder_new_a` / `_add_cstr_a` / `_add_int_a` /
+  `_build_a`. Added an OOM guard after `str_builder_new_a`
+  so allocator-failure returns 0 cleanly instead of
+  segfaulting on the next add (the stdlib `str_builder`
+  ops don't null-check `sb`).
+- **http**: new `_sandhi_http_exchange_a` and
+  `_sandhi_http_exchange_keepalive_a`. Recv buffer alloc
+  now goes through `alloc_via(a, cap+1)`; response parse
+  uses `sandhi_http_response_parse_a(a, ...)`; every
+  error-path resp construction uses `_sandhi_resp_err_a(a,
+  ...)`. Pool put-back path keeps using the pool's own
+  allocator (`_sandhi_pool_alloc(p)`) — pool entries
+  outlive any per-request arena, so this is intentional,
+  not a leak.
+- **http**: new `_sandhi_http_do_a` (trace wrapper) and
+  `_sandhi_http_do_impl_a` (request hot path). `_do_impl_a`
+  threads `a` through every per-request alloc: URL parse,
+  v4/v6 DNS resolve, conn-open (v4 + v6 paths), full-path
+  build, host-header build, request-builder, and the
+  exchange recv buffer.
+- **http**: new `_sandhi_http_dispatch_a` — opts-aware
+  entry. Routes the no-redirect path through `_do_a`
+  (allocator threaded end-to-end). The redirect-follow
+  path still routes through bare `_sandhi_http_follow` —
+  `_follow_a` is Batch B (1.2.1). For `follow=1` callers,
+  the per-request arena is bypassed across redirect hops
+  for now; documented as a partial-arena leak that closes
+  at 1.2.1.
+- All bare orchestrator versions (`_do` / `_do_impl` /
+  `_dispatch` / `_exchange` / `_exchange_keepalive`)
+  preserved as back-compat wrappers calling the `_a`
+  variant with `default_alloc()`. Public surface unchanged
+  in this slot.
+
+### Verified
+
+- `tests/alloc.tcyr` gains 4 new test groups (12
+  assertions) under `alloc/120a/`:
+  1. `build_request_arena` — arena round-trip + reset
+     reclaims everything.
+  2. `build_request_va_keepalive` — keep_alive=1 omits
+     `Connection: close` correctly through the threaded
+     allocator.
+  3. `dispatch_err_resp_arena` — `_sandhi_http_dispatch_a`
+     against an unparseable URL allocates the err-resp
+     in the arena; `reset_via` reclaims cleanly.
+  4. `build_request_oom` — `fail_after_n_allocs(0)`
+     returns 0 from the builder gracefully (this caught
+     the missing OOM guard during development).
+- 155/155 alloc tests pass (143 pre-existing + 12 new).
+- 482/482 `tests/sandhi.tcyr`, 167/167 `tests/h2.tcyr` —
+  no regression. **Total: 804 assertions green** (+12
+  over 1.1.2's 792).
+- `cyrius lint src/http/client.cyr` — 0 warnings.
+  `cyrfmt --check` clean on touched files.
+
+### Roadmap cleanup (rides along)
+
+- 1.2.0 / 1.3.x split per the slot-shape decision:
+  optimization arc (1.2.x) and TLS arc (1.3.x) are
+  separate efforts that don't share a cascade and
+  shouldn't bundle.
+- `tls_connect` native-transport prep audit dropped from
+  sandhi's roadmap — that's a cyrius-side issue against
+  `lib/tls.cyr`, not sandhi's slot. Filed on cyrius's
+  Held / pinned bug arc as
+  *"`lib/tls.cyr` hook-surface contract audit"*.
+- ADR 0001 + CLAUDE.md updated: the *"transitions to
+  native TLS when v5.9.x ships"* framing was wrong (cyrius
+  v5.9.x → v5.10.x is an optimization arc, not a transport
+  swap; lib/tls.cyr stays libssl.so.3-bridged
+  indefinitely per the 2026-04-24 pure-Cyrius-TLS removal).
+
+### Pinned next
+
+- **1.2.1 — Batch B**: `_sandhi_http_follow_a` +
+  `_sandhi_http_retry_a`. Closes the partial-arena leak
+  on `follow=1` and `_retry` callers.
+- **1.2.2 — Batch C**: `_sandhi_http_auto_*_a` family.
+- **1.2.3 — Batch D**: top-level public verbs
+  (`sandhi_http_get_a` etc.) — first slot where
+  consumer-visible end-to-end arena adoption ships.
+- **1.2.4+ — Batch E / F**: `_opts` / `_retry` / `_auto`
+  user-facing variants; RPC dialect entries.
+
 ## [1.1.2] — 2026-05-08
 
 **Request-builder dup-prevention.** Closes the second 0.9.9

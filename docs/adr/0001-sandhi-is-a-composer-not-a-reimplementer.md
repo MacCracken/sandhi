@@ -32,7 +32,7 @@ Scope of what sandhi owns:
 - **`sandhi::http`** — full HTTP client (POST/PUT/DELETE/PATCH/HEAD, headers, HTTPS unification via `tls.cyr`, redirect following, eventually keepalive / conn pooling).
 - **`sandhi::rpc`** — JSON-RPC dialects (WebDriver wire, Appium, MCP-over-HTTP). Streaming responses. Dialect-aware error envelopes.
 - **`sandhi::discovery`** — service discovery. mDNS, daimon-registered lookup, chained fallback. The genuinely new surface that didn't exist anywhere.
-- **`sandhi::tls_policy`** — cert pinning, mTLS, trust-store management. Wraps `lib/tls.cyr` FFI today; transitions to native TLS when Cyrius v5.9.x ships.
+- **`sandhi::tls_policy`** — cert pinning, mTLS, trust-store management. Wraps stdlib `lib/tls.cyr`. Transport details (fdlopen-libssl today; possibly native later) are stdlib concerns; sandhi's hook-surface contract is unchanged across any swap. (Earlier framing predicted a v5.9.x native-TLS transition that didn't happen on that boundary; cyrius v5.10.x is now an optimization arc, not a transport-swap arc. The thesis stands either way: sandhi composes, doesn't reimplement.)
 - **`sandhi::server`** — lifts `lib/http_server.cyr` out of interim stdlib (per cyrius roadmap), adds routing + middleware + auth primitives.
 
 Scope of what sandhi does **not** own:

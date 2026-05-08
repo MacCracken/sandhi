@@ -596,6 +596,112 @@ fn test_alloc_batch3_local_arena() {
 }
 
 # ================================================================
+# 1.2.0 — Batch A: orchestrator allocator review
+# ================================================================
+# Audit-pass tests for the request-orchestrator layer
+# (`_sandhi_http_do` / `_do_impl` / `_dispatch` / `_exchange` /
+# `_exchange_keepalive` / `_sandhi_client_build_request`). The 1.1.0
+# leaf-level migration was clean (no `_a` fn called a bare paired
+# version), but the orchestrators above the leaves had no `_a`
+# variants — every consumer call to `sandhi_http_get` etc. went
+# through `default_alloc()` for the entire request path, bypassing
+# any per-request arena even when leaves like `sandhi_url_parse_a`
+# would have honored it. Batch A adds `_a` variants for the four
+# orchestrators + the request builder. Follow / retry / h2 auto /
+# top-level public verbs land in 1.2.1+.
+
+# build_request — arena round-trip. The pre-1.2.0 `_a` variant
+# silently dropped `a` and routed every str_builder op through
+# default_alloc(); the new `_va` impl threads `a` correctly.
+fn test_alloc_120a_build_request_arena() {
+    var a = arena_allocator(4096);
+
+    var req = _sandhi_client_build_request_a(a, "GET", "/probe", "example.com", 0, 0);
+    assert_eq(req != 0, 1, "build_request_a returned a Str");
+    var s = str_data(req);
+    # Wire format must include the auto-injected Host: example.com line.
+    var has_host = 0;
+    var i = 0;
+    while (i + 17 < strlen(s)) {
+        if (load8(s + i) == 72 && load8(s + i + 1) == 111 && load8(s + i + 2) == 115
+        && load8(s + i + 3) == 116 && load8(s + i + 4) == 58 && load8(s + i + 5) == 32) {
+            has_host = 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(has_host, 1, "auto-injected Host: line present in arena-built request");
+
+    var used_after_first = arena_used(allocator_state(a));
+    assert_eq(used_after_first > 0, 1, "arena consumed by build_request_a");
+
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "reset_via clears arena");
+
+    # Second build into the reset arena succeeds; previous req's
+    # Str struct + str_builder + cstrings all reclaimed.
+    var req2 = _sandhi_client_build_request_a(a, "POST", "/api", "api.example.com", 0, 42);
+    assert_eq(req2 != 0, 1, "build #2 into reset arena succeeded");
+    return 0;
+}
+
+# build_request — full variadic with keep_alive flag.
+fn test_alloc_120a_build_request_va_keepalive() {
+    var a = arena_allocator(4096);
+    var req = _sandhi_client_build_request_va(a, "GET", "/", "example.com", 0, 0, 1);
+    assert_eq(req != 0, 1, "build_request_va keep_alive=1 succeeded");
+    # keep_alive=1 must NOT emit "Connection: close".
+    var s = str_data(req);
+    var has_close = 0;
+    var i = 0;
+    while (i + 17 < strlen(s)) {
+        if (load8(s + i) == 67 && load8(s + i + 1) == 111 && load8(s + i + 2) == 110
+        && load8(s + i + 3) == 110 && load8(s + i + 4) == 101 && load8(s + i + 5) == 99
+        && load8(s + i + 6) == 116 && load8(s + i + 7) == 105 && load8(s + i + 8) == 111
+        && load8(s + i + 9) == 110 && load8(s + i + 10) == 58 && load8(s + i + 11) == 32
+        && load8(s + i + 12) == 99 && load8(s + i + 13) == 108 && load8(s + i + 14) == 111
+        && load8(s + i + 15) == 115 && load8(s + i + 16) == 101) {
+            has_close = 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(has_close, 0, "keep_alive=1 omits Connection: close");
+    return 0;
+}
+
+# dispatch_a — error-path response is allocated in the arena.
+# Drive `_sandhi_http_dispatch_a` against an unparseable URL: every
+# alloc until the err-resp construction lands in the arena, which
+# `reset_via` should reclaim cleanly.
+fn test_alloc_120a_dispatch_err_resp_arena() {
+    var a = arena_allocator(4096);
+    var opts = sandhi_http_options_new_a(a);
+    var resp = _sandhi_http_dispatch_a(a, "GET", "not-a-valid-url", 0, 0, 0, opts);
+    assert_eq(resp != 0, 1, "dispatch_a err-resp constructed");
+    assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE,
+    "URL parse fail → SANDHI_ERR_PARSE");
+
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena bytes consumed by err-resp construction");
+
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0,
+    "reset_via reclaims the err-resp arena allocations");
+    return 0;
+}
+
+# build_request — OOM via fail_after_n_allocs returns gracefully.
+# The first alloc is `str_builder_new_a` (the builder header itself).
+fn test_alloc_120a_build_request_oom() {
+    var a = fail_after_n_allocs(0);
+    var req = _sandhi_client_build_request_a(a, "GET", "/", "example.com", 0, 0);
+    # str_builder_new_a returns 0 on OOM; subsequent str_builder_add_*
+    # ops are no-ops on a 0 builder; str_builder_build_a returns 0
+    # when sb is 0.
+    assert_eq(req, 0, "OOM at first alloc → build returns 0 cleanly (no abort)");
+    return 0;
+}
+
+# ================================================================
 # Runner
 # ================================================================
 
@@ -680,6 +786,18 @@ fn main() {
 
     test_group("alloc/batch6/stream_result_oom");
     test_alloc_batch6_stream_result_oom();
+
+    test_group("alloc/120a/build_request_arena");
+    test_alloc_120a_build_request_arena();
+
+    test_group("alloc/120a/build_request_va_keepalive");
+    test_alloc_120a_build_request_va_keepalive();
+
+    test_group("alloc/120a/dispatch_err_resp_arena");
+    test_alloc_120a_dispatch_err_resp_arena();
+
+    test_group("alloc/120a/build_request_oom");
+    test_alloc_120a_build_request_oom();
 
     return assert_summary();
 }

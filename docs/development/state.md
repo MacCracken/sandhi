@@ -4,7 +4,9 @@
 
 ## Version
 
-**1.1.2** — 2026-05-08. **Request-builder dup-prevention.** Closes the second 0.9.9 audit deferral, completing the 1.1.x small-fixes lane. `_sandhi_client_build_request_v` in `src/http/client.cyr` now filters caller-supplied `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` out of `user_headers` before serialization — each is auto-injected by the builder above, so a caller's second copy would emit alongside the auto value and create a dup-header smuggling vector on the wire (CL.CL / TE.CL / dup-Host / Connection-override). New static helper `_sandhi_client_user_header_is_reserved` sits just above the builder; uses `_sandhi_resp_streq_ci` from response.cyr (bundled before client.cyr) since client.cyr's own `_sandhi_streq_ci` is defined later in the file and unreachable from here under single-pass compilation. Symmetric to the server-side detector `sandhi_headers_smuggle_dup` (0.9.1) — that flagged dup-headers parsed off the wire; this is the matching client-side guard at request-build time. New `programs/_dup_prevention_probe.cyr` covers six scenarios across 21 assertions: caller-Host filtered + auto-Host wins, caller-Content-Length filtered on POST, caller-Transfer-Encoding filtered (CL.TE smuggling vector blocked at build), caller-Connection filtered, case-insensitive matcher (lowercase / UPPER-CASE / mixed all dropped), and a regression guard that non-reserved names (Authorization, Accept, X-Custom) pass through unchanged. **792 assertions green** (482 sandhi + 167 h2 + 143 alloc; no regression). Filter has no unit test in `tests/sandhi.tcyr` per the per-program fixup cap (architecture/001) — coverage stays in the probe. `cyrius lint` 0 warnings on touched files; `cyrfmt --check` clean. ADR 0005's surface freeze applied "between 0.9.2 and 1.0.0"; this is a 1.x.x stdlib-patch landing per the post-fold maintenance shape. The 1.1.x lane is now empty — next slot is 1.2.0 (true TLS + optimization pass).
+**1.2.0** — 2026-05-08. **Hot-path allocator review — Batch A: request-orchestrator foundation + audit findings.** Opens the 1.2.x optimization arc; sandhi-side companion to cyrius v5.10.x's optimization theme; ONE-thing-per-slot principle applied — each subsequent batch lands in its own slot. **Audit findings**: automated scan of all 78 `_a` paired fns across `src/http/` + `src/rpc/` found **zero** `_a` fn calling a bare paired helper — the 1.1.0 leaf-level migration was clean. The real leak is the *orchestration layer above the leaves* — `sandhi_http_get`/`_post`/`_put`/`_patch`/`_delete`/`_head` (+ their `_opts`/`_retry`/`_auto` variants, ~26 public verbs) and 7 internal orchestrators (`_do`, `_do_impl`, `_dispatch`, `_follow`, `_retry`, `_try_h2_promote`, `_auto_once`/`_auto_follow`) had no `_a` counterparts. A consumer using 1.1.0's arena-bound headers had no way to *use* the arena across the request — `sandhi_http_get` dropped to `default_alloc()` at the entry. **Batch A scope**: fixed buggy `_sandhi_client_build_request_a` (was accepting `a` and dropping it on the floor by calling bare `_v`); added proper `_sandhi_client_build_request_va` variadic with `a`; added `_a` variants for `_sandhi_http_exchange`/`_keepalive`, `_sandhi_http_do`/`_do_impl`, `_sandhi_http_dispatch`. The dispatch `_a` routes the no-redirect path through `_do_a` end-to-end; redirect-follow path still routes through bare `_follow` (Batch B/1.2.1 closes that partial-arena leak). Pool put-back keeps using the pool's own allocator (`_sandhi_pool_alloc`) — pool entries outlive any per-request arena; intentional, not a leak. Added OOM guard after `str_builder_new_a` (stdlib `str_builder` ops don't null-check `sb`; surfaced by the OOM regression test during dev). Public surface unchanged — back-compat wrappers (`_do`, `_dispatch`, etc.) preserved, calling the `_a` variant with `default_alloc()`. **804 assertions green** (482 sandhi + 167 h2 + 155 alloc; +12 over 1.1.2's 792). New `alloc/120a/` test groups: `build_request_arena`, `build_request_va_keepalive`, `dispatch_err_resp_arena`, `build_request_oom`. `cyrius lint src/http/client.cyr` 0 warnings; `cyrfmt --check` clean. Roadmap cleanup rode along: 1.2.x (optimization arc) and 1.3.x (TLS arc) split per the slot-shape decision; native-transport prep audit dropped from sandhi (it's a cyrius-side issue against `lib/tls.cyr` per ADR 0001 — sandhi composes, doesn't reimplement). Filed correspondingly on cyrius's Held / pinned bug arc as *"`lib/tls.cyr` hook-surface contract audit"*. ADR 0001 + CLAUDE.md updated to remove the "transitions to native TLS when v5.9.x ships" framing — that prediction didn't hold (cyrius v5.9.x → v5.10.x is an optimization arc, not a transport swap; lib/tls.cyr stays libssl.so.3-bridged indefinitely per the 2026-04-24 pure-Cyrius-TLS removal).
+
+**1.1.2** — 2026-05-08. **Request-builder dup-prevention.** Closes the second 0.9.9 audit deferral, completing the 1.1.x small-fixes lane. `_sandhi_client_build_request_v` in `src/http/client.cyr` now filters caller-supplied `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` out of `user_headers` before serialization — each is auto-injected by the builder above, so a caller's second copy would emit alongside the auto value and create a dup-header smuggling vector on the wire (CL.CL / TE.CL / dup-Host / Connection-override). New static helper `_sandhi_client_user_header_is_reserved` sits just above the builder; uses `_sandhi_resp_streq_ci` from response.cyr (bundled before client.cyr) since client.cyr's own `_sandhi_streq_ci` is defined later in the file and unreachable from here under single-pass compilation. Symmetric to the server-side detector `sandhi_headers_smuggle_dup` (0.9.1) — that flagged dup-headers parsed off the wire; this is the matching client-side guard at request-build time. New `programs/_dup_prevention_probe.cyr` covers six scenarios across 21 assertions: caller-Host filtered + auto-Host wins, caller-Content-Length filtered on POST, caller-Transfer-Encoding filtered (CL.TE smuggling vector blocked at build), caller-Connection filtered, case-insensitive matcher (lowercase / UPPER-CASE / mixed all dropped), and a regression guard that non-reserved names (Authorization, Accept, X-Custom) pass through unchanged. **792 assertions green** (482 sandhi + 167 h2 + 143 alloc; no regression). Filter has no unit test in `tests/sandhi.tcyr` per the per-program fixup cap (architecture/001) — coverage stays in the probe. `cyrius lint` 0 warnings on touched files; `cyrfmt --check` clean. ADR 0005's surface freeze applied "between 0.9.2 and 1.0.0"; this is a 1.x.x stdlib-patch landing per the post-fold maintenance shape. The 1.1.x lane is now empty.
 
 **1.1.1** — 2026-05-08. **`Proxy-Authenticate` trailer-forbidden + cyrius 5.10.0 pin.** First post-fold patch from the 1.1.x small-fixes lane. `_sandhi_resp_trailer_forbidden` in `src/http/response.cyr` adds `Proxy-Authenticate` to the RFC 7230 §4.1.2 forbidden-name list, completing the proxy-auth pair after 0.9.9 landed `Proxy-Authorization` / `Connection` / `Cookie`. Originally deferred from 0.9.9 on per-program-fixup-cap grounds (architecture/001); the cap re-baselined post-fold once consumers stopped re-concatenating sandhi's `src/`, so the addition lands cleanly. **Toolchain pin** bumped 5.8.36 → 5.10.0 (mechanical — v5.10.0 is profile-instrumentation only, `api-surface: unchanged`, byte-identical self-host). `programs/_trailers_probe.cyr` extended: section [4] now asserts the full forbidden-list coverage end-to-end — `Content-Length` / `Authorization` (0.9.4), `Connection` / `Cookie` / `Proxy-Authorization` (0.9.9), `Proxy-Authenticate` (1.1.1). 11 PASS / 11 total in the probe; the 0.9.9 audit additions were never asserted in the probe, so the fill-in lands symmetrically. **792 assertions green** (482 sandhi + 167 h2 + 143 alloc; no regression — forbidden-list helper has no unit test in `sandhi.tcyr` per per-program fixup cap). `cyrius lint` 0 warnings on the touched file; `cyrfmt --check` clean. ADR 0005's surface freeze applied "between 0.9.2 and 1.0.0" — this is a 1.x.x stdlib-patch landing per the post-fold maintenance shape.
 
@@ -84,7 +86,7 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | `src/http/conn.cyr` | 338 | **M2 done** — tagged plain/TLS connection abstraction. 0.7.2: `sandhi_conn_open_timed` + SO_RCVTIMEO/SO_SNDTIMEO helpers; EAGAIN surfaced as `0 - _SANDHI_EAGAIN`. 0.7.3: non-blocking connect via `_sandhi_conn_connect_nb` (O_NONBLOCK + poll + SO_ERROR); `sandhi_conn_open_fully_timed`; `sandhi_conn_recv_all_deadline`; module-level `_sandhi_conn_last_err` for failure classification. |
 | `src/http/response.cyr` | 310 | **M2 done** — Content-Length + chunked + close-delimited body framing. 0.7.1: `err_message` slot added (struct 40→48). |
 | `src/net/resolve.cyr` | 557 | **M2 done** — native UDP DNS (RFC 1035). 0.7.2: random TXID via `/dev/urandom`; `_sandhi_resolve_name_eq` with compression-pointer following + 32-hop guard; answer-name match against question in the A + AAAA parsers; new `sandhi_resolve_ipv6` + `_sandhi_resolve_build_query_aaaa` + `_sandhi_resolve_parse_response_aaaa`; trace-wrap on both public verbs. Four P1 security items pulled forward from 0.9.x. |
-| `src/http/client.cyr` | 806 | **M2 done** — POST/PUT/DELETE/PATCH/HEAD/GET, redirect following, options struct. 0.7.1: default UA + `Accept-Encoding: identity`; options gained `max_response_bytes`. 0.7.2: options gained `read_ms` / `write_ms`; `SANDHI_ERR_TIMEOUT` now raised; trace-wrap around `_sandhi_http_do`. 0.7.3: options gained `connect_ms` / `total_ms` (struct 40→56); `_sandhi_http_clamp_ms` deadline helper; per-hop budget for redirects. 1.1.2: `_sandhi_client_user_header_is_reserved` filter on `_sandhi_client_build_request_v` — caller-supplied `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` dropped from user_headers (symmetric to `sandhi_headers_smuggle_dup` server-side at 0.9.1). |
+| `src/http/client.cyr` | 868 | **M2 done** — POST/PUT/DELETE/PATCH/HEAD/GET, redirect following, options struct. 0.7.1: default UA + `Accept-Encoding: identity`; options gained `max_response_bytes`. 0.7.2: options gained `read_ms` / `write_ms`; `SANDHI_ERR_TIMEOUT` now raised; trace-wrap around `_sandhi_http_do`. 0.7.3: options gained `connect_ms` / `total_ms` (struct 40→56); `_sandhi_http_clamp_ms` deadline helper; per-hop budget for redirects. 1.1.2: `_sandhi_client_user_header_is_reserved` filter on `_sandhi_client_build_request_v` — caller-supplied `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` dropped from user_headers (symmetric to `sandhi_headers_smuggle_dup` server-side at 0.9.1). 1.2.0 Batch A: `_a` variants for `_sandhi_http_do` / `_do_impl` / `_dispatch` / `_exchange` / `_exchange_keepalive` + fixed buggy `_sandhi_client_build_request_a` (was dropping `a`); proper `_sandhi_client_build_request_va` variadic threads `a` through `str_builder_*_a`; OOM guard after `str_builder_new_a`. Bare versions stay as back-compat wrappers passing `default_alloc()`. Partial-arena leak documented on `follow=1` (closes at 1.2.1 / Batch B). |
 | `src/http/sse.cyr` | 244 | **M3.5 done** — WHATWG SSE event parser |
 | `src/http/stream.cyr` | 440 | **M3.5 done** — streaming HTTP + incremental chunked decoder + callback-per-event dispatch. 0.7.1: `sandhi_http_stream_opts` honors `max_response_bytes`. 0.7.2: also honors `read_ms`/`write_ms`; EAGAIN→TIMEOUT in read+body loops. 0.7.3: connect_ms + total_ms threaded via `sandhi_conn_open_fully_timed` + per-recv deadline check in body loop. |
 | `src/rpc/json.cyr` | 365 | **M3 done** — nested JSON build + dotted-path extract |
@@ -156,37 +158,68 @@ No external git deps. sandhi is pure-stdlib-composition.
 
 Post-fold release sequence (see `roadmap.md` for full detail):
 
-**Currently shipped** — all releases through 1.1.2 (request-
-builder dup-prevention). The fold landed at 1.0.0 (vendored into
-Cyrius stdlib at v5.7.0); 1.1.0 was the allocator migration;
-1.1.1–1.1.2 closed the two 0.9.9 audit deferrals. The 1.1.x
-small-fixes lane is now empty.
+**Currently shipped** — all releases through 1.2.0 (hot-path
+allocator review Batch A — request-orchestrator foundation +
+audit findings). The fold landed at 1.0.0; 1.1.0 was the
+allocator migration; 1.1.1–1.1.2 closed the 0.9.9 audit
+deferrals; 1.2.0 opens the optimization arc with the audit
+findings + the foundational orchestrator `_a` variants.
 
-**Pinned next**:
+**Pinned next** — split into two arcs (cyrius v5.10.0
+ONE-thing-per-slot principle; bundling justified only when
+items share a cascade):
 
-- **1.2.0** — **true TLS + optimization pass**. Sandhi-side
-  companion to the Cyrius v5.9.x → v5.10.x native-TLS
-  work.
-  - **True TLS**: session-resumption cache in `tls_policy`
-    (long-pinned for "the v5.9.x native-TLS transition"
-    moment); live-network TLS-policy gate (mirrors the
-    cyrius `_tls_live_gate` shape); TLS 1.3 0-RTT opt-in
-    (replay-safe methods only); `tls_connect` native-
-    transport prep (audit hook surface for fdlopen
-    assumptions).
-  - **Optimization pass**: hot-path allocator review
-    (1.1.0 `_a`-variants in per-request paths); HPACK
-    Huffman tie-break for short tokens; `_sandhi_resp_new`
+- **1.2.x — optimization arc**. Profile-driven hot-path
+  optimization; sibling cohort to cyrius v5.10.x's
+  optimization arc.
+  - **1.2.1 — Batch B**: `_sandhi_http_follow_a` +
+    `_sandhi_http_retry_a`. Closes the partial-arena
+    leak on `follow=1` and `_retry` callers (1.2.0 left
+    that path on `default_alloc()` as the documented
+    Batch A scope-out).
+  - **1.2.2 — Batch C**: `_sandhi_http_auto_*_a` family
+    (`_auto_once`, `_auto_follow`, `_try_h2_promote`).
+  - **1.2.3 — Batch D**: top-level public verbs
+    (`sandhi_http_get_a` etc.) — first slot where
+    consumer-visible end-to-end arena adoption ships.
+  - **1.2.4+ — Batch E / F**: `_opts` / `_retry` /
+    `_auto` user-facing variants; RPC dialect entries.
+  - **1.2.x — profile-justified candidates** (no
+    pre-committed ordering, lands once Batch A-F closes
+    the orchestrator gap and there's evidence to act on):
+    HPACK Huffman tie-break; `_sandhi_resp_new`
     allocation collapse; connection-pool LRU eviction
-    behind option flag; **`_sandhi_conn_connect_nb`
-    factoring candidate** — Cyrius v5.9.42 added
-    `regression_network_probe` in `lib/regression.cyr`
-    with same non-blocking-connect+poll+SO_ERROR
-    mechanics; decide at slot entry whether to factor
-    a shared `net_connect_nb` primitive or leave the
-    parallel impls intentional.
+    behind option flag; `_sandhi_conn_connect_nb`
+    factoring decision (cyrius v5.9.42 added
+    `regression_network_probe` with the same
+    non-blocking-connect+poll+SO_ERROR mechanics —
+    decide at slot entry between filing a cyrius issue
+    for `net_connect_nb` in `lib/net.cyr` vs.
+    documenting parallel evolution; default to the
+    document-only path).
 
-**Post-1.2.0** — items wait for their unblock signal
+- **1.3.x — TLS arc**. Sandhi-owned policy + state work
+  over stdlib `tls_connect`.
+  - **1.3.0** — live-network TLS policy gate (lead;
+    pure CI infra, mirrors cyrius `_tls_live_gate`
+    skip-cleanly cascade).
+  - **1.3.1** — session-resumption cache in `tls_policy`
+    (sandhi-side cache keyed by `(host, port, alpn)`,
+    respecting 0.9.0 cred-strip rules).
+  - **1.3.2** — TLS 1.3 0-RTT (opt-in via
+    `sandhi_http_options_allow_0rtt`; replay-safe
+    methods only per RFC 8446 §8).
+
+**Not sandhi's slot** (filed in state for the same reason
+roadmap surfaces it — drop-back protection): `tls_connect`
+native-transport prep audit. The hook surface is owned by
+stdlib `lib/tls.cyr`; auditing it for fdlopen-leaning
+assumptions ahead of a hypothetical native-TLS swap is a
+cyrius-side issue against `lib/tls.cyr`. Sandhi composes,
+doesn't reimplement (ADR 0001). Earlier framings of this
+as sandhi-side work were wrong.
+
+**Post-arc** — items wait for their unblock signal
 (consumer ask / stdlib prerequisite / profile evidence).
 See `roadmap.md` for the full bucket list.
 
@@ -197,7 +230,7 @@ See `roadmap.md` for the full bucket list.
 3. ~~**M3 — `sandhi::rpc` WebDriver + Appium + MCP.**~~ ✅ landed 2026-04-24 (v0.4.0).
 3.5. ~~**M3.5 — SSE streaming.**~~ ✅ landed 2026-04-24 (v0.7.0).
 4. ~~**M4 — `sandhi::discovery` chain resolver + daimon integration.**~~ ✅ landed 2026-04-24 (v0.5.0). Cross-repo daimon-side registry endpoints still tracked at `docs/issues/2026-04-24-daimon-registry-endpoints.md`. mDNS lookup stubbed — impl awaits multicast primitives in stdlib net.cyr.
-5. ~~**M5 — `sandhi::tls_policy` cert pinning + mTLS.**~~ ✅ **surface** landed 2026-04-24 (v0.6.0); enforcement filled in 0.9.3. Native-TLS-transport audit pinned for 1.2.0 (no consumer-facing API change expected).
+5. ~~**M5 — `sandhi::tls_policy` cert pinning + mTLS.**~~ ✅ **surface** landed 2026-04-24 (v0.6.0); enforcement filled in 0.9.3. (Earlier closeout-note framing of "native-TLS transport audit pinned for 1.2.0" has been corrected — the audit, if needed, is a cyrius-side issue against `lib/tls.cyr`, not a sandhi slot. ADR 0001: sandhi composes, doesn't reimplement.)
 6. ~~**M6 — Fold-into-stdlib at v5.7.0.**~~ ✅ landed at sandhi 1.0.0 / Cyrius v5.7.0.
 
 Receipts-oriented: sandhi's fold-into-stdlib moment shipped 2026-04-25; the
