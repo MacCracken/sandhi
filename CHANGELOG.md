@@ -4,6 +4,67 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-05-08
+
+**Request-builder dup-prevention.** Closes the second 0.9.9
+audit deferral. No public-surface change — the filter is
+internal to `_sandhi_client_build_request_v` and applies to
+every call site (`sandhi_http_get` / `_post` / `_put` / etc.,
+plus the retry + auto + h2 paths that compose on top).
+
+### Changed
+
+- **http**: `_sandhi_client_build_request_v` in
+  `src/http/client.cyr` now filters caller-supplied
+  `Host` / `Content-Length` / `Transfer-Encoding` /
+  `Connection` out of `user_headers` before serialization.
+  Each of those is auto-injected by the builder above (Host
+  from the URL, Content-Length from `body_len`, Connection
+  from `keep_alive`); a caller's second copy would emit
+  alongside the auto-injected version and create a dup-
+  header smuggling vector on the wire (CL.CL / TE.CL /
+  dup-Host / Connection-override).
+- New static helper `_sandhi_client_user_header_is_reserved`
+  defined just above the builder. Uses
+  `_sandhi_resp_streq_ci` (response.cyr is bundled before
+  client.cyr); client.cyr's own `_sandhi_streq_ci` sits
+  later in the file and isn't reachable from the builder
+  under single-pass compilation. Reuses the existing CI
+  helper rather than adding a third copy.
+- **Symmetry with the server-side detector**:
+  `sandhi_headers_smuggle_dup` (0.9.1) flags the same four
+  names as request-side dups in headers parsed off the
+  wire. The 1.1.2 builder-side filter is the matching
+  client-side guard at request-build time — closes the
+  loop at both ends.
+
+### Verified
+
+- New `programs/_dup_prevention_probe.cyr` covers six
+  scenarios across 21 assertions:
+  1. Caller Host filtered, auto Host wins, non-reserved
+     X-Trace passes through (4 asserts).
+  2. Caller Content-Length filtered on POST; auto value
+     from `body_len` wins (3 asserts).
+  3. Caller Transfer-Encoding filtered (CL.TE smuggling
+     vector blocked at build time; 2 asserts).
+  4. Caller Connection filtered; auto `Connection: close`
+     wins (3 asserts).
+  5. Case-insensitive matcher: lowercase / UPPER-CASE /
+     mixed-case caller names all dropped (4 asserts).
+  6. Non-reserved names (Authorization, Accept, X-Custom)
+     pass through unchanged — regression guard against the
+     filter accidentally suppressing benign headers
+     (3 asserts).
+- 21/21 PASS in the probe.
+- **792 assertions green** (482 sandhi + 167 h2 + 143
+  alloc; no regression). Filter has no unit test in
+  `tests/sandhi.tcyr` — coverage stays in the probe per
+  the per-program fixup cap (architecture/001).
+- `cyrius lint` 0 warnings on `src/http/client.cyr` and
+  `programs/_dup_prevention_probe.cyr`. `cyrfmt --check`
+  clean.
+
 ## [1.1.1] — 2026-05-08
 
 **`Proxy-Authenticate` trailer-forbidden + cyrius 5.10.0 pin.**

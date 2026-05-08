@@ -49,7 +49,8 @@ details, state.md the current snapshot.
 - **0.9.10** — pool stale-skip hardening: `_sandhi_pool_has_idle` peek now ignores conns past `idle_timeout_ms` so ALPN promotion fires deterministically
 - **1.0.0** — fold-ready release. Transitional `http_*` aliases dropped; final `dist/sandhi.cyr` regenerated; vendored into Cyrius stdlib at v5.7.0
 - **1.1.0** — allocator-as-first-arg migration. 6 commit-sized bites; ~150 new `_a` public verbs alongside back-compat wrappers. Toolchain pin 5.6.41 → 5.8.36. 792 assertions green (482 sandhi + 167 h2 + 143 alloc)
-- **1.1.1** — `Proxy-Authenticate` trailer-forbidden (rounds out 0.9.9 proxy-auth pair); toolchain pin 5.8.36 → 5.10.0 (mechanical, profile-instrumentation only)
+- **1.1.1** — `Proxy-Authenticate` trailer-forbidden (rounds out 0.9.9 proxy-auth pair); toolchain pin 5.8.36 → 5.10.0 (mechanical, profile-instrumentation only); CI fmt-check fix (broken `diff <(... --check) FILE` always reported drift — read exit code instead)
+- **1.1.2** — request-builder dup-prevention. `_sandhi_client_build_request_v` filters caller-supplied `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` out of `user_headers` (symmetric to `sandhi_headers_smuggle_dup` server-side at 0.9.1). 21-assert probe at `programs/_dup_prevention_probe.cyr`. 1.1.x small-fixes lane closed.
 
 ## What's next
 
@@ -63,21 +64,18 @@ post-fold (consumers' tests no longer re-concatenate sandhi's
 
 - ~~**1.1.1 — `Proxy-Authenticate` trailer-forbidden**~~
   ✅ landed 2026-05-08 (also bumped toolchain pin 5.8.36
-  → 5.10.0).
-- **1.1.2 — Request-builder dup-prevention** —
-  caller-supplied `Host` / `Content-Length` /
-  `Transfer-Encoding` / `Connection` in `user_headers`
-  currently emit alongside the auto-injected versions,
-  creating dup-header smuggling vectors on the wire.
-  Server-side counterpart (`sandhi_headers_smuggle_dup`)
-  landed at 0.9.1; this is the symmetric client-side
-  filter applied at build time. Implementation prototyped
-  at 0.9.9 but tipped the per-program fixup cap. Cap re-
-  baselines post-fold.
+  → 5.10.0; CI fmt-check fix rode along).
+- ~~**1.1.2 — Request-builder dup-prevention**~~
+  ✅ landed 2026-05-08. Caller-supplied `Host` /
+  `Content-Length` / `Transfer-Encoding` / `Connection`
+  filtered from `user_headers` in
+  `_sandhi_client_build_request_v`. 21-assert probe at
+  `programs/_dup_prevention_probe.cyr`.
 
-Either of these can absorb additional small patches when a
-consumer files something — the 1.1.x window is intentionally
-a "small fixes" lane separate from 1.2.0's optimization pass.
+The 1.1.x small-fixes lane is now empty. Future small
+patches that don't fit 1.2.0's optimization-pass shape
+land as 1.1.3+ when they show up — the lane stays open as
+a "small fixes" track separate from 1.2.0.
 
 ### 1.2.0 — true TLS + optimization pass
 

@@ -1,0 +1,162 @@
+# programs/_dup_prevention_probe.cyr — verify the 1.1.2 client-side
+# dup-prevention filter. When a caller passes `Host` / `Content-
+# Length` / `Transfer-Encoding` / `Connection` in user_headers,
+# `_sandhi_client_build_request_v` must drop the caller's copy
+# (each is auto-injected above) so the wire request doesn't carry a
+# dup-header smuggling vector. Standalone probe — tests/sandhi.tcyr
+# is at the per-program fixup cap (architecture/001).
+
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+fn check(label, cond) {
+    say(label); say(": ");
+    if (cond == 1) { say("PASS\n"); return 0; }
+    say("FAIL\n");
+    return 1;
+}
+
+# Count occurrences of `needle` (cstr) in `hay` (Str). Used to assert
+# that a header line appears exactly once on the wire (auto-injected
+# copy only) instead of twice (auto + leaked caller copy).
+fn count_occurrences(hay, needle) {
+    var hp = str_data(hay);
+    var hl = str_len(hay);
+    var nl = strlen(needle);
+    if (nl == 0) { return 0; }
+    var count = 0;
+    var i = 0;
+    while (i + nl <= hl) {
+        var eq = 1;
+        var j = 0;
+        while (j < nl) {
+            if (load8(hp + i + j) != load8(needle + j)) { eq = 0; }
+            j = j + 1;
+        }
+        if (eq == 1) { count = count + 1; i = i + nl; }
+        if (eq == 0) { i = i + 1; }
+    }
+    return count;
+}
+
+fn main() {
+    alloc_init();
+    var fails = 0;
+
+    # [1] Caller-supplied Host is dropped — auto-injected Host wins.
+    say("[1] caller Host filtered (no dup-Host smuggling)\n");
+    var h1 = sandhi_headers_new();
+    sandhi_headers_set(h1, "Host", "evil.example");
+    sandhi_headers_set(h1, "X-Trace", "ok");
+    var r1 = _sandhi_client_build_request("GET", "/path", "good.example", h1, 0);
+    fails = fails + check("    Host: appears exactly once", count_occurrences(r1, "Host: ") == 1);
+    fails = fails + check("    auto Host: good.example present", count_occurrences(r1, "Host: good.example\r\n") == 1);
+    fails = fails + check("    caller Host: evil.example dropped", count_occurrences(r1, "Host: evil.example") == 0);
+    fails = fails + check("    non-reserved X-Trace passes through", count_occurrences(r1, "X-Trace: ok\r\n") == 1);
+
+    # [2] Caller-supplied Content-Length is dropped on POST — auto wins.
+    say("[2] caller Content-Length filtered on POST (no CL.CL smuggling)\n");
+    var h2 = sandhi_headers_new();
+    sandhi_headers_set(h2, "Content-Length", "9999");
+    var r2 = _sandhi_client_build_request("POST", "/api", "api.example", h2, 42);
+    fails = fails + check("    Content-Length: appears exactly once", count_occurrences(r2, "Content-Length: ") == 1);
+    fails = fails + check("    auto Content-Length: 42 present", count_occurrences(r2, "Content-Length: 42\r\n") == 1);
+    var dropped2 = count_occurrences(r2, "Content-Length: 9999") == 0;
+    fails = fails + check("    caller Content-Length: 9999 dropped", dropped2);
+
+    # [3] Caller-supplied Transfer-Encoding is dropped (CL.TE smuggling
+    # vector — RFC 7230 §3.3.3 forbids CL+TE coexistence; the 0.9.0
+    # client-side reject covers headers parsed from the wire, but a
+    # builder-side filter is the only way to stop a caller from
+    # seeding the dup-emit at request-build time).
+    say("[3] caller Transfer-Encoding filtered (no CL.TE smuggling)\n");
+    var h3 = sandhi_headers_new();
+    sandhi_headers_set(h3, "Transfer-Encoding", "chunked");
+    var r3 = _sandhi_client_build_request("POST", "/api", "api.example", h3, 5);
+    fails = fails + check("    Transfer-Encoding dropped", count_occurrences(r3, "Transfer-Encoding") == 0);
+    fails = fails + check("    Content-Length: 5 still present", count_occurrences(r3, "Content-Length: 5\r\n") == 1);
+
+    # [4] Caller-supplied Connection is dropped — auto-injected Connection
+    # close wins (HTTP/1.1 lifecycle stays under sandhi's control).
+    say("[4] caller Connection filtered (auto lifecycle wins)\n");
+    var h4 = sandhi_headers_new();
+    sandhi_headers_set(h4, "Connection", "keep-alive");
+    var r4 = _sandhi_client_build_request("GET", "/x", "example", h4, 0);
+    fails = fails + check("    Connection: appears exactly once", count_occurrences(r4, "Connection: ") == 1);
+    fails = fails + check("    auto Connection: close present", count_occurrences(r4, "Connection: close\r\n") == 1);
+    var dropped4 = count_occurrences(r4, "Connection: keep-alive") == 0;
+    fails = fails + check("    caller Connection: keep-alive dropped", dropped4);
+
+    # [5] Case-insensitive: lowercase / mixed-case caller names also
+    # filtered (the matcher uses streq_ci).
+    say("[5] case-insensitive matcher (lowercase + mixed)\n");
+    var h5 = sandhi_headers_new();
+    sandhi_headers_set(h5, "host", "lower.example");
+    sandhi_headers_set(h5, "CONTENT-LENGTH", "8888");
+    sandhi_headers_set(h5, "transfer-encoding", "chunked");
+    sandhi_headers_set(h5, "ConNecTion", "upgrade");
+    var r5 = _sandhi_client_build_request("POST", "/x", "good.example", h5, 7);
+    fails = fails + check("    lowercase host dropped", count_occurrences(r5, "lower.example") == 0);
+    fails = fails + check("    UPPER-CASE Content-Length dropped", count_occurrences(r5, "8888") == 0);
+    fails = fails + check("    lowercase transfer-encoding dropped", count_occurrences(r5, "transfer-encoding") == 0);
+    fails = fails + check("    mixed-case ConNecTion dropped", count_occurrences(r5, "upgrade") == 0);
+
+    # [6] No-reserved-names path unchanged (regression guard for the
+    # filter accidentally suppressing benign headers).
+    say("[6] non-reserved names pass through unchanged\n");
+    var h6 = sandhi_headers_new();
+    sandhi_headers_set(h6, "Authorization", "Bearer xyz");
+    sandhi_headers_set(h6, "Accept", "application/json");
+    sandhi_headers_set(h6, "X-Custom", "v1");
+    var r6 = _sandhi_client_build_request("GET", "/me", "api.example", h6, 0);
+    fails = fails + check("    Authorization passes", count_occurrences(r6, "Authorization: Bearer xyz\r\n") == 1);
+    fails = fails + check("    Accept passes", count_occurrences(r6, "Accept: application/json\r\n") == 1);
+    fails = fails + check("    X-Custom passes", count_occurrences(r6, "X-Custom: v1\r\n") == 1);
+
+    say("\n");
+    if (fails == 0) { say("ALL PASS\n"); return 0; }
+    say("FAILS: "); fmt_int(fails); say("\n");
+    return 1;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

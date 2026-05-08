@@ -107,6 +107,24 @@ fn _sandhi_client_host_header(url_struct) {
     return _sandhi_client_host_header_a(default_alloc(), url_struct);
 }
 
+# 1.1.1 dup-prevention filter: caller-supplied `Host` / `Content-
+# Length` / `Transfer-Encoding` / `Connection` in user_headers would
+# emit alongside the auto-injected versions and create a dup-header
+# smuggling vector on the wire (TE.CL / CL.TE / dup-Host / Connection-
+# override). Symmetric to the server-side detector
+# `sandhi_headers_smuggle_dup` (0.9.1). Returns 1 for any reserved
+# name (case-insensitive), 0 otherwise. Uses `_sandhi_resp_streq_ci`
+# from response.cyr (bundled before client.cyr); client.cyr's own
+# `_sandhi_streq_ci` sits later in the file and isn't reachable from
+# here under single-pass compilation.
+fn _sandhi_client_user_header_is_reserved(name) {
+    if (_sandhi_resp_streq_ci(name, "Host") == 1)              { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Content-Length") == 1)    { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Transfer-Encoding") == 1) { return 1; }
+    if (_sandhi_resp_streq_ci(name, "Connection") == 1)        { return 1; }
+    return 0;
+}
+
 # Construct the wire-format request as a Str. user_headers may be 0.
 # Body is sent separately — the builder emits headers + blank line only.
 # `keep_alive` controls the trailing Connection header — 1 omits it
@@ -170,18 +188,28 @@ fn _sandhi_client_build_request_v(method, full_path, host_header, user_headers, 
         str_builder_add_cstr(sb, "TE: trailers\r\n");
     }
 
-    # User headers (after auto headers).
-    #
-    # Caller-supplied Host / Content-Length / Transfer-Encoding /
-    # Connection here would emit alongside the auto-injected
-    # versions and create a dup-header smuggling vector. The
-    # builder-side filter for these is documented as a 0.9.9 audit
-    # finding and deferred to the 1.0.x stdlib-patch window — the
-    # equivalent server-side dup-detection landed at 0.9.1 (see
-    # `sandhi_headers_smuggle_dup`). Caller currently owns the
-    # contract: do not pass these in `user_headers`.
+    # User headers (after auto headers). Caller-supplied
+    # `Host` / `Content-Length` / `Transfer-Encoding` /
+    # `Connection` are filtered out via
+    # `_sandhi_client_user_header_is_reserved` (1.1.2): each of
+    # those is auto-injected above, so a caller-supplied second
+    # copy would create a dup-header smuggling vector on the
+    # wire. Symmetric to the server-side dup detector
+    # `sandhi_headers_smuggle_dup` (0.9.1). All other user
+    # headers pass through unchanged.
     if (user_headers != 0) {
-        sandhi_headers_serialize(user_headers, sb);
+        var ui = 0;
+        var un = sandhi_headers_count(user_headers);
+        while (ui < un) {
+            var nm = sandhi_headers_name_at(user_headers, ui);
+            if (_sandhi_client_user_header_is_reserved(nm) == 0) {
+                str_builder_add_cstr(sb, nm);
+                str_builder_add_cstr(sb, ": ");
+                str_builder_add_cstr(sb, sandhi_headers_value_at(user_headers, ui));
+                str_builder_add_cstr(sb, "\r\n");
+            }
+            ui = ui + 1;
+        }
     }
 
     if (keep_alive == 1) {
