@@ -4,6 +4,8 @@
 
 ## Version
 
+**1.2.2** — 2026-05-08. **Batch D — top-level public verbs `_a`.** First release with consumer-visible end-to-end arena adoption. Internal cascade has been fully `_a`-threaded since 1.2.1; this slot paints the public-verb wrappers on top. Net public-surface change: +6 `_a` verbs (`sandhi_http_get_a` / `_post_a` / `_put_a` / `_patch_a` / `_delete_a` / `_head_a`). Each is a thin wrapper calling `_sandhi_http_dispatch_a(a, ...)`; bare versions become back-compat wrappers passing `default_alloc()`. Consumer pattern that's now possible end-to-end: `var arena = arena_allocator(8192); var headers = sandhi_headers_new_a(arena); var resp = sandhi_http_get_a(arena, url, headers); reset_via(arena);` — body / headers / status all live in `arena`. Mirrors the `sandhi_http_stream_a` (1.1.0) and `sandhi_h2_request_a` (1.1.0) pairing pattern. **837 assertions green** (482 sandhi + 167 h2 + 188 alloc; +13 over 1.2.1's 824). New `alloc/122d/` test groups (5): `get_arena`, `post_arena`, `delete_head_arena`, `put_patch_arena`, `get_arena_round_trip`. `cyrius lint` 0 warnings; `cyrfmt --check` clean.
+
 **1.2.1** — 2026-05-08. **Batches B + C bundled — redirect-following + auto-dispatch + retry threading.** Closes the 1.2.0 partial-arena leaks on `follow=1` and the auto-dispatch / retry call paths. Bundled per the cyrius v5.10.0 "items sharing the same cascade" rule — retry calls auto, so they're one cascade. New `_a` variants: `_sandhi_http_follow_a` (redirect chain via `_do_a` per hop, threaded cred-strip + Location resolution); `_sandhi_strip_sensitive_headers_a`; `_sandhi_http_try_h2_promote_a` (ALPN-promotion DNS + connect threaded); `_sandhi_http_auto_once_a` (h2 take / promote / 1.1 fallback uniformly threaded — pool h2-take routes through `sandhi_h2_request_a`, ALPN promote via `_try_h2_promote_a`, 1.1 fall-through via `_do_a`); `_sandhi_http_auto_follow_a`; `sandhi_http_request_auto_a`; `_sandhi_http_retry_a` (each attempt routes through `request_auto_a`, inheriting 0.9.5's h2 pool selection while threading the caller's allocator). `_sandhi_http_dispatch_a`'s 1.2.0 TODO (bare `_follow` call) resolved — follow path now threads `a` end-to-end. Public surface unchanged — back-compat wrappers preserved. h2 conn stored in pool keeps using `sandhi_h2_conn_new`'s internal allocator (h2 conn outlives any per-request arena; intentional). **824 assertions green** (482 sandhi + 167 h2 + 175 alloc; +20 over 1.2.0's 804). New `alloc/121bc/` test groups (6 groups): `strip_sensitive_arena`, `strip_sensitive_oom`, `follow_err_resp_arena`, `auto_once_err_resp_arena`, `request_auto_arena`, `retry_non_retryable_arena`. `tests/alloc.tcyr` includes extended with the four h2-dispatch modules so the test program reaches the new `_a` variants. `cyrius lint` 0 warnings on touched files; `cyrfmt --check` clean. Internal-cascade orchestrators are now fully `_a`-threaded post-1.2.1 — Batch D (1.2.2) is the public-verb-wrapper paint job on top.
 
 **1.2.0** — 2026-05-08. **Hot-path allocator review — Batch A: request-orchestrator foundation + audit findings.** Opens the 1.2.x optimization arc; sandhi-side companion to cyrius v5.10.x's optimization theme; ONE-thing-per-slot principle applied — each subsequent batch lands in its own slot. **Audit findings**: automated scan of all 78 `_a` paired fns across `src/http/` + `src/rpc/` found **zero** `_a` fn calling a bare paired helper — the 1.1.0 leaf-level migration was clean. The real leak is the *orchestration layer above the leaves* — `sandhi_http_get`/`_post`/`_put`/`_patch`/`_delete`/`_head` (+ their `_opts`/`_retry`/`_auto` variants, ~26 public verbs) and 7 internal orchestrators (`_do`, `_do_impl`, `_dispatch`, `_follow`, `_retry`, `_try_h2_promote`, `_auto_once`/`_auto_follow`) had no `_a` counterparts. A consumer using 1.1.0's arena-bound headers had no way to *use* the arena across the request — `sandhi_http_get` dropped to `default_alloc()` at the entry. **Batch A scope**: fixed buggy `_sandhi_client_build_request_a` (was accepting `a` and dropping it on the floor by calling bare `_v`); added proper `_sandhi_client_build_request_va` variadic with `a`; added `_a` variants for `_sandhi_http_exchange`/`_keepalive`, `_sandhi_http_do`/`_do_impl`, `_sandhi_http_dispatch`. The dispatch `_a` routes the no-redirect path through `_do_a` end-to-end; redirect-follow path still routes through bare `_follow` (Batch B/1.2.1 closes that partial-arena leak). Pool put-back keeps using the pool's own allocator (`_sandhi_pool_alloc`) — pool entries outlive any per-request arena; intentional, not a leak. Added OOM guard after `str_builder_new_a` (stdlib `str_builder` ops don't null-check `sb`; surfaced by the OOM regression test during dev). Public surface unchanged — back-compat wrappers (`_do`, `_dispatch`, etc.) preserved, calling the `_a` variant with `default_alloc()`. **804 assertions green** (482 sandhi + 167 h2 + 155 alloc; +12 over 1.1.2's 792). New `alloc/120a/` test groups: `build_request_arena`, `build_request_va_keepalive`, `dispatch_err_resp_arena`, `build_request_oom`. `cyrius lint src/http/client.cyr` 0 warnings; `cyrfmt --check` clean. Roadmap cleanup rode along: 1.2.x (optimization arc) and 1.3.x (TLS arc) split per the slot-shape decision; native-transport prep audit dropped from sandhi (it's a cyrius-side issue against `lib/tls.cyr` per ADR 0001 — sandhi composes, doesn't reimplement). Filed correspondingly on cyrius's Held / pinned bug arc as *"`lib/tls.cyr` hook-surface contract audit"*. ADR 0001 + CLAUDE.md updated to remove the "transitions to native TLS when v5.9.x ships" framing — that prediction didn't hold (cyrius v5.9.x → v5.10.x is an optimization arc, not a transport swap; lib/tls.cyr stays libssl.so.3-bridged indefinitely per the 2026-04-24 pure-Cyrius-TLS removal).
@@ -88,7 +90,7 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | `src/http/conn.cyr` | 338 | **M2 done** — tagged plain/TLS connection abstraction. 0.7.2: `sandhi_conn_open_timed` + SO_RCVTIMEO/SO_SNDTIMEO helpers; EAGAIN surfaced as `0 - _SANDHI_EAGAIN`. 0.7.3: non-blocking connect via `_sandhi_conn_connect_nb` (O_NONBLOCK + poll + SO_ERROR); `sandhi_conn_open_fully_timed`; `sandhi_conn_recv_all_deadline`; module-level `_sandhi_conn_last_err` for failure classification. |
 | `src/http/response.cyr` | 310 | **M2 done** — Content-Length + chunked + close-delimited body framing. 0.7.1: `err_message` slot added (struct 40→48). |
 | `src/net/resolve.cyr` | 557 | **M2 done** — native UDP DNS (RFC 1035). 0.7.2: random TXID via `/dev/urandom`; `_sandhi_resolve_name_eq` with compression-pointer following + 32-hop guard; answer-name match against question in the A + AAAA parsers; new `sandhi_resolve_ipv6` + `_sandhi_resolve_build_query_aaaa` + `_sandhi_resolve_parse_response_aaaa`; trace-wrap on both public verbs. Four P1 security items pulled forward from 0.9.x. |
-| `src/http/client.cyr` | 874 | **M2 done** — POST/PUT/DELETE/PATCH/HEAD/GET, redirect following, options struct. 0.7.1: default UA + `Accept-Encoding: identity`; options gained `max_response_bytes`. 0.7.2: options gained `read_ms` / `write_ms`; `SANDHI_ERR_TIMEOUT` now raised; trace-wrap around `_sandhi_http_do`. 0.7.3: options gained `connect_ms` / `total_ms` (struct 40→56); `_sandhi_http_clamp_ms` deadline helper; per-hop budget for redirects. 1.1.2: `_sandhi_client_user_header_is_reserved` filter on `_sandhi_client_build_request_v` — caller-supplied `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` dropped from user_headers (symmetric to `sandhi_headers_smuggle_dup` server-side at 0.9.1). 1.2.0 Batch A: `_a` variants for `_sandhi_http_do` / `_do_impl` / `_dispatch` / `_exchange` / `_exchange_keepalive` + fixed buggy `_sandhi_client_build_request_a` (was dropping `a`); proper `_sandhi_client_build_request_va` variadic threads `a` through `str_builder_*_a`; OOM guard after `str_builder_new_a`. Bare versions stay as back-compat wrappers passing `default_alloc()`. 1.2.1 Batches B+C: `_sandhi_http_follow_a` + `_sandhi_strip_sensitive_headers_a` thread `a` through every redirect hop and the cross-authority cred-strip; `_sandhi_http_dispatch_a`'s 1.2.0 follow-path TODO is now resolved. Internal-cascade orchestrators are fully `_a`-threaded. |
+| `src/http/client.cyr` | 906 | **M2 done** — POST/PUT/DELETE/PATCH/HEAD/GET, redirect following, options struct. 0.7.1: default UA + `Accept-Encoding: identity`; options gained `max_response_bytes`. 0.7.2: options gained `read_ms` / `write_ms`; `SANDHI_ERR_TIMEOUT` now raised; trace-wrap around `_sandhi_http_do`. 0.7.3: options gained `connect_ms` / `total_ms` (struct 40→56); `_sandhi_http_clamp_ms` deadline helper; per-hop budget for redirects. 1.1.2: `_sandhi_client_user_header_is_reserved` filter on `_sandhi_client_build_request_v` — caller-supplied `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` dropped from user_headers (symmetric to `sandhi_headers_smuggle_dup` server-side at 0.9.1). 1.2.0 Batch A: `_a` variants for `_sandhi_http_do` / `_do_impl` / `_dispatch` / `_exchange` / `_exchange_keepalive` + fixed buggy `_sandhi_client_build_request_a` (was dropping `a`); proper `_sandhi_client_build_request_va` variadic threads `a` through `str_builder_*_a`; OOM guard after `str_builder_new_a`. Bare versions stay as back-compat wrappers passing `default_alloc()`. 1.2.1 Batches B+C: `_sandhi_http_follow_a` + `_sandhi_strip_sensitive_headers_a` thread `a` through every redirect hop and the cross-authority cred-strip; `_sandhi_http_dispatch_a`'s 1.2.0 follow-path TODO is now resolved. Internal-cascade orchestrators are fully `_a`-threaded. 1.2.2 Batch D: public-verb `_a` family — `sandhi_http_get_a` / `_post_a` / `_put_a` / `_patch_a` / `_delete_a` / `_head_a` thin wrappers calling `_sandhi_http_dispatch_a`. First consumer-visible end-to-end arena adoption. |
 | `src/http/sse.cyr` | 244 | **M3.5 done** — WHATWG SSE event parser |
 | `src/http/stream.cyr` | 440 | **M3.5 done** — streaming HTTP + incremental chunked decoder + callback-per-event dispatch. 0.7.1: `sandhi_http_stream_opts` honors `max_response_bytes`. 0.7.2: also honors `read_ms`/`write_ms`; EAGAIN→TIMEOUT in read+body loops. 0.7.3: connect_ms + total_ms threaded via `sandhi_conn_open_fully_timed` + per-recv deadline check in body loop. |
 | `src/rpc/json.cyr` | 365 | **M3 done** — nested JSON build + dotted-path extract |
@@ -160,13 +162,15 @@ No external git deps. sandhi is pure-stdlib-composition.
 
 Post-fold release sequence (see `roadmap.md` for full detail):
 
-**Currently shipped** — all releases through 1.2.1 (Batches
-B + C bundled: redirect / auto-dispatch / retry threading).
-The fold landed at 1.0.0; 1.1.0 was the allocator migration;
-1.1.1–1.1.2 closed the 0.9.9 audit deferrals; 1.2.0 opened
-the optimization arc; 1.2.1 closes the internal-cascade
-threading leaving only the public-verb-wrapper layer for
-1.2.2+.
+**Currently shipped** — all releases through 1.2.2 (Batch
+D: top-level public verbs `_a`). The fold landed at 1.0.0;
+1.1.0 was the allocator migration; 1.1.1–1.1.2 closed the
+0.9.9 audit deferrals; 1.2.0 opened the optimization arc;
+1.2.1 closed the internal-cascade threading; 1.2.2 ships
+consumer-visible end-to-end arena adoption (the GET-family
+public verbs). Remaining: `_opts` / `_retry` / `_auto`
+user-facing variants (Batch E) and RPC dialect entries
+(Batch F).
 
 **Pinned next** — split into two arcs (cyrius v5.10.0
 ONE-thing-per-slot principle; bundling justified only when
@@ -175,17 +179,14 @@ items share a cascade):
 - **1.2.x — optimization arc**. Profile-driven hot-path
   optimization; sibling cohort to cyrius v5.10.x's
   optimization arc.
-  - **1.2.2 — Batch D**: top-level public verbs
-    (`sandhi_http_get_a` / `_post_a` / `_put_a` /
-    `_patch_a` / `_delete_a` / `_head_a`). First slot
-    where consumer-visible end-to-end arena adoption
-    ships. Internal cascade is fully `_a`-threaded
-    post-1.2.1; Batch D just paints the public-verb
-    wrappers on top.
   - **1.2.3 — Batch E**: `_opts` / `_retry` / `_auto`
-    user-facing variants.
+    user-facing variants. Per-method `_a` for each (e.g.
+    `sandhi_http_get_opts_a`, `sandhi_http_get_retry_a`,
+    `sandhi_http_get_auto_a`). Same paint-on-top shape
+    as 1.2.2 since the underlying dispatch / retry / auto
+    paths are already `_a`-threaded.
   - **1.2.4 — Batch F**: RPC dialect entries
-    (`sandhi_rpc_mcp_call` and friends).
+    (`sandhi_rpc_mcp_call_a` and friends).
   - **1.2.x — profile-justified candidates** (no
     pre-committed ordering, lands once Batch A-F closes
     the orchestrator gap and there's evidence to act on):

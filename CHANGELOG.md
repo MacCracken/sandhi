@@ -4,6 +4,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-05-08
+
+**Batch D — top-level public verbs `_a`.** First release with
+consumer-visible end-to-end arena adoption. Internal cascade
+has been fully `_a`-threaded since 1.2.1; this slot just
+paints the public-verb wrappers on top.
+
+### Added
+
+- **http**: new `_a` variants for the six top-level public
+  verbs:
+  - `sandhi_http_get_a(a, url, user_headers)`
+  - `sandhi_http_post_a(a, url, user_headers, body, body_len)`
+  - `sandhi_http_put_a(a, url, user_headers, body, body_len)`
+  - `sandhi_http_patch_a(a, url, user_headers, body, body_len)`
+  - `sandhi_http_delete_a(a, url, user_headers)`
+  - `sandhi_http_head_a(a, url, user_headers)`
+
+  Each is a thin wrapper calling `_sandhi_http_dispatch_a(a, ...)`.
+  The bare versions become back-compat wrappers passing
+  `default_alloc()`. **Net public-surface change: +6 `_a`
+  verbs.** Mirrors the `sandhi_http_stream` /
+  `sandhi_http_stream_a` pairing that shipped at 1.1.0 and
+  the `sandhi_h2_request` / `sandhi_h2_request_a` pairing
+  shipped alongside it.
+
+### Consumer adoption pattern
+
+A caller can now use a per-request arena end-to-end:
+
+```cyr
+var arena = arena_allocator(8192);
+var headers = sandhi_headers_new_a(arena);
+sandhi_headers_set_a(arena, headers, "Authorization", "Bearer ...");
+var resp = sandhi_http_get_a(arena, "https://api.example.com/v1", headers);
+# inspect resp here — body, headers, status all live in `arena`
+reset_via(arena);
+# arena is empty; reuse for the next request
+```
+
+This is the contract the 1.1.0 `_a` migration was scaffolded
+for; 1.2.0–1.2.1 closed the orchestration-layer leaks; 1.2.2
+exposes it through the public surface.
+
+### Verified
+
+- `tests/alloc.tcyr` gains 5 new test groups (13
+  assertions) under `alloc/122d/`: `get_arena`,
+  `post_arena`, `delete_head_arena`, `put_patch_arena`,
+  `get_arena_round_trip` (multiple calls across
+  `reset_via`).
+- 188/188 alloc tests pass (175 pre-existing + 13 new).
+- 482/482 `tests/sandhi.tcyr`, 167/167 `tests/h2.tcyr` —
+  no regression. **Total: 837 assertions green** (+13
+  over 1.2.1's 824).
+- `cyrius lint src/http/client.cyr` — 0 warnings.
+  `cyrfmt --check` clean on touched files.
+
+### Pinned next
+
+- **1.2.3 — Batch E**: `_opts` / `_retry` / `_auto`
+  user-facing variants (`sandhi_http_get_opts_a` etc.,
+  `sandhi_http_get_retry_a`, `sandhi_http_get_auto_a`,
+  per-method).
+- **1.2.4 — Batch F**: RPC dialect entries
+  (`sandhi_rpc_mcp_call_a` and friends).
+
 ## [1.2.1] — 2026-05-08
 
 **Batches B + C bundled — redirect-following + auto-dispatch

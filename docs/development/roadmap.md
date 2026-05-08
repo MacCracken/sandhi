@@ -53,6 +53,7 @@ details, state.md the current snapshot.
 - **1.1.2** — request-builder dup-prevention. `_sandhi_client_build_request_v` filters caller-supplied `Host` / `Content-Length` / `Transfer-Encoding` / `Connection` out of `user_headers` (symmetric to `sandhi_headers_smuggle_dup` server-side at 0.9.1). 21-assert probe at `programs/_dup_prevention_probe.cyr`. 1.1.x small-fixes lane closed.
 - **1.2.0** — hot-path allocator review Batch A: audit findings + request-orchestrator foundation. Audit found the 1.1.0 leaf-level migration was clean (zero `_a` fns calling bare paired helpers); the real leak was the *orchestration layer* above the leaves having no `_a` counterparts. Fixed buggy `_sandhi_client_build_request_a` (was dropping `a` on the floor); added `_a` variants for `_sandhi_http_do` / `_do_impl` / `_dispatch` / `_exchange` / `_exchange_keepalive` + `_sandhi_client_build_request_va`. Cyrius/lib.tls.cyr native-transport prep dropped from sandhi (filed cyrius-side instead). 804 assertions green (482 + 167 + 155).
 - **1.2.1** — Batches B + C bundled: redirect-following + auto-dispatch + retry threading. Closes 1.2.0's partial-arena leaks. New `_a` variants: `_sandhi_http_follow_a`, `_sandhi_strip_sensitive_headers_a`, `_sandhi_http_try_h2_promote_a`, `_sandhi_http_auto_once_a`, `_sandhi_http_auto_follow_a`, `sandhi_http_request_auto_a`, `_sandhi_http_retry_a`. Bundled per cyrius v5.10.0 "items sharing the same cascade" rule (retry calls auto). 824 assertions green (482 + 167 + 175).
+- **1.2.2** — Batch D: top-level public verbs `_a`. First release with consumer-visible end-to-end arena adoption. +6 `_a` verbs (`sandhi_http_get_a` / `_post_a` / `_put_a` / `_patch_a` / `_delete_a` / `_head_a`) — thin wrappers calling `_sandhi_http_dispatch_a`. Public-surface change documented (mirrors `sandhi_http_stream_a` shape). 837 assertions green (482 + 167 + 188).
 
 ## What's next
 
@@ -118,17 +119,26 @@ demonstrated):
   rather than route retry through the older
   `_sandhi_http_dispatch` and regress h2 selection
   temporarily.
-- **1.2.2 — Batch D**: top-level public verbs
-  (`sandhi_http_get_a` / `_post_a` / `_put_a` /
-  `_patch_a` / `_delete_a` / `_head_a`). First slot
-  where consumer-visible end-to-end arena adoption
-  ships. Post-1.2.1, the internal cascade is fully
-  `_a`-threaded; Batch D just paints the public-verb
-  wrappers on top — should be a clean, small slot.
+- ~~**1.2.2 — Batch D**~~ ✅ shipped 2026-05-08. Six
+  public-verb `_a` wrappers; +6 to public surface; first
+  consumer-visible end-to-end arena adoption shipped.
 - **1.2.3 — Batch E**: `_opts` / `_retry` / `_auto`
-  user-facing variants.
+  user-facing variants. Per-method `_a` variants for
+  each:
+  - `sandhi_http_get_opts_a` / `_post_opts_a` / etc.
+    (6 verbs — paint on `_sandhi_http_dispatch_a`).
+  - `sandhi_http_get_retry_a` / `_head_retry_a` /
+    `_put_retry_a` / `_delete_retry_a` (4 verbs — paint
+    on `_sandhi_http_retry_a`).
+  - `sandhi_http_get_auto_a` / `_post_auto_a` / etc. +
+    `sandhi_http_request_auto_a` (already exists since
+    1.2.1) — 7 verbs total.
+  Same paint-on-top shape as 1.2.2; all underlying
+  paths are `_a`-threaded.
 - **1.2.4 — Batch F**: RPC dialect entries
-  (`sandhi_rpc_mcp_call` and friends).
+  (`sandhi_rpc_mcp_call_a`, `sandhi_rpc_call_a`, plus
+  webdriver / appium / mcp-stream verbs). Closes the
+  hot-path allocator review arc.
 
 #### 1.2.x — optimization candidates (profile-justified)
 

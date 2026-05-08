@@ -808,6 +808,80 @@ fn test_alloc_121bc_retry_non_retryable_arena() {
 }
 
 # ================================================================
+# 1.2.2 — Batch D: top-level public verbs `_a`
+# ================================================================
+# First slot with consumer-visible end-to-end arena adoption.
+# Internal cascade is fully `_a`-threaded post-1.2.1; this batch
+# just adds the public-verb wrappers (`sandhi_http_get_a` /
+# `_post_a` / `_put_a` / `_patch_a` / `_delete_a` / `_head_a`).
+# Bare versions stay as back-compat wrappers passing
+# `default_alloc()`.
+
+# get_a — drives an unparseable URL so the err-resp path lands
+# entirely in the arena (URL parse → resolve → conn-open path
+# never reached, but the err-resp construction does allocate
+# from the arena via `_sandhi_resp_err_a`).
+fn test_alloc_122d_get_arena() {
+    var a = arena_allocator(4096);
+    var resp = sandhi_http_get_a(a, "garbage://x", 0);
+    assert_eq(resp != 0, 1, "get_a returned a response");
+    assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE, "PARSE err");
+    var used = arena_used(allocator_state(a));
+    assert_eq(used > 0, 1, "arena consumed by get_a path");
+    reset_via(a);
+    assert_eq(arena_used(allocator_state(a)), 0, "reset reclaims");
+    return 0;
+}
+
+# post_a — body-bearing variant; same shape as get_a but with
+# body+body_len threaded through the `_a` chain.
+fn test_alloc_122d_post_arena() {
+    var a = arena_allocator(4096);
+    var body = "hello";
+    var resp = sandhi_http_post_a(a, "garbage://x", 0, body, 5);
+    assert_eq(resp != 0, 1, "post_a returned a response");
+    assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE, "PARSE err");
+    return 0;
+}
+
+# delete_a / head_a — body-less variants share the same path
+# shape as get_a (no body args). Both must thread `a` cleanly.
+fn test_alloc_122d_delete_head_arena() {
+    var a = arena_allocator(4096);
+    var r1 = sandhi_http_delete_a(a, "garbage://x", 0);
+    assert_eq(sandhi_http_err_kind(r1), SANDHI_ERR_PARSE, "delete_a PARSE err");
+    var r2 = sandhi_http_head_a(a, "garbage://x", 0);
+    assert_eq(sandhi_http_err_kind(r2), SANDHI_ERR_PARSE, "head_a PARSE err");
+    return 0;
+}
+
+# put_a / patch_a — body-bearing variants symmetric to post_a.
+fn test_alloc_122d_put_patch_arena() {
+    var a = arena_allocator(4096);
+    var body = "x";
+    var r1 = sandhi_http_put_a(a, "garbage://x", 0, body, 1);
+    assert_eq(sandhi_http_err_kind(r1), SANDHI_ERR_PARSE, "put_a PARSE err");
+    var r2 = sandhi_http_patch_a(a, "garbage://x", 0, body, 1);
+    assert_eq(sandhi_http_err_kind(r2), SANDHI_ERR_PARSE, "patch_a PARSE err");
+    return 0;
+}
+
+# Round-trip across reset — multiple back-to-back calls into the
+# same arena, confirming `reset_via` between them gives a fresh
+# slate without leaking response memory.
+fn test_alloc_122d_get_arena_round_trip() {
+    var a = arena_allocator(4096);
+    var r1 = sandhi_http_get_a(a, "garbage://1", 0);
+    assert_eq(r1 != 0, 1, "first get_a");
+    var first_used = arena_used(allocator_state(a));
+    reset_via(a);
+    var r2 = sandhi_http_get_a(a, "garbage://2", 0);
+    assert_eq(r2 != 0, 1, "second get_a after reset");
+    assert_eq(first_used > 0, 1, "first call did consume arena");
+    return 0;
+}
+
+# ================================================================
 # Runner
 # ================================================================
 
@@ -922,6 +996,21 @@ fn main() {
 
     test_group("alloc/121bc/retry_non_retryable_arena");
     test_alloc_121bc_retry_non_retryable_arena();
+
+    test_group("alloc/122d/get_arena");
+    test_alloc_122d_get_arena();
+
+    test_group("alloc/122d/post_arena");
+    test_alloc_122d_post_arena();
+
+    test_group("alloc/122d/delete_head_arena");
+    test_alloc_122d_delete_head_arena();
+
+    test_group("alloc/122d/put_patch_arena");
+    test_alloc_122d_put_patch_arena();
+
+    test_group("alloc/122d/get_arena_round_trip");
+    test_alloc_122d_get_arena_round_trip();
 
     return assert_summary();
 }
