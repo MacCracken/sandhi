@@ -13,7 +13,7 @@ responses to the same `lib/tls.cyr` cascade.
 
 ### Toolchain
 
-- **cyrius pin** bumped 5.10.0 → 5.10.21. Picks up
+- **cyrius pin** bumped 5.10.0 → 5.10.20. Picks up
   v5.10.13 typed wrappers + v5.10.20 P(-1) hardening
   sweep; cyrius v5.9.42 testing-stdlib carve-out
   (`regression_network_probe`).
