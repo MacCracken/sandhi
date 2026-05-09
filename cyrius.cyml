@@ -5,7 +5,7 @@ description = "Service-boundary layer for AGNOS — shared HTTP/TCP/TLS + servic
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sandhi"
 language = "cyrius"
-cyrius = "5.10.0"
+cyrius = "5.10.21"
 
 # sandhi (सन्धि — junction, connection, joining) is the service-boundary
 # layer for AGNOS. Named 2026-04-24 after extensive search confirmed the
@@ -110,6 +110,11 @@ stdlib = [
     "chrono",
     "tagged",
     "assert",
+    # regression: testing-stdlib helpers (cyrius v5.9.42 carve-out).
+    # `regression_network_probe(addr, port, timeout_ms)` powers the
+    # skip-cleanly cascade in `programs/_policy_runtime_probe.cyr`'s
+    # live-network gate (1.3.0).
+    "regression",
     # mmap / dynlib / fdlopen: transitive requirements of tls.cyr. Without
     # these, cyrius non-strict mode patches undef-fn call sites with
     # placeholder bytes that silently loop back into _cyrius_init --

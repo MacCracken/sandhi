@@ -31,7 +31,9 @@
 # Cached fn pointers
 # ==================
 
-var _sandhi_apply_set_alpn_fp        = 0;  # SSL_CTX_set_alpn_protos
+# 1.3.0: `_sandhi_apply_set_alpn_fp` retired in favour of stdlib's
+# typed wrapper `tls_set_alpn` (cyrius v5.10.13). The other fps stay
+# tls_dlsym-resolved until typed wrappers ship for them too.
 var _sandhi_apply_load_verify_fp     = 0;  # SSL_CTX_load_verify_locations
 var _sandhi_apply_use_cert_fp        = 0;  # SSL_CTX_use_certificate_file
 var _sandhi_apply_use_key_fp         = 0;  # SSL_CTX_use_PrivateKey_file
@@ -47,7 +49,6 @@ var _SANDHI_SSL_FILETYPE_PEM = 1;
 
 fn _sandhi_apply_resolve_fns() {
     if (_sandhi_apply_resolved == 1) { return 0; }
-    _sandhi_apply_set_alpn_fp      = tls_dlsym("SSL_CTX_set_alpn_protos");
     _sandhi_apply_load_verify_fp   = tls_dlsym("SSL_CTX_load_verify_locations");
     _sandhi_apply_use_cert_fp      = tls_dlsym("SSL_CTX_use_certificate_file");
     _sandhi_apply_use_key_fp       = tls_dlsym("SSL_CTX_use_PrivateKey_file");
@@ -74,7 +75,11 @@ fn _sandhi_apply_resolve_fns() {
 # to open enforcement-demanding policies.
 fn sandhi_tls_policy_enforcement_available() {
     _sandhi_apply_resolve_fns();
-    if (_sandhi_apply_set_alpn_fp == 0)        { return 0; }
+    # ALPN gate: previously checked the fp cache; now we trust
+    # stdlib's `tls_set_alpn` to be present whenever `tls_available()`
+    # is true. The wrapper is a no-op if the underlying symbol is
+    # missing (returns -1; we ignore the return for non-fatal alpn).
+    if (tls_available() == 0)                  { return 0; }
     if (_sandhi_apply_load_verify_fp == 0)     { return 0; }
     if (_sandhi_apply_use_cert_fp == 0)        { return 0; }
     if (_sandhi_apply_use_key_fp == 0)         { return 0; }
@@ -98,13 +103,14 @@ fn _sandhi_apply_hook(hook_ctx, ssl_ctx) {
     if (hook_ctx == 0 || ssl_ctx == 0) { return 0; }
 
     # ALPN advertise — non-fatal if missing, same shape as the
-    # plain ALPN hook in conn.cyr.
-    if (_sandhi_apply_set_alpn_fp != 0) {
-        var protos = load64(hook_ctx);
-        var plen   = load64(hook_ctx + 8);
-        if (protos != 0 && plen > 0) {
-            fncall3(_sandhi_apply_set_alpn_fp, ssl_ctx, protos, plen);
-        }
+    # plain ALPN hook in conn.cyr. 1.3.0: switched from the
+    # `_sandhi_apply_set_alpn_fp` cache to stdlib's typed
+    # `tls_set_alpn` wrapper (cyrius v5.10.13). The wrapper itself
+    # null-checks the underlying symbol resolution.
+    var protos = load64(hook_ctx);
+    var plen   = load64(hook_ctx + 8);
+    if (protos != 0 && plen > 0) {
+        tls_set_alpn(ssl_ctx, protos, plen);
     }
 
     var policy = load64(hook_ctx + 16);

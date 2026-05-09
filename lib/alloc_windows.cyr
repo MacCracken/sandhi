@@ -57,6 +57,10 @@ var ALLOC_MAX = 0x10000000;
 # Allocate size bytes, 8-byte aligned. Returns 0 on overflow /
 # out-of-region.
 fn alloc(size) {
+    # v5.8.37 — lazy-init the heap if alloc_init() was never called.
+    # Mirrors the Linux + macOS branches; alloc_init() is now
+    # optional. See lib/alloc.cyr header for the full migration note.
+    if (_heap_base == 0) { alloc_init(); }
     if (size <= 0) { return 0; }
     if (size > ALLOC_MAX) { return 0; }
     size = (size + 7) & (0 - 8);

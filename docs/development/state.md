@@ -4,6 +4,8 @@
 
 ## Version
 
+**1.3.0** — 2026-05-09. **Opens the 1.3.x TLS arc** — live-network TLS-policy gate (the arc lead) + typed-wrapper migration onto cyrius v5.10.13's `tls_set_alpn`. Pairs the two: both are sandhi-side responses to the same `lib/tls.cyr` cascade. **Toolchain**: cyrius pin 5.10.0 → 5.10.21; `regression` added to `[deps] stdlib` for `regression_network_probe`. **Typed-wrapper migration**: `src/http/conn.cyr:_sandhi_alpn_hook` and `src/tls_policy/apply.cyr:_sandhi_apply_hook` switched from `tls_dlsym("SSL_CTX_set_alpn_protos") + fncall3` to stdlib's typed `tls_set_alpn(handle, protos, len)` — removes libssl-symbol-name binding at two sites. `_sandhi_alpn_set_fp` and `_sandhi_apply_set_alpn_fp` caches retired; `_sandhi_alpn_get0_fp` (`SSL_get0_alpn_selected`) and the 7 other libssl symbols in apply.cyr stay on `tls_dlsym` until typed wrappers ship for them. `sandhi_tls_policy_enforcement_available()` ALPN gate now checks `tls_available()` instead of the retired fp cache. **Live-network gate**: upgraded `programs/_policy_runtime_probe.cyr` into a CI-grade gate mirroring cyrius `_tls_live_gate` skip-cleanly cascade — `tls_available()` → `regression_network_probe(1.1.1.1, 443, 3000)` → `sandhi_tls_policy_enforcement_available()`. Three live gates against 1.1.1.1:443 / `one.one.one.one` SNI: default policy round-trip (exit 2 on regression), wrong-SPKI-pin fail-closed (exit 3 on fail-open / 4 on wrong err class), non-existent trust_store (soft warning). **mTLS NOT exercised** — needs server fixture; pinned for future slot. CI integration: `.github/workflows/ci.yml` gains "Live-network TLS-policy gate" step (skip-cleanly on offline runners). **899 assertions green** (440 + 167 + 250 + 42; no delta — 1.3.0's deliverable is the live gate). `cyrius lint` 0 warnings; `cyrfmt --check` clean. **1.3.1 / 1.3.2 remain blocked on cyrius** — `lib/tls.cyr` doesn't expose `SSL_get1_session` / `SSL_set_session` / `SSL_write_early_data` / `SSL_read_early_data` yet. Cyrius pinned `lib/tls.cyr` hook-surface contract audit to v5.10.31; session/0-RTT APIs would land on a separate (unpinned) slot.
+
 **1.2.8** — 2026-05-08. **1.1.0-era OOM-guard audit + tests/sandhi.tcyr cap relief.** Bundled slot per cyrius v5.10.0's "items sharing the same cascade" rule. **Audit findings (3 real)**: (1) `src/http/h2/response.cyr:239` — SIGSEGV-on-OOM via unguarded `sandhi_headers_new_a` → `_h2_decode_response_headers_a` → `sandhi_headers_add_a(h=null, ...)` → `vec_push_a(v=null,...)`; **fixed** with null-check + INTERNAL err-resp. (2) `src/http/sse.cyr:300` — SIGSEGV-on-OOM via unguarded `vec_new_a` → later `vec_push_a(events=null, ev)`; **fixed** with null-check returning 0. (3) `src/http/client.cyr:689` — partial-arena leak in `_sandhi_resolve_location_a` using `str_builder_new()` (default_alloc) for scratch; **fixed** by threading `str_builder_new_a(a)` + `_a` variants throughout. Other 1.1.0 paths surveyed and confirmed safe (5 `sandhi_url_parse_a` callsites all null-check, 2 `vec_new_a` in hpack guard at +2, `sandhi_headers_parse_a` guards at +1). **Audit story now complete across every `_a` verb in the codebase** — 1.1.0, 1.2.0–1.2.4, 1.2.7. **Cap relief**: carved 17 RPC test fns + 20 test_group calls out of `tests/sandhi.tcyr` into new `tests/rpc.tcyr` (440 + 42 = 482 unchanged total). **CI plumbing**: `tests/alloc.tcyr` (added at 1.1.0, never CI-wired) and the new `tests/rpc.tcyr` both added to `.github/workflows/ci.yml` — pre-existing gap closed. **899 assertions green** (440 sandhi + 167 h2 + 250 alloc + 42 rpc; +7 over 1.2.7's 892). New `alloc/128/` test groups (4): `h2_response_headers_alloc_oom`, `sse_parse_oom`, `resolve_location_arena`, `resolve_location_oom`. `cyrius lint` 0 warnings; `cyrfmt --check` clean. **Final sandhi-side release before holding for cyrius-side TLS hooks** — the 1.2.x optimization arc that opened at 1.2.0 closes here.
 
 **1.2.7** — 2026-05-08. **Batch G — server `_a` paint + OOM guards.** Closes the same SIGSEGV-on-OOM gap 1.2.6 found in RPC dialect verbs, this time on the server send-path. 4 server `_send_*` verbs in `src/server/mod.cyr` were using `str_builder_new()` (default_alloc) without null-check; painted `_a` variants on top + landed the guards in the same patch. New verbs: `sandhi_server_send_status_a` / `_send_response_a` / `_send_204_a` / `_send_chunked_start_a`. Each threads `a` through `str_builder_*_a` and returns 0 on success, -1 on OOM. Bare versions become back-compat wrappers passing `default_alloc()`. Public surface change: +4 `_a` verbs. Intentionally not paired: `_send_chunk` / `_send_chunked_end` (stack-local hexbuf, no alloc); `_recv_request` (caller-supplied buf); `_run` / `_run_opts` (lifecycle, singleton `_hsv_req_buf` pinned to default_alloc by design); options getters/setters (pure load64/store64); status accessors (`_body_offset`, `_content_length`, `_request_has_dup_smuggling_header`, `_request_has_cl_te_conflict` — int returns). **892 assertions green** (482 sandhi + 167 h2 + 243 alloc; +7 over 1.2.6's 885). New `alloc/127g/` test groups (5): 4 OOM tests + 1 arena round-trip. Each OOM test drives `fail_after_n_allocs(0)` and asserts -1 return — without guards, would have SIGSEGV'd. `cyrius lint` 0 warnings; `cyrfmt --check` clean. The OOM-guard audit story is now complete for every `_a` verb shipped post-1.1.0 (1.2.0–1.2.7).
@@ -78,7 +80,7 @@
 
 ## Toolchain
 
-- **Cyrius pin**: `5.10.0` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `5.10.21` (in `cyrius.cyml [package].cyrius`)
 
 ## Fold-into-stdlib status
 
@@ -185,10 +187,10 @@ verbs + 8 prof verbs = 61. **Audit story complete**: every
 the codebase. **CI plumbing**: alloc.tcyr + rpc.tcyr now CI-
 verified (closed pre-existing gap from 1.1.0).
 
-**HOLD** — sandhi-side 1.2.x arc closed at 1.2.8. No further
-sandhi work scheduled until cyrius lands `lib/tls.cyr` hook
-extensions for session-tickets + early-data (1.3.1 / 1.3.2
-unblockers per ADR 0001 — sandhi composes, doesn't reimplement).
+**1.3.0 shipped** — live-network gate + typed-wrapper
+migration onto v5.10.13's `tls_set_alpn`. **HOLD remains**
+for 1.3.1 / 1.3.2 (session resumption, 0-RTT) until cyrius
+lands the corresponding `lib/tls.cyr` hooks.
 
 - **1.2.x — optimization arc** ✅ closed at 1.2.8.
   +49 public `_a` verbs across 1.2.0–1.2.4 (RPC fold);
@@ -196,13 +198,12 @@ unblockers per ADR 0001 — sandhi composes, doesn't reimplement).
   across 1.2.6 / 1.2.7 / 1.2.8; cap relief + CI plumbing
   at 1.2.8.
 
-- **1.3.x — TLS arc** (partially blocked on cyrius).
+- **1.3.x — TLS arc** (lead landed; remaining blocked on cyrius).
   Sandhi-owned policy + state work over stdlib
   `tls_connect`.
-  - **1.3.0** — live-network TLS policy gate (lead;
-    pure CI infra, mirrors cyrius `_tls_live_gate`
-    skip-cleanly cascade). **Independent of cyrius —
-    can ship anytime.**
+  - ~~**1.3.0**~~ ✅ shipped 2026-05-09 (live-network
+    gate + typed-wrapper migration onto v5.10.13's
+    `tls_set_alpn`).
   - **1.3.1** — session-resumption cache. **Blocked on
     cyrius**: `lib/tls.cyr` doesn't expose
     `SSL_get1_session` / `SSL_set_session` /

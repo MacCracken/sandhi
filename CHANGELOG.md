@@ -4,6 +4,109 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-05-09
+
+**Opens the 1.3.x TLS arc** — live-network TLS-policy gate
++ typed-wrapper migration onto cyrius v5.10.13's
+`tls_set_alpn`. Pairs the two: both are sandhi-side
+responses to the same `lib/tls.cyr` cascade.
+
+### Toolchain
+
+- **cyrius pin** bumped 5.10.0 → 5.10.21. Picks up
+  v5.10.13 typed wrappers + v5.10.20 P(-1) hardening
+  sweep; cyrius v5.9.42 testing-stdlib carve-out
+  (`regression_network_probe`).
+- **`regression`** added to `[deps] stdlib`. Powers
+  the live-gate skip-cleanly cascade.
+
+### Typed-wrapper migration
+
+Sandhi previously called `tls_dlsym("SSL_CTX_set_alpn_protos")
++ fncall3` directly, binding to the libssl symbol name +
+ABI. Cyrius v5.10.13 added `tls_set_alpn(handle, protos,
+len)` typed wrapper; v1.3.0 swaps two sites:
+
+- **`src/http/conn.cyr`** `_sandhi_alpn_hook` →
+  `tls_set_alpn` direct. Retired
+  `_sandhi_alpn_set_fp` cache.
+- **`src/tls_policy/apply.cyr`** `_sandhi_apply_hook`
+  → same swap. Retired `_sandhi_apply_set_alpn_fp`.
+  `sandhi_tls_policy_enforcement_available()` gate
+  now uses `tls_available()` for the ALPN bit
+  instead of the retired fp cache.
+
+`SSL_get0_alpn_selected` and the 7 other libssl
+symbols sandhi reaches stay on `tls_dlsym` — no typed
+wrappers exist for them yet (per `lib/tls.cyr`'s
+soft-deprecation note: typed wrappers are the
+preferred surface, dlsym is escape-hatch). The
+`lib/tls.cyr` hook-surface contract audit on cyrius's
+v5.10.31 slot will likely surface more typed-wrapper
+candidates.
+
+### Live-network TLS-policy gate
+
+Upgraded `programs/_policy_runtime_probe.cyr` into a
+CI-grade gate. Mirrors cyrius `_tls_live_gate`
+skip-cleanly cascade:
+
+1. `tls_available()` — skip cleanly if missing.
+2. `regression_network_probe(1.1.1.1, 443, 3000)` —
+   skip cleanly if unreachable in 3s.
+3. `sandhi_tls_policy_enforcement_available()` —
+   FAIL exit 1 if libssl present but sandhi-side
+   resolve gap.
+
+Live gates against 1.1.1.1:443 / one.one.one.one SNI:
+
+- `[2]` **default policy** must succeed end-to-end
+  (exit 2 on regression).
+- `[3]` **wrong SPKI pin** must fail-closed with
+  `err_kind == SANDHI_CONN_OPEN_TLS` (exit 3 on
+  fail-open / security regression; exit 4 on wrong
+  err classification).
+- `[4]` **non-existent trust_store path** — soft
+  warning (some libssl builds keep system-CA
+  defaults loaded; documented as environment quirk).
+
+**mTLS intentionally NOT exercised** — needs a
+self-signed-server fixture; pinned for a future slot.
+
+Locally: ALL GATES PASS against 1.1.1.1:443.
+
+### CI integration
+
+`.github/workflows/ci.yml` gains a "Live-network
+TLS-policy gate" step. Builds + runs the probe;
+exits 0 on PASS or clean SKIP, non-zero on real
+regression. CI runners with no network skip-cleanly.
+
+### Verified
+
+- Live gate exits 0 with ALL GATES PASS locally.
+- 440/440 `tests/sandhi.tcyr`, 167/167 `tests/h2.tcyr`,
+  250/250 `tests/alloc.tcyr`, 42/42 `tests/rpc.tcyr` —
+  no regression. **Total: 899 assertions green** (no
+  delta from 1.2.8 — 1.3.0's deliverable is the live
+  gate, not unit tests).
+- `cyrius lint` 0 warnings on touched files;
+  `cyrfmt --check` clean.
+
+### Pinned next
+
+**1.3.1 (session resumption) and 1.3.2 (TLS 1.3 0-RTT)
+remain blocked** on cyrius — `lib/tls.cyr` doesn't
+expose `SSL_get1_session` / `SSL_set_session` /
+`SSL_write_early_data` / `SSL_read_early_data` yet.
+Per cyrius v5.10.20's roadmap reorg, the
+`lib/tls.cyr` hook-surface contract audit is pinned
+to v5.10.31; the actual session/0-RTT API additions
+would land separately on a slot the user hasn't
+pinned yet.
+
+Holding sandhi-side until cyrius signals.
+
 ## [1.2.8] — 2026-05-08
 
 **1.1.0-era OOM-guard audit + tests/sandhi.tcyr cap relief.**
