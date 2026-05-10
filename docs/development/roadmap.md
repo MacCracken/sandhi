@@ -62,6 +62,7 @@ details, state.md the current snapshot.
 - **1.2.8** — 1.1.0-era OOM-guard audit + tests/sandhi.tcyr cap relief. Bundled. Three real findings closed (h2/response.cyr SIGSEGV; sse.cyr SIGSEGV; client.cyr partial-arena leak). Carved 17 RPC test fns from sandhi.tcyr → new tests/rpc.tcyr (cap pressure relieved). Wired tests/alloc.tcyr + tests/rpc.tcyr into CI (closed pre-1.1.0 gap). 899 assertions green (440 + 167 + 250 + 42). **1.2.x optimization arc CLOSED.**
 - **1.3.0** — opens 1.3.x TLS arc. Live-network TLS-policy gate (3 gates against 1.1.1.1:443 / one.one.one.one) with skip-cleanly cascade mirroring cyrius `_tls_live_gate`. Typed-wrapper migration: `_sandhi_alpn_hook` + `_sandhi_apply_hook` switched from `tls_dlsym + fncall3` to v5.10.13's `tls_set_alpn`. Toolchain pin 5.10.0 → 5.10.21; `regression` added to deps. CI gains "Live-network TLS-policy gate" step. 899 assertions green + 1 live gate (4 sub-cases).
 - **1.3.1** — TLS 1.3 / 1.2 client-side session-resumption cache. New `src/tls_policy/session_cache.cyr` (process-wide singleton, keyed by `(sni_host, hook_fp_hex)`). `_sandhi_conn_finalize_a` switched to staged-connect (`tls_connect_alloc` → `tls_set_session` if hit → `tls_connect_complete` → `tls_get_session` capture). Default-OFF; opt-in via `sandhi_session_cache_enable(1)` (capability-gated). Toolchain pin 5.10.21 → 5.10.31 (5.10.27 was the staged-connect API the issue doc filed). 906 assertions green (440 + 167 + 257 + 42).
+- **1.3.3** — Cred-strip-aware session-cache keying. Cache key extended from `(sni_host, hook_fp_hex)` to `(sni_host, hook_fp_hex, cred_digest)`. New `_sandhi_compute_cred_digest(headers)` (FNV-1a 64-bit over Authorization / Cookie / Proxy-Authorization values; per-header marker prefix; returns 0 when no cred-bearing headers — preserves common-path key shape). Module-level `_sandhi_cred_digest` flag mirrors the `_sandhi_allow_0rtt` precedent, set+restored by dispatch entry-points. Internal signature evolution on `_lookup` / `_store` / `_key_a` (sandhi is its own only consumer of these verbs). 938 assertions green (440 + 167 + 289 + 42).
 - **1.3.2** — TLS 1.3 0-RTT (early data), opt-in. New per-request verb `sandhi_http_options_allow_0rtt(opts, on)` + getter; default 0 (off). Replay-safe methods only (GET/HEAD/OPTIONS via new `_sandhi_method_is_replay_safe`); 3-layer eligibility gate (opt-in + method-safe + cap + session-cache hit + cached session's `max_early_data >= req_len`). `_sandhi_conn_finalize_with_early_data_a` composes `tls_write_early_data` / `tls_get_early_data_status` / `tls_session_get_max_early_data`; new conn-struct slot `SANDHI_CONN_OFF_0RTT_STATUS` (32 → 40 bytes) latches the status. Both `_sandhi_http_exchange_a` and `_keepalive_a` gained ACCEPTED-skip / REJECTED-retry / NOT_SENT-passthrough handling at entry. Toolchain pin 5.10.31 → 5.10.34 (v5.10.34 closed the 0-RTT-status accessors gap filed at `docs/issues/archive/2026-05-10-stdlib-tls-early-data-status.md`). 924 assertions green (440 + 167 + 275 + 42).
 
 ## What's next
@@ -305,37 +306,72 @@ defaults when libssl lacks the underlying symbols.
 924 assertions green (440 + 167 + 275 + 42); 18 new alloc
 groups under `alloc/132/`. Toolchain pin 5.10.31 → 5.10.34.
 
-#### 1.3.3 — Cred-strip-aware session-cache keying (provisional, may slip)
+#### ~~1.3.3 — Cred-strip-aware session-cache keying~~ ✅ shipped 2026-05-10
 
-Sandhi 1.3.1 ships the session cache keyed on
+Sandhi 1.3.1 shipped the session cache keyed on
 `(sni_host, hook_fp_hex)` — sufficient for default-policy
-and policy-bound paths, but **does not currently distinguish
-auth contexts**. If a consumer rotates Authorization /
-Cookie / Proxy-Authorization headers across requests to the
-same authority + same hook, the cache reuses the session.
+and policy-bound paths, but did NOT distinguish auth contexts.
+If a consumer rotated Authorization / Cookie /
+Proxy-Authorization headers across requests to the same
+authority + same hook, the cache reused the session across
+both auth contexts.
 
-That's not a security regression at the TLS layer (the server
-still authenticates per-request using the new headers in the
-HTTP envelope), but it's a layering concern: the 0.9.0
-cred-strip rules deliberately invalidate cached state on
-auth-context change at the redirect layer, and the session
-cache should mirror that for symmetry.
+That wasn't a security regression at the TLS layer (the server
+still authenticates per-request using the new HTTP-envelope
+headers), but it was a layering concern: the 0.9.0 cred-strip
+rules deliberately invalidate cached state on auth-context
+change at the redirect layer, and the session cache should
+mirror that for symmetry. 1.3.3 closed the gap.
 
-**Scope**:
-- Extend `_sandhi_session_cache_key_a` to include a digest
-  (e.g. SHA-256 truncated to 8 hex chars) of the
-  cred-bearing headers from the current request.
-- When digest changes, key changes → cache miss → fresh
-  handshake. Old entry stays in cache (will age out via
-  1.3.4's TTL once that lands).
-- Sandhi will need a hook to surface request headers down
-  into `_sandhi_conn_finalize_a` — currently only `sni_host`
-  + `hook_fp` are passed. Plumb a 3rd "cred_digest" arg
-  (0 when no cred-bearing headers).
+**What landed**:
+- New internal helpers in `src/http/client.cyr`:
+  - `_sandhi_fnv1a_mix(h, s)` — running FNV-1a 64-bit
+    byte-mixer using stdlib's offset basis / prime
+    (`hash_str` in `lib/hashmap.cyr`).
+  - `_sandhi_compute_cred_digest(headers)` — folds the
+    values of Authorization / Cookie / Proxy-Authorization
+    (case-insensitive lookup via `sandhi_headers_get`) into
+    a single 64-bit digest. Per-header marker prefix
+    (`A:` / `C:` / `P:`) before each value prevents
+    same-value collisions across different cred header
+    names. Returns 0 when no cred-bearing headers are
+    present.
+- Module-level `_sandhi_cred_digest` flag in `src/http/conn.cyr`
+  — set+restored by `_sandhi_http_dispatch_a` and
+  `sandhi_http_request_auto_a` for the duration of each
+  dispatch. Mirrors the `_sandhi_allow_0rtt` and
+  `_sandhi_alpn_advertise_h2` precedents (single-threaded
+  client model, transient per-request state, avoids
+  threading the digest through 8+ fn signatures).
+- `_sandhi_session_cache_key_a` / `_lookup` / `_store`
+  signatures gained `cred_digest` slot. Internal evolution
+  inside sandhi (1.3.1 added these verbs; sandhi is the only
+  consumer). Cache key now renders as
+  `<sni>|<hook_fp_hex>|<cred_digest_hex>` — 16 hex digits
+  per suffix.
+- `_sandhi_conn_finalize_with_early_data_a` reads
+  `_sandhi_cred_digest` when calling lookup / store, so the
+  cache slot for a given `(host, hook)` splits across
+  distinct auth contexts.
 
-**Provisional** — may slip if 1.3.2 (0-RTT) ends up bigger
-than expected and pushes this out, or if a consumer files
-a real auth-rotation issue that promotes it ahead of 1.3.2.
+**Carry-over caveat**: redirect-follow's per-hop cred-strip
+(`_sandhi_strip_sensitive_headers_a`) operates on the request
+headers, but the dispatch-level digest is computed once at
+top-level dispatch entry. A redirect from authority A to B
+that crosses the cred-strip threshold would handshake against
+B with the original digest. Today's AGNOS consumers don't
+combine cred-bearing headers with cross-authority redirects;
+the limitation is flagged in the dispatch comment for the
+next consumer that needs it. Natural slot is to fold the
+recompute into `_sandhi_http_follow_a`'s hop loop alongside
+the existing cred-strip step.
+
+938 assertions green (440 + 167 + 289 + 42); 14 new alloc
+groups under `alloc/133/`. No toolchain bump (stays on
+5.10.34). Default `cred_digest=0` preserves the 1.3.1 /
+1.3.2 cache-key shape for service-to-service traffic, so
+existing consumers see no behavior change unless they
+explicitly carry cred-bearing headers.
 
 #### 1.3.4 — Session-cache TTL + max-size eviction (provisional, may slip)
 

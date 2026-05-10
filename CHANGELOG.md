@@ -4,6 +4,123 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.3] — 2026-05-10
+
+**Cred-strip-aware session-cache keying.** The 1.3.1 session
+cache was keyed on `(sni_host, hook_fp_hex)` — sufficient for
+default-policy and policy-bound paths, but didn't distinguish
+auth contexts. If a consumer rotated `Authorization` /
+`Cookie` / `Proxy-Authorization` headers across requests to the
+same authority + same hook, the cache reused the same TLS
+session across both auth contexts. Not a security regression
+at the TLS layer (the server still authenticates per-request
+using the new HTTP-envelope headers), but a layering concern:
+the 0.9.0 cred-strip rules deliberately invalidate cached state
+on auth-context change at the redirect layer, and the session
+cache should mirror that for symmetry.
+
+### Added
+
+- **`src/http/client.cyr`** — two new internal helpers:
+  - `_sandhi_fnv1a_mix(h, s)` — running FNV-1a 64-bit byte-mixer.
+    Same offset basis / prime as stdlib `hash_str` (see
+    `lib/hashmap.cyr`). Lets the cred digest chain multiple
+    header values into one accumulator without losing entropy
+    across them.
+  - `_sandhi_compute_cred_digest(headers)` — folds the values
+    of `Authorization` / `Cookie` / `Proxy-Authorization`
+    (case-insensitive lookup via `sandhi_headers_get`) into a
+    64-bit digest. Per-header marker prefix (`A:` / `C:` /
+    `P:`) before each value prevents same-value collisions
+    across header names. Returns 0 when no cred-bearing
+    headers are present — preserves the pre-1.3.3 cache-key
+    shape for the common service-to-service path.
+- **`src/http/conn.cyr`** — module-level `_sandhi_cred_digest`
+  flag (mirrors the `_sandhi_alpn_advertise_h2` and
+  `_sandhi_allow_0rtt` precedents). Set by dispatch entry-points
+  for the duration of the request; read by the staged-connect
+  finalize when computing the session-cache key.
+
+### Changed
+
+- **`src/tls_policy/session_cache.cyr`** — three signatures
+  gained the `cred_digest` arg. Internal verb (sandhi is its
+  own only consumer of these verbs; 1.3.1 added them, so
+  signature evolution this soon stays inside sandhi):
+  - `_sandhi_session_cache_key_a(a, sni_host, hook_fp, cred_digest)`
+    renders the digest as a second 16-hex-digit suffix:
+    `<sni>|<hook_fp_hex>|<cred_digest_hex>`.
+  - `sandhi_session_cache_lookup(sni_host, hook_fp, cred_digest)`.
+  - `sandhi_session_cache_store(sni_host, hook_fp, cred_digest, session)`.
+- **`src/http/conn.cyr:_sandhi_conn_finalize_with_early_data_a`**
+  — the lookup / store calls inside the staged-connect TLS
+  branch now pass `_sandhi_cred_digest` as the third key
+  component. When the dispatch hasn't set the flag (e.g.
+  pool-take of an already-resumed h2 conn whose finalize ran
+  earlier), the flag stays at 0 and key shape collapses to
+  the 1.3.1 default-digest path.
+- **`src/http/client.cyr:_sandhi_http_dispatch_a`** and
+  **`src/http/h2/dispatch.cyr:sandhi_http_request_auto_a`** —
+  both save+restore `_sandhi_cred_digest` around their
+  internal dispatch (mirror of the 1.3.2 0-RTT-flag pattern).
+  `_sandhi_compute_cred_digest(headers)` runs once at dispatch
+  entry; the conn finalize reads the latched value.
+
+### Notes
+
+- **Default-zero-digest preserves the common path.** Sandhi
+  consumers that don't rotate cred-bearing headers (the AGNOS
+  service-to-service majority) see no behavior change. Cache
+  hit-rate, key shape, and storage cost are identical to 1.3.2
+  for that case.
+- **Auth rotation now invalidates cache reuse.** When a
+  consumer flips Authorization (e.g. token refresh), the
+  digest changes → cache miss → fresh handshake. The old
+  entry stays in cache until 1.3.4's TTL evicts it (still
+  provisional).
+- **Redirect-layer cred-strip integration is partial.** The
+  0.9.0 cred-strip rules drop sensitive headers on
+  cross-authority redirects (`_sandhi_strip_sensitive_headers_a`).
+  The dispatch-level `_sandhi_compute_cred_digest` runs once
+  per top-level dispatch, so a redirect from authority A to
+  authority B uses the **original** digest for the B-authority
+  handshake. Consumers don't typically combine cred-bearing
+  headers with cross-authority redirects today (cross-origin
+  cred handling is a request-level concern, not a TLS-layer
+  one), so this is flagged in the dispatch comment but not
+  remediated here. If a consumer ever needs per-hop digest
+  rotation, the natural slot is to fold the recompute into
+  `_sandhi_http_follow_a`'s hop loop alongside the existing
+  cred-strip step.
+- **Carry-over scope-out**: 1.3.4 (session-cache TTL +
+  max-size eviction) stays provisional in the roadmap.
+
+### Tests
+
+- **`tests/alloc.tcyr alloc/133/`** — 7 new groups:
+  - `cred_digest_empty` — null + empty headers → digest 0.
+  - `cred_digest_non_cred_headers` — Accept / User-Agent /
+    X-Custom don't perturb the digest.
+  - `cred_digest_authorization` — different values → different
+    digests; same value → same digest.
+  - `cred_digest_cookie_and_proxy` — Cookie + Proxy-Authorization
+    each yield non-zero digests; per-header marker prefix
+    prevents same-value collisions across header names.
+  - `cred_digest_case_insensitive_header_name` — lowercase /
+    uppercase / mixed-case header names yield the same digest
+    (mirrors `sandhi_headers_get` semantics).
+  - `cache_isolates_by_cred_digest` — same `(host, hook_fp)`
+    under different `cred_digest` → distinct cache slots;
+    digest 0 → 3rd distinct slot. Skip-clean when libssl
+    can't resume.
+  - `cred_digest_flag_default` — module-level flag defaults to 0.
+- **`tests/alloc.tcyr alloc/131/`** — pre-existing 4 groups
+  updated to use the new 3/4-arg signatures (pass 0 for
+  `cred_digest`). No assertions changed; coverage of the
+  1.3.1 host/hook_fp dimensions stays identical.
+- Total: 924 → 938 passing (+14 new assertions in 1.3.3
+  groups; sandhi.tcyr / h2 / rpc unchanged).
+
 ## [1.3.2] — 2026-05-10
 
 **TLS 1.3 0-RTT (early data), opt-in.** Composes the cyrius

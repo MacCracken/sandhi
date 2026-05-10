@@ -39,17 +39,23 @@
 # doesn't support session resumption (`tls_supports_session_resumption()
 # == 0`). Saves consumers from setting up a cache that won't function.
 #
+# 1.3.2: 0-RTT (early data) wired through the staged-connect
+# finalize. Cache is the substrate; 0-RTT writes the request as
+# early data on resumed handshakes when the caller opts in.
+#
+# 1.3.3: cred-strip-aware keying. Cache key now includes a
+# 64-bit FNV-1a digest over the request's cred-bearing headers
+# (Authorization / Cookie / Proxy-Authorization). When the
+# digest changes (auth context rotates), the key changes →
+# fresh handshake. Old entry stays in cache until 1.3.4's TTL
+# evicts it. Caller passes 0 for the digest when the request
+# carries no cred-bearing headers (which is the common case
+# for service-to-service traffic) — same key shape as 1.3.1
+# / 1.3.2 in that majority path.
+#
 # What this slot does NOT do (deferred to follow-up patches):
-#   - Cred-strip integration: cache key doesn't currently include
-#     auth-bearing header digest. If a consumer sends conflicting
-#     creds across requests to the same authority, the cache still
-#     reuses the session (no security regression — server still
-#     authenticates per-request). 0.9.0 cred-strip rules apply at
-#     the redirect layer, not the resumption layer.
 #   - TTL / max-size eviction: cache grows unbounded today.
 #     `last_used_ms` slot is reserved for future eviction logic.
-#   - 0-RTT integration: 1.3.2 wires the cache into early-data
-#     after this lands.
 
 # Cache state (singletons)
 var _sandhi_session_cache_enabled    = 0;
@@ -89,20 +95,23 @@ fn sandhi_session_cache_enabled() {
     return _sandhi_session_cache_enabled;
 }
 
-# Build a cache key from (sni_host, hook_fp) into `a`. The hook fp
-# is rendered as a 16-hex-digit suffix so different hook surfaces
-# (default ALPN hook vs. policy hook) don't share cache slots —
-# their SSL_CTX configurations may differ, which would invalidate
-# session reuse.
-fn _sandhi_session_cache_key_a(a, sni_host, hook_fp) {
+# Build a cache key from (sni_host, hook_fp, cred_digest) into `a`.
+# The hook fp is rendered as a 16-hex-digit suffix so different hook
+# surfaces (default ALPN hook vs. policy hook) don't share cache
+# slots — their SSL_CTX configurations may differ, which would
+# invalidate session reuse. The cred digest (1.3.3) is rendered as
+# a second 16-hex-digit suffix so requests with different auth
+# contexts don't share a session: when Authorization / Cookie /
+# Proxy-Authorization rotate, digest changes → key changes →
+# fresh handshake. Pass 0 for cred_digest when no cred-bearing
+# headers are present; rendered as `|0000000000000000`, the common
+# case for service-to-service traffic.
+fn _sandhi_session_cache_key_a(a, sni_host, hook_fp, cred_digest) {
     if (sni_host == 0) { return 0; }
     var sb = str_builder_new_a(a);
     if (sb == 0) { return 0; }
     str_builder_add_cstr_a(a, sb, sni_host);
     str_builder_add_cstr_a(a, sb, "|");
-    # Hook fp as 16-hex-digit. We render manually rather than via
-    # fmt_int (which only handles signed decimal); 16 hex chars =
-    # uniquely identifies a fn pointer in a 64-bit address space.
     var hex = "0123456789abcdef";
     var i = 15;
     while (i >= 0) {
@@ -112,19 +121,34 @@ fn _sandhi_session_cache_key_a(a, sni_host, hook_fp) {
         str_builder_add_cstr_a(a, sb, &ch);
         i = i - 1;
     }
+    str_builder_add_cstr_a(a, sb, "|");
+    i = 15;
+    while (i >= 0) {
+        var nibble2 = (cred_digest >> (i * 4)) & 15;
+        var ch2[1];
+        store8(&ch2, load8(hex + nibble2));
+        str_builder_add_cstr_a(a, sb, &ch2);
+        i = i - 1;
+    }
     return str_data(str_builder_build_a(a, sb));
 }
 
-# Lookup a cached session for (sni_host, hook_fp). Returns 0 on
-# miss / disabled / cache uninitialized. The returned SSL_SESSION*
-# is OWNED BY THE CACHE — caller must NOT call `tls_session_free`
-# on it. Caller passes it to `tls_set_session(ctx, sess)` which
-# does NOT take ownership (libssl bumps the refcount internally).
-fn sandhi_session_cache_lookup(sni_host, hook_fp) {
+# Lookup a cached session for (sni_host, hook_fp, cred_digest).
+# Returns 0 on miss / disabled / cache uninitialized. The returned
+# SSL_SESSION* is OWNED BY THE CACHE — caller must NOT call
+# `tls_session_free` on it. Caller passes it to
+# `tls_set_session(ctx, sess)` which does NOT take ownership
+# (libssl bumps the refcount internally).
+#
+# 1.3.3: `cred_digest` is the FNV-1a 64-bit digest over the
+# cred-bearing header values from this request (computed via
+# `_sandhi_cred_digest_a` in client.cyr). Pass 0 when no
+# cred-bearing headers are present.
+fn sandhi_session_cache_lookup(sni_host, hook_fp, cred_digest) {
     if (_sandhi_session_cache_enabled == 0) { return 0; }
     if (_sandhi_session_cache_map == 0) { return 0; }
     if (sni_host == 0) { return 0; }
-    var key = _sandhi_session_cache_key_a(default_alloc(), sni_host, hook_fp);
+    var key = _sandhi_session_cache_key_a(default_alloc(), sni_host, hook_fp, cred_digest);
     if (key == 0) { return 0; }
     var sess = hashmap_get(_sandhi_session_cache_map, key);
     if (sess == 0) {
@@ -135,17 +159,17 @@ fn sandhi_session_cache_lookup(sni_host, hook_fp) {
     return sess;
 }
 
-# Store a freshly-captured session for (sni_host, hook_fp). The
-# session pointer must come from `tls_get_session(ctx)` (refcount-
-# bumped). Cache takes ownership — replaces any prior entry for
-# the same key, freeing the prior session.
+# Store a freshly-captured session for (sni_host, hook_fp, cred_digest).
+# The session pointer must come from `tls_get_session(ctx)`
+# (refcount-bumped). Cache takes ownership — replaces any prior
+# entry for the same key, freeing the prior session.
 #
 # No-op when disabled / cache uninitialized / session is 0.
-fn sandhi_session_cache_store(sni_host, hook_fp, session) {
+fn sandhi_session_cache_store(sni_host, hook_fp, cred_digest, session) {
     if (_sandhi_session_cache_enabled == 0) { return 0; }
     if (_sandhi_session_cache_map == 0) { return 0; }
     if (sni_host == 0 || session == 0) { return 0; }
-    var key = _sandhi_session_cache_key_a(default_alloc(), sni_host, hook_fp);
+    var key = _sandhi_session_cache_key_a(default_alloc(), sni_host, hook_fp, cred_digest);
     if (key == 0) { return 0; }
     var prior = hashmap_get(_sandhi_session_cache_map, key);
     if (prior != 0) {

@@ -1458,7 +1458,10 @@ fn test_alloc_131_session_cache_default_off() {
     var was_enabled = sandhi_session_cache_enabled();
     sandhi_session_cache_enable(0);
     assert_eq(sandhi_session_cache_enabled(), 0, "default disabled");
-    var sess = sandhi_session_cache_lookup("example.com", 0);
+    # 1.3.3: lookup signature gained `cred_digest` 3rd arg. Pass 0
+    # for the no-cred-bearing-headers case (matches the cache-key
+    # shape used by service-to-service requests by default).
+    var sess = sandhi_session_cache_lookup("example.com", 0, 0);
     assert_eq(sess, 0, "disabled lookup returns 0");
     sandhi_session_cache_enable(was_enabled);
     return 0;
@@ -1493,14 +1496,16 @@ fn test_alloc_131_session_cache_store_lookup_roundtrip() {
     # Non-zero fake session pointer (never dereferenced). Real
     # SSL_SESSION* comes from tls_get_session; here we just verify
     # the hashmap round-trip.
+    # 1.3.3: signatures gained `cred_digest` slot — passing 0 keeps
+    # the test focused on the 1.3.1 host/hook_fp dimensions.
     var fake_sess = 0xDEADBEEF;
-    sandhi_session_cache_store("test1.example.com", 0, fake_sess);
+    sandhi_session_cache_store("test1.example.com", 0, 0, fake_sess);
 
-    var got = sandhi_session_cache_lookup("test1.example.com", 0);
+    var got = sandhi_session_cache_lookup("test1.example.com", 0, 0);
     assert_eq(got, fake_sess, "lookup returns stored session");
     assert_eq(sandhi_session_cache_hit_count(), 1, "1 hit recorded");
 
-    var miss = sandhi_session_cache_lookup("missing.example.com", 0);
+    var miss = sandhi_session_cache_lookup("missing.example.com", 0, 0);
     assert_eq(miss, 0, "miss returns 0");
     assert_eq(sandhi_session_cache_miss_count(), 1, "1 miss recorded");
 
@@ -1508,10 +1513,10 @@ fn test_alloc_131_session_cache_store_lookup_roundtrip() {
 
     # Different hook_fp → different slot.
     var fake_sess2 = 0xCAFEBABE;
-    sandhi_session_cache_store("test1.example.com", 0xABCDEF, fake_sess2);
-    assert_eq(sandhi_session_cache_lookup("test1.example.com", 0xABCDEF),
+    sandhi_session_cache_store("test1.example.com", 0xABCDEF, 0, fake_sess2);
+    assert_eq(sandhi_session_cache_lookup("test1.example.com", 0xABCDEF, 0),
     fake_sess2, "hook_fp distinguishes slots");
-    assert_eq(sandhi_session_cache_lookup("test1.example.com", 0),
+    assert_eq(sandhi_session_cache_lookup("test1.example.com", 0, 0),
     fake_sess, "original slot unaffected");
 
     sandhi_session_cache_enable(was_enabled);
@@ -1574,6 +1579,140 @@ fn test_alloc_132_allow_0rtt_flag_default() {
     return 0;
 }
 
+# ----------------------------------------------------------------
+# 1.3.3 — cred-strip-aware session-cache keying. Cache key extends
+# from `(sni_host, hook_fp_hex)` to `(sni_host, hook_fp_hex,
+# cred_digest)` so requests with different auth contexts to the
+# same authority don't share a cached session.
+# ----------------------------------------------------------------
+
+# Empty / null headers → digest 0 (preserves pre-1.3.3 cache-key
+# shape for the common service-to-service path).
+fn test_alloc_133_cred_digest_empty() {
+    assert_eq(_sandhi_compute_cred_digest(0), 0, "null headers → 0");
+    var h = sandhi_headers_new();
+    assert_neq(h, 0, "headers allocated");
+    assert_eq(_sandhi_compute_cred_digest(h), 0, "empty headers → 0");
+    return 0;
+}
+
+# Headers with only non-cred-bearing names → still 0. Auth headers
+# are the only ones that should perturb the digest.
+fn test_alloc_133_cred_digest_non_cred_headers() {
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Accept", "*/*");
+    sandhi_headers_add(h, "User-Agent", "sandhi-test/1.3.3");
+    sandhi_headers_add(h, "X-Custom", "anything");
+    assert_eq(_sandhi_compute_cred_digest(h), 0,
+    "non-cred-bearing headers don't change digest");
+    return 0;
+}
+
+# Authorization → non-zero digest, value-sensitive.
+fn test_alloc_133_cred_digest_authorization() {
+    var h1 = sandhi_headers_new();
+    sandhi_headers_add(h1, "Authorization", "Bearer alpha");
+    var d1 = _sandhi_compute_cred_digest(h1);
+    assert_neq(d1, 0, "Authorization yields non-zero digest");
+
+    var h2 = sandhi_headers_new();
+    sandhi_headers_add(h2, "Authorization", "Bearer beta");
+    var d2 = _sandhi_compute_cred_digest(h2);
+    assert_neq(d2, 0, "different value also non-zero");
+    assert_neq(d1, d2, "different Authorization values → different digests");
+
+    var h3 = sandhi_headers_new();
+    sandhi_headers_add(h3, "Authorization", "Bearer alpha");
+    var d3 = _sandhi_compute_cred_digest(h3);
+    assert_eq(d1, d3, "same Authorization value → same digest");
+    return 0;
+}
+
+# Cookie + Proxy-Authorization also count as cred-bearing.
+fn test_alloc_133_cred_digest_cookie_and_proxy() {
+    var h_cookie = sandhi_headers_new();
+    sandhi_headers_add(h_cookie, "Cookie", "session=abc");
+    var d_cookie = _sandhi_compute_cred_digest(h_cookie);
+    assert_neq(d_cookie, 0, "Cookie yields non-zero digest");
+
+    var h_proxy = sandhi_headers_new();
+    sandhi_headers_add(h_proxy, "Proxy-Authorization", "Basic xyz");
+    var d_proxy = _sandhi_compute_cred_digest(h_proxy);
+    assert_neq(d_proxy, 0, "Proxy-Authorization yields non-zero digest");
+
+    # Per-header marker prefix prevents value-collision across
+    # header names: same body shouldn't hash identically across
+    # Cookie vs. Proxy-Authorization.
+    var h_collision_a = sandhi_headers_new();
+    sandhi_headers_add(h_collision_a, "Cookie", "shared");
+    var h_collision_b = sandhi_headers_new();
+    sandhi_headers_add(h_collision_b, "Proxy-Authorization", "shared");
+    assert_neq(_sandhi_compute_cred_digest(h_collision_a),
+               _sandhi_compute_cred_digest(h_collision_b),
+               "same value across different cred headers → different digests");
+    return 0;
+}
+
+# Case-insensitive header lookup — `sandhi_headers_get` does
+# case-insensitive matching, so the digest must too.
+fn test_alloc_133_cred_digest_case_insensitive_header_name() {
+    var h_canon = sandhi_headers_new();
+    sandhi_headers_add(h_canon, "Authorization", "Bearer x");
+    var h_lower = sandhi_headers_new();
+    sandhi_headers_add(h_lower, "authorization", "Bearer x");
+    var h_mixed = sandhi_headers_new();
+    sandhi_headers_add(h_mixed, "AUTHORIZATION", "Bearer x");
+    var d = _sandhi_compute_cred_digest(h_canon);
+    assert_eq(_sandhi_compute_cred_digest(h_lower), d,
+    "lowercase header name → same digest");
+    assert_eq(_sandhi_compute_cred_digest(h_mixed), d,
+    "uppercase header name → same digest");
+    return 0;
+}
+
+# Cache-key isolation — the same (host, hook_fp) under different
+# cred_digest values must produce distinct cache slots. Run the
+# whole assertion under enable=1; if libssl can't resume, skip.
+fn test_alloc_133_cache_isolates_by_cred_digest() {
+    var was_enabled = sandhi_session_cache_enabled();
+    var rc = sandhi_session_cache_enable(1);
+    if (rc != 1) {
+        sandhi_session_cache_enable(was_enabled);
+        return 0;
+    }
+    var sz_before = sandhi_session_cache_size();
+
+    var fake_a = 0x11AA11AA;
+    var fake_b = 0x22BB22BB;
+    # Same host, same hook_fp, different cred_digest →
+    # 2 distinct slots, one session per slot.
+    sandhi_session_cache_store("iso.example.com", 0, 0xC0FFEE01, fake_a);
+    sandhi_session_cache_store("iso.example.com", 0, 0xC0FFEE02, fake_b);
+
+    assert_eq(sandhi_session_cache_lookup("iso.example.com", 0, 0xC0FFEE01),
+    fake_a, "cred_digest A → session A");
+    assert_eq(sandhi_session_cache_lookup("iso.example.com", 0, 0xC0FFEE02),
+    fake_b, "cred_digest B → session B");
+    # Default digest 0 is yet a 3rd slot — must miss.
+    assert_eq(sandhi_session_cache_lookup("iso.example.com", 0, 0),
+    0, "cred_digest 0 → miss (3rd distinct slot)");
+    assert_eq(sandhi_session_cache_size(), sz_before + 2,
+    "exactly 2 new slots from 2 different cred_digest values");
+
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
+# `_sandhi_cred_digest` module-level flag defaults to 0 and is
+# the storage that dispatch save+restores from
+# `_sandhi_compute_cred_digest(headers)` for the duration of the
+# request.
+fn test_alloc_133_cred_digest_flag_default() {
+    assert_eq(_sandhi_cred_digest, 0,
+    "module-level cred_digest flag defaults to 0");
+    return 0;
+}
+
 # Conn-struct accessor — the new 0-RTT status slot is at
 # `SANDHI_CONN_OFF_0RTT_STATUS`. Verify the accessor reads from
 # the right offset and that NOT_SENT is the default the finalize
@@ -1604,10 +1743,10 @@ fn test_alloc_131_session_cache_disabled_noops() {
     var sz_before = sandhi_session_cache_size();
     sandhi_session_cache_reset_stats();
 
-    sandhi_session_cache_store("noop.example.com", 0, 0xFEEDFACE);
+    sandhi_session_cache_store("noop.example.com", 0, 0, 0xFEEDFACE);
     assert_eq(sandhi_session_cache_size(), sz_before,
     "store no-op when disabled");
-    var sess = sandhi_session_cache_lookup("noop.example.com", 0);
+    var sess = sandhi_session_cache_lookup("noop.example.com", 0, 0);
     assert_eq(sess, 0, "lookup no-op when disabled");
     assert_eq(sandhi_session_cache_hit_count(), 0, "no hit-count delta");
     assert_eq(sandhi_session_cache_miss_count(), 0, "no miss-count delta");
@@ -1863,6 +2002,27 @@ fn main() {
 
     test_group("alloc/132/conn_0rtt_status_accessor");
     test_alloc_132_conn_0rtt_status_accessor();
+
+    test_group("alloc/133/cred_digest_empty");
+    test_alloc_133_cred_digest_empty();
+
+    test_group("alloc/133/cred_digest_non_cred_headers");
+    test_alloc_133_cred_digest_non_cred_headers();
+
+    test_group("alloc/133/cred_digest_authorization");
+    test_alloc_133_cred_digest_authorization();
+
+    test_group("alloc/133/cred_digest_cookie_and_proxy");
+    test_alloc_133_cred_digest_cookie_and_proxy();
+
+    test_group("alloc/133/cred_digest_case_insensitive_header_name");
+    test_alloc_133_cred_digest_case_insensitive_header_name();
+
+    test_group("alloc/133/cache_isolates_by_cred_digest");
+    test_alloc_133_cache_isolates_by_cred_digest();
+
+    test_group("alloc/133/cred_digest_flag_default");
+    test_alloc_133_cred_digest_flag_default();
 
     return assert_summary();
 }

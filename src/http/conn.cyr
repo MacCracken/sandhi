@@ -82,6 +82,17 @@ var _sandhi_alpn_advertise_h2 = 0;
 # justification as `_sandhi_alpn_advertise_h2`.
 var _sandhi_allow_0rtt = 0;
 
+# 1.3.3 — cred-digest threaded through to the session-cache key.
+# Set by dispatch entry-points to FNV-1a 64-bit over the request's
+# Authorization / Cookie / Proxy-Authorization values (via
+# `_sandhi_cred_digest_a` in client.cyr); 0 when no cred-bearing
+# headers. Read inside `_sandhi_conn_finalize_with_early_data_a`
+# when calling `sandhi_session_cache_lookup` / `_store`. Same
+# module-level-flag rationale as `_sandhi_allow_0rtt` —
+# single-threaded client model, transient per-request state we
+# don't want to thread through 8+ fn signatures.
+var _sandhi_cred_digest = 0;
+
 # Hook override mechanism. When non-zero, sandhi_conn_open_fully_timed
 # uses these in place of the default ALPN hook. Set by tls_policy/
 # apply.cyr around its policy-aware open so the policy hook can
@@ -548,7 +559,7 @@ read_ms, write_ms, early_data, early_data_len) {
             _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
             return 0;
         }
-        var cached_sess = sandhi_session_cache_lookup(sni_host, hook_fp);
+        var cached_sess = sandhi_session_cache_lookup(sni_host, hook_fp, _sandhi_cred_digest);
         if (cached_sess != 0) {
             tls_set_session(tls_ctx, cached_sess);
         }
@@ -581,7 +592,7 @@ read_ms, write_ms, early_data, early_data_len) {
         # refcount; the cache takes ownership of that ref.
         var fresh_sess = tls_get_session(tls_ctx);
         if (fresh_sess != 0) {
-            sandhi_session_cache_store(sni_host, hook_fp, fresh_sess);
+            sandhi_session_cache_store(sni_host, hook_fp, _sandhi_cred_digest, fresh_sess);
         }
         alpn_data = _sandhi_alpn_read_selected_a(a, tls_ctx);
         kind = SANDHI_CONN_TLS;

@@ -274,6 +274,15 @@ fn sandhi_http_request_auto_a(a, method, url, user_headers, body, body_len, opts
     # CONNECTION preface vs. early-data ordering is settled.
     var prior_0rtt = _sandhi_allow_0rtt;
     _sandhi_allow_0rtt = sandhi_http_options_get_allow_0rtt(opts);
+    # 1.3.3 — propagate cred-digest into the conn-finalize path so
+    # the session cache distinguishes auth contexts. Same save+restore
+    # shape as the 0-RTT flag. Available to the 1.1 fallback branch
+    # of auto dispatch (h2 fast-path uses pool-cached conns whose
+    # session was cached at finalize-time with the prior digest, so
+    # the "right session for this auth context" decision happens at
+    # the lookup that built the cached h2 conn — not on every reuse).
+    var prior_cred = _sandhi_cred_digest;
+    _sandhi_cred_digest = _sandhi_compute_cred_digest(user_headers);
     var r = 0;
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
@@ -281,6 +290,7 @@ fn sandhi_http_request_auto_a(a, method, url, user_headers, body, body_len, opts
     } else {
         r = _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts);
     }
+    _sandhi_cred_digest = prior_cred;
     _sandhi_allow_0rtt = prior_0rtt;
     return r;
 }

@@ -275,6 +275,63 @@ fn _sandhi_method_is_replay_safe(method) {
     return 0;
 }
 
+# 1.3.3 — FNV-1a 64-bit byte-mixer. Continues from a running hash
+# `h` so the cred digest can chain multiple header values together
+# in one accumulator without losing entropy across them. Same
+# offset basis / prime as stdlib `hash_str` (lib/hashmap.cyr).
+fn _sandhi_fnv1a_mix(h, s) {
+    if (s == 0) { return h; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        h = h ^ load8(s + i);
+        h = h * 0x100000001B3;
+        i = i + 1;
+    }
+    return h;
+}
+
+# 1.3.3 — cred-strip-aware session-cache keying digest. Hashes the
+# values of Authorization / Cookie / Proxy-Authorization headers
+# (case-insensitive lookup via `sandhi_headers_get`) into a 64-bit
+# digest. When at least one cred-bearing header is present, the
+# digest folds in a per-header marker prefix ("A:" / "C:" / "P:")
+# before the value bytes so a value reused across header names
+# (e.g. same token in Authorization vs. Cookie) doesn't collide.
+# Returns 0 when no cred-bearing headers — preserves the pre-1.3.3
+# cache-key shape for the common service-to-service path.
+#
+# Used by `_sandhi_http_dispatch_a` / `sandhi_http_request_auto_a`
+# to set the module-level `_sandhi_cred_digest` flag (defined in
+# conn.cyr alongside `_sandhi_allow_0rtt`); the conn finalize reads
+# the flag when calling `sandhi_session_cache_lookup` / `_store`.
+# Named `_compute_` rather than just `_cred_digest` to avoid
+# collision with the module-level variable of the same root.
+fn _sandhi_compute_cred_digest(headers) {
+    if (headers == 0) { return 0; }
+    var found = 0;
+    var h = 0xCBF29CE484222325;  # FNV offset basis
+    var v = sandhi_headers_get(headers, "Authorization");
+    if (v != 0) {
+        h = _sandhi_fnv1a_mix(h, "A:");
+        h = _sandhi_fnv1a_mix(h, v);
+        found = 1;
+    }
+    v = sandhi_headers_get(headers, "Cookie");
+    if (v != 0) {
+        h = _sandhi_fnv1a_mix(h, "C:");
+        h = _sandhi_fnv1a_mix(h, v);
+        found = 1;
+    }
+    v = sandhi_headers_get(headers, "Proxy-Authorization");
+    if (v != 0) {
+        h = _sandhi_fnv1a_mix(h, "P:");
+        h = _sandhi_fnv1a_mix(h, v);
+        found = 1;
+    }
+    if (found == 0) { return 0; }
+    return h;
+}
+
 # Compute the effective connect_ms given a monotonic deadline.
 # Returns connect_ms unchanged when deadline is disabled; otherwise
 # clamps to `deadline - now`. Returns 0 if the deadline has already
@@ -960,6 +1017,21 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts) {
     # invoked recursively via redirect-follow).
     var prior_0rtt = _sandhi_allow_0rtt;
     _sandhi_allow_0rtt = sandhi_http_options_get_allow_0rtt(opts);
+    # 1.3.3 — set the cred-digest flag for the duration of this
+    # dispatch. Conn finalize reads it when computing the
+    # session-cache key. Save + restore mirrors the 0-RTT pattern
+    # so redirect-follow's cred-strip step (which mutates `headers`
+    # via `_sandhi_strip_sensitive_headers_a` for cross-authority
+    # hops) takes effect on the next hop's digest naturally —
+    # `_sandhi_http_follow_a` recomputes through this dispatch on
+    # each hop only when the user-level dispatch loops, but the
+    # 1.1 follow path stays inside `_sandhi_http_do_a` per hop, so
+    # cred-strip-on-redirect handling for the cache key is a
+    # follow-up if a consumer ever sets cred-bearing headers AND
+    # follows redirects across authorities. Today that combination
+    # is rare; flagging the limitation rather than over-engineering.
+    var prior_cred = _sandhi_cred_digest;
+    _sandhi_cred_digest = _sandhi_compute_cred_digest(headers);
     var r = 0;
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
@@ -969,6 +1041,7 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts) {
         r = _sandhi_http_do_a(a, method, url, headers, body, body_len,
         max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
     }
+    _sandhi_cred_digest = prior_cred;
     _sandhi_allow_0rtt = prior_0rtt;
     return r;
 }
