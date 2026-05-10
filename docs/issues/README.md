@@ -28,8 +28,9 @@ zero ambiguity on what to put on its roadmap.
 
 ## Upstream dependencies (sandhi is blocked on stdlib / toolchain)
 
-None open. The 2026-05-09 staged-connect ask cleared at cyrius
-v5.10.27 (same day filed) — see archive table.
+| Doc | Filed | Status | Summary |
+|-----|-------|--------|---------|
+| [`2026-05-10-stdlib-tls-early-data-status.md`](2026-05-10-stdlib-tls-early-data-status.md) | sandhi 1.3.2 entry | Open | Cyrius v5.10.31 ships `tls_write_early_data` / `tls_read_early_data` / `tls_supports_early_data` but not `SSL_get_early_data_status` (post-handshake acceptance check) or `SSL_SESSION_get_max_early_data` (pre-attempt eligibility). Without those, client-side 0-RTT can't safely detect rejection or right-size the early-data write. Sandhi 1.3.2 holds until cyrius adds them. Same shape as 2026-05-09's staged-connect filing — primitives shipped, safety surface gap remains.
 
 ## Archived (resolved)
 

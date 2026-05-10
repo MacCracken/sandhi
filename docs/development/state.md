@@ -192,9 +192,15 @@ verified (closed pre-existing gap from 1.1.0).
 
 **1.3.0 shipped** (live-network gate + typed-wrapper migration).
 **1.3.1 shipped** (session-resumption cache + staged-connect
-wire-up at v5.10.27 unblock). 1.3.2 (0-RTT) is the remaining
-TLS-arc item — composes the same primitives on an installed
-session.
+wire-up at v5.10.27 unblock). **1.3.2 BLOCKED on cyrius** —
+v5.10.31 has 0-RTT write/read primitives but not the
+status / max-early-data accessors required for safe
+client-side 0-RTT. Filed
+`docs/issues/2026-05-10-stdlib-tls-early-data-status.md`;
+sandhi 1.3.2 lands when cyrius adds the safety surface.
+1.3.3 / 1.3.4 (provisional, may slip) are session-cache
+hardening items independent of 1.3.2 — could land in
+parallel.
 
 - **1.2.x — optimization arc** ✅ closed at 1.2.8.
   +49 public `_a` verbs across 1.2.0–1.2.4 (RPC fold);
@@ -216,7 +222,16 @@ session.
     Filed staged-connect issue cleared at cyrius
     v5.10.27.
   - **1.3.2** — TLS 1.3 0-RTT (opt-in via
-    `sandhi_http_options_allow_0rtt`). Composes
+    `sandhi_http_options_allow_0rtt`). **Blocked on
+    cyrius**: v5.10.31 ships write/read early-data
+    primitives but not `SSL_get_early_data_status`
+    (post-handshake acceptance check) or
+    `SSL_SESSION_get_max_early_data` (pre-attempt
+    eligibility). Without those, client-side 0-RTT
+    can't safely detect rejection or right-size the
+    write. Filed
+    `docs/issues/2026-05-10-stdlib-tls-early-data-status.md`.
+    When unblocked: composes
     `tls_ctx_set_max_early_data` / `tls_write_early_data`
     / `tls_read_early_data` on top of an installed
     session. Replay-safe methods only per RFC 8446 §8.

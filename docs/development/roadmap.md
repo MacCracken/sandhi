@@ -244,7 +244,7 @@ needs either Option A (staged-connect API:
 `tls_connect_alloc` + `tls_connect_complete`) or Option B
 (post-`SSL_new` hook variant). 1.3.1 lands when cyrius does.
 
-#### 1.3.2 — TLS 1.3 0-RTT (early data) — opt-in (unblocked at cyrius v5.10.27 + sandhi 1.3.1)
+#### 1.3.2 — TLS 1.3 0-RTT (early data) — opt-in (BLOCKED on cyrius early-data status accessors)
 
 Only for GET / HEAD / OPTIONS where the request is replay-
 safe per RFC 8446 §8. Behind an explicit options flag
@@ -253,13 +253,27 @@ surface means default-off is the only safe default. Pairs
 with session-resumption since 0-RTT requires a cached
 session.
 
-**Cyrius v5.10.21 surface available** (`tls_ctx_set_max_early_data`
-/ `tls_write_early_data` / `tls_read_early_data` /
-`tls_supports_early_data`); the v5.10.27 staged-connect API
-is what makes 0-RTT actually wire-able (same unblock as 1.3.1).
-Sandhi 1.3.1 shipped the cache plumbing 0-RTT rides on top of.
-Lands after 1.3.1's stabilization or whenever 0-RTT is the
-priority pull.
+**Status — primitives shipped, status-accessor blocker open**:
+Cyrius v5.10.21 shipped the write/read primitives
+(`tls_write_early_data` / `tls_read_early_data` /
+`tls_ctx_set_max_early_data` / `tls_supports_early_data`).
+v5.10.27 added the staged-connect API that makes them
+wire-able. v5.10.31 is current.
+
+But OpenSSL's client-side 0-RTT contract requires two more
+accessors that cyrius v5.10.31 doesn't expose:
+
+- `SSL_get_early_data_status(ssl)` — post-handshake check
+  (`NOT_SENT` / `REJECTED` / `ACCEPTED`). Without this,
+  silent rejection means request loss.
+- `SSL_SESSION_get_max_early_data(sess)` — pre-attempt
+  eligibility (server's advertised early-data byte budget;
+  0 means session doesn't support it).
+
+Filed [`docs/issues/2026-05-10-stdlib-tls-early-data-status.md`](../issues/2026-05-10-stdlib-tls-early-data-status.md) —
+two thin typed wrappers + 3-entry enum (TLS_EARLY_DATA_*).
+Sandhi 1.3.2 lands when cyrius does. Same shape as the
+2026-05-09 staged-connect filing.
 
 #### 1.3.3 — Cred-strip-aware session-cache keying (provisional, may slip)
 
