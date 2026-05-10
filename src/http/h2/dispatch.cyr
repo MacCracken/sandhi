@@ -264,11 +264,25 @@ fn _sandhi_http_auto_follow(method, url, user_headers, body, body_len, opts, max
 }
 
 fn sandhi_http_request_auto_a(a, method, url, user_headers, body, body_len, opts) {
+    # 1.3.2 — propagate the 0-RTT opt-in flag for the duration of
+    # this dispatch. Mirrors `_sandhi_http_dispatch_a` in client.cyr;
+    # the module-level `_sandhi_allow_0rtt` is read inside the 1.1
+    # fallback's `_do_impl_a` eligibility check. Save+restore so
+    # nested invocations (none today, but cheap insurance) don't
+    # corrupt outer state. h2 path doesn't consult the flag — TLS
+    # 1.3 0-RTT for h2 sits in a future milestone once the
+    # CONNECTION preface vs. early-data ordering is settled.
+    var prior_0rtt = _sandhi_allow_0rtt;
+    _sandhi_allow_0rtt = sandhi_http_options_get_allow_0rtt(opts);
+    var r = 0;
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
-        return _sandhi_http_auto_follow_a(a, method, url, user_headers, body, body_len, opts, hops);
+        r = _sandhi_http_auto_follow_a(a, method, url, user_headers, body, body_len, opts, hops);
+    } else {
+        r = _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts);
     }
-    return _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts);
+    _sandhi_allow_0rtt = prior_0rtt;
+    return r;
 }
 
 fn sandhi_http_request_auto(method, url, user_headers, body, body_len, opts) {

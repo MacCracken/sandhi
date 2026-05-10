@@ -62,6 +62,7 @@ details, state.md the current snapshot.
 - **1.2.8** — 1.1.0-era OOM-guard audit + tests/sandhi.tcyr cap relief. Bundled. Three real findings closed (h2/response.cyr SIGSEGV; sse.cyr SIGSEGV; client.cyr partial-arena leak). Carved 17 RPC test fns from sandhi.tcyr → new tests/rpc.tcyr (cap pressure relieved). Wired tests/alloc.tcyr + tests/rpc.tcyr into CI (closed pre-1.1.0 gap). 899 assertions green (440 + 167 + 250 + 42). **1.2.x optimization arc CLOSED.**
 - **1.3.0** — opens 1.3.x TLS arc. Live-network TLS-policy gate (3 gates against 1.1.1.1:443 / one.one.one.one) with skip-cleanly cascade mirroring cyrius `_tls_live_gate`. Typed-wrapper migration: `_sandhi_alpn_hook` + `_sandhi_apply_hook` switched from `tls_dlsym + fncall3` to v5.10.13's `tls_set_alpn`. Toolchain pin 5.10.0 → 5.10.21; `regression` added to deps. CI gains "Live-network TLS-policy gate" step. 899 assertions green + 1 live gate (4 sub-cases).
 - **1.3.1** — TLS 1.3 / 1.2 client-side session-resumption cache. New `src/tls_policy/session_cache.cyr` (process-wide singleton, keyed by `(sni_host, hook_fp_hex)`). `_sandhi_conn_finalize_a` switched to staged-connect (`tls_connect_alloc` → `tls_set_session` if hit → `tls_connect_complete` → `tls_get_session` capture). Default-OFF; opt-in via `sandhi_session_cache_enable(1)` (capability-gated). Toolchain pin 5.10.21 → 5.10.31 (5.10.27 was the staged-connect API the issue doc filed). 906 assertions green (440 + 167 + 257 + 42).
+- **1.3.2** — TLS 1.3 0-RTT (early data), opt-in. New per-request verb `sandhi_http_options_allow_0rtt(opts, on)` + getter; default 0 (off). Replay-safe methods only (GET/HEAD/OPTIONS via new `_sandhi_method_is_replay_safe`); 3-layer eligibility gate (opt-in + method-safe + cap + session-cache hit + cached session's `max_early_data >= req_len`). `_sandhi_conn_finalize_with_early_data_a` composes `tls_write_early_data` / `tls_get_early_data_status` / `tls_session_get_max_early_data`; new conn-struct slot `SANDHI_CONN_OFF_0RTT_STATUS` (32 → 40 bytes) latches the status. Both `_sandhi_http_exchange_a` and `_keepalive_a` gained ACCEPTED-skip / REJECTED-retry / NOT_SENT-passthrough handling at entry. Toolchain pin 5.10.31 → 5.10.34 (v5.10.34 closed the 0-RTT-status accessors gap filed at `docs/issues/archive/2026-05-10-stdlib-tls-early-data-status.md`). 924 assertions green (440 + 167 + 275 + 42).
 
 ## What's next
 
@@ -244,36 +245,65 @@ needs either Option A (staged-connect API:
 `tls_connect_alloc` + `tls_connect_complete`) or Option B
 (post-`SSL_new` hook variant). 1.3.1 lands when cyrius does.
 
-#### 1.3.2 — TLS 1.3 0-RTT (early data) — opt-in (BLOCKED on cyrius early-data status accessors)
+#### ~~1.3.2 — TLS 1.3 0-RTT (early data) — opt-in~~ ✅ shipped 2026-05-10
 
-Only for GET / HEAD / OPTIONS where the request is replay-
-safe per RFC 8446 §8. Behind an explicit options flag
-(`sandhi_http_options_allow_0rtt`) — the replay-attack
-surface means default-off is the only safe default. Pairs
-with session-resumption since 0-RTT requires a cached
-session.
+Replay-safe methods only (GET / HEAD / OPTIONS) per RFC 8446 §8.
+Behind an explicit options flag (`sandhi_http_options_allow_0rtt`)
+— the replay-attack surface means default-off is the only safe
+default. Pairs with session-resumption since 0-RTT requires a
+cached session.
 
-**Status — primitives shipped, status-accessor blocker open**:
-Cyrius v5.10.21 shipped the write/read primitives
-(`tls_write_early_data` / `tls_read_early_data` /
-`tls_ctx_set_max_early_data` / `tls_supports_early_data`).
-v5.10.27 added the staged-connect API that makes them
-wire-able. v5.10.31 is current.
+**Closed the blocker**: cyrius v5.10.34 shipped the two
+status accessors filed at
+[`docs/issues/archive/2026-05-10-stdlib-tls-early-data-status.md`](../issues/archive/2026-05-10-stdlib-tls-early-data-status.md) —
+`tls_get_early_data_status(ctx)` (with `TLS_EARLY_DATA_*` enum)
+and `tls_session_get_max_early_data(session)`. Both with safe
+defaults when libssl lacks the underlying symbols.
 
-But OpenSSL's client-side 0-RTT contract requires two more
-accessors that cyrius v5.10.31 doesn't expose:
+**Composition**:
+- v5.10.21: `tls_write_early_data` / `tls_read_early_data` /
+  `tls_ctx_set_max_early_data` / `tls_supports_early_data` —
+  the write/read primitives + capability probe.
+- v5.10.27: staged-connect (`tls_connect_alloc` +
+  `tls_connect_complete`) — gives sandhi the slot to install
+  the session BEFORE handshake and write early data between
+  alloc and complete.
+- v5.10.34: status accessors — sandhi reads
+  `tls_get_early_data_status` after handshake to decide
+  ACCEPTED-skip vs. REJECTED-retry, and checks
+  `tls_session_get_max_early_data` before attempting the
+  early-data write.
 
-- `SSL_get_early_data_status(ssl)` — post-handshake check
-  (`NOT_SENT` / `REJECTED` / `ACCEPTED`). Without this,
-  silent rejection means request loss.
-- `SSL_SESSION_get_max_early_data(sess)` — pre-attempt
-  eligibility (server's advertised early-data byte budget;
-  0 means session doesn't support it).
+**Sandhi-side changes**:
+- New per-request opt-in verb `sandhi_http_options_allow_0rtt(opts, on)`
+  + getter. Options struct grew 64 → 72 bytes.
+- New internal classifier `_sandhi_method_is_replay_safe(method)` —
+  GET / HEAD / OPTIONS only, case-sensitive per RFC 7230 §3.1.1.
+- `_sandhi_http_do_impl_a` restructured to build request bytes
+  BEFORE conn-open (pure refactor — bytes don't depend on conn
+  properties), so the request can be passed in as early-data.
+- `_sandhi_conn_finalize_a` becomes a back-compat wrapper
+  forwarding `early_data=0, early_data_len=0` to the new
+  `_sandhi_conn_finalize_with_early_data_a`.
+- Conn struct grew 32 → 40 bytes — new
+  `SANDHI_CONN_OFF_0RTT_STATUS` slot latches the TLS_EARLY_DATA_*
+  value at handshake completion. Exposed via public verb
+  `sandhi_conn_0rtt_status(conn)`.
+- Both `_sandhi_http_exchange_a` and `_keepalive_a` gained a
+  status check at entry: ACCEPTED skips the request send,
+  REJECTED sends normally on the established stream,
+  NOT_SENT is the existing path (covers all plaintext, all
+  non-resumed TLS, and the disabled-0-RTT majority).
+- Dispatch surfaces (`_sandhi_http_dispatch_a` +
+  `sandhi_http_request_auto_a`) save+restore the module-level
+  `_sandhi_allow_0rtt` flag from
+  `sandhi_http_options_get_allow_0rtt(opts)` — mirrors the
+  existing `_sandhi_alpn_advertise_h2` pattern. h2 path
+  doesn't enable 0-RTT today (CONNECTION preface vs.
+  early-data ordering pinned for a later milestone).
 
-Filed [`docs/issues/2026-05-10-stdlib-tls-early-data-status.md`](../issues/2026-05-10-stdlib-tls-early-data-status.md) —
-two thin typed wrappers + 3-entry enum (TLS_EARLY_DATA_*).
-Sandhi 1.3.2 lands when cyrius does. Same shape as the
-2026-05-09 staged-connect filing.
+924 assertions green (440 + 167 + 275 + 42); 18 new alloc
+groups under `alloc/132/`. Toolchain pin 5.10.31 → 5.10.34.
 
 #### 1.3.3 — Cred-strip-aware session-cache keying (provisional, may slip)
 

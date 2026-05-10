@@ -20,17 +20,23 @@ enum SandhiConnKind {
 }
 
 enum SandhiConnOff {
-    SANDHI_CONN_OFF_KIND      = 0;
-    SANDHI_CONN_OFF_FD        = 8;
-    SANDHI_CONN_OFF_TLS_CTX   = 16;
+    SANDHI_CONN_OFF_KIND        = 0;
+    SANDHI_CONN_OFF_FD          = 8;
+    SANDHI_CONN_OFF_TLS_CTX     = 16;
     # Cstr ptr to the ALPN protocol the server picked (e.g. "h2",
     # "http/1.1"), or 0 when ALPN didn't fire / handshake was plain.
     # Populated post-handshake from SSL_get0_alpn_selected; copy is
     # owned by the conn and lives until process exit (alloc-once).
-    SANDHI_CONN_OFF_ALPN_DATA = 24;
+    SANDHI_CONN_OFF_ALPN_DATA   = 24;
+    # 1.3.2 — TLS 1.3 0-RTT acceptance status from
+    # `tls_get_early_data_status`. Default 0 (TLS_EARLY_DATA_NOT_SENT)
+    # for non-0-RTT conns. Exchange path reads this to decide
+    # whether to skip the send step (ACCEPTED) or resend over the
+    # normal stream (REJECTED / NOT_SENT).
+    SANDHI_CONN_OFF_0RTT_STATUS = 32;
 }
 
-var SANDHI_CONN_STRUCT_SIZE = 32;
+var SANDHI_CONN_STRUCT_SIZE = 40;
 
 # ---------------------------------------------------------------
 # ALPN runtime — wires the v5.6.40 stdlib hook
@@ -66,6 +72,15 @@ var _sandhi_alpn_h2h11_wire_len = 12;
 # dispatcher before opening; cleared after). Single-threaded
 # client model, so a module-level flag is sufficient.
 var _sandhi_alpn_advertise_h2 = 0;
+
+# 1.3.2 — TLS 1.3 0-RTT opt-in flag. Mirrors the alpn-advertise
+# pattern: set to opts.allow_0rtt by the dispatch entry-points
+# before any conn-open in the request flow; cleared after the
+# request completes. `_sandhi_http_do_impl_a` reads this in its
+# eligibility check (along with method-safety, capability,
+# session-cache hit). Single-threaded client model — same
+# justification as `_sandhi_alpn_advertise_h2`.
+var _sandhi_allow_0rtt = 0;
 
 # Hook override mechanism. When non-zero, sandhi_conn_open_fully_timed
 # uses these in place of the default ALPN hook. Set by tls_policy/
@@ -244,6 +259,18 @@ fn sandhi_conn_last_open_err() {
 fn sandhi_conn_kind(c)    { return load64(c + SANDHI_CONN_OFF_KIND); }
 fn sandhi_conn_fd(c)      { return load64(c + SANDHI_CONN_OFF_FD); }
 fn sandhi_conn_tls_ctx(c) { return load64(c + SANDHI_CONN_OFF_TLS_CTX); }
+
+# 1.3.2 — 0-RTT acceptance status. Returns one of:
+#   TLS_EARLY_DATA_NOT_SENT (0) — no 0-RTT attempted, OR conn is
+#                                 plain HTTP, OR pool reuse
+#   TLS_EARLY_DATA_REJECTED (1) — server rejected; exchange path
+#                                 must resend via `tls_write`
+#   TLS_EARLY_DATA_ACCEPTED (2) — server accepted; exchange path
+#                                 skips send, jumps to recv
+fn sandhi_conn_0rtt_status(c) {
+    if (c == 0) { return 0; }
+    return load64(c + SANDHI_CONN_OFF_0RTT_STATUS);
+}
 
 # Set SO_RCVTIMEO or SO_SNDTIMEO to `ms` milliseconds. Value is a
 # `struct timeval { tv_sec: i64, tv_usec: i64 }` = 16 bytes on
@@ -469,13 +496,15 @@ fn _sandhi_conn_connect_sa_nb(fd, sa, salen, timeout_ms) {
 # (16 bytes for the ALPN hook) and the ALPN-selected cstr also live
 # in `a`. The wire literals themselves are process-wide singletons
 # (see _sandhi_alpn_init_wire).
-fn _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms) {
+fn _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
+read_ms, write_ms, early_data, early_data_len) {
     if (read_ms > 0)  { _sandhi_conn_set_timeout_ms_a(a, fd, read_ms,  _SANDHI_SO_RCVTIMEO); }
     if (write_ms > 0) { _sandhi_conn_set_timeout_ms_a(a, fd, write_ms, _SANDHI_SO_SNDTIMEO); }
 
     var tls_ctx = 0;
     var kind = SANDHI_CONN_PLAIN;
     var alpn_data = 0;
+    var early_data_status = 0;  # TLS_EARLY_DATA_NOT_SENT
     if (use_tls == 1) {
         if (tls_available() == 0) {
             sock_close(fd);
@@ -523,12 +552,31 @@ fn _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms) {
         if (cached_sess != 0) {
             tls_set_session(tls_ctx, cached_sess);
         }
+        # 1.3.2 — 0-RTT write between session-set and handshake-
+        # complete. Caller already gated `early_data` non-zero
+        # on capability + method-safety + session-presence; here
+        # we only need the per-session-size check
+        # (`tls_session_get_max_early_data` against actual req
+        # length). Skip 0-RTT silently if the session doesn't
+        # advertise enough budget. tls_write_early_data return
+        # value is informational — definitive accepted/rejected
+        # signal comes post-handshake from
+        # `tls_get_early_data_status`.
+        if (early_data != 0 && early_data_len > 0 && cached_sess != 0) {
+            var max_early = tls_session_get_max_early_data(cached_sess);
+            if (max_early >= early_data_len) {
+                tls_write_early_data(tls_ctx, early_data, early_data_len);
+            }
+        }
         if (tls_connect_complete(tls_ctx) != 1) {
             tls_close(tls_ctx);
             sock_close(fd);
             _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
             return 0;
         }
+        # Post-handshake early-data status — drives the
+        # exchange path's send-or-skip decision.
+        early_data_status = tls_get_early_data_status(tls_ctx);
         # Capture session for next time. tls_get_session bumps the
         # refcount; the cache takes ownership of that ref.
         var fresh_sess = tls_get_session(tls_ctx);
@@ -550,7 +598,14 @@ fn _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms) {
     store64(conn + SANDHI_CONN_OFF_FD, fd);
     store64(conn + SANDHI_CONN_OFF_TLS_CTX, tls_ctx);
     store64(conn + SANDHI_CONN_OFF_ALPN_DATA, alpn_data);
+    store64(conn + SANDHI_CONN_OFF_0RTT_STATUS, early_data_status);
     return conn;
+}
+
+# Back-compat wrapper — pre-1.3.2 callers don't pass early-data.
+fn _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms) {
+    return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
+    read_ms, write_ms, 0, 0);
 }
 
 fn _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms) {
@@ -600,6 +655,41 @@ fn _sandhi_conn_open_v6_fully_timed(addr16, port, use_tls, sni_host, connect_ms,
     connect_ms, read_ms, write_ms);
 }
 
+# 1.3.2 — v6 variant of the early-data-aware open path.
+fn _sandhi_conn_open_v6_fully_timed_with_early_data_a(a, addr16, port,
+use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len) {
+    _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
+    if (addr16 == 0) {
+        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        return 0;
+    }
+    var fd = syscall(SYS_SOCKET, 10, 1, 0);  # AF_INET6, SOCK_STREAM
+    if (fd < 0) {
+        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        return 0;
+    }
+    var sa = _sandhi_conn_sockaddr_in6_a(a, addr16, port);
+    if (sa == 0) {
+        sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+    }
+    if (connect_ms > 0) {
+        var nbr = _sandhi_conn_connect_sa_nb_a(a, fd, sa, 28, connect_ms);
+        if (nbr == _SANDHI_CONN_NB_TIMEOUT) {
+            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_TIMEOUT; return 0;
+        }
+        if (nbr != _SANDHI_CONN_NB_OK) {
+            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+        }
+    } else {
+        var rc = syscall(SYS_CONNECT, fd, sa, 28);
+        if (rc < 0) {
+            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+        }
+    }
+    return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
+    read_ms, write_ms, early_data, early_data_len);
+}
+
 fn sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
     _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
 
@@ -638,6 +728,50 @@ fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_
     return sandhi_conn_open_fully_timed_a(
     default_alloc(), addr, port, use_tls, sni_host,
     connect_ms, read_ms, write_ms);
+}
+
+# 1.3.2 — open with early-data attached. Internal-only; the public
+# `sandhi_conn_open_fully_timed_a` stays unchanged. Caller
+# (`_sandhi_http_do_impl_a`) pre-checks 0-RTT eligibility
+# (allow_0rtt opt + method safety + capability + session present);
+# this fn just plumbs early_data + early_data_len through to
+# `_sandhi_conn_finalize_with_early_data_a`. The actual size-fit
+# check (`tls_session_get_max_early_data >= len`) happens inside
+# finalize against the cached session.
+fn _sandhi_conn_open_fully_timed_with_early_data_a(a, addr, port, use_tls,
+sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len) {
+    _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
+
+    var sfd_r = tcp_socket();
+    if (is_err_result(sfd_r) == 1) {
+        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        return 0;
+    }
+    var fd = payload(sfd_r);
+
+    if (connect_ms > 0) {
+        var nbr = _sandhi_conn_connect_nb_a(a, fd, addr, port, connect_ms);
+        if (nbr == _SANDHI_CONN_NB_TIMEOUT) {
+            sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TIMEOUT;
+            return 0;
+        }
+        if (nbr != _SANDHI_CONN_NB_OK) {
+            sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+            return 0;
+        }
+    } else {
+        var cr = sock_connect(fd, addr, port);
+        if (is_err_result(cr) == 1) {
+            sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+            return 0;
+        }
+    }
+
+    return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
+    read_ms, write_ms, early_data, early_data_len);
 }
 
 # Send `len` bytes through the connection. Returns bytes sent, 0 on

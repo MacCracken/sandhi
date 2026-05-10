@@ -262,6 +262,19 @@ connect_ms, read_ms, write_ms, total_ms, pool) {
     max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
 }
 
+# 1.3.2 — request-method safety check for TLS 1.3 0-RTT. Per
+# RFC 8446 §8, only requests that are safe to replay should be sent
+# as 0-RTT (replay-attack mitigation). Safe methods per RFC 7231:
+# GET, HEAD, OPTIONS, TRACE — sandhi exposes the first three. PUT
+# is idempotent but not safe (changes server state), so it stays
+# out per OpenSSL's recommended posture.
+fn _sandhi_method_is_replay_safe(method) {
+    if (streq(method, "GET") == 1) { return 1; }
+    if (streq(method, "HEAD") == 1) { return 1; }
+    if (streq(method, "OPTIONS") == 1) { return 1; }
+    return 0;
+}
+
 # Compute the effective connect_ms given a monotonic deadline.
 # Returns connect_ms unchanged when deadline is disabled; otherwise
 # clamps to `deadline - now`. Returns 0 if the deadline has already
@@ -325,15 +338,57 @@ connect_ms, read_ms, write_ms, total_ms, pool) {
         conn = _sandhi_pool_take(pool, host, port, use_tls);
     }
 
+    # 1.3.2 — request build moved BEFORE conn-open so the bytes are
+    # available to pass as early-data when 0-RTT eligible. For the
+    # non-0-RTT path this is byte-identical to the pre-1.3.2 ordering
+    # (the request bytes don't depend on the connection's properties,
+    # only on the URL + headers + body + keep_alive).
+    var full_path = _sandhi_client_full_path_a(a, u);
+    var host_hdr = _sandhi_client_host_header_a(a, u);
+    var req = _sandhi_client_build_request_va(a, method, full_path, host_hdr,
+    user_headers, body_len, keep_alive);
+    sandhi_prof_capture(SANDHI_PROF_PHASE_REQ_BUILD_END);
+
     if (conn == 0) {
         var eff_connect = _sandhi_http_clamp_ms(connect_ms, deadline_ms);
         if (eff_connect == 0 - 1) { return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT); }
+        # 1.3.2 — 0-RTT eligibility: opt-in flag set + TLS + method
+        # is replay-safe + libssl exposes the full 0-RTT surface +
+        # session-cache enabled (no session means no resumption).
+        # The session-presence check itself happens inside
+        # `_sandhi_conn_finalize_with_early_data_a` (per-cache-key
+        # lookup); we just need the early_data bytes to be non-zero
+        # for finalize to consider 0-RTT.
+        var use_0rtt = 0;
+        if (_sandhi_allow_0rtt == 1
+        && use_tls == 1
+        && _sandhi_method_is_replay_safe(method) == 1
+        && tls_supports_early_data() == 1
+        && sandhi_session_cache_enabled() == 1) {
+            use_0rtt = 1;
+        }
+        var ed_ptr = 0;
+        var ed_len = 0;
+        if (use_0rtt == 1) {
+            ed_ptr = str_data(req);
+            ed_len = strlen(ed_ptr);
+        }
         if (addr6 != 0) {
-            conn = _sandhi_conn_open_v6_fully_timed_a(a, addr6, port, use_tls, host,
-            eff_connect, read_ms, write_ms);
+            if (use_0rtt == 1) {
+                conn = _sandhi_conn_open_v6_fully_timed_with_early_data_a(a, addr6,
+                port, use_tls, host, eff_connect, read_ms, write_ms, ed_ptr, ed_len);
+            } else {
+                conn = _sandhi_conn_open_v6_fully_timed_a(a, addr6, port, use_tls, host,
+                eff_connect, read_ms, write_ms);
+            }
         } else {
-            conn = sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, host,
-            eff_connect, read_ms, write_ms);
+            if (use_0rtt == 1) {
+                conn = _sandhi_conn_open_fully_timed_with_early_data_a(a, addr,
+                port, use_tls, host, eff_connect, read_ms, write_ms, ed_ptr, ed_len);
+            } else {
+                conn = sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, host,
+                eff_connect, read_ms, write_ms);
+            }
         }
         if (conn == 0) {
             sandhi_prof_capture(SANDHI_PROF_PHASE_CONN_OPEN_END);
@@ -344,12 +399,6 @@ connect_ms, read_ms, write_ms, total_ms, pool) {
         }
     }
     sandhi_prof_capture(SANDHI_PROF_PHASE_CONN_OPEN_END);
-
-    var full_path = _sandhi_client_full_path_a(a, u);
-    var host_hdr = _sandhi_client_host_header_a(a, u);
-    var req = _sandhi_client_build_request_va(a, method, full_path, host_hdr,
-    user_headers, body_len, keep_alive);
-    sandhi_prof_capture(SANDHI_PROF_PHASE_REQ_BUILD_END);
 
     var resp = 0;
     if (keep_alive == 1) {
@@ -381,14 +430,29 @@ fn _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms)
     }
     var req_data = str_data(req);
     var req_len = strlen(req_data);
-    var sw = sandhi_conn_send_all(conn, req_data, req_len);
-    if (sw == 0 - _SANDHI_EAGAIN) {
-        sandhi_conn_close(conn);
-        return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT);
-    }
-    if (sw < 0) {
-        sandhi_conn_close(conn);
-        return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT);
+    # 1.3.2 — TLS 1.3 0-RTT branch. When `conn` was opened with the
+    # request bytes also written as early data (eligibility gated to
+    # session-resumed TLS + replay-safe methods at conn-open time),
+    # the 0-RTT status decides whether to re-send the request on the
+    # normal stream:
+    #   ACCEPTED (2)  — server processed the early data; skip resend.
+    #   REJECTED (1)  — server discarded the early data; must resend.
+    #   NOT_SENT (0)  — no early data was attempted; normal path.
+    # NOT_SENT also covers every plaintext / non-resumed TLS exchange,
+    # so the default path stays identical to pre-1.3.2 behavior.
+    var ed_status = sandhi_conn_0rtt_status(conn);
+    var skip_req_send = 0;
+    if (ed_status == TLS_EARLY_DATA_ACCEPTED) { skip_req_send = 1; }
+    if (skip_req_send == 0) {
+        var sw = sandhi_conn_send_all(conn, req_data, req_len);
+        if (sw == 0 - _SANDHI_EAGAIN) {
+            sandhi_conn_close(conn);
+            return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT);
+        }
+        if (sw < 0) {
+            sandhi_conn_close(conn);
+            return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT);
+        }
     }
     if (body_len > 0 && body != 0) {
         var sb = sandhi_conn_send_all(conn, body, body_len);
@@ -439,14 +503,21 @@ deadline_ms, pool, host, port, use_tls) {
     }
     var req_data = str_data(req);
     var req_len = strlen(req_data);
-    var sw = sandhi_conn_send_all(conn, req_data, req_len);
-    if (sw == 0 - _SANDHI_EAGAIN) {
-        sandhi_conn_close(conn);
-        return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT);
-    }
-    if (sw < 0) {
-        sandhi_conn_close(conn);
-        return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT);
+    # 1.3.2 — same 0-RTT skip-resend gate as the non-keepalive exchange.
+    # See `_sandhi_http_exchange_a` for the status-value rationale.
+    var ed_status = sandhi_conn_0rtt_status(conn);
+    var skip_req_send = 0;
+    if (ed_status == TLS_EARLY_DATA_ACCEPTED) { skip_req_send = 1; }
+    if (skip_req_send == 0) {
+        var sw = sandhi_conn_send_all(conn, req_data, req_len);
+        if (sw == 0 - _SANDHI_EAGAIN) {
+            sandhi_conn_close(conn);
+            return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT);
+        }
+        if (sw < 0) {
+            sandhi_conn_close(conn);
+            return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT);
+        }
     }
     if (body_len > 0 && body != 0) {
         var sb = sandhi_conn_send_all(conn, body, body_len);
@@ -548,17 +619,18 @@ deadline_ms, pool, host, port, use_tls) {
 #                            server-Connection-close. Added 0.8.0
 #                            (Bite 1).
 enum SandhiHttpOptOff {
-    SANDHI_HTTP_OPT_OFF_FOLLOW     = 0;
-    SANDHI_HTTP_OPT_OFF_MAX_HOPS   = 8;
-    SANDHI_HTTP_OPT_OFF_MAX_BYTES  = 16;
-    SANDHI_HTTP_OPT_OFF_READ_MS    = 24;
-    SANDHI_HTTP_OPT_OFF_WRITE_MS   = 32;
-    SANDHI_HTTP_OPT_OFF_CONNECT_MS = 40;
-    SANDHI_HTTP_OPT_OFF_TOTAL_MS   = 48;
-    SANDHI_HTTP_OPT_OFF_POOL       = 56;
+    SANDHI_HTTP_OPT_OFF_FOLLOW       = 0;
+    SANDHI_HTTP_OPT_OFF_MAX_HOPS     = 8;
+    SANDHI_HTTP_OPT_OFF_MAX_BYTES    = 16;
+    SANDHI_HTTP_OPT_OFF_READ_MS      = 24;
+    SANDHI_HTTP_OPT_OFF_WRITE_MS     = 32;
+    SANDHI_HTTP_OPT_OFF_CONNECT_MS   = 40;
+    SANDHI_HTTP_OPT_OFF_TOTAL_MS     = 48;
+    SANDHI_HTTP_OPT_OFF_POOL         = 56;
+    SANDHI_HTTP_OPT_OFF_ALLOW_0RTT   = 64;   # 1.3.2 — opt-in TLS 1.3 0-RTT
 }
 
-var SANDHI_HTTP_OPT_STRUCT_SIZE = 64;
+var SANDHI_HTTP_OPT_STRUCT_SIZE = 72;
 var SANDHI_HTTP_DEFAULT_MAX_HOPS = 5;
 var SANDHI_HTTP_DEFAULT_MAX_BYTES = 262144;
 
@@ -573,6 +645,7 @@ fn sandhi_http_options_new_a(a) {
     store64(o + SANDHI_HTTP_OPT_OFF_CONNECT_MS, 0);
     store64(o + SANDHI_HTTP_OPT_OFF_TOTAL_MS, 0);
     store64(o + SANDHI_HTTP_OPT_OFF_POOL, 0);
+    store64(o + SANDHI_HTTP_OPT_OFF_ALLOW_0RTT, 0);
     return o;
 }
 
@@ -618,6 +691,25 @@ fn sandhi_http_options_total_ms(opts, ms) {
 fn sandhi_http_options_pool(opts, pool) {
     store64(opts + SANDHI_HTTP_OPT_OFF_POOL, pool);
     return 0;
+}
+
+# 1.3.2: opt-in TLS 1.3 0-RTT (early data). Default 0 = off.
+# Replay-attack surface means this MUST stay default-off; consumers
+# opt in per-request when they're sending replay-safe payloads
+# (GET / HEAD / OPTIONS). Sandhi enforces method-safety internally
+# even when this flag is set — POST / PUT / PATCH / DELETE silently
+# skip 0-RTT regardless. Also gated on
+# `tls_supports_early_data()` (libssl capability) + session-cache
+# hit + cached session advertising 0-RTT support
+# (`tls_session_get_max_early_data >= req_len`).
+fn sandhi_http_options_allow_0rtt(opts, on) {
+    store64(opts + SANDHI_HTTP_OPT_OFF_ALLOW_0RTT, on);
+    return 0;
+}
+
+fn sandhi_http_options_get_allow_0rtt(opts) {
+    if (opts == 0) { return 0; }
+    return load64(opts + SANDHI_HTTP_OPT_OFF_ALLOW_0RTT);
 }
 
 fn sandhi_http_options_follow(opts) {
@@ -861,13 +953,24 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts) {
     var connect_ms = sandhi_http_options_get_connect_ms(opts);
     var total_ms = sandhi_http_options_get_total_ms(opts);
     var pool = sandhi_http_options_get_pool(opts);
+    # 1.3.2 — set the 0-RTT opt-in flag (module-level, matches the
+    # `_sandhi_alpn_advertise_h2` pattern). do_impl_a reads it in
+    # the eligibility check. Save + restore around the call so
+    # outer-scope state isn't perturbed (relevant when this is
+    # invoked recursively via redirect-follow).
+    var prior_0rtt = _sandhi_allow_0rtt;
+    _sandhi_allow_0rtt = sandhi_http_options_get_allow_0rtt(opts);
+    var r = 0;
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
-        return _sandhi_http_follow_a(a, method, url, headers, body, body_len, hops,
+        r = _sandhi_http_follow_a(a, method, url, headers, body, body_len, hops,
+        max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+    } else {
+        r = _sandhi_http_do_a(a, method, url, headers, body, body_len,
         max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
     }
-    return _sandhi_http_do_a(a, method, url, headers, body, body_len,
-    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+    _sandhi_allow_0rtt = prior_0rtt;
+    return r;
 }
 
 fn _sandhi_http_dispatch(method, url, headers, body, body_len, opts) {

@@ -30,7 +30,7 @@ zero ambiguity on what to put on its roadmap.
 
 | Doc | Filed | Status | Summary |
 |-----|-------|--------|---------|
-| [`2026-05-10-stdlib-tls-early-data-status.md`](2026-05-10-stdlib-tls-early-data-status.md) | sandhi 1.3.2 entry | Open | Cyrius v5.10.31 ships `tls_write_early_data` / `tls_read_early_data` / `tls_supports_early_data` but not `SSL_get_early_data_status` (post-handshake acceptance check) or `SSL_SESSION_get_max_early_data` (pre-attempt eligibility). Without those, client-side 0-RTT can't safely detect rejection or right-size the early-data write. Sandhi 1.3.2 holds until cyrius adds them. Same shape as 2026-05-09's staged-connect filing — primitives shipped, safety surface gap remains.
+| _(none currently open)_ | — | — | All upstream blockers cleared as of 2026-05-10. See archive below for resolved filings. |
 
 ## Archived (resolved)
 
@@ -41,6 +41,7 @@ zero ambiguity on what to put on its roadmap.
 | [`archive/2026-04-24-stdlib-tls-alpn-hook.md`](archive/2026-04-24-stdlib-tls-alpn-hook.md) | cyrius v5.6.40 | Stdlib `tls_connect` built its SSL_CTX privately so sandhi had no slot to call `SSL_CTX_set_alpn_protos`. Closed by `tls_connect_with_ctx_hook(sock, host, hook_fp, hook_ctx)` + `tls_dlsym(name)` — Option A from the filing, smallest stdlib delta. End-to-end verified: advertise `h2,http/1.1` to Cloudflare → server picks `h2` via `SSL_get0_alpn_selected`. |
 | [`archive/2026-04-25-cyrius-7arg-frame-tls-connect-segfault.md`](archive/2026-04-25-cyrius-7arg-frame-tls-connect-segfault.md) | cyrius v5.6.41 | Surfaced once libssl-pthread cleared. `tls_connect` SIGSEGV'd at its first instruction when invoked from a Cyrius function whose 7th param sat on the stack (SysV-ABI register/stack-arg boundary). `sandhi_conn_open_fully_timed` is exactly that shape. Closed by upstream calling-convention fix; `sandhi_http_get("https://example.com/")` returns 200 / 528 bytes since the pin reached 5.6.41. |
 | [`archive/2026-05-09-stdlib-tls-staged-connect.md`](archive/2026-05-09-stdlib-tls-staged-connect.md) | cyrius v5.10.27 | Cyrius v5.10.21 shipped session/0-RTT primitives but `tls_connect_with_ctx_hook` ran `SSL_new`+`SSL_connect` in one shot — no timing window for `tls_set_session(ssl, ...)`. v5.10.27 split the connect flow (Option A from the filing): `tls_connect_alloc` + `tls_connect_complete`. Sandhi 1.3.1 wires the staged-connect into `_sandhi_conn_finalize_a` + adds `src/tls_policy/session_cache.cyr` for the SSL_SESSION* cache. |
+| [`archive/2026-05-10-stdlib-tls-early-data-status.md`](archive/2026-05-10-stdlib-tls-early-data-status.md) | cyrius v5.10.34 | Cyrius v5.10.21 shipped `tls_write_early_data` / `tls_read_early_data` / `tls_supports_early_data` but not the post-handshake `SSL_get_early_data_status` accessor or the pre-attempt `SSL_SESSION_get_max_early_data` budget probe. Without those, client-side 0-RTT can't detect rejection or right-size the early-data write. v5.10.34 added typed wrappers `tls_get_early_data_status(ctx)` + `tls_session_get_max_early_data(session)` with safe defaults (NOT_SENT / 0) when libssl lacks the underlying symbols. Sandhi 1.3.2 composes both into the opt-in 0-RTT path. |
 
 ## How to use this directory
 

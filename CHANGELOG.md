@@ -4,6 +4,131 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.2] — 2026-05-10
+
+**TLS 1.3 0-RTT (early data), opt-in.** Composes the cyrius
+v5.10.21 0-RTT primitives + v5.10.27 staged-connect + v5.10.34
+status accessors into safe client-side 0-RTT with
+rejection-detection retry. Default OFF — caller opts in per
+request, and sandhi gates internally on replay-safe method +
+libssl capability + session-cache hit + cached-session
+`max_early_data` budget. Closes the 1.3.1 follow-up the
+0-RTT-status filing was blocking on.
+
+### Toolchain
+
+- **cyrius pin** bumped 5.10.31 → 5.10.34. v5.10.34 closed
+  the 0-RTT-status gap filed in
+  `docs/issues/archive/2026-05-10-stdlib-tls-early-data-status.md`:
+  added `tls_get_early_data_status(ctx)` and
+  `tls_session_get_max_early_data(session)`, both with safe
+  defaults (NOT_SENT / 0) when libssl lacks the underlying
+  `SSL_get_early_data_status` / `SSL_SESSION_get_max_early_data`
+  symbols. Without these accessors, sandhi can't tell whether
+  the server processed early data — and silent failure to
+  detect rejection would resend nothing on a stream where the
+  request was discarded.
+
+### Added
+
+- **Public surface** — 2 verbs + 1 status accessor:
+  - `sandhi_http_options_allow_0rtt(opts, on)` — per-request
+    opt-in. Default 0 (off).
+  - `sandhi_http_options_get_allow_0rtt(opts)` — query.
+    Null-opts guard returns 0 (matches the rest of the
+    getter family).
+  - `sandhi_conn_0rtt_status(conn)` — exposes the
+    `TLS_EARLY_DATA_*` value latched at handshake completion.
+    `0` = NOT_SENT, `1` = REJECTED, `2` = ACCEPTED.
+- **`src/http/client.cyr:_sandhi_method_is_replay_safe(method)`**
+  — RFC-8446-§8 replay safety classifier. GET / HEAD /
+  OPTIONS only; everything else silently refuses 0-RTT even
+  when the caller opts in. Case-sensitive (per RFC 7230 §3.1.1).
+
+### Changed
+
+- **`src/http/conn.cyr`** — staged-connect finalize gained
+  early-data parameters:
+  - `_sandhi_conn_finalize_a` becomes a back-compat wrapper
+    forwarding `early_data = 0, early_data_len = 0` to the
+    new `_sandhi_conn_finalize_with_early_data_a`. Pre-1.3.2
+    callers (h2 ALPN promotion, plain-TLS path without 0-RTT)
+    see no behavior change.
+  - After `tls_set_session(ctx, cached)`, the new finalize
+    checks `tls_session_get_max_early_data(cached) >= early_data_len`
+    and calls `tls_write_early_data(ctx, ed, ed_len)` when
+    the cached session advertises the budget. Otherwise
+    early-data is silently dropped and the request goes
+    through the normal stream — same shape as a NOT_SENT
+    outcome.
+  - After `tls_connect_complete`, the finalize captures
+    `tls_get_early_data_status(ctx)` into the new conn-struct
+    slot `SANDHI_CONN_OFF_0RTT_STATUS`. Conn struct grew
+    from 32 to 40 bytes (one extra `i64` slot).
+- **`src/http/client.cyr:_sandhi_http_do_impl_a`** — request
+  bytes now built BEFORE conn-open so the request can be
+  passed in as `early_data`. The request build only depends
+  on URL / headers / body / keep-alive, none of which change
+  across conn-open paths, so this is a pure refactor for
+  every non-0-RTT exchange.
+- **`src/http/client.cyr:_sandhi_http_exchange_a`** and
+  **`_sandhi_http_exchange_keepalive_a`** — both gained a
+  status check at entry:
+  - ACCEPTED (2): skip the request send (already sent as
+    early data; server processed it), go straight to recv.
+  - REJECTED (1): send the request normally via `tls_write`
+    — handshake is complete, the early data the server
+    discarded never reached the request handler, so this is
+    a clean retry on the established stream.
+  - NOT_SENT (0): existing path (covers all plaintext, all
+    non-resumed TLS, and the disabled-0-RTT majority).
+- **`src/http/client.cyr:_sandhi_http_dispatch_a`** and
+  **`src/http/h2/dispatch.cyr:sandhi_http_request_auto_a`** —
+  read `sandhi_http_options_get_allow_0rtt(opts)` and set
+  the module-level `_sandhi_allow_0rtt` flag for the
+  duration of the dispatch. Mirrors the existing
+  `_sandhi_alpn_advertise_h2` pattern (set transiently,
+  restored after) — keeps the per-call state out of every
+  fn signature in the call tree. h2 auto-path doesn't
+  enable 0-RTT for h2 today; the CONNECTION preface vs.
+  early-data ordering still needs a milestone of its own.
+- **cyrius.cyml** — pin bumped 5.10.31 → 5.10.34.
+
+### Notes
+
+- **Default-off is load-bearing.** Replay attacks on 0-RTT
+  are real (RFC 8446 §8 spells out the threat model). Even
+  with the method-safety filter, idempotent-on-the-wire ≠
+  idempotent-in-effect (a GET that increments a counter is
+  GET-shaped but not safe to replay). Default-off + per-request
+  opt-in keeps the choice with the caller.
+- **Three filters must all pass.** Caller opts in (`allow_0rtt = 1`)
+  AND method is replay-safe (GET/HEAD/OPTIONS) AND
+  `tls_supports_early_data()` returns 1 AND the session cache
+  is enabled AND there's a cached session for this route AND
+  the cached session's `max_early_data >= req_len`. Any
+  failure silently falls back to the normal stream — no
+  surprises, no error surfacing for a perf feature.
+- **Carry-over scope-outs** still tracked for 1.3.3 / 1.3.4
+  (cred-strip-aware cache keying / TTL + max-size eviction)
+  per the roadmap.
+
+### Tests
+
+- **`tests/alloc.tcyr alloc/132/`** — 4 new groups:
+  - `options_allow_0rtt_roundtrip` — setter/getter, default,
+    null-opts guard.
+  - `method_is_replay_safe` — full GET/HEAD/OPTIONS/POST/PUT/
+    PATCH/DELETE coverage + case-sensitivity check.
+  - `allow_0rtt_flag_default` — module-level flag defaults
+    to 0.
+  - `conn_0rtt_status_accessor` — accessor reads the
+    correct offset for all three status values.
+  - Total: 257 → 275 passing (18 new assertions).
+- **`tests/sandhi.tcyr`** — 440 passing, unchanged (the
+  0-RTT path adds no new public verbs to the main surface
+  beyond the opts setter/getter exercised in alloc.tcyr).
+
 ## [1.3.1] — 2026-05-10
 
 **TLS 1.3 / 1.2 client-side session-resumption cache.** First

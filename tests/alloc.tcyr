@@ -1518,6 +1518,84 @@ fn test_alloc_131_session_cache_store_lookup_roundtrip() {
     return 0;
 }
 
+# ----------------------------------------------------------------
+# 1.3.2 — TLS 1.3 0-RTT (early data), opt-in. Builds on 1.3.1
+# session resumption; eligibility is gated to session-resumed TLS
+# + replay-safe methods (GET/HEAD/OPTIONS) + libssl capability.
+# ----------------------------------------------------------------
+
+# Options surface — default off, setter/getter round-trip.
+fn test_alloc_132_options_allow_0rtt_roundtrip() {
+    var opts = sandhi_http_options_new();
+    assert_neq(opts, 0, "options allocated");
+    assert_eq(sandhi_http_options_get_allow_0rtt(opts), 0,
+    "0-RTT defaults off");
+    sandhi_http_options_allow_0rtt(opts, 1);
+    assert_eq(sandhi_http_options_get_allow_0rtt(opts), 1,
+    "set 1 round-trips");
+    sandhi_http_options_allow_0rtt(opts, 0);
+    assert_eq(sandhi_http_options_get_allow_0rtt(opts), 0,
+    "reset to 0 round-trips");
+    # opts == 0 guard: getter must return 0 for the null-opts path
+    # because dispatch chains it through `_sandhi_http_dispatch_a`.
+    assert_eq(sandhi_http_options_get_allow_0rtt(0), 0,
+    "null opts → 0");
+    return 0;
+}
+
+# Replay-safety classifier — exactly the RFC-7231-safe subset
+# sandhi exposes (GET/HEAD/OPTIONS). Anything else MUST refuse
+# 0-RTT even when the user opts in, since RFC 8446 §8 makes the
+# replay risk explicit.
+fn test_alloc_132_method_is_replay_safe() {
+    assert_eq(_sandhi_method_is_replay_safe("GET"), 1, "GET safe");
+    assert_eq(_sandhi_method_is_replay_safe("HEAD"), 1, "HEAD safe");
+    assert_eq(_sandhi_method_is_replay_safe("OPTIONS"), 1, "OPTIONS safe");
+    assert_eq(_sandhi_method_is_replay_safe("POST"), 0, "POST unsafe");
+    assert_eq(_sandhi_method_is_replay_safe("PUT"), 0, "PUT unsafe");
+    assert_eq(_sandhi_method_is_replay_safe("PATCH"), 0, "PATCH unsafe");
+    assert_eq(_sandhi_method_is_replay_safe("DELETE"), 0, "DELETE unsafe");
+    # Case-sensitive — HTTP methods are case-sensitive per RFC 7230 §3.1.1.
+    assert_eq(_sandhi_method_is_replay_safe("get"), 0,
+    "lowercase get unsafe (method names are case-sensitive)");
+    return 0;
+}
+
+# Dispatch-flag plumbing — `_sandhi_http_dispatch_a` and
+# `sandhi_http_request_auto_a` both save+restore the module-level
+# `_sandhi_allow_0rtt` flag from `sandhi_http_options_get_allow_0rtt(opts)`.
+# Verify the flag is the actual storage location and starts at 0.
+fn test_alloc_132_allow_0rtt_flag_default() {
+    # Flag is module-level, defined in src/http/conn.cyr next to
+    # `_sandhi_alpn_advertise_h2`. Mirrors that pattern exactly —
+    # default 0, set transiently around dispatch, restored after.
+    assert_eq(_sandhi_allow_0rtt, 0,
+    "module-level 0-RTT flag defaults to 0");
+    return 0;
+}
+
+# Conn-struct accessor — the new 0-RTT status slot is at
+# `SANDHI_CONN_OFF_0RTT_STATUS`. Verify the accessor reads from
+# the right offset and that NOT_SENT is the default the finalize
+# path stamps in for plaintext / non-resumed TLS exchanges.
+# Stand up a fake conn (raw alloc + zero-init) so the assertion
+# doesn't depend on a real socket / TLS handshake.
+fn test_alloc_132_conn_0rtt_status_accessor() {
+    var fake = alloc_via(default_alloc(), SANDHI_CONN_STRUCT_SIZE);
+    assert_neq(fake, 0, "fake conn allocated");
+    # Zero-init the slot — `alloc_via` does not guarantee zeroing.
+    store64(fake + SANDHI_CONN_OFF_0RTT_STATUS, TLS_EARLY_DATA_NOT_SENT);
+    assert_eq(sandhi_conn_0rtt_status(fake), TLS_EARLY_DATA_NOT_SENT,
+    "accessor reads NOT_SENT");
+    store64(fake + SANDHI_CONN_OFF_0RTT_STATUS, TLS_EARLY_DATA_REJECTED);
+    assert_eq(sandhi_conn_0rtt_status(fake), TLS_EARLY_DATA_REJECTED,
+    "accessor reads REJECTED");
+    store64(fake + SANDHI_CONN_OFF_0RTT_STATUS, TLS_EARLY_DATA_ACCEPTED);
+    assert_eq(sandhi_conn_0rtt_status(fake), TLS_EARLY_DATA_ACCEPTED,
+    "accessor reads ACCEPTED");
+    return 0;
+}
+
 # Disabled-path: store + lookup are no-ops. Critical because
 # `_sandhi_conn_finalize_a` calls these on every TLS connect.
 fn test_alloc_131_session_cache_disabled_noops() {
@@ -1773,6 +1851,18 @@ fn main() {
 
     test_group("alloc/131/session_cache_disabled_noops");
     test_alloc_131_session_cache_disabled_noops();
+
+    test_group("alloc/132/options_allow_0rtt_roundtrip");
+    test_alloc_132_options_allow_0rtt_roundtrip();
+
+    test_group("alloc/132/method_is_replay_safe");
+    test_alloc_132_method_is_replay_safe();
+
+    test_group("alloc/132/allow_0rtt_flag_default");
+    test_alloc_132_allow_0rtt_flag_default();
+
+    test_group("alloc/132/conn_0rtt_status_accessor");
+    test_alloc_132_conn_0rtt_status_accessor();
 
     return assert_summary();
 }
