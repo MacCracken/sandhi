@@ -504,11 +504,36 @@ fn _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms) {
             }
             hook_fp = &_sandhi_alpn_hook;
         }
-        tls_ctx = tls_connect_with_ctx_hook(fd, sni_host, hook_fp, hook_ctx);
+        # 1.3.1 staged-connect with session-resumption hook.
+        # When `sandhi_session_cache_enable(1)` is set AND the
+        # cache has a session for (sni_host, hook_fp), we install
+        # it pre-`SSL_connect` via `tls_set_session` to attempt
+        # resumption. Post-handshake we capture a fresh session
+        # via `tls_get_session` for the next request.
+        # When the cache is disabled, lookup returns 0 and store
+        # is a no-op — the path collapses to one-shot connect
+        # with one extra global-load per call.
+        tls_ctx = tls_connect_alloc(fd, sni_host, hook_fp, hook_ctx);
         if (tls_ctx == 0) {
             sock_close(fd);
             _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
             return 0;
+        }
+        var cached_sess = sandhi_session_cache_lookup(sni_host, hook_fp);
+        if (cached_sess != 0) {
+            tls_set_session(tls_ctx, cached_sess);
+        }
+        if (tls_connect_complete(tls_ctx) != 1) {
+            tls_close(tls_ctx);
+            sock_close(fd);
+            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+            return 0;
+        }
+        # Capture session for next time. tls_get_session bumps the
+        # refcount; the cache takes ownership of that ref.
+        var fresh_sess = tls_get_session(tls_ctx);
+        if (fresh_sess != 0) {
+            sandhi_session_cache_store(sni_host, hook_fp, fresh_sess);
         }
         alpn_data = _sandhi_alpn_read_selected_a(a, tls_ctx);
         kind = SANDHI_CONN_TLS;

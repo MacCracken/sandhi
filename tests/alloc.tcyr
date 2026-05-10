@@ -12,6 +12,7 @@ include "src/obs/trace.cyr"
 include "src/obs/prof.cyr"
 include "src/http/headers.cyr"
 include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
 include "src/http/conn.cyr"
 include "src/http/response.cyr"
 include "src/net/resolve.cyr"
@@ -1441,6 +1442,103 @@ fn test_alloc_128_resolve_location_oom() {
 }
 
 # ================================================================
+# 1.3.1 — TLS session-resumption cache
+# ================================================================
+# Process-wide singleton cache for SSL_SESSION* keyed by
+# (sni_host, hook_fp). Default-OFF; opt-in via
+# `sandhi_session_cache_enable(1)`. Lookup/store wired into
+# `_sandhi_conn_finalize_a`'s staged-connect path.
+#
+# These tests exercise the cache surface directly. End-to-end
+# session-resumption verification (back-to-back TLS connects
+# with handshake-time savings) lives in the live-network gate
+# program, not the unit suite.
+
+fn test_alloc_131_session_cache_default_off() {
+    var was_enabled = sandhi_session_cache_enabled();
+    sandhi_session_cache_enable(0);
+    assert_eq(sandhi_session_cache_enabled(), 0, "default disabled");
+    var sess = sandhi_session_cache_lookup("example.com", 0);
+    assert_eq(sess, 0, "disabled lookup returns 0");
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
+fn test_alloc_131_session_cache_enable_capability_gated() {
+    var was_enabled = sandhi_session_cache_enabled();
+    var rc = sandhi_session_cache_enable(1);
+    if (rc == 1) {
+        assert_eq(sandhi_session_cache_enabled(), 1, "enabled when capable");
+    } else {
+        assert_eq(sandhi_session_cache_enabled(), 0,
+        "stays off when libssl can't resume");
+    }
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
+fn test_alloc_131_session_cache_store_lookup_roundtrip() {
+    var was_enabled = sandhi_session_cache_enabled();
+    var rc = sandhi_session_cache_enable(1);
+    if (rc != 1) {
+        # libssl can't resume — skip round-trip; disabled-path
+        # already covered above.
+        sandhi_session_cache_enable(was_enabled);
+        return 0;
+    }
+
+    var sz_before = sandhi_session_cache_size();
+    sandhi_session_cache_reset_stats();
+
+    # Non-zero fake session pointer (never dereferenced). Real
+    # SSL_SESSION* comes from tls_get_session; here we just verify
+    # the hashmap round-trip.
+    var fake_sess = 0xDEADBEEF;
+    sandhi_session_cache_store("test1.example.com", 0, fake_sess);
+
+    var got = sandhi_session_cache_lookup("test1.example.com", 0);
+    assert_eq(got, fake_sess, "lookup returns stored session");
+    assert_eq(sandhi_session_cache_hit_count(), 1, "1 hit recorded");
+
+    var miss = sandhi_session_cache_lookup("missing.example.com", 0);
+    assert_eq(miss, 0, "miss returns 0");
+    assert_eq(sandhi_session_cache_miss_count(), 1, "1 miss recorded");
+
+    assert_eq(sandhi_session_cache_size(), sz_before + 1, "size grew by 1");
+
+    # Different hook_fp → different slot.
+    var fake_sess2 = 0xCAFEBABE;
+    sandhi_session_cache_store("test1.example.com", 0xABCDEF, fake_sess2);
+    assert_eq(sandhi_session_cache_lookup("test1.example.com", 0xABCDEF),
+    fake_sess2, "hook_fp distinguishes slots");
+    assert_eq(sandhi_session_cache_lookup("test1.example.com", 0),
+    fake_sess, "original slot unaffected");
+
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
+# Disabled-path: store + lookup are no-ops. Critical because
+# `_sandhi_conn_finalize_a` calls these on every TLS connect.
+fn test_alloc_131_session_cache_disabled_noops() {
+    var was_enabled = sandhi_session_cache_enabled();
+    sandhi_session_cache_enable(0);
+    var sz_before = sandhi_session_cache_size();
+    sandhi_session_cache_reset_stats();
+
+    sandhi_session_cache_store("noop.example.com", 0, 0xFEEDFACE);
+    assert_eq(sandhi_session_cache_size(), sz_before,
+    "store no-op when disabled");
+    var sess = sandhi_session_cache_lookup("noop.example.com", 0);
+    assert_eq(sess, 0, "lookup no-op when disabled");
+    assert_eq(sandhi_session_cache_hit_count(), 0, "no hit-count delta");
+    assert_eq(sandhi_session_cache_miss_count(), 0, "no miss-count delta");
+
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
+# ================================================================
 # Runner
 # ================================================================
 
@@ -1663,6 +1761,18 @@ fn main() {
 
     test_group("alloc/128/resolve_location_oom");
     test_alloc_128_resolve_location_oom();
+
+    test_group("alloc/131/session_cache_default_off");
+    test_alloc_131_session_cache_default_off();
+
+    test_group("alloc/131/session_cache_enable_capability_gated");
+    test_alloc_131_session_cache_enable_capability_gated();
+
+    test_group("alloc/131/session_cache_store_lookup_roundtrip");
+    test_alloc_131_session_cache_store_lookup_roundtrip();
+
+    test_group("alloc/131/session_cache_disabled_noops");
+    test_alloc_131_session_cache_disabled_noops();
 
     return assert_summary();
 }

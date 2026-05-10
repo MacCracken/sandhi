@@ -60,7 +60,8 @@ details, state.md the current snapshot.
 - **1.2.6** — OOM-guard audit on 1.2.0–1.2.4 `_a` additions. Found two systemic SIGSEGV-on-OOM patterns: rbuf alloc in `_sandhi_http_exchange_a`/`_keepalive_a` (2 sites), and `sandhi_json_obj_new_a` chains in RPC dialect verbs (~12 sites across webdriver/appium/mcp). Fixed every site with null-check + graceful err-resp return. 885 assertions green (482 + 167 + 236; without the guards 7+ of these new tests would have SIGSEGV'd).
 - **1.2.7** — Batch G server `_a` paint + OOM guards. 4 new `_a` verbs (`sandhi_server_send_status_a` / `_send_response_a` / `_send_204_a` / `_send_chunked_start_a`) closing the same SIGSEGV-on-OOM pattern 1.2.6 found in RPC dialects, this time on the server send-path. `_a` returns 0/-1 (OOM signal); bare versions back-compat wrap. 892 assertions green (482 + 167 + 243). The OOM-guard audit story is now complete for every `_a` verb shipped post-1.1.0.
 - **1.2.8** — 1.1.0-era OOM-guard audit + tests/sandhi.tcyr cap relief. Bundled. Three real findings closed (h2/response.cyr SIGSEGV; sse.cyr SIGSEGV; client.cyr partial-arena leak). Carved 17 RPC test fns from sandhi.tcyr → new tests/rpc.tcyr (cap pressure relieved). Wired tests/alloc.tcyr + tests/rpc.tcyr into CI (closed pre-1.1.0 gap). 899 assertions green (440 + 167 + 250 + 42). **1.2.x optimization arc CLOSED.**
-- **1.3.0** — opens 1.3.x TLS arc. Live-network TLS-policy gate (3 gates against 1.1.1.1:443 / one.one.one.one) with skip-cleanly cascade mirroring cyrius `_tls_live_gate`. Typed-wrapper migration: `_sandhi_alpn_hook` + `_sandhi_apply_hook` switched from `tls_dlsym + fncall3` to v5.10.13's `tls_set_alpn`. Toolchain pin 5.10.0 → 5.10.20; `regression` added to deps. CI gains "Live-network TLS-policy gate" step. 899 assertions green + 1 live gate (4 sub-cases).
+- **1.3.0** — opens 1.3.x TLS arc. Live-network TLS-policy gate (3 gates against 1.1.1.1:443 / one.one.one.one) with skip-cleanly cascade mirroring cyrius `_tls_live_gate`. Typed-wrapper migration: `_sandhi_alpn_hook` + `_sandhi_apply_hook` switched from `tls_dlsym + fncall3` to v5.10.13's `tls_set_alpn`. Toolchain pin 5.10.0 → 5.10.21; `regression` added to deps. CI gains "Live-network TLS-policy gate" step. 899 assertions green + 1 live gate (4 sub-cases).
+- **1.3.1** — TLS 1.3 / 1.2 client-side session-resumption cache. New `src/tls_policy/session_cache.cyr` (process-wide singleton, keyed by `(sni_host, hook_fp_hex)`). `_sandhi_conn_finalize_a` switched to staged-connect (`tls_connect_alloc` → `tls_set_session` if hit → `tls_connect_complete` → `tls_get_session` capture). Default-OFF; opt-in via `sandhi_session_cache_enable(1)` (capability-gated). Toolchain pin 5.10.21 → 5.10.31 (5.10.27 was the staged-connect API the issue doc filed). 906 assertions green (440 + 167 + 257 + 42).
 
 ## What's next
 
@@ -217,7 +218,7 @@ upstream cert reachable). The `pinned` and `trust_store`
 modes shipped surface tests at 0.6.0; `mtls` has been
 unverified end-to-end since the stub-fill at 0.9.3.
 
-#### 1.3.1 — Session-resumption cache in `tls_policy`
+#### ~~1.3.1 — Session-resumption cache in `tls_policy`~~ ✅ shipped 2026-05-10
 
 Sandhi-side cache holds session tickets (TLS 1.3) / session
 IDs (TLS 1.2) keyed by `(host, port, alpn)`; hands them to
@@ -227,7 +228,23 @@ the 0.9.0 cred-strip rules — no resumption across different
 authentication contexts. Cache hits documented via existing
 `sakshi.tracing` boundaries; no new public span verbs.
 
-#### 1.3.2 — TLS 1.3 0-RTT (early data) — opt-in
+**Status — primitives shipped, call-sequence blocker open**:
+Cyrius v5.10.21 shipped 12 typed wrappers covering session
+resumption + 0-RTT (`tls_get_session` / `tls_set_session` /
+`tls_session_free`, the 4 session-cache callbacks, capability
+probes). Sufficient for capture / cleanup / probe. **NOT
+sufficient for resume**: `tls_set_session` requires a
+pre-`SSL_connect` timing window, but
+`tls_connect_with_ctx_hook` runs the full
+`SSL_new → SSL_connect` flow in one shot. No slot for sandhi
+to inject the cached session.
+
+Filed [`docs/issues/2026-05-09-stdlib-tls-staged-connect.md`](../issues/2026-05-09-stdlib-tls-staged-connect.md) —
+needs either Option A (staged-connect API:
+`tls_connect_alloc` + `tls_connect_complete`) or Option B
+(post-`SSL_new` hook variant). 1.3.1 lands when cyrius does.
+
+#### 1.3.2 — TLS 1.3 0-RTT (early data) — opt-in (unblocked at cyrius v5.10.27 + sandhi 1.3.1)
 
 Only for GET / HEAD / OPTIONS where the request is replay-
 safe per RFC 8446 §8. Behind an explicit options flag
@@ -235,6 +252,12 @@ safe per RFC 8446 §8. Behind an explicit options flag
 surface means default-off is the only safe default. Pairs
 with session-resumption since 0-RTT requires a cached
 session.
+
+**Cyrius v5.10.21 surface available** (`tls_ctx_set_max_early_data`
+/ `tls_write_early_data` / `tls_read_early_data` /
+`tls_supports_early_data`), but 0-RTT requires an installed
+session pre-handshake — same blocker as 1.3.1. Lands after
+1.3.1.
 
 ### Post-arc — wait-for-trigger
 

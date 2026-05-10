@@ -28,7 +28,8 @@ zero ambiguity on what to put on its roadmap.
 
 ## Upstream dependencies (sandhi is blocked on stdlib / toolchain)
 
-None open as of cyrius v5.6.41. The three TLS-stack blockers all cleared 2026-04-25 and are listed in the archive table below. Live HTTPS through `sandhi_http_get` round-trips real bytes; ALPN advertise works through the new stdlib hook.
+None open. The 2026-05-09 staged-connect ask cleared at cyrius
+v5.10.27 (same day filed) — see archive table.
 
 ## Archived (resolved)
 
@@ -38,6 +39,7 @@ None open as of cyrius v5.6.41. The three TLS-stack blockers all cleared 2026-04
 | [`archive/2026-04-24-libssl-pthread-deadlock.md`](archive/2026-04-24-libssl-pthread-deadlock.md) | cyrius v5.6.39 | `SSL_connect` deadlocked on a futex-wait inside libssl's pthread-lock path in static cyrius binaries (no `__libc_pthread_init`). Closed when upstream completed the dynlib/locale/TLS bootstrap so libssl gets a properly pthread-initialised process. Stdlib raw probe round-trips real HTTPS bytes since the pin reached 5.6.39. |
 | [`archive/2026-04-24-stdlib-tls-alpn-hook.md`](archive/2026-04-24-stdlib-tls-alpn-hook.md) | cyrius v5.6.40 | Stdlib `tls_connect` built its SSL_CTX privately so sandhi had no slot to call `SSL_CTX_set_alpn_protos`. Closed by `tls_connect_with_ctx_hook(sock, host, hook_fp, hook_ctx)` + `tls_dlsym(name)` — Option A from the filing, smallest stdlib delta. End-to-end verified: advertise `h2,http/1.1` to Cloudflare → server picks `h2` via `SSL_get0_alpn_selected`. |
 | [`archive/2026-04-25-cyrius-7arg-frame-tls-connect-segfault.md`](archive/2026-04-25-cyrius-7arg-frame-tls-connect-segfault.md) | cyrius v5.6.41 | Surfaced once libssl-pthread cleared. `tls_connect` SIGSEGV'd at its first instruction when invoked from a Cyrius function whose 7th param sat on the stack (SysV-ABI register/stack-arg boundary). `sandhi_conn_open_fully_timed` is exactly that shape. Closed by upstream calling-convention fix; `sandhi_http_get("https://example.com/")` returns 200 / 528 bytes since the pin reached 5.6.41. |
+| [`archive/2026-05-09-stdlib-tls-staged-connect.md`](archive/2026-05-09-stdlib-tls-staged-connect.md) | cyrius v5.10.27 | Cyrius v5.10.21 shipped session/0-RTT primitives but `tls_connect_with_ctx_hook` ran `SSL_new`+`SSL_connect` in one shot — no timing window for `tls_set_session(ssl, ...)`. v5.10.27 split the connect flow (Option A from the filing): `tls_connect_alloc` + `tls_connect_complete`. Sandhi 1.3.1 wires the staged-connect into `_sandhi_conn_finalize_a` + adds `src/tls_policy/session_cache.cyr` for the SSL_SESSION* cache. |
 
 ## How to use this directory
 

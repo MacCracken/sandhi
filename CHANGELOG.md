@@ -4,6 +4,121 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-05-10
+
+**TLS 1.3 / 1.2 client-side session-resumption cache.** First
+release where sandhi composes the cyrius v5.10.21 session
+primitives + v5.10.27 staged-connect API into actual
+session reuse. Closes the 1.3.0 follow-up the staged-connect
+filing was blocking on.
+
+### Toolchain
+
+- **cyrius pin** bumped 5.10.21 → 5.10.31. v5.10.27 (2026-05-09)
+  shipped the staged-connect API (Option A from
+  `docs/issues/archive/2026-05-09-stdlib-tls-staged-connect.md`):
+  `tls_connect_alloc(sock, host, hook_fp, hook_ctx)` +
+  `tls_connect_complete(ctx)`. v5.10.31 is current cyrius head;
+  the typed-simd ABI work in v5.10.28–.31 is unrelated to
+  sandhi but ships in the resync.
+- The 5.10.27 → 5.10.31 stdlib resync brings typed return-type
+  annotations across `lib/*` (no semantic change for sandhi —
+  bare versions still work; typed annotations are forward-
+  facing).
+
+### Added
+
+- **`src/tls_policy/session_cache.cyr`** (~190 lines) — process-
+  wide singleton cache for `SSL_SESSION*` keyed by
+  `(sni_host, hook_fp_hex)`. The hook pointer in the key
+  prevents cross-policy contamination (default-ALPN hook
+  vs. policy hook = different SSL_CTX config = incompatible
+  session). Cache uses `default_alloc()` (sessions outlive
+  any per-request arena, same shape as pool's `_hsv_req_buf`
+  / HPACK static).
+- **Public surface** — 7 verbs:
+  - `sandhi_session_cache_enable(on)` — opt-in toggle.
+    Returns 1 when libssl supports session resumption,
+    0 otherwise (capability-gated; bails on first call
+    if `tls_supports_session_resumption()` is 0).
+  - `sandhi_session_cache_enabled()` — query current state.
+  - `sandhi_session_cache_lookup(sni_host, hook_fp)` —
+    returns cached session or 0; bumps hit/miss stats.
+  - `sandhi_session_cache_store(sni_host, hook_fp, session)`
+    — store; replaces prior entry (frees via
+    `tls_session_free` if any).
+  - `sandhi_session_cache_size()` — entry count.
+  - `sandhi_session_cache_hit_count()` /
+    `sandhi_session_cache_miss_count()` — observability.
+  - `sandhi_session_cache_reset_stats()` — counter reset.
+
+### Changed
+
+- **`src/http/conn.cyr:_sandhi_conn_finalize_a`** — TLS path
+  switched from one-shot `tls_connect_with_ctx_hook` to
+  staged-connect:
+  ```
+  ctx = tls_connect_alloc(fd, sni, hook_fp, hook_ctx);
+  cached = sandhi_session_cache_lookup(sni, hook_fp);
+  if (cached != 0) { tls_set_session(ctx, cached); }
+  if (tls_connect_complete(ctx) != 1) { close + return 0; }
+  fresh = tls_get_session(ctx);  # refcount-bumped
+  if (fresh != 0) { sandhi_session_cache_store(sni, hook_fp, fresh); }
+  ```
+  When the cache is disabled (default), lookup returns 0
+  and store is a no-op — adds one global-load + early-
+  return per call. **Zero overhead for callers who don't
+  opt in.**
+- **`cyrius.cyml [lib].modules`** — `src/tls_policy/session_cache.cyr`
+  inserted between `src/http/url.cyr` and `src/http/conn.cyr`
+  so single-pass compilation sees the cache fns at conn.cyr
+  parse time.
+- **25 program/test files** updated to add
+  `include "src/tls_policy/session_cache.cyr"` before
+  `include "src/http/conn.cyr"` (forward-ref under
+  single-pass compilation).
+
+### Not in scope (pinned for follow-up)
+
+- **Cred-strip integration**: cache key currently uses
+  `(host, hook_fp)` only. Auth-bearing-header digest is
+  reserved for a follow-up patch when a consumer surfaces
+  a real auth-rotation scenario.
+- **TTL / max-size eviction**: cache grows unbounded.
+  `last_used_ms` slot reserved for future eviction.
+- **0-RTT (1.3.2)**: composes the same primitives on top
+  of an installed session. Lands when capacity allows.
+
+### Verified
+
+- 4 new test groups (7 assertions) under `alloc/131/`:
+  `session_cache_default_off`,
+  `session_cache_enable_capability_gated`,
+  `session_cache_store_lookup_roundtrip`,
+  `session_cache_disabled_noops`.
+- 257/257 `tests/alloc.tcyr` (250 pre-existing + 7 new).
+- 440/440 sandhi, 167/167 h2, 42/42 rpc — no regression.
+- **Live-network gate**: `programs/_policy_runtime_probe.cyr`
+  ALL GATES PASS against 1.1.1.1:443 (default policy
+  round-trip / wrong-pin fail-closed / non-existent
+  trust-store) — confirms the staged-connect rewrite
+  preserves existing behavior.
+- **906 assertions green** total (+7 over 1.3.0's 899).
+- `cyrius lint` 0 warnings on `src/tls_policy/session_cache.cyr`,
+  `src/http/conn.cyr`. `cyrfmt --check` clean.
+
+### Pinned next
+
+- **1.3.2** — TLS 1.3 0-RTT (opt-in via
+  `sandhi_http_options_allow_0rtt`). Composes
+  `tls_ctx_set_max_early_data` / `tls_write_early_data`
+  / `tls_read_early_data` on top of an installed
+  session. Replay-safe methods only per RFC 8446 §8.
+- Possible follow-ups for 1.3.1's deliberate-deferrals:
+  cred-strip-aware cache keying (when a consumer asks),
+  TTL/max-size eviction (when prof shows the cache
+  growing without bound on a real workload).
+
 ## [1.3.0] — 2026-05-09
 
 **Opens the 1.3.x TLS arc** — live-network TLS-policy gate
@@ -13,9 +128,13 @@ responses to the same `lib/tls.cyr` cascade.
 
 ### Toolchain
 
-- **cyrius pin** bumped 5.10.0 → 5.10.20. Picks up
-  v5.10.13 typed wrappers + v5.10.20 P(-1) hardening
-  sweep; cyrius v5.9.42 testing-stdlib carve-out
+- **cyrius pin** bumped 5.10.0 → 5.10.21. Picks up
+  v5.10.13 typed wrappers (`tls_set_alpn` /
+  `tls_set_verify`) + v5.10.20 P(-1) hardening sweep +
+  **v5.10.21 TLS surface completion** (full session-
+  resumption + 0-RTT primitive set; the unblockers for
+  1.3.1 / 1.3.2 — see "what 1.3.0 doesn't use yet"
+  below). Plus cyrius v5.9.42 testing-stdlib carve-out
   (`regression_network_probe`).
 - **`regression`** added to `[deps] stdlib`. Powers
   the live-gate skip-cleanly cascade.
@@ -93,19 +212,57 @@ regression. CI runners with no network skip-cleanly.
 - `cyrius lint` 0 warnings on touched files;
   `cyrfmt --check` clean.
 
+### What 1.3.0 doesn't use yet (and why 1.3.1 / 1.3.2 are still blocked)
+
+The 5.10.21 pin pulls in cyrius's full TLS surface-completion
+landing — **12 new typed wrappers / capability probes** that
+1.3.1 (session resumption) and 1.3.2 (TLS 1.3 0-RTT) compose:
+
+- Session resumption: `tls_get_session(ctx)`,
+  `tls_set_session(ctx, session)`, `tls_session_free(session)`.
+- Session-cache callbacks: `tls_ctx_set_session_new_cb` /
+  `_remove_cb` / `_get_cb` / `_cache_mode`.
+- Early data: `tls_ctx_set_max_early_data` / `tls_write_early_data`
+  / `tls_read_early_data`.
+- Capability probes: `tls_supports_early_data()` /
+  `tls_supports_session_resumption()`.
+
+1.3.0 itself doesn't compose any of these — its deliverable is
+the live-network gate over the existing surface.
+
+**1.3.1 / 1.3.2 surfaced an additional cyrius-side gap during
+slot scoping**: `tls_set_session(ctx, session)` is documented
+as "install a previously-cached session before tls_connect to
+attempt resumption", but cyrius's `tls_connect_with_ctx_hook`
+runs `SSL_CTX_new → hook → SSL_new → SSL_set_fd → SSL_ctrl(SNI)
+→ SSL_connect` in one shot. The hook fires on `SSL_CTX*`
+(pre-`SSL_new`); `tls_set_session` accesses the SSL handle from
+`ctx+8`, which only exists post-handshake. **There's no timing
+window between `SSL_new` and `SSL_connect`** for sandhi to
+inject the cached session for client-side resumption.
+
+The cyrius-side fix is either a staged-connect API
+(`tls_connect_alloc` + `tls_connect_complete`) or a post-`SSL_new`
+hook variant. Filed as
+[`docs/issues/2026-05-09-stdlib-tls-staged-connect.md`](docs/issues/2026-05-09-stdlib-tls-staged-connect.md).
+Sandhi 1.3.1 / 1.3.2 wait on cyrius landing it.
+
 ### Pinned next
 
-**1.3.1 (session resumption) and 1.3.2 (TLS 1.3 0-RTT)
-remain blocked** on cyrius — `lib/tls.cyr` doesn't
-expose `SSL_get1_session` / `SSL_set_session` /
-`SSL_write_early_data` / `SSL_read_early_data` yet.
-Per cyrius v5.10.20's roadmap reorg, the
-`lib/tls.cyr` hook-surface contract audit is pinned
-to v5.10.31; the actual session/0-RTT API additions
-would land separately on a slot the user hasn't
-pinned yet.
+- **WAIT** for cyrius staged-connect API
+  (`docs/issues/2026-05-09-stdlib-tls-staged-connect.md`).
+  Sandhi 1.3.1 / 1.3.2 are blocked at the call-sequence layer
+  even though all primitive fns exist.
+- **1.3.1** when unblocked — compose `tls_get_session` /
+  `tls_set_session` + the cache-callback set into a
+  sandhi-side cache keyed by `(host, port, alpn)`. Respect
+  0.9.0 cred-strip rules.
+- **1.3.2** when 1.3.1 lands — TLS 1.3 0-RTT (opt-in via
+  `sandhi_http_options_allow_0rtt`). Replay-safe methods only
+  per RFC 8446 §8.
 
-Holding sandhi-side until cyrius signals.
+The `lib/tls.cyr` hook-surface contract audit (cyrius v5.10.31)
+is independent of these and rides separately.
 
 ## [1.2.8] — 2026-05-08
 
