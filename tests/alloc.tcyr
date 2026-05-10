@@ -1648,8 +1648,8 @@ fn test_alloc_133_cred_digest_cookie_and_proxy() {
     var h_collision_b = sandhi_headers_new();
     sandhi_headers_add(h_collision_b, "Proxy-Authorization", "shared");
     assert_neq(_sandhi_compute_cred_digest(h_collision_a),
-               _sandhi_compute_cred_digest(h_collision_b),
-               "same value across different cred headers → different digests");
+    _sandhi_compute_cred_digest(h_collision_b),
+    "same value across different cred headers → different digests");
     return 0;
 }
 
