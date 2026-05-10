@@ -216,12 +216,25 @@ session.
     Filed staged-connect issue cleared at cyrius
     v5.10.27.
   - **1.3.2** — TLS 1.3 0-RTT (opt-in via
-    `sandhi_http_options_allow_0rtt`). Now unblocked
-    — composes `tls_ctx_set_max_early_data` /
-    `tls_write_early_data` / `tls_read_early_data` on
-    top of an installed session. Replay-safe methods
-    only per RFC 8446 §8. Capability probe via
-    `tls_supports_early_data()`.
+    `sandhi_http_options_allow_0rtt`). Composes
+    `tls_ctx_set_max_early_data` / `tls_write_early_data`
+    / `tls_read_early_data` on top of an installed
+    session. Replay-safe methods only per RFC 8446 §8.
+    Capability probe via `tls_supports_early_data()`.
+  - **1.3.3 — cred-strip-aware session-cache keying**
+    (provisional, may slip). Adds an auth-bearing-header
+    digest to the cache key so requests with different
+    auth contexts don't share a session. Mirrors the
+    0.9.0 cred-strip rules at the session layer.
+    Plumbs a 3rd `cred_digest` arg through
+    `_sandhi_conn_finalize_a`.
+  - **1.3.4 — session-cache TTL + max-size eviction**
+    (provisional, may slip). Bounded cache size +
+    age-based eviction; uses the `last_used_ms` slot
+    reserved on the entry struct at 1.3.1. New config
+    verbs `sandhi_session_cache_set_max_size` /
+    `_set_max_age_ms`. Eviction-on-insert + age-check-
+    on-lookup pattern; no periodic sweep.
   - **1.2.6+ — profile-justified optimizations**.
     Now that the prof captures landed at 1.2.5, the
     next picks wait for real-workload data. The

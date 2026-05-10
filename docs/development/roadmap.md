@@ -255,9 +255,73 @@ session.
 
 **Cyrius v5.10.21 surface available** (`tls_ctx_set_max_early_data`
 / `tls_write_early_data` / `tls_read_early_data` /
-`tls_supports_early_data`), but 0-RTT requires an installed
-session pre-handshake — same blocker as 1.3.1. Lands after
-1.3.1.
+`tls_supports_early_data`); the v5.10.27 staged-connect API
+is what makes 0-RTT actually wire-able (same unblock as 1.3.1).
+Sandhi 1.3.1 shipped the cache plumbing 0-RTT rides on top of.
+Lands after 1.3.1's stabilization or whenever 0-RTT is the
+priority pull.
+
+#### 1.3.3 — Cred-strip-aware session-cache keying (provisional, may slip)
+
+Sandhi 1.3.1 ships the session cache keyed on
+`(sni_host, hook_fp_hex)` — sufficient for default-policy
+and policy-bound paths, but **does not currently distinguish
+auth contexts**. If a consumer rotates Authorization /
+Cookie / Proxy-Authorization headers across requests to the
+same authority + same hook, the cache reuses the session.
+
+That's not a security regression at the TLS layer (the server
+still authenticates per-request using the new headers in the
+HTTP envelope), but it's a layering concern: the 0.9.0
+cred-strip rules deliberately invalidate cached state on
+auth-context change at the redirect layer, and the session
+cache should mirror that for symmetry.
+
+**Scope**:
+- Extend `_sandhi_session_cache_key_a` to include a digest
+  (e.g. SHA-256 truncated to 8 hex chars) of the
+  cred-bearing headers from the current request.
+- When digest changes, key changes → cache miss → fresh
+  handshake. Old entry stays in cache (will age out via
+  1.3.4's TTL once that lands).
+- Sandhi will need a hook to surface request headers down
+  into `_sandhi_conn_finalize_a` — currently only `sni_host`
+  + `hook_fp` are passed. Plumb a 3rd "cred_digest" arg
+  (0 when no cred-bearing headers).
+
+**Provisional** — may slip if 1.3.2 (0-RTT) ends up bigger
+than expected and pushes this out, or if a consumer files
+a real auth-rotation issue that promotes it ahead of 1.3.2.
+
+#### 1.3.4 — Session-cache TTL + max-size eviction (provisional, may slip)
+
+Sandhi 1.3.1's cache grows unbounded — every successful TLS
+handshake captures a session and stores it forever. That's
+fine for short-lived processes; long-running servers /
+daemons would eventually accumulate stale sessions whose
+servers have rotated session-ticket keys.
+
+The cache entry already reserves a `last_used_ms` slot at
+1.3.1 specifically for this — wiring it up is one slot of
+work.
+
+**Scope**:
+- Per-cache config: `sandhi_session_cache_set_max_size(n)`
+  (default ~256 entries) and
+  `sandhi_session_cache_set_max_age_ms(ms)` (default
+  24h — TLS session ticket lifetime is typically a few
+  hours; 24h is the safe upper bound).
+- Eviction policy: on insert, if cache is at max, evict
+  the entry with the oldest `last_used_ms`. Periodic sweep
+  is unnecessary — eviction-on-insert covers the bounded-
+  size goal.
+- Age check: on lookup, if `now - last_used_ms > max_age`,
+  evict + return miss (so we don't serve a stale ticket
+  that the server will reject).
+
+**Provisional** — may slip if profile evidence shows the
+cache stays small in practice, or if a consumer cares more
+about another item.
 
 ### Post-arc — wait-for-trigger
 

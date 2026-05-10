@@ -78,16 +78,23 @@ filing was blocking on.
   `include "src/http/conn.cyr"` (forward-ref under
   single-pass compilation).
 
-### Not in scope (pinned for follow-up)
+### Tracked for follow-up slots
 
-- **Cred-strip integration**: cache key currently uses
-  `(host, hook_fp)` only. Auth-bearing-header digest is
-  reserved for a follow-up patch when a consumer surfaces
-  a real auth-rotation scenario.
-- **TTL / max-size eviction**: cache grows unbounded.
-  `last_used_ms` slot reserved for future eviction.
-- **0-RTT (1.3.2)**: composes the same primitives on top
-  of an installed session. Lands when capacity allows.
+The cache lands functional but with two known limitations
+that ride into pinned 1.3.x slots — see `roadmap.md` for
+detail. Both are provisional and may shift order based on
+consumer asks:
+
+- **1.3.3 — cred-strip-aware session-cache keying** —
+  cache key currently uses `(sni_host, hook_fp_hex)` only.
+  Auth-bearing-header digest extension lands here.
+- **1.3.4 — session-cache TTL + max-size eviction** —
+  cache grows unbounded today; `last_used_ms` slot is
+  reserved on the entry struct for the eviction logic.
+- **1.3.2 — TLS 1.3 0-RTT** — composes the same
+  primitives on top of an installed session. Stays the
+  next-up TLS-arc slot since 0-RTT is the obvious value
+  pair to session resumption.
 
 ### Verified
 
@@ -114,10 +121,14 @@ filing was blocking on.
   `tls_ctx_set_max_early_data` / `tls_write_early_data`
   / `tls_read_early_data` on top of an installed
   session. Replay-safe methods only per RFC 8446 §8.
-- Possible follow-ups for 1.3.1's deliberate-deferrals:
-  cred-strip-aware cache keying (when a consumer asks),
-  TTL/max-size eviction (when prof shows the cache
-  growing without bound on a real workload).
+- **1.3.3** — cred-strip-aware session-cache keying
+  (provisional, may slip). Adds an auth-bearing-header
+  digest to the cache key so requests with different
+  auth contexts don't share a session.
+- **1.3.4** — session-cache TTL + max-size eviction
+  (provisional, may slip). Bounded cache size +
+  age-based eviction; uses the `last_used_ms` slot
+  reserved on the entry at 1.3.1.
 
 ## [1.3.0] — 2026-05-09
 
