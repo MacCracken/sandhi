@@ -65,18 +65,18 @@ var _sandhi_prof_recv_used_v = 0;
 # ================================================================
 
 # Toggle profiling on/off. Default 0 = every capture is a no-op.
-fn sandhi_prof_enable(on) {
+fn sandhi_prof_enable(on): i64 {
     _sandhi_prof_enabled = on;
     return 0;
 }
 
-fn sandhi_prof_enabled() {
+fn sandhi_prof_enabled(): i64 {
     return _sandhi_prof_enabled;
 }
 
 # Reset per-request state at request entry. Records PHASE_REQUEST_START.
 # No-op when profiling is disabled.
-fn sandhi_prof_reset() {
+fn sandhi_prof_reset(): i64 {
     if (_sandhi_prof_enabled == 0) { return 0; }
     var now = clock_now_ns();
     _sandhi_prof_ts_0 = now;
@@ -92,7 +92,7 @@ fn sandhi_prof_reset() {
 
 # Capture timestamp for `phase`. No-op when profiling is disabled.
 # Phase ordering matters — capture in the order phases complete.
-fn sandhi_prof_capture(phase) {
+fn sandhi_prof_capture(phase): i64 {
     if (_sandhi_prof_enabled == 0) { return 0; }
     var now = clock_now_ns();
     if (phase == SANDHI_PROF_PHASE_URL_PARSE_END) { _sandhi_prof_ts_1 = now; }
@@ -106,7 +106,7 @@ fn sandhi_prof_capture(phase) {
 # Record the recv-buffer cap (allocated) and used (actually received).
 # Called once per exchange, just before `sandhi_conn_close`. No-op
 # when profiling is disabled.
-fn sandhi_prof_record_recv(cap, used) {
+fn sandhi_prof_record_recv(cap, used): i64 {
     if (_sandhi_prof_enabled == 0) { return 0; }
     _sandhi_prof_recv_cap_v = cap;
     _sandhi_prof_recv_used_v = used;
@@ -115,7 +115,7 @@ fn sandhi_prof_record_recv(cap, used) {
 
 # Read elapsed ns from PHASE_REQUEST_START to `phase`. Returns 0
 # when profiling is disabled or for PHASE_REQUEST_START itself.
-fn sandhi_prof_get(phase) {
+fn sandhi_prof_get(phase): i64 {
     if (_sandhi_prof_enabled == 0) { return 0; }
     if (phase == SANDHI_PROF_PHASE_REQUEST_START) { return 0; }
     var start = _sandhi_prof_ts_0;
@@ -128,7 +128,7 @@ fn sandhi_prof_get(phase) {
 }
 
 # Bytes allocated for the recv buffer in the most-recent exchange.
-fn sandhi_prof_recv_cap() {
+fn sandhi_prof_recv_cap(): i64 {
     return _sandhi_prof_recv_cap_v;
 }
 
@@ -136,6 +136,6 @@ fn sandhi_prof_recv_cap() {
 # `recv_used / recv_cap` is the over-allocation factor — values
 # near 1.0 mean the cap is well-tuned, near 0 means we allocated
 # 100KB+ for a 200-byte response.
-fn sandhi_prof_recv_used() {
+fn sandhi_prof_recv_used(): i64 {
     return _sandhi_prof_recv_used_v;
 }

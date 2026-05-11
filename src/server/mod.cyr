@@ -38,7 +38,7 @@ var HTTP_SERVICE_UNAVAILABLE = 503;
 
 # Find the first occurrence of `needle[0..nlen]` in `haystack[0..hlen]`.
 # Returns the offset, or 0 - 1 if not found.
-fn _hsv_find(haystack, hlen, needle, nlen) {
+fn _hsv_find(haystack, hlen, needle, nlen): i64 {
     if (nlen == 0) { return 0; }
     if (nlen > hlen) { return 0 - 1; }
     var i = 0;
@@ -49,12 +49,12 @@ fn _hsv_find(haystack, hlen, needle, nlen) {
     return 0 - 1;
 }
 
-fn _hsv_to_lower(c) {
+fn _hsv_to_lower(c): i64 {
     if (c >= 65) { if (c <= 90) { return c + 32; } }
     return c;
 }
 
-fn _hsv_iceq(a, b, n) {
+fn _hsv_iceq(a, b, n): i64 {
     var i = 0;
     while (i < n) {
         if (_hsv_to_lower(load8(a + i)) != _hsv_to_lower(load8(b + i))) { return 0; }
@@ -63,7 +63,7 @@ fn _hsv_iceq(a, b, n) {
     return 1;
 }
 
-fn _hsv_next_nl(buf, start, end) {
+fn _hsv_next_nl(buf, start, end): i64 {
     var i = start;
     while (i < end) {
         if (load8(buf + i) == 10) { return i; }
@@ -79,7 +79,7 @@ fn _hsv_next_nl(buf, start, end) {
 # Method from the request line — "GET", "POST", etc. Returns "" on malformed.
 # Extract the request method into `a`. Returns "" on malformed; 0 on
 # OOM (caller can distinguish by null-checking; "" is non-zero).
-fn sandhi_server_get_method_a(a, buf, blen) {
+fn sandhi_server_get_method_a(a, buf, blen): i64 {
     var sp = _hsv_find(buf, blen, " ", 1);
     if (sp < 0) { return ""; }
     var out = alloc_via(a, sp + 1);
@@ -89,11 +89,11 @@ fn sandhi_server_get_method_a(a, buf, blen) {
     return out;
 }
 
-fn sandhi_server_get_method(buf, blen) {
+fn sandhi_server_get_method(buf, blen): i64 {
     return sandhi_server_get_method_a(default_alloc(), buf, blen);
 }
 
-fn sandhi_server_get_path_a(a, buf, blen) {
+fn sandhi_server_get_path_a(a, buf, blen): i64 {
     var sp1 = _hsv_find(buf, blen, " ", 1);
     if (sp1 < 0) { return ""; }
     var sp2 = _hsv_find(buf + sp1 + 1, blen - sp1 - 1, " ", 1);
@@ -105,12 +105,12 @@ fn sandhi_server_get_path_a(a, buf, blen) {
     return out;
 }
 
-fn sandhi_server_get_path(buf, blen) {
+fn sandhi_server_get_path(buf, blen): i64 {
     return sandhi_server_get_path_a(default_alloc(), buf, blen);
 }
 
 # Offset of the body start (after \r\n\r\n) — 0 - 1 if no headers terminator.
-fn sandhi_server_body_offset(buf, blen) {
+fn sandhi_server_body_offset(buf, blen): i64 {
     var off = _hsv_find(buf, blen, "\r\n\r\n", 4);
     if (off < 0) { return 0 - 1; }
     return off + 4;
@@ -118,7 +118,7 @@ fn sandhi_server_body_offset(buf, blen) {
 
 # Case-insensitive header lookup. Returns the value cstr (trimmed of leading
 # SP and trailing CR), or 0 if the header is absent.
-fn sandhi_server_find_header_a(a, buf, blen, name) {
+fn sandhi_server_find_header_a(a, buf, blen, name): i64 {
     var nlen = strlen(name);
     var headers_end = _hsv_find(buf, blen, "\r\n\r\n", 4);
     if (headers_end < 0) { headers_end = blen; }
@@ -146,7 +146,7 @@ fn sandhi_server_find_header_a(a, buf, blen, name) {
     return 0;
 }
 
-fn sandhi_server_find_header(buf, blen, name) {
+fn sandhi_server_find_header(buf, blen, name): i64 {
     return sandhi_server_find_header_a(default_alloc(), buf, blen, name);
 }
 
@@ -159,7 +159,7 @@ fn sandhi_server_find_header(buf, blen, name) {
 # embedded in the number); the existing accept loop reads body up
 # to the parsed length so 0 means "no body" which is a safe fail
 # closed for malformed input.
-fn sandhi_server_content_length(buf, blen) {
+fn sandhi_server_content_length(buf, blen): i64 {
     var v = sandhi_server_find_header(buf, blen, "Content-Length");
     if (v == 0) { return 0; }
     var i = 0;
@@ -184,7 +184,7 @@ fn sandhi_server_content_length(buf, blen) {
 # match. We don't have to be perfect about line boundaries here
 # because sandhi_server_find_header / `_hsv_find` already understand the
 # request format — we just iterate all body offsets and use them.
-fn _sandhi_server_count_header_occurrences(buf, blen, name) {
+fn _sandhi_server_count_header_occurrences(buf, blen, name): i64 {
     var count = 0;
     var pos = 0;
     var name_len = strlen(name);
@@ -214,7 +214,7 @@ fn _sandhi_server_count_header_occurrences(buf, blen, name) {
 # Transfer-Encoding headers (CL.CL / Host.Host / TE.TE smuggling
 # vector per RFC 7230 §3.3.2 + §5.4). Server replies 400 on truthy
 # rather than dispatching to the handler.
-fn sandhi_server_request_has_dup_smuggling_header(buf, blen) {
+fn sandhi_server_request_has_dup_smuggling_header(buf, blen): i64 {
     if (_sandhi_server_count_header_occurrences(buf, blen, "Host") > 1)              { return 1; }
     if (_sandhi_server_count_header_occurrences(buf, blen, "Content-Length") > 1)    { return 1; }
     if (_sandhi_server_count_header_occurrences(buf, blen, "Transfer-Encoding") > 1) { return 1; }
@@ -226,7 +226,7 @@ fn sandhi_server_request_has_dup_smuggling_header(buf, blen) {
 # §3.3.3 and the canonical CL.TE smuggling vector. The accept-loop
 # in `sandhi_server_run_opts` checks this and replies 400 before
 # handing the request to the user's handler.
-fn sandhi_server_request_has_cl_te_conflict(buf, blen) {
+fn sandhi_server_request_has_cl_te_conflict(buf, blen): i64 {
     if (sandhi_server_find_header(buf, blen, "Content-Length") == 0) { return 0; }
     var te = sandhi_server_find_header(buf, blen, "Transfer-Encoding");
     if (te == 0) { return 0; }
@@ -257,7 +257,7 @@ fn sandhi_server_request_has_cl_te_conflict(buf, blen) {
 # ================================================================
 
 # "/foo?bar=baz" → "/foo". Returns the input unchanged if there's no '?'.
-fn sandhi_server_path_only_a(a, path) {
+fn sandhi_server_path_only_a(a, path): i64 {
     if (path == 0) { return path; }
     var i = 0;
     while (load8(path + i) != 0) {
@@ -273,11 +273,11 @@ fn sandhi_server_path_only_a(a, path) {
     return path;
 }
 
-fn sandhi_server_path_only(path) {
+fn sandhi_server_path_only(path): i64 {
     return sandhi_server_path_only_a(default_alloc(), path);
 }
 
-fn sandhi_server_url_decode_a(a, s) {
+fn sandhi_server_url_decode_a(a, s): i64 {
     if (s == 0) { return ""; }
     var slen = strlen(s);
     var out = alloc_via(a, slen + 1);
@@ -312,13 +312,13 @@ fn sandhi_server_url_decode_a(a, s) {
     return out;
 }
 
-fn sandhi_server_url_decode(s) {
+fn sandhi_server_url_decode(s): i64 {
     return sandhi_server_url_decode_a(default_alloc(), s);
 }
 
 # Query parameter value, percent-decoded. 0 if not found.
 # Example: sandhi_server_get_param("/a?foo=1&bar=hello%20world", "bar") → "hello world"
-fn sandhi_server_get_param_a(a, path, name) {
+fn sandhi_server_get_param_a(a, path, name): i64 {
     if (path == 0) { return 0; }
     var plen = strlen(path);
     var qmark = 0 - 1;
@@ -349,11 +349,11 @@ fn sandhi_server_get_param_a(a, path, name) {
     return 0;
 }
 
-fn sandhi_server_get_param(path, name) {
+fn sandhi_server_get_param(path, name): i64 {
     return sandhi_server_get_param_a(default_alloc(), path, name);
 }
 
-fn sandhi_server_path_segment_a(a, path, n) {
+fn sandhi_server_path_segment_a(a, path, n): i64 {
     if (path == 0) { return 0; }
     var path_only = sandhi_server_path_only_a(a, path);
     var plen = strlen(path_only);
@@ -381,7 +381,7 @@ fn sandhi_server_path_segment_a(a, path, n) {
     return 0;
 }
 
-fn sandhi_server_path_segment(path, n) {
+fn sandhi_server_path_segment(path, n): i64 {
     return sandhi_server_path_segment_a(default_alloc(), path, n);
 }
 
@@ -398,7 +398,7 @@ fn sandhi_server_path_segment(path, n) {
 # versions return whatever `_a` returns — under default_alloc that's
 # always 0 in practice. Closes the SIGSEGV-on-OOM gap that mirrored
 # the 1.2.6 RPC dialect findings.
-fn sandhi_server_send_status_a(a, cfd, code, msg) {
+fn sandhi_server_send_status_a(a, cfd, code, msg): i64 {
     var sb = str_builder_new_a(a);
     if (sb == 0) { return 0 - 1; }
     str_builder_add_cstr_a(a, sb, "HTTP/1.1 ");
@@ -411,13 +411,13 @@ fn sandhi_server_send_status_a(a, cfd, code, msg) {
     return 0;
 }
 
-fn sandhi_server_send_status(cfd, code, msg) {
+fn sandhi_server_send_status(cfd, code, msg): i64 {
     return sandhi_server_send_status_a(default_alloc(), cfd, code, msg);
 }
 
 # Full response. extra_headers is a cstr (each line CRLF-terminated) or 0.
 # e.g. sandhi_server_send_response(cfd, 200, "OK", "application/json", body, len, 0);
-fn sandhi_server_send_response_a(a, cfd, code, msg, content_type, body, body_len, extra_headers) {
+fn sandhi_server_send_response_a(a, cfd, code, msg, content_type, body, body_len, extra_headers): i64 {
     var sb = str_builder_new_a(a);
     if (sb == 0) { return 0 - 1; }
     str_builder_add_cstr_a(a, sb, "HTTP/1.1 ");
@@ -437,13 +437,13 @@ fn sandhi_server_send_response_a(a, cfd, code, msg, content_type, body, body_len
     return 0;
 }
 
-fn sandhi_server_send_response(cfd, code, msg, content_type, body, body_len, extra_headers) {
+fn sandhi_server_send_response(cfd, code, msg, content_type, body, body_len, extra_headers): i64 {
     return sandhi_server_send_response_a(default_alloc(), cfd, code, msg,
     content_type, body, body_len, extra_headers);
 }
 
 # 204 No Content with optional extra headers (CRLF-terminated cstr or 0).
-fn sandhi_server_send_204_a(a, cfd, extra_headers) {
+fn sandhi_server_send_204_a(a, cfd, extra_headers): i64 {
     var sb = str_builder_new_a(a);
     if (sb == 0) { return 0 - 1; }
     str_builder_add_cstr_a(a, sb, "HTTP/1.1 204 No Content\r\n");
@@ -454,7 +454,7 @@ fn sandhi_server_send_204_a(a, cfd, extra_headers) {
     return 0;
 }
 
-fn sandhi_server_send_204(cfd, extra_headers) {
+fn sandhi_server_send_204(cfd, extra_headers): i64 {
     return sandhi_server_send_204_a(default_alloc(), cfd, extra_headers);
 }
 
@@ -472,7 +472,7 @@ fn sandhi_server_send_204(cfd, extra_headers) {
 # Transfer-Encoding: chunked. Follow with repeated sandhi_server_send_chunk calls
 # and finish with sandhi_server_send_chunked_end. extra_headers is a cstr of
 # CRLF-terminated header lines or 0.
-fn sandhi_server_send_chunked_start_a(a, cfd, code, content_type, extra_headers) {
+fn sandhi_server_send_chunked_start_a(a, cfd, code, content_type, extra_headers): i64 {
     var sb = str_builder_new_a(a);
     if (sb == 0) { return 0 - 1; }
     str_builder_add_cstr_a(a, sb, "HTTP/1.1 ");
@@ -487,14 +487,14 @@ fn sandhi_server_send_chunked_start_a(a, cfd, code, content_type, extra_headers)
     return 0;
 }
 
-fn sandhi_server_send_chunked_start(cfd, code, content_type, extra_headers) {
+fn sandhi_server_send_chunked_start(cfd, code, content_type, extra_headers): i64 {
     return sandhi_server_send_chunked_start_a(default_alloc(), cfd, code, content_type, extra_headers);
 }
 
 # Send one chunk of a chunked-transfer response. Emits the chunk-length
 # as lowercase hex followed by CRLF, then `len` bytes of `data`, then
 # another CRLF. Use between sandhi_server_send_chunked_start and sandhi_server_send_chunked_end.
-fn sandhi_server_send_chunk(cfd, data, len) {
+fn sandhi_server_send_chunk(cfd, data, len): i64 {
     var hexbuf[32];
     var hi = 0;
     var n = len;
@@ -526,7 +526,7 @@ fn sandhi_server_send_chunk(cfd, data, len) {
 
 # Terminate a chunked-transfer response. Sends the zero-length chunk
 # that tells the client the body is complete ("0\r\n\r\n").
-fn sandhi_server_send_chunked_end(cfd) {
+fn sandhi_server_send_chunked_end(cfd): i64 {
     sock_send(cfd, "0\r\n\r\n", 5);
     return 0;
 }
@@ -542,7 +542,7 @@ fn sandhi_server_send_chunked_end(cfd) {
 #   - max bytes have been read.
 # Returns the total bytes read (or 0 - 1 on socket error). Always
 # null-terminates buf at the returned length.
-fn sandhi_server_recv_request(cfd, buf, max) {
+fn sandhi_server_recv_request(cfd, buf, max): i64 {
     var have = 0;
     var need_body = 0 - 1;
 
@@ -606,7 +606,7 @@ var SANDHI_SERVER_OPT_STRUCT_SIZE = 16;
 var SANDHI_SERVER_DEFAULT_IDLE_MS = 30000;
 var SANDHI_SERVER_DEFAULT_MAX_CONNS = 128;
 
-fn sandhi_server_options_new_a(a) {
+fn sandhi_server_options_new_a(a): i64 {
     var o = alloc_via(a, SANDHI_SERVER_OPT_STRUCT_SIZE);
     if (o == 0) { return 0; }
     store64(o + SANDHI_SERVER_OPT_OFF_IDLE_MS, SANDHI_SERVER_DEFAULT_IDLE_MS);
@@ -614,26 +614,26 @@ fn sandhi_server_options_new_a(a) {
     return o;
 }
 
-fn sandhi_server_options_new() {
+fn sandhi_server_options_new(): i64 {
     return sandhi_server_options_new_a(default_alloc());
 }
 
-fn sandhi_server_options_idle_ms(opts, ms) {
+fn sandhi_server_options_idle_ms(opts, ms): i64 {
     store64(opts + SANDHI_SERVER_OPT_OFF_IDLE_MS, ms);
     return 0;
 }
 
-fn sandhi_server_options_max_conns(opts, n) {
+fn sandhi_server_options_max_conns(opts, n): i64 {
     store64(opts + SANDHI_SERVER_OPT_OFF_MAX_CONNS, n);
     return 0;
 }
 
-fn sandhi_server_options_get_idle_ms(opts) {
+fn sandhi_server_options_get_idle_ms(opts): i64 {
     if (opts == 0) { return SANDHI_SERVER_DEFAULT_IDLE_MS; }
     return load64(opts + SANDHI_SERVER_OPT_OFF_IDLE_MS);
 }
 
-fn sandhi_server_options_get_max_conns(opts) {
+fn sandhi_server_options_get_max_conns(opts): i64 {
     if (opts == 0) { return SANDHI_SERVER_DEFAULT_MAX_CONNS; }
     return load64(opts + SANDHI_SERVER_OPT_OFF_MAX_CONNS);
 }
@@ -646,14 +646,14 @@ fn sandhi_server_options_get_max_conns(opts) {
 #   fn handler(ctx, cfd, req_buf, req_len) → 0
 #
 # Returns 1 on bind/listen failure; never returns on success (loops forever).
-fn sandhi_server_run(addr, port, handler_fp, ctx) {
+fn sandhi_server_run(addr, port, handler_fp, ctx): i64 {
     return sandhi_server_run_opts(addr, port, handler_fp, ctx, 0);
 }
 
 # Opts-aware variant. Applies SO_RCVTIMEO on each accepted connection
 # to bound slow/idle peers (slowloris guard). max_conns is accepted
 # but not honored today — server stays single-threaded until 0.8.0.
-fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts) {
+fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts): i64 {
     # _hsv_req_buf is a process-wide singleton shared across every
     # accepted connection — it must outlive any per-request arena, so
     # always allocate from the global bump.

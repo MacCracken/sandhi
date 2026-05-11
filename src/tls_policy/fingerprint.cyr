@@ -20,13 +20,13 @@
 # (e.g. SHA-1 legacy — discouraged) get their length back.
 
 # Lowercase an ASCII byte. Non-alpha bytes pass through.
-fn _sandhi_fp_to_lower(c) {
+fn _sandhi_fp_to_lower(c): i64 {
     if (c >= 65) { if (c <= 90) { return c + 32; } }
     return c;
 }
 
 # 1 if the byte is a hex digit (0-9 / a-f / A-F), 0 otherwise.
-fn _sandhi_fp_is_hex(c) {
+fn _sandhi_fp_is_hex(c): i64 {
     if (c >= 48 && c <= 57) { return 1; }
     if (c >= 65 && c <= 70) { return 1; }
     if (c >= 97 && c <= 102) { return 1; }
@@ -35,7 +35,7 @@ fn _sandhi_fp_is_hex(c) {
 
 # Normalize an SPKI hex string into `a`: strip delimiters (: space tab),
 # lowercase. Returns a fresh cstr or 0 on null input / invalid byte / OOM.
-fn sandhi_fp_normalize_a(a, hex) {
+fn sandhi_fp_normalize_a(a, hex): i64 {
     if (hex == 0) { return 0; }
     var slen = strlen(hex);
     var out = alloc_via(a, slen + 1);
@@ -60,7 +60,7 @@ fn sandhi_fp_normalize_a(a, hex) {
     return out;
 }
 
-fn sandhi_fp_normalize(hex) {
+fn sandhi_fp_normalize(hex): i64 {
     return sandhi_fp_normalize_a(default_alloc(), hex);
 }
 
@@ -78,7 +78,7 @@ fn sandhi_fp_normalize(hex) {
 # Constant-time equality with normalization done in `alloc`. The two
 # scratch normalized buffers don't escape, so an arena allocator with
 # reset_via(a) afterwards is the natural fit.
-fn sandhi_fp_eq_a(alloc, a, b) {
+fn sandhi_fp_eq_a(alloc, a, b): i64 {
     if (a == 0 || b == 0) { return 0; }
     var na = sandhi_fp_normalize_a(alloc, a);
     var nb = sandhi_fp_normalize_a(alloc, b);
@@ -96,7 +96,7 @@ fn sandhi_fp_eq_a(alloc, a, b) {
     return 0;
 }
 
-fn sandhi_fp_eq(a, b) {
+fn sandhi_fp_eq(a, b): i64 {
     if (a == 0 || b == 0) { return 0; }
     var na = sandhi_fp_normalize(a);
     var nb = sandhi_fp_normalize(b);
@@ -121,7 +121,7 @@ fn sandhi_fp_eq(a, b) {
 
 # Byte length of the normalized fingerprint (2 hex chars per byte).
 # Returns 0 on malformed input, 32 for SHA-256, 20 for SHA-1 (legacy).
-fn sandhi_fp_byte_length(hex) {
+fn sandhi_fp_byte_length(hex): i64 {
     var n = sandhi_fp_normalize(hex);
     if (n == 0) { return 0; }
     var len = strlen(n);
@@ -131,7 +131,7 @@ fn sandhi_fp_byte_length(hex) {
 
 # Encode raw SHA-256 bytes (or any digest buffer) as lowercase hex
 # allocated from `a`. Returns 0 on OOM.
-fn sandhi_fp_encode_bytes_a(a, bytes, nbytes) {
+fn sandhi_fp_encode_bytes_a(a, bytes, nbytes): i64 {
     var out = alloc_via(a, nbytes * 2 + 1);
     if (out == 0) { return 0; }
     var i = 0;
@@ -151,6 +151,6 @@ fn sandhi_fp_encode_bytes_a(a, bytes, nbytes) {
     return out;
 }
 
-fn sandhi_fp_encode_bytes(bytes, nbytes) {
+fn sandhi_fp_encode_bytes(bytes, nbytes): i64 {
     return sandhi_fp_encode_bytes_a(default_alloc(), bytes, nbytes);
 }

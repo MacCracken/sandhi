@@ -41,7 +41,7 @@ var _SANDHI_H2_REQ_HBUF_CAP = 8192;
 # Pseudo-header emit helpers
 # ================================================================
 
-fn _h2_emit_method(h2c, method, hbuf, off) {
+fn _h2_emit_method(h2c, method, hbuf, off): i64 {
     var enc = sandhi_h2_conn_enc_table(h2c);
     if (streq(method, "GET") == 1)  {
         return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_METHOD_GET);
@@ -54,7 +54,7 @@ fn _h2_emit_method(h2c, method, hbuf, off) {
     _SANDHI_H2_REQ_IDX_METHOD_GET, ":method", method);
 }
 
-fn _h2_emit_scheme(h2c, scheme, hbuf, off) {
+fn _h2_emit_scheme(h2c, scheme, hbuf, off): i64 {
     if (streq(scheme, "https") == 1) {
         return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_SCHEME_HTTPS);
     }
@@ -66,7 +66,7 @@ fn _h2_emit_scheme(h2c, scheme, hbuf, off) {
     _SANDHI_H2_REQ_IDX_SCHEME_HTTP, ":scheme", scheme);
 }
 
-fn _h2_emit_path(h2c, path, hbuf, off) {
+fn _h2_emit_path(h2c, path, hbuf, off): i64 {
     if (streq(path, "/") == 1) {
         return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_PATH_ROOT);
     }
@@ -75,7 +75,7 @@ fn _h2_emit_path(h2c, path, hbuf, off) {
     _SANDHI_H2_REQ_IDX_PATH_ROOT, ":path", path);
 }
 
-fn _h2_emit_authority(h2c, authority, hbuf, off) {
+fn _h2_emit_authority(h2c, authority, hbuf, off): i64 {
     var enc = sandhi_h2_conn_enc_table(h2c);
     return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
     _SANDHI_H2_REQ_IDX_AUTHORITY, ":authority", authority);
@@ -85,7 +85,7 @@ fn _h2_emit_authority(h2c, authority, hbuf, off) {
 # The HPACK encoder only references the lowercased name during this
 # call, so the alloc is short-lived; arena callers reset after the
 # request is on the wire.
-fn _h2_emit_user_header_a(a, h2c, name, value, hbuf, off) {
+fn _h2_emit_user_header_a(a, h2c, name, value, hbuf, off): i64 {
     var nlen = strlen(name);
     var lower = alloc_via(a, nlen + 1);
     if (lower == 0) { return off; }
@@ -101,7 +101,7 @@ fn _h2_emit_user_header_a(a, h2c, name, value, hbuf, off) {
     return sandhi_hpack_encode_literal_indexed(enc, hbuf, off, lower, value);
 }
 
-fn _h2_emit_user_header(h2c, name, value, hbuf, off) {
+fn _h2_emit_user_header(h2c, name, value, hbuf, off): i64 {
     return _h2_emit_user_header_a(default_alloc(), h2c, name, value, hbuf, off);
 }
 
@@ -116,7 +116,7 @@ fn _h2_emit_user_header(h2c, name, value, hbuf, off) {
 # emitted in that exact order per RFC 7540 §8.1.2.1.
 
 fn sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path, authority,
-user_headers, hbuf) {
+user_headers, hbuf): i64 {
     var off = 0;
     off = _h2_emit_method(h2c, method, hbuf, off);
     off = _h2_emit_scheme(h2c, scheme, hbuf, off);
@@ -147,7 +147,7 @@ user_headers, hbuf) {
 }
 
 fn sandhi_h2_request_encode_headers(h2c, method, scheme, path, authority,
-user_headers, hbuf) {
+user_headers, hbuf): i64 {
     return sandhi_h2_request_encode_headers_a(default_alloc(), h2c, method, scheme, path, authority,
     user_headers, hbuf);
 }
@@ -158,7 +158,7 @@ user_headers, hbuf) {
 # value (e.g. `te: gzip`) must be dropped — the spec says a request
 # with TE != "trailers" is malformed. We drop instead of erroring so
 # the request still ships.
-fn _h2_header_is_forbidden(name, value) {
+fn _h2_header_is_forbidden(name, value): i64 {
     if (_h2_streq_ci(name, "connection") == 1)        { return 1; }
     if (_h2_streq_ci(name, "keep-alive") == 1)        { return 1; }
     if (_h2_streq_ci(name, "proxy-connection") == 1)  { return 1; }
@@ -174,7 +174,7 @@ fn _h2_header_is_forbidden(name, value) {
 # 1 if `value` is the literal "trailers" (case-insensitive) with
 # optional surrounding whitespace. NULL or any other value → 0.
 # Used only by `_h2_header_is_forbidden` for the te-conditional rule.
-fn _h2_te_value_is_trailers(value) {
+fn _h2_te_value_is_trailers(value): i64 {
     if (value == 0) { return 0; }
     var i = 0;
     while (load8(value + i) == 32 || load8(value + i) == 9) { i = i + 1; }
@@ -196,7 +196,7 @@ fn _h2_te_value_is_trailers(value) {
     return 1;
 }
 
-fn _h2_streq_ci(a, b) {
+fn _h2_streq_ci(a, b): i64 {
     var i = 0;
     while (1 == 1) {
         var ca = load8(a + i);
@@ -223,7 +223,7 @@ fn _h2_streq_ci(a, b) {
 # `_SANDHI_H2_ERR_*` sentinel on failure.
 
 fn sandhi_h2_request_send_a(a, h2c, method, scheme, path, authority,
-user_headers, body, body_len) {
+user_headers, body, body_len): i64 {
     var hbuf = alloc_via(a, _SANDHI_H2_REQ_HBUF_CAP);
     if (hbuf == 0) { return _SANDHI_H2_ERR_MALFORMED; }
     var hlen = sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path,
@@ -257,7 +257,7 @@ user_headers, body, body_len) {
 }
 
 fn sandhi_h2_request_send(h2c, method, scheme, path, authority,
-user_headers, body, body_len) {
+user_headers, body, body_len): i64 {
     return sandhi_h2_request_send_a(default_alloc(), h2c, method, scheme, path, authority,
     user_headers, body, body_len);
 }

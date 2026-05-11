@@ -42,7 +42,7 @@ var _SANDHI_H2_BODY_CAP   = 1048576;  # 1 MB
 
 # Parse the :status pseudo-header value (cstr like "200") to an int.
 # Returns 0 on malformed.
-fn _h2_parse_status(s) {
+fn _h2_parse_status(s): i64 {
     if (s == 0) { return 0; }
     var n = 0;
     var i = 0;
@@ -56,14 +56,14 @@ fn _h2_parse_status(s) {
 }
 
 # 1 if the header name starts with ':' (a pseudo-header).
-fn _h2_is_pseudo(name) {
+fn _h2_is_pseudo(name): i64 {
     if (name == 0) { return 0; }
     if (load8(name) == 58) { return 1; }
     return 0;
 }
 
 # Append `n` bytes from `src` to `dst+dst_off`. Caller pre-allocated.
-fn _h2_buf_append(dst, dst_off, src, n) {
+fn _h2_buf_append(dst, dst_off, src, n): i64 {
     var i = 0;
     while (i < n) {
         store8(dst + dst_off + i, load8(src + i));
@@ -76,7 +76,7 @@ fn _h2_buf_append(dst, dst_off, src, n) {
 # every transient cell + decoded name/value cstr from `a`. Returns
 # status (0 on bad/missing); the HPACK decode dynamic-table side
 # effects also route through `a` (see hpack.cyr's decode_field_a).
-fn _h2_decode_response_headers_a(a, h2c, hblock, hblock_len, headers_out) {
+fn _h2_decode_response_headers_a(a, h2c, hblock, hblock_len, headers_out): i64 {
     var dec = sandhi_h2_conn_dec_table(h2c);
     var off = alloc_via(a, 8);
     var no  = alloc_via(a, 8);
@@ -105,7 +105,7 @@ fn _h2_decode_response_headers_a(a, h2c, hblock, hblock_len, headers_out) {
     return status;
 }
 
-fn _h2_decode_response_headers(h2c, hblock, hblock_len, headers_out) {
+fn _h2_decode_response_headers(h2c, hblock, hblock_len, headers_out): i64 {
     return _h2_decode_response_headers_a(default_alloc(), h2c, hblock, hblock_len, headers_out);
 }
 
@@ -114,7 +114,7 @@ fn _h2_decode_response_headers(h2c, hblock, hblock_len, headers_out) {
 # ================================================================
 
 # Returns 0 on success, negative on send-fail.
-fn _h2_handle_settings(h2c, hdr, payload) {
+fn _h2_handle_settings(h2c, hdr, payload): i64 {
     var flags = sandhi_h2_hdr_flags(hdr);
     if ((flags & SANDHI_H2_FLAG_ACK) != 0) {
         # Empty ACK from peer — our SETTINGS got through. Nothing
@@ -127,7 +127,7 @@ fn _h2_handle_settings(h2c, hdr, payload) {
     return sandhi_h2_conn_send_settings_ack(h2c);
 }
 
-fn _h2_handle_ping(h2c, hdr, payload) {
+fn _h2_handle_ping(h2c, hdr, payload): i64 {
     var flags = sandhi_h2_hdr_flags(hdr);
     if ((flags & SANDHI_H2_FLAG_ACK) != 0) { return 0; }
     return sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_PING,
@@ -144,7 +144,7 @@ fn _h2_handle_ping(h2c, hdr, payload) {
 # the heaviest alloc sites in the codebase (a 1 MB body buffer + per-
 # frame 16-byte result cells in a tight loop) — routing through `a`
 # lets a per-request arena reset reclaim everything in one shot.
-fn sandhi_h2_response_recv_a(a, h2c, stream_id) {
+fn sandhi_h2_response_recv_a(a, h2c, stream_id): i64 {
     var hblock = alloc_via(a, _SANDHI_H2_HBLOCK_CAP);
     var hblock_len = 0;
     var body = alloc_via(a, _SANDHI_H2_BODY_CAP);
@@ -251,7 +251,7 @@ fn sandhi_h2_response_recv_a(a, h2c, stream_id) {
     return _sandhi_resp_new_a(a, status, body, body_len, headers, SANDHI_OK);
 }
 
-fn sandhi_h2_response_recv(h2c, stream_id) {
+fn sandhi_h2_response_recv(h2c, stream_id): i64 {
     return sandhi_h2_response_recv_a(default_alloc(), h2c, stream_id);
 }
 

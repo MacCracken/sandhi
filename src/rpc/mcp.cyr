@@ -17,7 +17,7 @@
 
 var _sandhi_mcp_next_id = 1;
 
-fn _sandhi_mcp_alloc_id() {
+fn _sandhi_mcp_alloc_id(): i64 {
     var id = _sandhi_mcp_next_id;
     _sandhi_mcp_next_id = _sandhi_mcp_next_id + 1;
     return id;
@@ -31,7 +31,7 @@ fn _sandhi_mcp_alloc_id() {
 # `params_json` is a pre-built cstr including braces (or 0 for none).
 # Return value: wire-ready request body (cstr).
 
-fn _sandhi_mcp_build_request_a(a, method, params_json) {
+fn _sandhi_mcp_build_request_a(a, method, params_json): i64 {
     var id = _sandhi_mcp_alloc_id();
     var o = sandhi_json_obj_new_a(a);
     # 1.2.6 OOM guard. Returning 0 here is propagated through the
@@ -48,7 +48,7 @@ fn _sandhi_mcp_build_request_a(a, method, params_json) {
     return sandhi_json_build_a(a, o);
 }
 
-fn _sandhi_mcp_build_request(method, params_json) {
+fn _sandhi_mcp_build_request(method, params_json): i64 {
     return _sandhi_mcp_build_request_a(default_alloc(), method, params_json);
 }
 
@@ -66,22 +66,22 @@ fn _sandhi_mcp_build_request(method, params_json) {
 # Returns an rpc-response struct. sandhi_rpc_ok(r) == 1 on success.
 # The response body is the full JSON-RPC response — caller navigates
 # `result.<field>` or `error.<field>` per protocol spec.
-fn sandhi_rpc_mcp_call_a(a, endpoint_url, method_name, params_json) {
+fn sandhi_rpc_mcp_call_a(a, endpoint_url, method_name, params_json): i64 {
     var body = _sandhi_mcp_build_request_a(a, method_name, params_json);
     return sandhi_rpc_call_a(a, endpoint_url, "POST", body, SANDHI_RPC_DIALECT_JSONRPC);
 }
 
-fn sandhi_rpc_mcp_call(endpoint_url, method_name, params_json) {
+fn sandhi_rpc_mcp_call(endpoint_url, method_name, params_json): i64 {
     return sandhi_rpc_mcp_call_a(default_alloc(), endpoint_url, method_name, params_json);
 }
 
 # Variant accepting caller-supplied headers (auth tokens etc.).
-fn sandhi_rpc_mcp_call_with_headers_a(a, endpoint_url, method_name, params_json, user_headers) {
+fn sandhi_rpc_mcp_call_with_headers_a(a, endpoint_url, method_name, params_json, user_headers): i64 {
     var body = _sandhi_mcp_build_request_a(a, method_name, params_json);
     return sandhi_rpc_call_with_headers_a(a, endpoint_url, "POST", body, user_headers, SANDHI_RPC_DIALECT_JSONRPC);
 }
 
-fn sandhi_rpc_mcp_call_with_headers(endpoint_url, method_name, params_json, user_headers) {
+fn sandhi_rpc_mcp_call_with_headers(endpoint_url, method_name, params_json, user_headers): i64 {
     return sandhi_rpc_mcp_call_with_headers_a(default_alloc(), endpoint_url, method_name, params_json, user_headers);
 }
 
@@ -93,13 +93,13 @@ fn sandhi_rpc_mcp_call_with_headers(endpoint_url, method_name, params_json, user
 # Returns 0 if the response didn't contain a result (e.g. was an error).
 # Callers doing protocol-level work (bote / t-ron) re-parse this into
 # the typed shape they want.
-fn sandhi_rpc_mcp_result_raw_a(a, resp) {
+fn sandhi_rpc_mcp_result_raw_a(a, resp): i64 {
     var body = sandhi_rpc_body(resp);
     if (body == 0) { return 0; }
     return sandhi_json_get_string_a(a, body, "result");
 }
 
-fn sandhi_rpc_mcp_result_raw(resp) {
+fn sandhi_rpc_mcp_result_raw(resp): i64 {
     return sandhi_rpc_mcp_result_raw_a(default_alloc(), resp);
 }
 
@@ -107,20 +107,20 @@ fn sandhi_rpc_mcp_result_raw(resp) {
 # (A legitimate error code of 0 is not defined by JSON-RPC 2.0 —
 # standard codes are -32600/-32601/-32602/-32603/-32700 plus
 # -32000..-32099 for implementation-defined.)
-fn sandhi_rpc_mcp_error_code(resp) {
+fn sandhi_rpc_mcp_error_code(resp): i64 {
     var body = sandhi_rpc_body(resp);
     if (body == 0) { return 0; }
     return sandhi_json_get_int(body, "error.code");
 }
 
 # Extract the JSON-RPC error message. Returns 0 if no error envelope.
-fn sandhi_rpc_mcp_error_message_a(a, resp) {
+fn sandhi_rpc_mcp_error_message_a(a, resp): i64 {
     var body = sandhi_rpc_body(resp);
     if (body == 0) { return 0; }
     return sandhi_json_get_string_a(a, body, "error.message");
 }
 
-fn sandhi_rpc_mcp_error_message(resp) {
+fn sandhi_rpc_mcp_error_message(resp): i64 {
     return sandhi_rpc_mcp_error_message_a(default_alloc(), resp);
 }
 
@@ -138,7 +138,7 @@ fn sandhi_rpc_mcp_error_message(resp) {
 # The callback receives `sandhi_sse_event` structs; `sandhi_sse_event_data(e)`
 # is the raw JSON payload the server pushed.
 
-fn sandhi_rpc_mcp_stream_a(a, endpoint_url, method_name, params_json, cb, ctx) {
+fn sandhi_rpc_mcp_stream_a(a, endpoint_url, method_name, params_json, cb, ctx): i64 {
     var body = _sandhi_mcp_build_request_a(a, method_name, params_json);
     # 1.2.6 OOM guard. `strlen(0)` would walk past 0; if the JSON
     # build OOM'd, bail. `sandhi_http_stream_a` returns a stream-
@@ -154,7 +154,7 @@ fn sandhi_rpc_mcp_stream_a(a, endpoint_url, method_name, params_json, cb, ctx) {
     return sandhi_http_stream_a(a, endpoint_url, "POST", headers, body, body_len, cb, ctx);
 }
 
-fn sandhi_rpc_mcp_stream(endpoint_url, method_name, params_json, cb, ctx) {
+fn sandhi_rpc_mcp_stream(endpoint_url, method_name, params_json, cb, ctx): i64 {
     return sandhi_rpc_mcp_stream_a(default_alloc(), endpoint_url, method_name, params_json, cb, ctx);
 }
 

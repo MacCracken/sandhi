@@ -4,6 +4,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.4] — 2026-05-11
+
+**Stdlib annotation pass + cyrius pin 5.10.34 → 5.11.4.**
+
+Every public fn across the 703-fn `src/` tree (http/, http/h2/,
+tls_policy/, net/, obs/, etc.) carries a `: i64` return-type
+annotation. Mechanical sed pass; 15 multi-line fn signatures
+hand-fixed (`_sandhi_http_do_a` family + `_sandhi_conn_open_*`
+family + `sandhi_h2_request_*` family). Parse-only, zero
+runtime / codegen change.
+
+`dist/sandhi.cyr` regenerated via `cyrius distlib` at v1.3.4
+(11598 lines). Ready for next cyrius-side fold-in slot.
+
+### Verified
+
+- `cyrius build programs/smoke.cyr build/sandhi-smoke`: green.
+- Dead-code report unchanged.
+
 ## [1.3.3] — 2026-05-10
 
 **Cred-strip-aware session-cache keying.** The 1.3.1 session

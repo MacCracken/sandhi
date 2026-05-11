@@ -30,7 +30,7 @@ var SANDHI_STREAM_RESULT_SIZE = 32;
 var _SANDHI_STREAM_READ_CHUNK = 16384;
 var _SANDHI_STREAM_BUF_CAP    = 262144;
 
-fn _sandhi_stream_result_a(a, status, events, err, stopped) {
+fn _sandhi_stream_result_a(a, status, events, err, stopped): i64 {
     var r = alloc_via(a, SANDHI_STREAM_RESULT_SIZE);
     if (r == 0) { return 0; }
     store64(r + SANDHI_STREAM_OFF_STATUS, status);
@@ -40,14 +40,14 @@ fn _sandhi_stream_result_a(a, status, events, err, stopped) {
     return r;
 }
 
-fn _sandhi_stream_result(status, events, err, stopped) {
+fn _sandhi_stream_result(status, events, err, stopped): i64 {
     return _sandhi_stream_result_a(default_alloc(), status, events, err, stopped);
 }
 
-fn sandhi_stream_status(r)  { return load64(r + SANDHI_STREAM_OFF_STATUS); }
-fn sandhi_stream_events(r)  { return load64(r + SANDHI_STREAM_OFF_EVENTS); }
-fn sandhi_stream_err(r)     { return load64(r + SANDHI_STREAM_OFF_ERR); }
-fn sandhi_stream_stopped(r) { return load64(r + SANDHI_STREAM_OFF_STOPPED); }
+fn sandhi_stream_status(r): i64 { return load64(r + SANDHI_STREAM_OFF_STATUS); }
+fn sandhi_stream_events(r): i64 { return load64(r + SANDHI_STREAM_OFF_EVENTS); }
+fn sandhi_stream_err(r): i64 { return load64(r + SANDHI_STREAM_OFF_ERR); }
+fn sandhi_stream_stopped(r): i64 { return load64(r + SANDHI_STREAM_OFF_STOPPED); }
 
 # ================================================================
 # Buffer helpers
@@ -63,7 +63,7 @@ enum SandhiStreamBufOff {
     SANDHI_SB_OFF_CAP = 16;
 }
 
-fn _sandhi_sb_new_a(a, cap) {
+fn _sandhi_sb_new_a(a, cap): i64 {
     var sb = alloc_via(a, 24);
     if (sb == 0) { return 0; }
     var buf = alloc_via(a, cap + 1);
@@ -74,17 +74,17 @@ fn _sandhi_sb_new_a(a, cap) {
     return sb;
 }
 
-fn _sandhi_sb_new(cap) {
+fn _sandhi_sb_new(cap): i64 {
     return _sandhi_sb_new_a(default_alloc(), cap);
 }
 
-fn _sandhi_sb_ptr(sb) { return load64(sb + SANDHI_SB_OFF_PTR); }
-fn _sandhi_sb_len(sb) { return load64(sb + SANDHI_SB_OFF_LEN); }
-fn _sandhi_sb_cap(sb) { return load64(sb + SANDHI_SB_OFF_CAP); }
+fn _sandhi_sb_ptr(sb): i64 { return load64(sb + SANDHI_SB_OFF_PTR); }
+fn _sandhi_sb_len(sb): i64 { return load64(sb + SANDHI_SB_OFF_LEN); }
+fn _sandhi_sb_cap(sb): i64 { return load64(sb + SANDHI_SB_OFF_CAP); }
 
 # Append `n` bytes from `src` onto the buffer. Returns 0 on success,
 # -1 on overflow (caller decides whether to grow or drop).
-fn _sandhi_sb_append(sb, src, n) {
+fn _sandhi_sb_append(sb, src, n): i64 {
     var len = _sandhi_sb_len(sb);
     var cap = _sandhi_sb_cap(sb);
     if (len + n > cap) { return 0 - 1; }
@@ -95,7 +95,7 @@ fn _sandhi_sb_append(sb, src, n) {
 }
 
 # Drop the first `n` bytes, shifting the remainder left.
-fn _sandhi_sb_consume(sb, n) {
+fn _sandhi_sb_consume(sb, n): i64 {
     var len = _sandhi_sb_len(sb);
     if (n <= 0) { return 0; }
     if (n >= len) {
@@ -114,7 +114,7 @@ fn _sandhi_sb_consume(sb, n) {
 
 # Find `\r\n\r\n` in sb. Returns byte offset just past the marker, or
 # -1 if not yet present.
-fn _sandhi_stream_headers_end(sb) {
+fn _sandhi_stream_headers_end(sb): i64 {
     var p = _sandhi_sb_ptr(sb);
     var n = _sandhi_sb_len(sb);
     var i = 0;
@@ -141,7 +141,7 @@ enum SandhiChunkOff {
     SANDHI_CHUNK_OFF_DONE = 8;
 }
 
-fn _sandhi_chunk_state_new_a(a) {
+fn _sandhi_chunk_state_new_a(a): i64 {
     var c = alloc_via(a, 16);
     if (c == 0) { return 0; }
     store64(c, 0 - 1);  # reading size
@@ -149,19 +149,19 @@ fn _sandhi_chunk_state_new_a(a) {
     return c;
 }
 
-fn _sandhi_chunk_state_new() {
+fn _sandhi_chunk_state_new(): i64 {
     return _sandhi_chunk_state_new_a(default_alloc());
 }
 
-fn _sandhi_chunk_rem(c)  { return load64(c + SANDHI_CHUNK_OFF_REM); }
-fn _sandhi_chunk_done(c) { return load64(c + SANDHI_CHUNK_OFF_DONE); }
+fn _sandhi_chunk_rem(c): i64 { return load64(c + SANDHI_CHUNK_OFF_REM); }
+fn _sandhi_chunk_done(c): i64 { return load64(c + SANDHI_CHUNK_OFF_DONE); }
 
-fn _sandhi_chunk_set_rem(c, v)  { store64(c + SANDHI_CHUNK_OFF_REM, v); return 0; }
-fn _sandhi_chunk_set_done(c, v) { store64(c + SANDHI_CHUNK_OFF_DONE, v); return 0; }
+fn _sandhi_chunk_set_rem(c, v): i64 { store64(c + SANDHI_CHUNK_OFF_REM, v); return 0; }
+fn _sandhi_chunk_set_done(c, v): i64 { store64(c + SANDHI_CHUNK_OFF_DONE, v); return 0; }
 
 # Parse one hex chunk-size line out of sb starting at offset 0.
 # Returns (size | (consumed_offset << 32)), or -1 if no complete line yet.
-fn _sandhi_chunk_parse_size(sb) {
+fn _sandhi_chunk_parse_size(sb): i64 {
     var p = _sandhi_sb_ptr(sb);
     var n = _sandhi_sb_len(sb);
     var size = 0;
@@ -194,7 +194,7 @@ fn _sandhi_chunk_parse_size(sb) {
 
 # Dispatch a vec of events. Returns the number dispatched successfully.
 # If the callback returns 0, stops and writes 1 into *stop_out.
-fn _sandhi_stream_dispatch(events, cb, ctx, stop_out) {
+fn _sandhi_stream_dispatch(events, cb, ctx, stop_out): i64 {
     var n = vec_len(events);
     var i = 0;
     var dispatched = 0;
@@ -214,7 +214,7 @@ fn _sandhi_stream_dispatch(events, cb, ctx, stop_out) {
 
 # Parse any complete SSE events currently in the body-buffer, dispatch
 # them, consume the parsed bytes. Updates total_events in-place.
-fn _sandhi_stream_feed_sse_a(a, body_buf, cb, ctx, total_events_ptr, stop_out) {
+fn _sandhi_stream_feed_sse_a(a, body_buf, cb, ctx, total_events_ptr, stop_out): i64 {
     var p = _sandhi_sb_ptr(body_buf);
     var n = _sandhi_sb_len(body_buf);
     if (n == 0) { return 0; }
@@ -229,7 +229,7 @@ fn _sandhi_stream_feed_sse_a(a, body_buf, cb, ctx, total_events_ptr, stop_out) {
     return 0;
 }
 
-fn _sandhi_stream_feed_sse(body_buf, cb, ctx, total_events_ptr, stop_out) {
+fn _sandhi_stream_feed_sse(body_buf, cb, ctx, total_events_ptr, stop_out): i64 {
     return _sandhi_stream_feed_sse_a(default_alloc(), body_buf, cb, ctx, total_events_ptr, stop_out);
 }
 
@@ -242,17 +242,17 @@ fn _sandhi_stream_feed_sse(body_buf, cb, ctx, total_events_ptr, stop_out) {
 # each parsed event. `method` is "GET" or "POST"; body may be 0.
 #
 # Returns a stream-result struct.
-fn sandhi_http_stream_a(a, url, method, user_headers, body, body_len, cb, ctx) {
+fn sandhi_http_stream_a(a, url, method, user_headers, body, body_len, cb, ctx): i64 {
     return sandhi_http_stream_opts_a(a, url, method, user_headers, body, body_len, cb, ctx, 0);
 }
 
-fn sandhi_http_stream(url, method, user_headers, body, body_len, cb, ctx) {
+fn sandhi_http_stream(url, method, user_headers, body, body_len, cb, ctx): i64 {
     return sandhi_http_stream_a(default_alloc(), url, method, user_headers, body, body_len, cb, ctx);
 }
 
 # Opts-aware variant — honors `max_response_bytes` for the stream
 # buffers (header drain, body accumulator, chunked-decode output).
-fn sandhi_http_stream_opts_a(a, url, method, user_headers, body, body_len, cb, ctx, opts) {
+fn sandhi_http_stream_opts_a(a, url, method, user_headers, body, body_len, cb, ctx, opts): i64 {
     var u = sandhi_url_parse_a(a, url);
     if (u == 0) { return _sandhi_stream_result_a(a, 0, 0, SANDHI_ERR_PARSE, 0); }
 
@@ -297,7 +297,7 @@ fn sandhi_http_stream_opts_a(a, url, method, user_headers, body, body_len, cb, c
     return _sandhi_stream_run_a(a, conn, req, body, body_len, cb, ctx, cap, deadline_ms);
 }
 
-fn sandhi_http_stream_opts(url, method, user_headers, body, body_len, cb, ctx, opts) {
+fn sandhi_http_stream_opts(url, method, user_headers, body, body_len, cb, ctx, opts): i64 {
     return sandhi_http_stream_opts_a(default_alloc(), url, method, user_headers, body, body_len, cb, ctx, opts);
 }
 
@@ -306,7 +306,7 @@ fn sandhi_http_stream_opts(url, method, user_headers, body, body_len, cb, ctx, o
 # (SO_RCVTIMEO / SO_SNDTIMEO) to SANDHI_ERR_TIMEOUT; any other I/O
 # fail maps to SANDHI_ERR_CONNECT. deadline_ms (0 = none) bounds the
 # overall stream lifetime — body-loop checks it between event reads.
-fn _sandhi_stream_run_a(a, conn, req, body, body_len, cb, ctx, cap, deadline_ms) {
+fn _sandhi_stream_run_a(a, conn, req, body, body_len, cb, ctx, cap, deadline_ms): i64 {
     var req_data = str_data(req);
     var req_len = strlen(req_data);
     var sw = sandhi_conn_send_all(conn, req_data, req_len);
@@ -334,13 +334,13 @@ fn _sandhi_stream_run_a(a, conn, req, body, body_len, cb, ctx, cap, deadline_ms)
     return out;
 }
 
-fn _sandhi_stream_run(conn, req, body, body_len, cb, ctx, cap, deadline_ms) {
+fn _sandhi_stream_run(conn, req, body, body_len, cb, ctx, cap, deadline_ms): i64 {
     return _sandhi_stream_run_a(default_alloc(), conn, req, body, body_len, cb, ctx, cap, deadline_ms);
 }
 
 # Read loop: drain headers, then feed body bytes through SSE parser.
 # Returns stream-result. Handles chunked or close-delimited bodies.
-fn _sandhi_stream_read_loop_a(a, conn, cb, ctx, cap, deadline_ms) {
+fn _sandhi_stream_read_loop_a(a, conn, cb, ctx, cap, deadline_ms): i64 {
     var header_sb = _sandhi_sb_new_a(a, cap);
     var scratch = alloc_via(a, _SANDHI_STREAM_READ_CHUNK);
     if (header_sb == 0 || scratch == 0) {
@@ -384,13 +384,13 @@ fn _sandhi_stream_read_loop_a(a, conn, cb, ctx, cap, deadline_ms) {
     return _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms);
 }
 
-fn _sandhi_stream_read_loop(conn, cb, ctx, cap, deadline_ms) {
+fn _sandhi_stream_read_loop(conn, cb, ctx, cap, deadline_ms): i64 {
     return _sandhi_stream_read_loop_a(default_alloc(), conn, cb, ctx, cap, deadline_ms);
 }
 
 # Body-loop: alternate "read more" + "decode + dispatch". Kept
 # compact — per-iteration work lives in helpers.
-fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms) {
+fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms): i64 {
     var total_events_cell = alloc_via(a, 8);
     var stop_cell = alloc_via(a, 8);
     if (total_events_cell == 0 || stop_cell == 0) {
@@ -437,7 +437,7 @@ fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ct
     return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_OK, load64(stop_cell));
 }
 
-fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms) {
+fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms): i64 {
     return _sandhi_stream_body_loop_a(
     default_alloc(), conn, body_sb, scratch, chunked, status,
     cb, ctx, cap, deadline_ms);
@@ -446,7 +446,7 @@ fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, ca
 # Decode as many chunked frames as possible out of `in_sb` into
 # `out_sb`. Advances chunk_state. Stops when a complete frame can't
 # be parsed or the terminal 0-chunk is seen.
-fn _sandhi_stream_decode_chunked_into(in_sb, chunk_state, out_sb) {
+fn _sandhi_stream_decode_chunked_into(in_sb, chunk_state, out_sb): i64 {
     var going = 1;
     while (going == 1) {
         var rem = _sandhi_chunk_rem(chunk_state);

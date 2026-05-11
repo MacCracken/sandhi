@@ -65,6 +65,6 @@
 # `cyrius/src/version_str.cyr`). VERSION is the only place a
 # developer edits the version string; the bump script regenerates
 # version_str.cyr in lockstep and CI fails the build if they drift.
-fn sandhi_version() {
+fn sandhi_version(): i64 {
     return SANDHI_VERSION;
 }

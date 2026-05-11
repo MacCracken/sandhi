@@ -11,3 +11,8 @@
 .env.*
 *.pem
 *.key
+
+# `lib/` is populated by `cyrius deps` from cyrius.cyml [deps] — a
+# build artifact, not source. Never commit; never replace with a
+# symlink to a cyrius checkout (see CLAUDE.md "Dependency wiring").
+/lib/

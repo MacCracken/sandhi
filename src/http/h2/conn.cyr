@@ -60,7 +60,7 @@ var _SANDHI_H2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 # subsequent table_add operations on the enc/dec tables route through
 # `a` via sandhi_hpack_table_add_a (Batch 2) so the dynamic-table
 # growth stays in the same allocator. Returns 0 on OOM.
-fn sandhi_h2_conn_new_a(a, sandhi_conn_ptr) {
+fn sandhi_h2_conn_new_a(a, sandhi_conn_ptr): i64 {
     var c = alloc_via(a, SANDHI_H2_CONN_STRUCT_SIZE);
     if (c == 0) { return 0; }
     store64(c + SANDHI_H2_CONN_OFF_CONN, sandhi_conn_ptr);
@@ -76,22 +76,22 @@ fn sandhi_h2_conn_new_a(a, sandhi_conn_ptr) {
     return c;
 }
 
-fn sandhi_h2_conn_new(sandhi_conn_ptr) {
+fn sandhi_h2_conn_new(sandhi_conn_ptr): i64 {
     return sandhi_h2_conn_new_a(default_alloc(), sandhi_conn_ptr);
 }
 
-fn sandhi_h2_conn_underlying(c) { return load64(c + SANDHI_H2_CONN_OFF_CONN); }
-fn sandhi_h2_conn_enc_table(c)  { return load64(c + SANDHI_H2_CONN_OFF_HPACK_ENC); }
-fn sandhi_h2_conn_dec_table(c)  { return load64(c + SANDHI_H2_CONN_OFF_HPACK_DEC); }
-fn sandhi_h2_conn_peer_max_frame(c)   { return load64(c + SANDHI_H2_CONN_OFF_PEER_FRAME); }
-fn sandhi_h2_conn_peer_max_streams(c) { return load64(c + SANDHI_H2_CONN_OFF_PEER_STREAMS); }
-fn sandhi_h2_conn_peer_init_window(c) { return load64(c + SANDHI_H2_CONN_OFF_PEER_WINDOW); }
-fn sandhi_h2_conn_goaway_received(c)  { return load64(c + SANDHI_H2_CONN_OFF_GOAWAY); }
+fn sandhi_h2_conn_underlying(c): i64 { return load64(c + SANDHI_H2_CONN_OFF_CONN); }
+fn sandhi_h2_conn_enc_table(c): i64 { return load64(c + SANDHI_H2_CONN_OFF_HPACK_ENC); }
+fn sandhi_h2_conn_dec_table(c): i64 { return load64(c + SANDHI_H2_CONN_OFF_HPACK_DEC); }
+fn sandhi_h2_conn_peer_max_frame(c): i64 { return load64(c + SANDHI_H2_CONN_OFF_PEER_FRAME); }
+fn sandhi_h2_conn_peer_max_streams(c): i64 { return load64(c + SANDHI_H2_CONN_OFF_PEER_STREAMS); }
+fn sandhi_h2_conn_peer_init_window(c): i64 { return load64(c + SANDHI_H2_CONN_OFF_PEER_WINDOW); }
+fn sandhi_h2_conn_goaway_received(c): i64 { return load64(c + SANDHI_H2_CONN_OFF_GOAWAY); }
 
 # Allocate the next odd stream-id for client-originated streams.
 # Returns the allocated id; advances the counter for next call. RFC
 # 7540 §5.1.1: client uses odd ids; ids monotonically increase.
-fn sandhi_h2_conn_next_stream_id(c) {
+fn sandhi_h2_conn_next_stream_id(c): i64 {
     var id = load64(c + SANDHI_H2_CONN_OFF_NEXT_SID);
     store64(c + SANDHI_H2_CONN_OFF_NEXT_SID, id + 2);
     return id;
@@ -111,7 +111,7 @@ fn sandhi_h2_conn_next_stream_id(c) {
 # Send a single h2 frame, allocating the 9-byte header buf from `a`.
 # Per-frame allocation; an arena reset between requests reclaims
 # every header buf accumulated within the request.
-fn sandhi_h2_conn_send_frame_a(a, c, type, flags, stream_id, payload, payload_len) {
+fn sandhi_h2_conn_send_frame_a(a, c, type, flags, stream_id, payload, payload_len): i64 {
     if (payload_len < 0) { return _SANDHI_H2_ERR_BAD_LENGTH; }
     if (payload_len > sandhi_h2_conn_peer_max_frame(c)) {
         return _SANDHI_H2_ERR_BAD_LENGTH;
@@ -132,7 +132,7 @@ fn sandhi_h2_conn_send_frame_a(a, c, type, flags, stream_id, payload, payload_le
     return 0;
 }
 
-fn sandhi_h2_conn_send_frame(c, type, flags, stream_id, payload, payload_len) {
+fn sandhi_h2_conn_send_frame(c, type, flags, stream_id, payload, payload_len): i64 {
     return sandhi_h2_conn_send_frame_a(default_alloc(), c, type, flags, stream_id, payload, payload_len);
 }
 
@@ -147,7 +147,7 @@ fn sandhi_h2_conn_send_frame(c, type, flags, stream_id, payload, payload_len) {
 # Receive one h2 frame into `a`. The hdr struct (via hdr_decode_a),
 # the 9-byte hbuf, and the variable-length payload buf all flow
 # through `a`; the result_out cells are caller-allocated.
-fn sandhi_h2_conn_recv_frame_a(a, c, result_out) {
+fn sandhi_h2_conn_recv_frame_a(a, c, result_out): i64 {
     var conn = sandhi_h2_conn_underlying(c);
     var hbuf = alloc_via(a, SANDHI_H2_FRAME_HEADER_SIZE);
     if (hbuf == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
@@ -169,7 +169,7 @@ fn sandhi_h2_conn_recv_frame_a(a, c, result_out) {
     return SANDHI_H2_FRAME_HEADER_SIZE + plen;
 }
 
-fn sandhi_h2_conn_recv_frame(c, result_out) {
+fn sandhi_h2_conn_recv_frame(c, result_out): i64 {
     return sandhi_h2_conn_recv_frame_a(default_alloc(), c, result_out);
 }
 
@@ -187,7 +187,7 @@ fn sandhi_h2_conn_recv_frame(c, result_out) {
 # SETTINGS, ACK it. The server will subsequently ACK ours (which we
 # observe in the regular frame loop, not synchronously here).
 
-fn sandhi_h2_conn_send_preface_and_settings_a(a, c) {
+fn sandhi_h2_conn_send_preface_and_settings_a(a, c): i64 {
     var conn = sandhi_h2_conn_underlying(c);
     if (sandhi_conn_send_all(conn, _SANDHI_H2_PREFACE, 24) < 0) {
         return _SANDHI_H2_ERR_TRUNCATED;
@@ -195,12 +195,12 @@ fn sandhi_h2_conn_send_preface_and_settings_a(a, c) {
     return sandhi_h2_conn_send_frame_a(a, c, SANDHI_H2_FRAME_SETTINGS, 0, 0, 0, 0);
 }
 
-fn sandhi_h2_conn_send_preface_and_settings(c) {
+fn sandhi_h2_conn_send_preface_and_settings(c): i64 {
     return sandhi_h2_conn_send_preface_and_settings_a(default_alloc(), c);
 }
 
 # Apply a single peer-SETTINGS pair. Updates h2 conn state per §6.5.2.
-fn _h2_conn_apply_setting(c, id, value) {
+fn _h2_conn_apply_setting(c, id, value): i64 {
     if (id == SANDHI_H2_SETTINGS_MAX_FRAME_SIZE) {
         store64(c + SANDHI_H2_CONN_OFF_PEER_FRAME, value);
     } elif (id == SANDHI_H2_SETTINGS_MAX_CONCURRENT_STREAMS) {
@@ -216,7 +216,7 @@ fn _h2_conn_apply_setting(c, id, value) {
 }
 
 # Parse a SETTINGS frame payload into pairs and apply each.
-fn sandhi_h2_conn_apply_settings_payload_a(a, c, payload, payload_len) {
+fn sandhi_h2_conn_apply_settings_payload_a(a, c, payload, payload_len): i64 {
     if (payload_len % 6 != 0) { return _SANDHI_H2_ERR_MALFORMED; }
     var off = 0;
     var id_cell = alloc_via(a, 8);
@@ -232,16 +232,16 @@ fn sandhi_h2_conn_apply_settings_payload_a(a, c, payload, payload_len) {
     return 0;
 }
 
-fn sandhi_h2_conn_apply_settings_payload(c, payload, payload_len) {
+fn sandhi_h2_conn_apply_settings_payload(c, payload, payload_len): i64 {
     return sandhi_h2_conn_apply_settings_payload_a(default_alloc(), c, payload, payload_len);
 }
 
-fn sandhi_h2_conn_send_settings_ack_a(a, c) {
+fn sandhi_h2_conn_send_settings_ack_a(a, c): i64 {
     return sandhi_h2_conn_send_frame_a(a, c,
     SANDHI_H2_FRAME_SETTINGS, SANDHI_H2_FLAG_ACK, 0, 0, 0);
 }
 
-fn sandhi_h2_conn_send_settings_ack(c) {
+fn sandhi_h2_conn_send_settings_ack(c): i64 {
     return sandhi_h2_conn_send_settings_ack_a(default_alloc(), c);
 }
 
@@ -249,7 +249,7 @@ fn sandhi_h2_conn_send_settings_ack(c) {
 # downstream recv_frame scratch from `a`. Recurses on the legal-but-
 # odd "peer-acks-before-sending" case; that recursion shares `a` so
 # all the per-handshake scratch lives in one allocator.
-fn sandhi_h2_conn_recv_peer_settings_a(a, c) {
+fn sandhi_h2_conn_recv_peer_settings_a(a, c): i64 {
     var result = alloc_via(a, 16);
     if (result == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
     var n = sandhi_h2_conn_recv_frame_a(a, c, result);
@@ -268,7 +268,7 @@ fn sandhi_h2_conn_recv_peer_settings_a(a, c) {
     return sandhi_h2_conn_send_settings_ack_a(a, c);
 }
 
-fn sandhi_h2_conn_recv_peer_settings(c) {
+fn sandhi_h2_conn_recv_peer_settings(c): i64 {
     return sandhi_h2_conn_recv_peer_settings_a(default_alloc(), c);
 }
 

@@ -18,7 +18,7 @@
 # Join base URL and a path. Handles trailing-slash presence or absence
 # on base. Path must start with '/'.
 # Join base + path into `a`. Returns 0 on OOM.
-fn _sandhi_wd_join_a(a, base, path) {
+fn _sandhi_wd_join_a(a, base, path): i64 {
     var blen = strlen(base);
     var plen = strlen(path);
     var has_trailing = 0;
@@ -35,14 +35,14 @@ fn _sandhi_wd_join_a(a, base, path) {
     return out;
 }
 
-fn _sandhi_wd_join(base, path) {
+fn _sandhi_wd_join(base, path): i64 {
     return _sandhi_wd_join_a(default_alloc(), base, path);
 }
 
 # Build base + "/session/{id}" + suffix into `a`. The trim-copy of the
 # base lives in `a`; the str_builder scratch still uses the global bump,
 # but the final cstr is dup'd into `a` so arena reset reclaims it.
-fn _sandhi_wd_session_url_a(a, base, session_id, suffix) {
+fn _sandhi_wd_session_url_a(a, base, session_id, suffix): i64 {
     var sb = str_builder_new();
     var blen = strlen(base);
     var has_trailing = 0;
@@ -64,7 +64,7 @@ fn _sandhi_wd_session_url_a(a, base, session_id, suffix) {
     return _sandhi_json_dup_a(a, str_data(str_builder_build(sb)));
 }
 
-fn _sandhi_wd_session_url(base, session_id, suffix) {
+fn _sandhi_wd_session_url(base, session_id, suffix): i64 {
     return _sandhi_wd_session_url_a(default_alloc(), base, session_id, suffix);
 }
 
@@ -84,7 +84,7 @@ fn _sandhi_wd_session_url(base, session_id, suffix) {
 # stay as back-compat wrappers passing `default_alloc()`. Each
 # `_a` threads `a` through the URL builder, the JSON body
 # builder, and `sandhi_rpc_call_a` (paired since 1.1.0).
-fn sandhi_wd_new_session_a(a, base_url, capabilities_json) {
+fn sandhi_wd_new_session_a(a, base_url, capabilities_json): i64 {
     var url = _sandhi_wd_join_a(a, base_url, "/session");
     var body = capabilities_json;
     if (body == 0) {
@@ -93,14 +93,14 @@ fn sandhi_wd_new_session_a(a, base_url, capabilities_json) {
     return sandhi_rpc_call_a(a, url, "POST", body, SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_new_session(base_url, capabilities_json) {
+fn sandhi_wd_new_session(base_url, capabilities_json): i64 {
     return sandhi_wd_new_session_a(default_alloc(), base_url, capabilities_json);
 }
 
 # Pull the session ID out of a new_session response body.
 # W3C: {"value":{"sessionId":"<id>","capabilities":{...}}}.
 # Returns alloc'd cstr or 0 if absent.
-fn sandhi_wd_extract_session_id_a(a, resp) {
+fn sandhi_wd_extract_session_id_a(a, resp): i64 {
     var body = sandhi_rpc_body(resp);
     if (body == 0) { return 0; }
     # Try W3C shape first, then pre-W3C fallback for older drivers.
@@ -109,17 +109,17 @@ fn sandhi_wd_extract_session_id_a(a, resp) {
     return sandhi_json_get_string_a(a, body, "sessionId");
 }
 
-fn sandhi_wd_extract_session_id(resp) {
+fn sandhi_wd_extract_session_id(resp): i64 {
     return sandhi_wd_extract_session_id_a(default_alloc(), resp);
 }
 
 # DELETE /session/{id} — end session.
-fn sandhi_wd_delete_session_a(a, base_url, session_id) {
+fn sandhi_wd_delete_session_a(a, base_url, session_id): i64 {
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, "");
     return sandhi_rpc_call_a(a, url, "DELETE", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_delete_session(base_url, session_id) {
+fn sandhi_wd_delete_session(base_url, session_id): i64 {
     return sandhi_wd_delete_session_a(default_alloc(), base_url, session_id);
 }
 
@@ -128,7 +128,7 @@ fn sandhi_wd_delete_session(base_url, session_id) {
 # ================================================================
 
 # POST /session/{id}/url — navigate the session to `target_url`.
-fn sandhi_wd_navigate_to_a(a, base_url, session_id, target_url) {
+fn sandhi_wd_navigate_to_a(a, base_url, session_id, target_url): i64 {
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, "/url");
     var body_obj = sandhi_json_obj_new_a(a);
     if (body_obj == 0) { return _sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0); }
@@ -136,27 +136,27 @@ fn sandhi_wd_navigate_to_a(a, base_url, session_id, target_url) {
     return sandhi_rpc_call_a(a, url, "POST", sandhi_json_build_a(a, body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_navigate_to(base_url, session_id, target_url) {
+fn sandhi_wd_navigate_to(base_url, session_id, target_url): i64 {
     return sandhi_wd_navigate_to_a(default_alloc(), base_url, session_id, target_url);
 }
 
 # GET /session/{id}/url — current URL. Extract via `value` path.
-fn sandhi_wd_get_url_a(a, base_url, session_id) {
+fn sandhi_wd_get_url_a(a, base_url, session_id): i64 {
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, "/url");
     return sandhi_rpc_call_a(a, url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_get_url(base_url, session_id) {
+fn sandhi_wd_get_url(base_url, session_id): i64 {
     return sandhi_wd_get_url_a(default_alloc(), base_url, session_id);
 }
 
 # GET /session/{id}/title — page title.
-fn sandhi_wd_get_title_a(a, base_url, session_id) {
+fn sandhi_wd_get_title_a(a, base_url, session_id): i64 {
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, "/title");
     return sandhi_rpc_call_a(a, url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_get_title(base_url, session_id) {
+fn sandhi_wd_get_title(base_url, session_id): i64 {
     return sandhi_wd_get_title_a(default_alloc(), base_url, session_id);
 }
 
@@ -170,7 +170,7 @@ fn sandhi_wd_get_title(base_url, session_id) {
 # references as {"element-6066-11e4-a52e-4f735466cecf":"<uuid>"}.
 
 # POST /session/{id}/element — find first element.
-fn sandhi_wd_find_element_a(a, base_url, session_id, strategy, selector) {
+fn sandhi_wd_find_element_a(a, base_url, session_id, strategy, selector): i64 {
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, "/element");
     var body_obj = sandhi_json_obj_new_a(a);
     if (body_obj == 0) { return _sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0); }
@@ -179,7 +179,7 @@ fn sandhi_wd_find_element_a(a, base_url, session_id, strategy, selector) {
     return sandhi_rpc_call_a(a, url, "POST", sandhi_json_build_a(a, body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_find_element(base_url, session_id, strategy, selector) {
+fn sandhi_wd_find_element(base_url, session_id, strategy, selector): i64 {
     return sandhi_wd_find_element_a(default_alloc(), base_url, session_id, strategy, selector);
 }
 
@@ -187,7 +187,7 @@ fn sandhi_wd_find_element(base_url, session_id, strategy, selector) {
 var _SANDHI_WD_ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
 
 # Pull the element ID out of a find_element response. Returns alloc'd cstr or 0.
-fn sandhi_wd_extract_element_id_a(a, resp) {
+fn sandhi_wd_extract_element_id_a(a, resp): i64 {
     var body = sandhi_rpc_body(resp);
     if (body == 0) { return 0; }
     var path = _sandhi_wd_build_path_a(a, "value.", _SANDHI_WD_ELEMENT_KEY);
@@ -197,11 +197,11 @@ fn sandhi_wd_extract_element_id_a(a, resp) {
     return sandhi_json_get_string_a(a, body, "value.ELEMENT");
 }
 
-fn sandhi_wd_extract_element_id(resp) {
+fn sandhi_wd_extract_element_id(resp): i64 {
     return sandhi_wd_extract_element_id_a(default_alloc(), resp);
 }
 
-fn _sandhi_wd_build_path_a(a, prefix, tail) {
+fn _sandhi_wd_build_path_a(a, prefix, tail): i64 {
     var sb = str_builder_new_a(a);
     if (sb == 0) { return 0; }
     str_builder_add_cstr_a(a, sb, prefix);
@@ -209,34 +209,34 @@ fn _sandhi_wd_build_path_a(a, prefix, tail) {
     return str_data(str_builder_build_a(a, sb));
 }
 
-fn _sandhi_wd_build_path(prefix, tail) {
+fn _sandhi_wd_build_path(prefix, tail): i64 {
     return _sandhi_wd_build_path_a(default_alloc(), prefix, tail);
 }
 
 # POST /session/{id}/element/{eid}/click
-fn sandhi_wd_element_click_a(a, base_url, session_id, element_id) {
+fn sandhi_wd_element_click_a(a, base_url, session_id, element_id): i64 {
     var suffix = _sandhi_wd_build_element_suffix_a(a, element_id, "/click");
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, suffix);
     return sandhi_rpc_call_a(a, url, "POST", "{}", SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_element_click(base_url, session_id, element_id) {
+fn sandhi_wd_element_click(base_url, session_id, element_id): i64 {
     return sandhi_wd_element_click_a(default_alloc(), base_url, session_id, element_id);
 }
 
 # GET /session/{id}/element/{eid}/text
-fn sandhi_wd_element_text_a(a, base_url, session_id, element_id) {
+fn sandhi_wd_element_text_a(a, base_url, session_id, element_id): i64 {
     var suffix = _sandhi_wd_build_element_suffix_a(a, element_id, "/text");
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, suffix);
     return sandhi_rpc_call_a(a, url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_element_text(base_url, session_id, element_id) {
+fn sandhi_wd_element_text(base_url, session_id, element_id): i64 {
     return sandhi_wd_element_text_a(default_alloc(), base_url, session_id, element_id);
 }
 
 # GET /session/{id}/element/{eid}/attribute/{name}
-fn sandhi_wd_element_attribute_a(a, base_url, session_id, element_id, attr_name) {
+fn sandhi_wd_element_attribute_a(a, base_url, session_id, element_id, attr_name): i64 {
     var sb = str_builder_new_a(a);
     if (sb == 0) { return _sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0); }
     str_builder_add_cstr_a(a, sb, "/element/");
@@ -248,12 +248,12 @@ fn sandhi_wd_element_attribute_a(a, base_url, session_id, element_id, attr_name)
     return sandhi_rpc_call_a(a, url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_element_attribute(base_url, session_id, element_id, attr_name) {
+fn sandhi_wd_element_attribute(base_url, session_id, element_id, attr_name): i64 {
     return sandhi_wd_element_attribute_a(default_alloc(), base_url, session_id, element_id, attr_name);
 }
 
 # POST /session/{id}/element/{eid}/value — type text into an element.
-fn sandhi_wd_element_send_keys_a(a, base_url, session_id, element_id, text) {
+fn sandhi_wd_element_send_keys_a(a, base_url, session_id, element_id, text): i64 {
     var suffix = _sandhi_wd_build_element_suffix_a(a, element_id, "/value");
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, suffix);
     var body_obj = sandhi_json_obj_new_a(a);
@@ -262,11 +262,11 @@ fn sandhi_wd_element_send_keys_a(a, base_url, session_id, element_id, text) {
     return sandhi_rpc_call_a(a, url, "POST", sandhi_json_build_a(a, body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_element_send_keys(base_url, session_id, element_id, text) {
+fn sandhi_wd_element_send_keys(base_url, session_id, element_id, text): i64 {
     return sandhi_wd_element_send_keys_a(default_alloc(), base_url, session_id, element_id, text);
 }
 
-fn _sandhi_wd_build_element_suffix_a(a, element_id, tail) {
+fn _sandhi_wd_build_element_suffix_a(a, element_id, tail): i64 {
     var sb = str_builder_new_a(a);
     if (sb == 0) { return 0; }
     str_builder_add_cstr_a(a, sb, "/element/");
@@ -275,7 +275,7 @@ fn _sandhi_wd_build_element_suffix_a(a, element_id, tail) {
     return str_data(str_builder_build_a(a, sb));
 }
 
-fn _sandhi_wd_build_element_suffix(element_id, tail) {
+fn _sandhi_wd_build_element_suffix(element_id, tail): i64 {
     return _sandhi_wd_build_element_suffix_a(default_alloc(), element_id, tail);
 }
 
@@ -284,18 +284,18 @@ fn _sandhi_wd_build_element_suffix(element_id, tail) {
 # ================================================================
 
 # GET /status — driver readiness. Doesn't need a session ID.
-fn sandhi_wd_status_a(a, base_url) {
+fn sandhi_wd_status_a(a, base_url): i64 {
     var url = _sandhi_wd_join_a(a, base_url, "/status");
     return sandhi_rpc_call_a(a, url, "GET", 0, SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_status(base_url) {
+fn sandhi_wd_status(base_url): i64 {
     return sandhi_wd_status_a(default_alloc(), base_url);
 }
 
 # POST /session/{id}/execute/sync — run JS synchronously. `args_json`
 # is a pre-built JSON array cstr (may be "[]"). `script` is the JS src.
-fn sandhi_wd_execute_script_a(a, base_url, session_id, script, args_json) {
+fn sandhi_wd_execute_script_a(a, base_url, session_id, script, args_json): i64 {
     var url = _sandhi_wd_session_url_a(a, base_url, session_id, "/execute/sync");
     var body_obj = sandhi_json_obj_new_a(a);
     if (body_obj == 0) { return _sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0); }
@@ -308,7 +308,7 @@ fn sandhi_wd_execute_script_a(a, base_url, session_id, script, args_json) {
     return sandhi_rpc_call_a(a, url, "POST", sandhi_json_build_a(a, body_obj), SANDHI_RPC_DIALECT_WEBDRIVER);
 }
 
-fn sandhi_wd_execute_script(base_url, session_id, script, args_json) {
+fn sandhi_wd_execute_script(base_url, session_id, script, args_json): i64 {
     return sandhi_wd_execute_script_a(default_alloc(), base_url, session_id, script, args_json);
 }
 

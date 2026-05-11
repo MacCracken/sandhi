@@ -52,12 +52,12 @@ var SANDHI_RESP_STRUCT_SIZE = 48;
 
 # Public accessors. Same rationale as URL accessors — lets us reshape
 # the struct without churning call sites.
-fn sandhi_http_status(r)       { return load64(r + SANDHI_RESP_OFF_STATUS); }
-fn sandhi_http_body(r)         { return load64(r + SANDHI_RESP_OFF_BODY_PTR); }
-fn sandhi_http_body_len(r)     { return load64(r + SANDHI_RESP_OFF_BODY_LEN); }
-fn sandhi_http_headers(r)      { return load64(r + SANDHI_RESP_OFF_HEADERS); }
-fn sandhi_http_err_kind(r)     { return load64(r + SANDHI_RESP_OFF_ERR_KIND); }
-fn sandhi_http_err_message(r)  { return load64(r + SANDHI_RESP_OFF_ERR_MSG); }
+fn sandhi_http_status(r): i64 { return load64(r + SANDHI_RESP_OFF_STATUS); }
+fn sandhi_http_body(r): i64 { return load64(r + SANDHI_RESP_OFF_BODY_PTR); }
+fn sandhi_http_body_len(r): i64 { return load64(r + SANDHI_RESP_OFF_BODY_LEN); }
+fn sandhi_http_headers(r): i64 { return load64(r + SANDHI_RESP_OFF_HEADERS); }
+fn sandhi_http_err_kind(r): i64 { return load64(r + SANDHI_RESP_OFF_ERR_KIND); }
+fn sandhi_http_err_message(r): i64 { return load64(r + SANDHI_RESP_OFF_ERR_MSG); }
 
 # Build a response struct in one shot, allocated from `a`. Returns 0
 # on OOM. This is THE central constructor — every public client verb
@@ -65,7 +65,7 @@ fn sandhi_http_err_message(r)  { return load64(r + SANDHI_RESP_OFF_ERR_MSG); }
 # through is the foundation of the per-request-arena pattern: a
 # handler can build everything (headers, body, struct) into one arena
 # and reset between requests.
-fn _sandhi_resp_new_a(a, status, body_ptr, body_len, headers, err_kind) {
+fn _sandhi_resp_new_a(a, status, body_ptr, body_len, headers, err_kind): i64 {
     var r = alloc_via(a, SANDHI_RESP_STRUCT_SIZE);
     if (r == 0) { return 0; }
     store64(r + SANDHI_RESP_OFF_STATUS, status);
@@ -77,36 +77,36 @@ fn _sandhi_resp_new_a(a, status, body_ptr, body_len, headers, err_kind) {
     return r;
 }
 
-fn _sandhi_resp_new(status, body_ptr, body_len, headers, err_kind) {
+fn _sandhi_resp_new(status, body_ptr, body_len, headers, err_kind): i64 {
     return _sandhi_resp_new_a(default_alloc(), status, body_ptr, body_len, headers, err_kind);
 }
 
 # Error-response shortcut from `a`. Headers is always an empty block
 # (never 0) so downstream code can iterate without null-checking.
-fn _sandhi_resp_err_a(a, err_kind) {
+fn _sandhi_resp_err_a(a, err_kind): i64 {
     return _sandhi_resp_new_a(a, 0, 0, 0, sandhi_headers_new_a(a), err_kind);
 }
 
-fn _sandhi_resp_err(err_kind) {
+fn _sandhi_resp_err(err_kind): i64 {
     return _sandhi_resp_err_a(default_alloc(), err_kind);
 }
 
 # Error-response with a caller-supplied context message. The parser
 # still uses `_sandhi_resp_err_a` for today's failure modes — this is
 # the escape hatch for the 0.8.x security pass diagnostics.
-fn _sandhi_resp_err_msg_a(a, err_kind, msg) {
+fn _sandhi_resp_err_msg_a(a, err_kind, msg): i64 {
     var r = _sandhi_resp_err_a(a, err_kind);
     if (r == 0) { return 0; }
     store64(r + SANDHI_RESP_OFF_ERR_MSG, msg);
     return r;
 }
 
-fn _sandhi_resp_err_msg(err_kind, msg) {
+fn _sandhi_resp_err_msg(err_kind, msg): i64 {
     return _sandhi_resp_err_msg_a(default_alloc(), err_kind, msg);
 }
 
 # Parse status line. Returns the int status code, or 0 on malformed.
-fn _sandhi_resp_status(buf, blen) {
+fn _sandhi_resp_status(buf, blen): i64 {
     if (blen < 12) { return 0; }
     # "HTTP/1.x NNN ..."
     if (load8(buf) != 72)  { return 0; }  # H
@@ -126,7 +126,7 @@ fn _sandhi_resp_status(buf, blen) {
 
 # Find the offset of the end-of-headers marker (\r\n\r\n). Returns
 # (0 - 1) if not present — the buffer is incomplete.
-fn _sandhi_resp_headers_end(buf, blen) {
+fn _sandhi_resp_headers_end(buf, blen): i64 {
     var i = 0;
     while (i + 3 < blen) {
         if (load8(buf + i) == 13
@@ -147,7 +147,7 @@ fn _sandhi_resp_headers_end(buf, blen) {
 }
 
 # Offset of the first CR or LF from `start`, bounded by `end`.
-fn _sandhi_resp_eol(buf, start, end) {
+fn _sandhi_resp_eol(buf, start, end): i64 {
     var i = start;
     while (i < end) {
         var c = load8(buf + i);
@@ -174,7 +174,7 @@ fn _sandhi_resp_eol(buf, start, end) {
 #     itself approached i63.
 var _SANDHI_RESP_CHUNK_BAD     = 0 - 1;
 var _SANDHI_RESP_CHUNK_MAX     = 0x7FFFFFFF;
-fn _sandhi_resp_chunk_size(buf, blen, offset_ptr) {
+fn _sandhi_resp_chunk_size(buf, blen, offset_ptr): i64 {
     var p = load64(offset_ptr);
     var size = 0;
     var seen_digit = 0;
@@ -209,7 +209,7 @@ fn _sandhi_resp_chunk_size(buf, blen, offset_ptr) {
 # truncation) as success. This silently truncated bodies. Now we
 # track `saw_terminal` and propagate `_BAD` from chunk_size, so a
 # clean stream end is the only way to claim success.
-fn _sandhi_resp_decode_chunked_a(a, buf, blen, start, body_out_ptr, body_len_ptr, headers) {
+fn _sandhi_resp_decode_chunked_a(a, buf, blen, start, body_out_ptr, body_len_ptr, headers): i64 {
     var cap = blen - start;
     if (cap < 1) { cap = 1; }
     var out = alloc_via(a, cap + 1);
@@ -260,13 +260,13 @@ fn _sandhi_resp_decode_chunked_a(a, buf, blen, start, body_out_ptr, body_len_ptr
     return 0;
 }
 
-fn _sandhi_resp_decode_chunked(buf, blen, start, body_out_ptr, body_len_ptr, headers) {
+fn _sandhi_resp_decode_chunked(buf, blen, start, body_out_ptr, body_len_ptr, headers): i64 {
     return _sandhi_resp_decode_chunked_a(default_alloc(), buf, blen, start, body_out_ptr, body_len_ptr, headers);
 }
 
 # Case-insensitive cstr equality. Local to response.cyr because
 # client.cyr's identical helper sits later in the build order.
-fn _sandhi_resp_streq_ci(a, b) {
+fn _sandhi_resp_streq_ci(a, b): i64 {
     if (a == 0 || b == 0) { return 0; }
     var i = 0;
     while (1 == 1) {
@@ -286,7 +286,7 @@ fn _sandhi_resp_streq_ci(a, b) {
 # fact that the recipient already committed to a body framing) or
 # (b) they modify the trailer parsing itself. Returns 1 if `name`
 # (case-insensitive) is on the forbidden list, 0 otherwise.
-fn _sandhi_resp_trailer_forbidden(name) {
+fn _sandhi_resp_trailer_forbidden(name): i64 {
     if (_sandhi_resp_streq_ci(name, "Transfer-Encoding") == 1) { return 1; }
     if (_sandhi_resp_streq_ci(name, "Content-Length") == 1)    { return 1; }
     if (_sandhi_resp_streq_ci(name, "Host") == 1)              { return 1; }
@@ -327,7 +327,7 @@ fn _sandhi_resp_trailer_forbidden(name) {
 # Tolerant: returns silently on malformed bytes — trailer parsing
 # is best-effort. The body has already been delivered correctly;
 # trailer drops only affect metadata visibility.
-fn _sandhi_resp_merge_trailers_a(a, buf, blen, start, headers) {
+fn _sandhi_resp_merge_trailers_a(a, buf, blen, start, headers): i64 {
     var off = start;
     var safety = 0;
     while (off < blen && safety < 256) {
@@ -382,12 +382,12 @@ fn _sandhi_resp_merge_trailers_a(a, buf, blen, start, headers) {
     return 0;
 }
 
-fn _sandhi_resp_merge_trailers(buf, blen, start, headers) {
+fn _sandhi_resp_merge_trailers(buf, blen, start, headers): i64 {
     return _sandhi_resp_merge_trailers_a(default_alloc(), buf, blen, start, headers);
 }
 
 # 1 if the headers block declares Transfer-Encoding: chunked.
-fn _sandhi_resp_is_chunked(headers) {
+fn _sandhi_resp_is_chunked(headers): i64 {
     var te = sandhi_headers_get(headers, "Transfer-Encoding");
     if (te == 0) { return 0; }
     var i = 0;
@@ -415,7 +415,7 @@ fn _sandhi_resp_is_chunked(headers) {
 # like `"10, 20"` would parse as 1020 — different from any sane
 # parser's reading. That kind of disagreement is the CL.CL leg of
 # the smuggling triad (CL.TE handled in 0.9.0 P0 #2).
-fn _sandhi_resp_parse_clen(v) {
+fn _sandhi_resp_parse_clen(v): i64 {
     if (v == 0) { return 0; }
     var i = 0;
     # Skip leading whitespace.
@@ -438,7 +438,7 @@ fn _sandhi_resp_parse_clen(v) {
 
 # Copy `len` bytes starting at `buf+start` into a fresh null-terminated
 # cstr allocated from `a`. Returns 0 on OOM.
-fn _sandhi_resp_body_copy_a(a, buf, start, len) {
+fn _sandhi_resp_body_copy_a(a, buf, start, len): i64 {
     if (len < 0) { len = 0; }
     var out = alloc_via(a, len + 1);
     if (out == 0) { return 0; }
@@ -447,7 +447,7 @@ fn _sandhi_resp_body_copy_a(a, buf, start, len) {
     return out;
 }
 
-fn _sandhi_resp_body_copy(buf, start, len) {
+fn _sandhi_resp_body_copy(buf, start, len): i64 {
     return _sandhi_resp_body_copy_a(default_alloc(), buf, start, len);
 }
 
@@ -465,7 +465,7 @@ fn _sandhi_resp_body_copy(buf, start, len) {
 # refusal rather than a silently-truncated or silently-extended body.
 # Frame the body using `a` for every per-response allocation: chunked
 # scratch cells, body-copy buffers, and the response struct itself.
-fn _sandhi_resp_frame_a(a, buf, blen, status, headers, body_start) {
+fn _sandhi_resp_frame_a(a, buf, blen, status, headers, body_start): i64 {
     var body_ptr = 0;
     var body_len = 0;
     var chunked = _sandhi_resp_is_chunked(headers);
@@ -514,7 +514,7 @@ fn _sandhi_resp_frame_a(a, buf, blen, status, headers, body_start) {
     return _sandhi_resp_new_a(a, status, body_ptr, body_len, headers, SANDHI_OK);
 }
 
-fn _sandhi_resp_frame(buf, blen, status, headers, body_start) {
+fn _sandhi_resp_frame(buf, blen, status, headers, body_start): i64 {
     return _sandhi_resp_frame_a(default_alloc(), buf, blen, status, headers, body_start);
 }
 
@@ -523,7 +523,7 @@ fn _sandhi_resp_frame(buf, blen, status, headers, body_start) {
 # in one shot. Returns a response struct (never 0 — even on parse
 # failure the err-response is allocated from `a`); the caller can
 # detect parse failure via sandhi_http_err_kind.
-fn sandhi_http_response_parse_a(a, buf, blen) {
+fn sandhi_http_response_parse_a(a, buf, blen): i64 {
     if (buf == 0 || blen <= 0) {
         return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL);
     }
@@ -554,7 +554,7 @@ fn sandhi_http_response_parse_a(a, buf, blen) {
     return _sandhi_resp_frame_a(a, buf, blen, status, headers, body_start);
 }
 
-fn sandhi_http_response_parse(buf, blen) {
+fn sandhi_http_response_parse(buf, blen): i64 {
     return sandhi_http_response_parse_a(default_alloc(), buf, blen);
 }
 

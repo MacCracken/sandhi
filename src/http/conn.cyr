@@ -117,7 +117,7 @@ var _sandhi_alpn_resolved   = 0;
 # Build the per-process ALPN wire buffers. Always allocates from
 # `default_alloc()` — these are process-wide singletons read on every
 # TLS handshake, so they must outlive any per-request arena.
-fn _sandhi_alpn_init_wire() {
+fn _sandhi_alpn_init_wire(): i64 {
     if (_sandhi_alpn_h11_wire != 0) { return 0; }
     var ga = default_alloc();
     # http/1.1 only:  08 h t t p / 1 . 1
@@ -150,7 +150,7 @@ fn _sandhi_alpn_init_wire() {
     return 0;
 }
 
-fn _sandhi_alpn_resolve_fns() {
+fn _sandhi_alpn_resolve_fns(): i64 {
     if (_sandhi_alpn_resolved == 1) { return 0; }
     _sandhi_alpn_get0_fp = tls_dlsym("SSL_get0_alpn_selected");
     _sandhi_alpn_resolved = 1;
@@ -169,7 +169,7 @@ fn _sandhi_alpn_resolve_fns() {
 # transport ever swaps, sandhi rides the contract not the symbol.
 # We tolerate `tls_set_alpn` failure (returns non-zero) — connection
 # without ALPN is still useful, same shape as a plain-text fallback.
-fn _sandhi_alpn_hook(hook_ctx, ssl_ctx) {
+fn _sandhi_alpn_hook(hook_ctx, ssl_ctx): i64 {
     var protos = load64(hook_ctx);
     var plen   = load64(hook_ctx + 8);
     tls_set_alpn(ssl_ctx, protos, plen);
@@ -189,7 +189,7 @@ fn _sandhi_alpn_hook(hook_ctx, ssl_ctx) {
 # (out_p / out_l) are short-lived; the returned cstr lives on the
 # conn struct, so it inherits the conn's lifetime — when the conn was
 # allocated from an arena, the ALPN slot lives in the same arena.
-fn _sandhi_alpn_read_selected_a(a, tls_ctx) {
+fn _sandhi_alpn_read_selected_a(a, tls_ctx): i64 {
     _sandhi_alpn_resolve_fns();
     if (_sandhi_alpn_get0_fp == 0) { return 0; }
     if (tls_ctx == 0) { return 0; }
@@ -215,7 +215,7 @@ fn _sandhi_alpn_read_selected_a(a, tls_ctx) {
     return copy;
 }
 
-fn _sandhi_alpn_read_selected(tls_ctx) {
+fn _sandhi_alpn_read_selected(tls_ctx): i64 {
     return _sandhi_alpn_read_selected_a(default_alloc(), tls_ctx);
 }
 
@@ -263,13 +263,13 @@ enum SandhiConnOpenErr {
     SANDHI_CONN_OPEN_TLS       = 3;
 }
 
-fn sandhi_conn_last_open_err() {
+fn sandhi_conn_last_open_err(): i64 {
     return _sandhi_conn_last_err;
 }
 
-fn sandhi_conn_kind(c)    { return load64(c + SANDHI_CONN_OFF_KIND); }
-fn sandhi_conn_fd(c)      { return load64(c + SANDHI_CONN_OFF_FD); }
-fn sandhi_conn_tls_ctx(c) { return load64(c + SANDHI_CONN_OFF_TLS_CTX); }
+fn sandhi_conn_kind(c): i64 { return load64(c + SANDHI_CONN_OFF_KIND); }
+fn sandhi_conn_fd(c): i64 { return load64(c + SANDHI_CONN_OFF_FD); }
+fn sandhi_conn_tls_ctx(c): i64 { return load64(c + SANDHI_CONN_OFF_TLS_CTX); }
 
 # 1.3.2 — 0-RTT acceptance status. Returns one of:
 #   TLS_EARLY_DATA_NOT_SENT (0) — no 0-RTT attempted, OR conn is
@@ -278,7 +278,7 @@ fn sandhi_conn_tls_ctx(c) { return load64(c + SANDHI_CONN_OFF_TLS_CTX); }
 #                                 must resend via `tls_write`
 #   TLS_EARLY_DATA_ACCEPTED (2) — server accepted; exchange path
 #                                 skips send, jumps to recv
-fn sandhi_conn_0rtt_status(c) {
+fn sandhi_conn_0rtt_status(c): i64 {
     if (c == 0) { return 0; }
     return load64(c + SANDHI_CONN_OFF_0RTT_STATUS);
 }
@@ -286,7 +286,7 @@ fn sandhi_conn_0rtt_status(c) {
 # Set SO_RCVTIMEO or SO_SNDTIMEO to `ms` milliseconds. Value is a
 # `struct timeval { tv_sec: i64, tv_usec: i64 }` = 16 bytes on
 # x86_64 / aarch64 Linux. ms<=0 is a no-op.
-fn _sandhi_conn_set_timeout_ms_a(a, fd, ms, opt) {
+fn _sandhi_conn_set_timeout_ms_a(a, fd, ms, opt): i64 {
     if (ms <= 0) { return 0; }
     var tv = alloc_via(a, 16);
     if (tv == 0) { return 0 - 1; }
@@ -297,7 +297,7 @@ fn _sandhi_conn_set_timeout_ms_a(a, fd, ms, opt) {
     return syscall(SYS_SETSOCKOPT, fd, SOL_SOCKET, opt, tv, 16);
 }
 
-fn _sandhi_conn_set_timeout_ms(fd, ms, opt) {
+fn _sandhi_conn_set_timeout_ms(fd, ms, opt): i64 {
     return _sandhi_conn_set_timeout_ms_a(default_alloc(), fd, ms, opt);
 }
 
@@ -321,7 +321,7 @@ fn _sandhi_conn_set_timeout_ms(fd, ms, opt) {
 #   _SANDHI_CONN_NB_TIMEOUT (-2) — poll timed out waiting for completion
 #   _SANDHI_CONN_NB_ERR     (-1) — any other failure (fcntl, immediate
 #                                  connect err, SO_ERROR non-zero)
-fn _sandhi_conn_connect_nb_a(a, fd, addr, port, timeout_ms) {
+fn _sandhi_conn_connect_nb_a(a, fd, addr, port, timeout_ms): i64 {
     var flags = syscall(SYS_FCNTL, fd, _SANDHI_F_GETFL, 0);
     if (flags < 0) { return _SANDHI_CONN_NB_ERR; }
     syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags | _SANDHI_O_NONBLOCK);
@@ -375,15 +375,15 @@ fn _sandhi_conn_connect_nb_a(a, fd, addr, port, timeout_ms) {
     return _SANDHI_CONN_NB_OK;
 }
 
-fn _sandhi_conn_connect_nb(fd, addr, port, timeout_ms) {
+fn _sandhi_conn_connect_nb(fd, addr, port, timeout_ms): i64 {
     return _sandhi_conn_connect_nb_a(default_alloc(), fd, addr, port, timeout_ms);
 }
 
-fn sandhi_conn_open_a(a, addr, port, use_tls, sni_host) {
+fn sandhi_conn_open_a(a, addr, port, use_tls, sni_host): i64 {
     return sandhi_conn_open_timed_a(a, addr, port, use_tls, sni_host, 0, 0);
 }
 
-fn sandhi_conn_open(addr, port, use_tls, sni_host) {
+fn sandhi_conn_open(addr, port, use_tls, sni_host): i64 {
     return sandhi_conn_open_a(default_alloc(), addr, port, use_tls, sni_host);
 }
 
@@ -396,11 +396,11 @@ fn sandhi_conn_open(addr, port, use_tls, sni_host) {
 # On a timeout during recv/send, the underlying syscall returns
 # EAGAIN (-11). sandhi_conn_recv/send convert that to -_SANDHI_EAGAIN
 # so callers can distinguish "connection broke" from "deadline fired".
-fn sandhi_conn_open_timed_a(a, addr, port, use_tls, sni_host, read_ms, write_ms) {
+fn sandhi_conn_open_timed_a(a, addr, port, use_tls, sni_host, read_ms, write_ms): i64 {
     return sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, sni_host, 0, read_ms, write_ms);
 }
 
-fn sandhi_conn_open_timed(addr, port, use_tls, sni_host, read_ms, write_ms) {
+fn sandhi_conn_open_timed(addr, port, use_tls, sni_host, read_ms, write_ms): i64 {
     return sandhi_conn_open_timed_a(default_alloc(), addr, port, use_tls, sni_host, read_ms, write_ms);
 }
 
@@ -412,7 +412,7 @@ fn sandhi_conn_open_timed(addr, port, use_tls, sni_host, read_ms, write_ms) {
 # Build a sockaddr_in6 (28 bytes) from a 16-byte address buffer +
 # port. Caller-owned alloc. Layout matches Linux uapi
 # /usr/include/linux/in6.h.
-fn _sandhi_conn_sockaddr_in6_a(a, addr16, port) {
+fn _sandhi_conn_sockaddr_in6_a(a, addr16, port): i64 {
     var sa = alloc_via(a, 28);
     if (sa == 0) { return 0; }
     memset(sa, 0, 28);
@@ -429,7 +429,7 @@ fn _sandhi_conn_sockaddr_in6_a(a, addr16, port) {
     return sa;
 }
 
-fn _sandhi_conn_sockaddr_in6(addr16, port) {
+fn _sandhi_conn_sockaddr_in6(addr16, port): i64 {
     return _sandhi_conn_sockaddr_in6_a(default_alloc(), addr16, port);
 }
 
@@ -447,7 +447,7 @@ fn _sandhi_conn_sockaddr_in6(addr16, port) {
 # non-blocking, fires connect, polls POLLOUT, restores blocking.
 # Returns _SANDHI_CONN_NB_OK / _TIMEOUT / _ERR matching the v4-only
 # variant.
-fn _sandhi_conn_connect_sa_nb_a(a, fd, sa, salen, timeout_ms) {
+fn _sandhi_conn_connect_sa_nb_a(a, fd, sa, salen, timeout_ms): i64 {
     var flags = syscall(SYS_FCNTL, fd, _SANDHI_F_GETFL, 0);
     if (flags < 0) { return _SANDHI_CONN_NB_ERR; }
     syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags | _SANDHI_O_NONBLOCK);
@@ -494,7 +494,7 @@ fn _sandhi_conn_connect_sa_nb_a(a, fd, sa, salen, timeout_ms) {
     return _SANDHI_CONN_NB_OK;
 }
 
-fn _sandhi_conn_connect_sa_nb(fd, sa, salen, timeout_ms) {
+fn _sandhi_conn_connect_sa_nb(fd, sa, salen, timeout_ms): i64 {
     return _sandhi_conn_connect_sa_nb_a(default_alloc(), fd, sa, salen, timeout_ms);
 }
 
@@ -508,7 +508,7 @@ fn _sandhi_conn_connect_sa_nb(fd, sa, salen, timeout_ms) {
 # in `a`. The wire literals themselves are process-wide singletons
 # (see _sandhi_alpn_init_wire).
 fn _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
-read_ms, write_ms, early_data, early_data_len) {
+read_ms, write_ms, early_data, early_data_len): i64 {
     if (read_ms > 0)  { _sandhi_conn_set_timeout_ms_a(a, fd, read_ms,  _SANDHI_SO_RCVTIMEO); }
     if (write_ms > 0) { _sandhi_conn_set_timeout_ms_a(a, fd, write_ms, _SANDHI_SO_SNDTIMEO); }
 
@@ -614,12 +614,12 @@ read_ms, write_ms, early_data, early_data_len) {
 }
 
 # Back-compat wrapper — pre-1.3.2 callers don't pass early-data.
-fn _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms) {
+fn _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms): i64 {
     return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
     read_ms, write_ms, 0, 0);
 }
 
-fn _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms) {
+fn _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms): i64 {
     return _sandhi_conn_finalize_a(default_alloc(), fd, use_tls, sni_host, read_ms, write_ms);
 }
 
@@ -628,7 +628,7 @@ fn _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms) {
 # client tries v6 fallback through this path. `addr16` is a
 # 16-byte network-byte-order AAAA address buffer (e.g. from
 # sandhi_resolve_ipv6).
-fn _sandhi_conn_open_v6_fully_timed_a(a, addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
+fn _sandhi_conn_open_v6_fully_timed_a(a, addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
     _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
     if (addr16 == 0) {
         _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
@@ -660,7 +660,7 @@ fn _sandhi_conn_open_v6_fully_timed_a(a, addr16, port, use_tls, sni_host, connec
     return _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms);
 }
 
-fn _sandhi_conn_open_v6_fully_timed(addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
+fn _sandhi_conn_open_v6_fully_timed(addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
     return _sandhi_conn_open_v6_fully_timed_a(
     default_alloc(), addr16, port, use_tls, sni_host,
     connect_ms, read_ms, write_ms);
@@ -668,7 +668,7 @@ fn _sandhi_conn_open_v6_fully_timed(addr16, port, use_tls, sni_host, connect_ms,
 
 # 1.3.2 — v6 variant of the early-data-aware open path.
 fn _sandhi_conn_open_v6_fully_timed_with_early_data_a(a, addr16, port,
-use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len) {
+use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len): i64 {
     _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
     if (addr16 == 0) {
         _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
@@ -701,7 +701,7 @@ use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len) {
     read_ms, write_ms, early_data, early_data_len);
 }
 
-fn sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
+fn sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
     _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
 
     var sfd_r = tcp_socket();
@@ -735,7 +735,7 @@ fn sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, sni_host, connect_ms, 
     return _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms);
 }
 
-fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms) {
+fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
     return sandhi_conn_open_fully_timed_a(
     default_alloc(), addr, port, use_tls, sni_host,
     connect_ms, read_ms, write_ms);
@@ -750,7 +750,7 @@ fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_
 # check (`tls_session_get_max_early_data >= len`) happens inside
 # finalize against the cached session.
 fn _sandhi_conn_open_fully_timed_with_early_data_a(a, addr, port, use_tls,
-sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len) {
+sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len): i64 {
     _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
 
     var sfd_r = tcp_socket();
@@ -790,7 +790,7 @@ sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len) {
 # `0 - _SANDHI_EAGAIN` when SO_SNDTIMEO fires — callers map to
 # SANDHI_ERR_TIMEOUT. Any other negative is a CONNECT-class error.
 # Full write not guaranteed — caller loops on partial.
-fn sandhi_conn_send(conn, buf, len) {
+fn sandhi_conn_send(conn, buf, len): i64 {
     if (conn == 0) { return 0 - 1; }
     if (sandhi_conn_kind(conn) == SANDHI_CONN_TLS) {
         # tls_write returns negative on error (pre-libssl-pthread-fix
@@ -804,7 +804,7 @@ fn sandhi_conn_send(conn, buf, len) {
 
 # Send a full cstr. Loops on partial writes. Returns 0 on success,
 # `0 - _SANDHI_EAGAIN` on send-timeout, -1 on any other failure.
-fn sandhi_conn_send_all(conn, buf, len) {
+fn sandhi_conn_send_all(conn, buf, len): i64 {
     var sent = 0;
     while (sent < len) {
         var n = sandhi_conn_send(conn, buf + sent, len - sent);
@@ -819,7 +819,7 @@ fn sandhi_conn_send_all(conn, buf, len) {
 # negative errno on error. `0 - _SANDHI_EAGAIN` signals a read
 # timeout (SO_RCVTIMEO fired); callers treat other negatives as
 # CONNECT-class.
-fn sandhi_conn_recv(conn, buf, max) {
+fn sandhi_conn_recv(conn, buf, max): i64 {
     if (conn == 0) { return 0 - 1; }
     if (sandhi_conn_kind(conn) == SANDHI_CONN_TLS) {
         var tr = tls_read(sandhi_conn_tls_ctx(conn), buf, max);
@@ -835,7 +835,7 @@ fn sandhi_conn_recv(conn, buf, max) {
 # max reached. Returns total bytes read on success; `0 - _SANDHI_EAGAIN`
 # if read-timeout fires; `0 - 1` for any other error. Always null-
 # terminates buf at the returned length (buf must have room for max+1).
-fn sandhi_conn_recv_all(conn, buf, max) {
+fn sandhi_conn_recv_all(conn, buf, max): i64 {
     return sandhi_conn_recv_all_deadline(conn, buf, max, 0);
 }
 
@@ -845,7 +845,7 @@ fn sandhi_conn_recv_all(conn, buf, max) {
 # before the next recv and returns -_SANDHI_EAGAIN if it's passed.
 # SO_RCVTIMEO still bounds individual recv calls; the deadline is
 # the outer ceiling.
-fn sandhi_conn_recv_all_deadline(conn, buf, max, deadline_ms) {
+fn sandhi_conn_recv_all_deadline(conn, buf, max, deadline_ms): i64 {
     var have = 0;
     var going = 1;
     while (going == 1 && have < max) {
@@ -866,7 +866,7 @@ fn sandhi_conn_recv_all_deadline(conn, buf, max, deadline_ms) {
 }
 
 # Close the connection. Shuts TLS cleanly, closes the fd. No-op on 0.
-fn sandhi_conn_close(conn) {
+fn sandhi_conn_close(conn): i64 {
     if (conn == 0) { return 0; }
     if (sandhi_conn_kind(conn) == SANDHI_CONN_TLS) {
         tls_close(sandhi_conn_tls_ctx(conn));

@@ -39,7 +39,7 @@ var _SANDHI_RESOLVE_MAX_PTR_HOPS = 32;
 # constant for anti-spoofing, worse than real entropy. Callers should
 # not rely on this for cryptographic-grade randomness; it exists
 # specifically to close the Kaminsky-class cache-poisoning window.
-fn _sandhi_resolve_random_u16() {
+fn _sandhi_resolve_random_u16(): i64 {
     var buf[2];
     store8(&buf + 0, 0);
     store8(&buf + 1, 0);
@@ -62,7 +62,7 @@ fn _sandhi_resolve_random_u16() {
 
 # Parse "127.0.0.1" / "1.2.3.4" into a network-byte-order uint32.
 # Returns (0 - 1) on malformed input. sock_connect expects this shape.
-fn sandhi_net_parse_ipv4(host) {
+fn sandhi_net_parse_ipv4(host): i64 {
     if (host == 0) { return 0 - 1; }
     var octets[4];
     store8(&octets + 0, 0);
@@ -113,7 +113,7 @@ fn sandhi_net_parse_ipv4(host) {
 # 4 KB scratch + the parsed cstr both live in `a`; both are short-
 # lived (caller only needs the returned int). Returns (0 - 1) on any
 # failure so the caller can fall back to a public DNS default.
-fn _sandhi_resolve_read_resolv_conf_a(a) {
+fn _sandhi_resolve_read_resolv_conf_a(a): i64 {
     var buf = alloc_via(a, 4096);
     if (buf == 0) { return 0 - 1; }
     var n = file_read_all("/etc/resolv.conf", buf, 4095);
@@ -152,7 +152,7 @@ fn _sandhi_resolve_read_resolv_conf_a(a) {
     return 0 - 1;
 }
 
-fn _sandhi_resolve_read_resolv_conf() {
+fn _sandhi_resolve_read_resolv_conf(): i64 {
     return _sandhi_resolve_read_resolv_conf_a(default_alloc());
 }
 
@@ -163,7 +163,7 @@ fn _sandhi_resolve_read_resolv_conf() {
 # Encode a hostname as DNS labels: "example.com" → 07 example 03 com 00.
 # Writes to `out` starting at offset 0, returns bytes written. Returns
 # (0 - 1) if any label exceeds 63 bytes or total exceeds 255.
-fn _sandhi_resolve_encode_labels(host, out) {
+fn _sandhi_resolve_encode_labels(host, out): i64 {
     var total = 0;
     var label_start = 0;
     var p = 0;
@@ -197,7 +197,7 @@ fn _sandhi_resolve_encode_labels(host, out) {
 
 # Build the full DNS query packet. Writes into `out` (must hold at
 # least 12 + 255 + 4 bytes). Returns packet length.
-fn _sandhi_resolve_build_query(id, host, out) {
+fn _sandhi_resolve_build_query(id, host, out): i64 {
     # Header
     store8(out + 0, (id >> 8) & 0xFF);
     store8(out + 1, id & 0xFF);
@@ -231,7 +231,7 @@ fn _sandhi_resolve_build_query(id, host, out) {
 # target is well-formed. Consumers that need the actual name bytes
 # must use `_sandhi_resolve_name_eq` which does follow pointers with
 # an explicit hop-budget guard.
-fn _sandhi_resolve_skip_name(buf, blen, off) {
+fn _sandhi_resolve_skip_name(buf, blen, off): i64 {
     var p = off;
     var safety = 0;
     while (safety < 256) {
@@ -259,7 +259,7 @@ fn _sandhi_resolve_skip_name(buf, blen, off) {
 # pointer loop). `hops_cell` tracks pointer-hops across calls — pass
 # the same cell to successive reads of one name so the budget is
 # shared.
-fn _sandhi_resolve_read_label(buf, blen, off_cell, label_buf, label_len_cell, hops_cell) {
+fn _sandhi_resolve_read_label(buf, blen, off_cell, label_buf, label_len_cell, hops_cell): i64 {
     var p = load64(off_cell);
     while (1 == 1) {
         if (p >= blen) { return 0 - 1; }
@@ -303,7 +303,7 @@ fn _sandhi_resolve_read_label(buf, blen, off_cell, label_buf, label_len_cell, ho
 # Heaviest alloc site in the resolver — the cells are touched per
 # label per name, so they really want to live in an arena that the
 # resolver caller resets after the query completes.
-fn _sandhi_resolve_name_eq_a(a, buf, blen, off_a, off_b) {
+fn _sandhi_resolve_name_eq_a(a, buf, blen, off_a, off_b): i64 {
     var pa_cell = alloc_via(a, 8);
     var pb_cell = alloc_via(a, 8);
     var ha_cell = alloc_via(a, 8);
@@ -338,7 +338,7 @@ fn _sandhi_resolve_name_eq_a(a, buf, blen, off_a, off_b) {
     return 0;
 }
 
-fn _sandhi_resolve_name_eq(buf, blen, off_a, off_b) {
+fn _sandhi_resolve_name_eq(buf, blen, off_a, off_b): i64 {
     return _sandhi_resolve_name_eq_a(default_alloc(), buf, blen, off_a, off_b);
 }
 
@@ -351,7 +351,7 @@ fn _sandhi_resolve_name_eq(buf, blen, off_a, off_b) {
 # the question name (echoed at offset 12) — guards against answer
 # substitution where a crafted packet resolves a different host.
 # Parse an A-record response, allocating the name-eq scratch from `a`.
-fn _sandhi_resolve_parse_response_a(a, buf, blen, expected_id) {
+fn _sandhi_resolve_parse_response_a(a, buf, blen, expected_id): i64 {
     if (blen < 12) { return 0 - 1; }
     # TXID echo check.
     var got_id = (load8(buf + 0) << 8) | load8(buf + 1);
@@ -411,7 +411,7 @@ fn _sandhi_resolve_parse_response_a(a, buf, blen, expected_id) {
     return 0 - 1;
 }
 
-fn _sandhi_resolve_parse_response(buf, blen, expected_id) {
+fn _sandhi_resolve_parse_response(buf, blen, expected_id): i64 {
     return _sandhi_resolve_parse_response_a(default_alloc(), buf, blen, expected_id);
 }
 
@@ -426,7 +426,7 @@ fn _sandhi_resolve_parse_response(buf, blen, expected_id) {
 # Build a DNS query for AAAA records (QTYPE=28, not 1). Everything else
 # identical to the A-record build. Kept separate so the hot path of
 # IPv4 resolution doesn't pay a branch.
-fn _sandhi_resolve_build_query_aaaa(id, host, out) {
+fn _sandhi_resolve_build_query_aaaa(id, host, out): i64 {
     store8(out + 0, (id >> 8) & 0xFF);
     store8(out + 1, id & 0xFF);
     store8(out + 2, 0x01);
@@ -449,7 +449,7 @@ fn _sandhi_resolve_build_query_aaaa(id, host, out) {
 # record parser: TXID echo + answer-name match + compression-loop guard.
 # Parse an AAAA-record response into `a`. The 16-byte AAAA buffer
 # returned to the caller (and the name-eq scratch) flow through `a`.
-fn _sandhi_resolve_parse_response_aaaa_a(a, buf, blen, expected_id) {
+fn _sandhi_resolve_parse_response_aaaa_a(a, buf, blen, expected_id): i64 {
     if (blen < 12) { return 0; }
     var got_id = (load8(buf + 0) << 8) | load8(buf + 1);
     if (got_id != expected_id) { return 0; }
@@ -494,7 +494,7 @@ fn _sandhi_resolve_parse_response_aaaa_a(a, buf, blen, expected_id) {
     return 0;
 }
 
-fn _sandhi_resolve_parse_response_aaaa(buf, blen, expected_id) {
+fn _sandhi_resolve_parse_response_aaaa(buf, blen, expected_id): i64 {
     return _sandhi_resolve_parse_response_aaaa_a(default_alloc(), buf, blen, expected_id);
 }
 
@@ -510,18 +510,18 @@ fn _sandhi_resolve_parse_response_aaaa(buf, blen, expected_id) {
 # connect(sockaddr_in6)). v4 + v6 are tried sequentially, not in
 # parallel — Happy Eyeballs (RFC 8305) would need the connect-path
 # refactor to drive two concurrent attempts; not in 0.9.x scope.
-fn sandhi_resolve_ipv6_a(a, host) {
+fn sandhi_resolve_ipv6_a(a, host): i64 {
     sandhi_trace_begin("sandhi.dns.v6");
     var r = _sandhi_resolve_ipv6_impl_a(a, host);
     sandhi_trace_end();
     return r;
 }
 
-fn sandhi_resolve_ipv6(host) {
+fn sandhi_resolve_ipv6(host): i64 {
     return sandhi_resolve_ipv6_a(default_alloc(), host);
 }
 
-fn _sandhi_resolve_ipv6_impl_a(a, host) {
+fn _sandhi_resolve_ipv6_impl_a(a, host): i64 {
     if (host == 0) { return 0; }
     var ns = _sandhi_resolve_read_resolv_conf_a(a);
     if (ns == 0 - 1) {
@@ -550,22 +550,22 @@ fn _sandhi_resolve_ipv6_impl_a(a, host) {
     return _sandhi_resolve_parse_response_aaaa_a(a, rbuf, rlen, txid);
 }
 
-fn _sandhi_resolve_ipv6_impl(host) {
+fn _sandhi_resolve_ipv6_impl(host): i64 {
     return _sandhi_resolve_ipv6_impl_a(default_alloc(), host);
 }
 
-fn sandhi_resolve_ipv4_a(a, host) {
+fn sandhi_resolve_ipv4_a(a, host): i64 {
     sandhi_trace_begin("sandhi.dns.v4");
     var r = _sandhi_resolve_ipv4_impl_a(a, host);
     sandhi_trace_end();
     return r;
 }
 
-fn sandhi_resolve_ipv4(host) {
+fn sandhi_resolve_ipv4(host): i64 {
     return sandhi_resolve_ipv4_a(default_alloc(), host);
 }
 
-fn _sandhi_resolve_ipv4_impl_a(a, host) {
+fn _sandhi_resolve_ipv4_impl_a(a, host): i64 {
     if (host == 0) { return 0 - 1; }
     var ns = _sandhi_resolve_read_resolv_conf_a(a);
     if (ns == 0 - 1) {
@@ -605,7 +605,7 @@ fn _sandhi_resolve_ipv4_impl_a(a, host) {
     return _sandhi_resolve_parse_response_a(a, rbuf, rlen, txid);
 }
 
-fn _sandhi_resolve_ipv4_impl(host) {
+fn _sandhi_resolve_ipv4_impl(host): i64 {
     return _sandhi_resolve_ipv4_impl_a(default_alloc(), host);
 }
 

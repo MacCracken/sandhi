@@ -14,26 +14,26 @@
 
 # Chain is just a vec of resolver pointers. Kept as a typed alias so
 # the API documents intent rather than leaking "vec".
-fn sandhi_discovery_chain_new() {
+fn sandhi_discovery_chain_new(): i64 {
     return vec_new();
 }
 
 # Append a resolver. Resolvers run in insertion order on lookup.
-fn sandhi_discovery_chain_add(chain, resolver) {
+fn sandhi_discovery_chain_add(chain, resolver): i64 {
     if (chain == 0 || resolver == 0) { return 0; }
     vec_push(chain, resolver);
     return 0;
 }
 
 # Count of resolvers in the chain. Handy for diagnostics.
-fn sandhi_discovery_chain_count(chain) {
+fn sandhi_discovery_chain_count(chain): i64 {
     if (chain == 0) { return 0; }
     return vec_len(chain);
 }
 
 # Resolve `name` by trying each resolver. Returns the first non-null
 # service, or 0 if every resolver misses.
-fn sandhi_discovery_chain_resolve(chain, name) {
+fn sandhi_discovery_chain_resolve(chain, name): i64 {
     if (chain == 0 || name == 0) { return 0; }
     var n = vec_len(chain);
     var i = 0;
@@ -48,11 +48,11 @@ fn sandhi_discovery_chain_resolve(chain, name) {
 
 # Wrap a chain as a resolver itself, so one chain can nest another.
 # The caller passes the chain as ctx; the adapter calls chain_resolve.
-fn _sandhi_discovery_chain_adapter(ctx, name) {
+fn _sandhi_discovery_chain_adapter(ctx, name): i64 {
     return sandhi_discovery_chain_resolve(ctx, name);
 }
 
-fn sandhi_discovery_chain_as_resolver(chain) {
+fn sandhi_discovery_chain_as_resolver(chain): i64 {
     return sandhi_resolver_new(&_sandhi_discovery_chain_adapter, chain);
 }
 

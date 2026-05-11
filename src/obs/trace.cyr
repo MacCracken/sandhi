@@ -27,28 +27,28 @@
 # flooded with sandhi-internal ENTER/EXIT noise it didn't ask for.
 var _sandhi_trace_enabled = 0;
 
-fn sandhi_trace_enable(on) {
+fn sandhi_trace_enable(on): i64 {
     _sandhi_trace_enabled = on;
     return 0;
 }
 
-fn sandhi_trace_enabled() {
+fn sandhi_trace_enabled(): i64 {
     return _sandhi_trace_enabled;
 }
 
-fn sandhi_trace_begin(name) {
+fn sandhi_trace_begin(name): i64 {
     if (_sandhi_trace_enabled == 0) { return 0; }
     sakshi_span_enter(name, strlen(name));
     return 0;
 }
 
-fn sandhi_trace_end() {
+fn sandhi_trace_end(): i64 {
     if (_sandhi_trace_enabled == 0) { return 0; }
     sakshi_span_exit();
     return 0;
 }
 
-fn sandhi_trace_depth() {
+fn sandhi_trace_depth(): i64 {
     return sakshi_span_depth();
 }
 

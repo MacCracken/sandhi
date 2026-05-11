@@ -35,15 +35,15 @@ var SANDHI_URL_STRUCT_SIZE = 40;
 
 # Accessors. Inline-friendly — callers can load64 directly, but going
 # through accessors reads better and lets us reshape the struct later.
-fn sandhi_url_scheme(u) { return load64(u + SANDHI_URL_OFF_SCHEME); }
-fn sandhi_url_host(u)   { return load64(u + SANDHI_URL_OFF_HOST); }
-fn sandhi_url_port(u)   { return load64(u + SANDHI_URL_OFF_PORT); }
-fn sandhi_url_path(u)   { return load64(u + SANDHI_URL_OFF_PATH); }
-fn sandhi_url_query(u)  { return load64(u + SANDHI_URL_OFF_QUERY); }
+fn sandhi_url_scheme(u): i64 { return load64(u + SANDHI_URL_OFF_SCHEME); }
+fn sandhi_url_host(u): i64 { return load64(u + SANDHI_URL_OFF_HOST); }
+fn sandhi_url_port(u): i64 { return load64(u + SANDHI_URL_OFF_PORT); }
+fn sandhi_url_path(u): i64 { return load64(u + SANDHI_URL_OFF_PATH); }
+fn sandhi_url_query(u): i64 { return load64(u + SANDHI_URL_OFF_QUERY); }
 
 # Validate that no byte in the URL can escape the request line / header
 # block. Returns 1 if safe, 0 if any disallowed byte is present.
-fn _sandhi_url_safe(url) {
+fn _sandhi_url_safe(url): i64 {
     var i = 0;
     while (load8(url + i) != 0) {
         var c = load8(url + i);
@@ -58,7 +58,7 @@ fn _sandhi_url_safe(url) {
 
 # Lowercase-equal comparison for scheme detection ("HTTP" == "http").
 # Compares up to `n` bytes; returns 1 if equal ignoring case, 0 otherwise.
-fn _sandhi_url_sceq(a, b, n) {
+fn _sandhi_url_sceq(a, b, n): i64 {
     var i = 0;
     while (i < n) {
         var ca = load8(a + i);
@@ -75,7 +75,7 @@ fn _sandhi_url_sceq(a, b, n) {
 # 0 on malformed input or OOM. Every alloc on the parsed-URL hot path
 # (host / path / query / struct) lands in `a`; reset_via(a) reclaims
 # all of it in one shot — the per-request-arena pattern.
-fn sandhi_url_parse_a(a, url) {
+fn sandhi_url_parse_a(a, url): i64 {
     if (url == 0) { return 0; }
     if (_sandhi_url_safe(url) == 0) { return 0; }
 
@@ -131,7 +131,7 @@ fn sandhi_url_parse_a(a, url) {
 }
 
 # Back-compat: parse using the process-wide default Allocator.
-fn sandhi_url_parse(url) {
+fn sandhi_url_parse(url): i64 {
     return sandhi_url_parse_a(default_alloc(), url);
 }
 
@@ -141,7 +141,7 @@ fn sandhi_url_parse(url) {
 # pass host_end_excl == tail_start; bracketed-v6 passes
 # tail_start == host_end_excl + 1 to skip the closing ']'. Returns
 # 0 on bad input OR on allocator failure (OOM).
-fn _sandhi_url_finish_at_a(a, url, scheme, default_port, host_start, host_end_excl, tail_start) {
+fn _sandhi_url_finish_at_a(a, url, scheme, default_port, host_start, host_end_excl, tail_start): i64 {
     var host_len = host_end_excl - host_start;
     if (host_len == 0) { return 0; }
 

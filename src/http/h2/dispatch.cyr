@@ -33,7 +33,7 @@
 # authority builder, full-path combine, request-encode scratch, and
 # entire response struct/body all flow through `a` — so a per-request
 # arena reset reclaims the whole exchange.
-fn sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len) {
+fn sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len): i64 {
     var u = sandhi_url_parse_a(a, url);
     if (u == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PARSE); }
 
@@ -79,7 +79,7 @@ fn sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len) {
     return sandhi_h2_response_recv_a(a, h2c, stream_id);
 }
 
-fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len) {
+fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len): i64 {
     return sandhi_h2_request_a(default_alloc(), h2c, method, url, user_headers, body, body_len);
 }
 
@@ -128,7 +128,7 @@ fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len) {
 # ACK roundtrips don't pay back on a single request — without a pool
 # to cache the conn for the next request, advertising h2 is strictly
 # slower than 1.1.
-fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool) {
+fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool): i64 {
     var addr = _sandhi_client_resolve_a(a, host);
     var addr6 = 0;
     if (addr == 0 - 1) {
@@ -174,7 +174,7 @@ fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool) {
     return 0;
 }
 
-fn _sandhi_http_try_h2_promote(url, opts, host, port, pool) {
+fn _sandhi_http_try_h2_promote(url, opts, host, port, pool): i64 {
     return _sandhi_http_try_h2_promote_a(default_alloc(), url, opts, host, port, pool);
 }
 
@@ -185,7 +185,7 @@ fn _sandhi_http_try_h2_promote(url, opts, host, port, pool) {
 # 1.2.1: `_a` threads `a` through h2 / promote / 1.1 paths uniformly.
 # h2 path uses `sandhi_h2_request_a(a, ...)` for the per-request resp;
 # 1.1 path uses `_sandhi_http_do_a(a, ...)`.
-fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts) {
+fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts): i64 {
     var pool = sandhi_http_options_get_pool(opts);
     if (pool != 0) {
         var u = sandhi_url_parse_a(a, url);
@@ -221,13 +221,13 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts) 
     max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
 }
 
-fn _sandhi_http_auto_once(method, url, user_headers, body, body_len, opts) {
+fn _sandhi_http_auto_once(method, url, user_headers, body, body_len, opts): i64 {
     return _sandhi_http_auto_once_a(default_alloc(), method, url, user_headers, body, body_len, opts);
 }
 
 # Auto-path redirect driver. Same shape as `_sandhi_http_follow`:
 # per-hop locals reassigned in place to keep the frame small.
-fn _sandhi_http_auto_follow_a(a, method, url, user_headers, body, body_len, opts, max_hops) {
+fn _sandhi_http_auto_follow_a(a, method, url, user_headers, body, body_len, opts, max_hops): i64 {
     var m = method;
     var u = url;
     var b = body;
@@ -259,11 +259,11 @@ fn _sandhi_http_auto_follow_a(a, method, url, user_headers, body, body_len, opts
     return r;
 }
 
-fn _sandhi_http_auto_follow(method, url, user_headers, body, body_len, opts, max_hops) {
+fn _sandhi_http_auto_follow(method, url, user_headers, body, body_len, opts, max_hops): i64 {
     return _sandhi_http_auto_follow_a(default_alloc(), method, url, user_headers, body, body_len, opts, max_hops);
 }
 
-fn sandhi_http_request_auto_a(a, method, url, user_headers, body, body_len, opts) {
+fn sandhi_http_request_auto_a(a, method, url, user_headers, body, body_len, opts): i64 {
     # 1.3.2 — propagate the 0-RTT opt-in flag for the duration of
     # this dispatch. Mirrors `_sandhi_http_dispatch_a` in client.cyr;
     # the module-level `_sandhi_allow_0rtt` is read inside the 1.1
@@ -295,7 +295,7 @@ fn sandhi_http_request_auto_a(a, method, url, user_headers, body, body_len, opts
     return r;
 }
 
-fn sandhi_http_request_auto(method, url, user_headers, body, body_len, opts) {
+fn sandhi_http_request_auto(method, url, user_headers, body, body_len, opts): i64 {
     return sandhi_http_request_auto_a(default_alloc(), method, url, user_headers, body, body_len, opts);
 }
 
@@ -305,51 +305,51 @@ fn sandhi_http_request_auto(method, url, user_headers, body, body_len, opts) {
 # `sandhi_http_request_auto_a` (which has been `_a`-threaded since
 # 1.2.1). Bare versions stay as back-compat wrappers passing
 # `default_alloc()`.
-fn sandhi_http_get_auto_a(a, url, user_headers, opts) {
+fn sandhi_http_get_auto_a(a, url, user_headers, opts): i64 {
     return sandhi_http_request_auto_a(a, "GET", url, user_headers, 0, 0, opts);
 }
 
-fn sandhi_http_get_auto(url, user_headers, opts) {
+fn sandhi_http_get_auto(url, user_headers, opts): i64 {
     return sandhi_http_get_auto_a(default_alloc(), url, user_headers, opts);
 }
 
-fn sandhi_http_head_auto_a(a, url, user_headers, opts) {
+fn sandhi_http_head_auto_a(a, url, user_headers, opts): i64 {
     return sandhi_http_request_auto_a(a, "HEAD", url, user_headers, 0, 0, opts);
 }
 
-fn sandhi_http_head_auto(url, user_headers, opts) {
+fn sandhi_http_head_auto(url, user_headers, opts): i64 {
     return sandhi_http_head_auto_a(default_alloc(), url, user_headers, opts);
 }
 
-fn sandhi_http_post_auto_a(a, url, user_headers, body, body_len, opts) {
+fn sandhi_http_post_auto_a(a, url, user_headers, body, body_len, opts): i64 {
     return sandhi_http_request_auto_a(a, "POST", url, user_headers, body, body_len, opts);
 }
 
-fn sandhi_http_post_auto(url, user_headers, body, body_len, opts) {
+fn sandhi_http_post_auto(url, user_headers, body, body_len, opts): i64 {
     return sandhi_http_post_auto_a(default_alloc(), url, user_headers, body, body_len, opts);
 }
 
-fn sandhi_http_put_auto_a(a, url, user_headers, body, body_len, opts) {
+fn sandhi_http_put_auto_a(a, url, user_headers, body, body_len, opts): i64 {
     return sandhi_http_request_auto_a(a, "PUT", url, user_headers, body, body_len, opts);
 }
 
-fn sandhi_http_put_auto(url, user_headers, body, body_len, opts) {
+fn sandhi_http_put_auto(url, user_headers, body, body_len, opts): i64 {
     return sandhi_http_put_auto_a(default_alloc(), url, user_headers, body, body_len, opts);
 }
 
-fn sandhi_http_patch_auto_a(a, url, user_headers, body, body_len, opts) {
+fn sandhi_http_patch_auto_a(a, url, user_headers, body, body_len, opts): i64 {
     return sandhi_http_request_auto_a(a, "PATCH", url, user_headers, body, body_len, opts);
 }
 
-fn sandhi_http_patch_auto(url, user_headers, body, body_len, opts) {
+fn sandhi_http_patch_auto(url, user_headers, body, body_len, opts): i64 {
     return sandhi_http_patch_auto_a(default_alloc(), url, user_headers, body, body_len, opts);
 }
 
-fn sandhi_http_delete_auto_a(a, url, user_headers, opts) {
+fn sandhi_http_delete_auto_a(a, url, user_headers, opts): i64 {
     return sandhi_http_request_auto_a(a, "DELETE", url, user_headers, 0, 0, opts);
 }
 
-fn sandhi_http_delete_auto(url, user_headers, opts) {
+fn sandhi_http_delete_auto(url, user_headers, opts): i64 {
     return sandhi_http_delete_auto_a(default_alloc(), url, user_headers, opts);
 }
 

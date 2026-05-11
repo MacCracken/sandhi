@@ -102,7 +102,7 @@ enum SandhiH2HdrOff {
 var SANDHI_H2_HDR_STRUCT_SIZE = 32;
 
 # Allocate an h2 frame-header struct from `a`. Returns 0 on OOM.
-fn sandhi_h2_hdr_new_a(a, length, type, flags, stream_id) {
+fn sandhi_h2_hdr_new_a(a, length, type, flags, stream_id): i64 {
     var h = alloc_via(a, SANDHI_H2_HDR_STRUCT_SIZE);
     if (h == 0) { return 0; }
     store64(h + SANDHI_H2_HDR_OFF_LENGTH, length);
@@ -112,24 +112,24 @@ fn sandhi_h2_hdr_new_a(a, length, type, flags, stream_id) {
     return h;
 }
 
-fn sandhi_h2_hdr_new(length, type, flags, stream_id) {
+fn sandhi_h2_hdr_new(length, type, flags, stream_id): i64 {
     return sandhi_h2_hdr_new_a(default_alloc(), length, type, flags, stream_id);
 }
 
-fn sandhi_h2_hdr_length(h)    { return load64(h + SANDHI_H2_HDR_OFF_LENGTH); }
-fn sandhi_h2_hdr_type(h)      { return load64(h + SANDHI_H2_HDR_OFF_TYPE); }
-fn sandhi_h2_hdr_flags(h)     { return load64(h + SANDHI_H2_HDR_OFF_FLAGS); }
-fn sandhi_h2_hdr_stream_id(h) { return load64(h + SANDHI_H2_HDR_OFF_STREAM_ID); }
+fn sandhi_h2_hdr_length(h): i64 { return load64(h + SANDHI_H2_HDR_OFF_LENGTH); }
+fn sandhi_h2_hdr_type(h): i64 { return load64(h + SANDHI_H2_HDR_OFF_TYPE); }
+fn sandhi_h2_hdr_flags(h): i64 { return load64(h + SANDHI_H2_HDR_OFF_FLAGS); }
+fn sandhi_h2_hdr_stream_id(h): i64 { return load64(h + SANDHI_H2_HDR_OFF_STREAM_ID); }
 
 # Big-endian write helpers — h2 wire is BE end-to-end (§4.1).
-fn _h2_write_u24(out, off, v) {
+fn _h2_write_u24(out, off, v): i64 {
     store8(out + off + 0, (v >> 16) & 0xFF);
     store8(out + off + 1, (v >>  8) & 0xFF);
     store8(out + off + 2,  v        & 0xFF);
     return 0;
 }
 
-fn _h2_write_u32(out, off, v) {
+fn _h2_write_u32(out, off, v): i64 {
     store8(out + off + 0, (v >> 24) & 0xFF);
     store8(out + off + 1, (v >> 16) & 0xFF);
     store8(out + off + 2, (v >>  8) & 0xFF);
@@ -137,13 +137,13 @@ fn _h2_write_u32(out, off, v) {
     return 0;
 }
 
-fn _h2_read_u24(buf, off) {
+fn _h2_read_u24(buf, off): i64 {
     return (load8(buf + off + 0) << 16)
     | (load8(buf + off + 1) <<  8)
     |  load8(buf + off + 2);
 }
 
-fn _h2_read_u32(buf, off) {
+fn _h2_read_u32(buf, off): i64 {
     return (load8(buf + off + 0) << 24)
     | (load8(buf + off + 1) << 16)
     | (load8(buf + off + 2) <<  8)
@@ -153,7 +153,7 @@ fn _h2_read_u32(buf, off) {
 # Build a frame header into out[off..off+9]. Returns off+9 or
 # negative sentinel on bad input (length too large, stream_id high
 # bit set).
-fn sandhi_h2_hdr_encode(out, off, length, type, flags, stream_id) {
+fn sandhi_h2_hdr_encode(out, off, length, type, flags, stream_id): i64 {
     if (length < 0 || length > SANDHI_H2_MAX_FRAME_SIZE) { return _SANDHI_H2_ERR_BAD_LENGTH; }
     if ((stream_id >> 31) != 0) { return _SANDHI_H2_ERR_BAD_STREAM; }
     _h2_write_u24(out, off + 0, length);
@@ -167,7 +167,7 @@ fn sandhi_h2_hdr_encode(out, off, length, type, flags, stream_id) {
 # Parse a frame header starting at buf[off], allocating the result
 # from `a`. Caller must have ≥ 9 bytes available. Returns a hdr
 # struct (caller owns) or 0 on truncation / over-length / OOM.
-fn sandhi_h2_hdr_decode_a(a, buf, blen, off) {
+fn sandhi_h2_hdr_decode_a(a, buf, blen, off): i64 {
     if (off + SANDHI_H2_FRAME_HEADER_SIZE > blen) { return 0; }
     var length = _h2_read_u24(buf, off + 0);
     var type   = load8(buf + off + 3);
@@ -178,7 +178,7 @@ fn sandhi_h2_hdr_decode_a(a, buf, blen, off) {
     return sandhi_h2_hdr_new_a(a, length, type, flags, stream_id);
 }
 
-fn sandhi_h2_hdr_decode(buf, blen, off) {
+fn sandhi_h2_hdr_decode(buf, blen, off): i64 {
     return sandhi_h2_hdr_decode_a(default_alloc(), buf, blen, off);
 }
 
@@ -190,14 +190,14 @@ fn sandhi_h2_hdr_decode(buf, blen, off) {
 # variant has no payload.
 
 # Encode a single SETTINGS pair into out[off..off+6]. Returns off+6.
-fn sandhi_h2_settings_pair_encode(out, off, id, value) {
+fn sandhi_h2_settings_pair_encode(out, off, id, value): i64 {
     store8(out + off + 0, (id >> 8) & 0xFF);
     store8(out + off + 1, id & 0xFF);
     _h2_write_u32(out, off + 2, value);
     return off + 6;
 }
 
-fn sandhi_h2_settings_pair_decode(buf, blen, off, id_out, value_out) {
+fn sandhi_h2_settings_pair_decode(buf, blen, off, id_out, value_out): i64 {
     if (off + 6 > blen) { return _SANDHI_H2_ERR_TRUNCATED; }
     var id = (load8(buf + off + 0) << 8) | load8(buf + off + 1);
     var v  = _h2_read_u32(buf, off + 2);
@@ -213,7 +213,7 @@ fn sandhi_h2_settings_pair_decode(buf, blen, off, id_out, value_out) {
 # 8 octets of opaque data. ACK flag echoes data back. Stream id MUST
 # be 0 (connection-level frame).
 
-fn sandhi_h2_ping_encode(out, off, opaque8) {
+fn sandhi_h2_ping_encode(out, off, opaque8): i64 {
     var i = 0;
     while (i < 8) {
         store8(out + off + i, load8(opaque8 + i));
@@ -229,7 +229,7 @@ fn sandhi_h2_ping_encode(out, off, opaque8) {
 # Payload: 4 octets, high bit reserved + 31-bit window-size-increment.
 # Increment MUST be > 0.
 
-fn sandhi_h2_window_update_encode(out, off, increment) {
+fn sandhi_h2_window_update_encode(out, off, increment): i64 {
     if (increment <= 0 || (increment >> 31) != 0) {
         return _SANDHI_H2_ERR_MALFORMED;
     }
@@ -237,7 +237,7 @@ fn sandhi_h2_window_update_encode(out, off, increment) {
     return off + 4;
 }
 
-fn sandhi_h2_window_update_decode(buf, blen, off) {
+fn sandhi_h2_window_update_decode(buf, blen, off): i64 {
     if (off + 4 > blen) { return _SANDHI_H2_ERR_TRUNCATED; }
     var v = _h2_read_u32(buf, off);
     return v & 0x7FFFFFFF;
@@ -249,12 +249,12 @@ fn sandhi_h2_window_update_decode(buf, blen, off) {
 #
 # Payload: 4-octet error code.
 
-fn sandhi_h2_rst_stream_encode(out, off, error_code) {
+fn sandhi_h2_rst_stream_encode(out, off, error_code): i64 {
     _h2_write_u32(out, off, error_code);
     return off + 4;
 }
 
-fn sandhi_h2_rst_stream_decode(buf, blen, off) {
+fn sandhi_h2_rst_stream_decode(buf, blen, off): i64 {
     if (off + 4 > blen) { return _SANDHI_H2_ERR_TRUNCATED; }
     return _h2_read_u32(buf, off);
 }
@@ -266,7 +266,7 @@ fn sandhi_h2_rst_stream_decode(buf, blen, off) {
 # Payload: last_stream_id (4) + error_code (4) + optional debug data.
 # Reserved bit on last_stream_id must be 0.
 
-fn sandhi_h2_goaway_encode(out, off, last_stream_id, error_code, debug, debug_len) {
+fn sandhi_h2_goaway_encode(out, off, last_stream_id, error_code, debug, debug_len): i64 {
     if ((last_stream_id >> 31) != 0) { return _SANDHI_H2_ERR_BAD_STREAM; }
     _h2_write_u32(out, off + 0, last_stream_id & 0x7FFFFFFF);
     _h2_write_u32(out, off + 4, error_code);
@@ -280,7 +280,7 @@ fn sandhi_h2_goaway_encode(out, off, last_stream_id, error_code, debug, debug_le
     return off + 8 + debug_len;
 }
 
-fn sandhi_h2_goaway_decode(buf, blen, off, last_stream_out, error_out) {
+fn sandhi_h2_goaway_decode(buf, blen, off, last_stream_out, error_out): i64 {
     if (off + 8 > blen) { return _SANDHI_H2_ERR_TRUNCATED; }
     var sid = _h2_read_u32(buf, off + 0) & 0x7FFFFFFF;
     var ec  = _h2_read_u32(buf, off + 4);

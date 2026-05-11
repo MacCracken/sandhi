@@ -408,6 +408,26 @@ about another item.
 *Same shape as before — items grouped by what unblocks
 them, not by version pin.*
 
+**Server-side concurrency arc — consumer surfaced, design held**:
+
+- **`sandhi_server_options_max_conns` enforcement**
+  (daimon, **Low**). Filed 2026-05-10 against sandhi 1.3.3
+  by daimon 1.2.2; full report at
+  [`docs/issues/2026-05-10-daimon-server-max-conns.md`](../issues/2026-05-10-daimon-server-max-conns.md).
+  The public hook (setter + getter) exists from 0.7.2 / 0.8.0
+  shape but the accept loop in `sandhi_server_run_opts`
+  remains single-flight. Daimon owns its own epoll-cooperative
+  `serve_async` and wants to collapse ~60 LOC into a shared
+  `sandhi_server_run_opts` call when enforcement lands. Two
+  approaches viable: in-process worker pool or epoll-cooperative
+  integration with `lib/async.cyr`. Low severity because no
+  security impact — daimon's 1.2.2 closed the async slowloris
+  exposure independently via its own per-cfd `SO_RCVTIMEO`
+  call. Pure refactor / dedup blocker; bumps to Medium if a
+  second consumer surfaces or if drift between daimon's two
+  accept-paths surfaces a regression. Slot scheduled when
+  sandhi has design capacity for the worker-shape choice.
+
 **Wait-for-second-consumer-ask**:
 
 - **CONNECT / proxy tunneling** — no documented AGNOS egress-proxy need today.

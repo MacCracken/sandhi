@@ -45,7 +45,7 @@ var _SANDHI_HPACK_HUFFMAN_INTERNAL = 0 - 1;
 # table; they must outlive any per-request arena. The `_a` variant
 # exists for symmetry but `_hpack_huffman_init` always pins the tree
 # to `default_alloc()` — see the comment at `_hpack_huffman_init`.
-fn _hpack_huffman_node_new_a(a) {
+fn _hpack_huffman_node_new_a(a): i64 {
     var n = alloc_via(a, 24);
     if (n == 0) { return 0; }
     store64(n + 0, 0);
@@ -54,7 +54,7 @@ fn _hpack_huffman_node_new_a(a) {
     return n;
 }
 
-fn _hpack_huffman_node_new() {
+fn _hpack_huffman_node_new(): i64 {
     return _hpack_huffman_node_new_a(default_alloc());
 }
 
@@ -88,14 +88,14 @@ var _hpack_huffman_inited = 0;
 var _hpack_huffman_root = 0;
 var _hpack_huffman_codes = 0;
 
-fn _hpack_hex_digit(c) {
+fn _hpack_hex_digit(c): i64 {
     if (c >= 48 && c <= 57)  { return c - 48; }   # 0-9
     if (c >= 97 && c <= 102) { return c - 87; }   # a-f
     if (c >= 65 && c <= 70)  { return c - 55; }   # A-F
     return 0 - 1;
 }
 
-fn _hpack_parse_hex(blob, off, n) {
+fn _hpack_parse_hex(blob, off, n): i64 {
     var v = 0;
     var i = 0;
     while (i < n) {
@@ -108,7 +108,7 @@ fn _hpack_parse_hex(blob, off, n) {
 # Insert (code, length, sym) into the tree. Always allocates new
 # internal nodes from `default_alloc()` since they belong to the
 # process-wide tree (see `_hpack_huffman_init`).
-fn _hpack_huffman_add(code, length, sym) {
+fn _hpack_huffman_add(code, length, sym): i64 {
     var node = _hpack_huffman_root;
     var bit = length - 1;
     while (bit >= 0) {
@@ -134,7 +134,7 @@ fn _hpack_huffman_add(code, length, sym) {
 # h2 conn, so an arena-reset in one request would invalidate the
 # tables for every other in-flight request. There is intentionally
 # no `_init_a` variant.
-fn _hpack_huffman_init() {
+fn _hpack_huffman_init(): i64 {
     if (_hpack_huffman_inited == 1) { return 0; }
     var ga = default_alloc();
     _hpack_huffman_root = _hpack_huffman_node_new_a(ga);
@@ -153,11 +153,11 @@ fn _hpack_huffman_init() {
     return 0;
 }
 
-fn _hpack_huffman_code_of(symbol) {
+fn _hpack_huffman_code_of(symbol): i64 {
     return load64(_hpack_huffman_codes + symbol * 16);
 }
 
-fn _hpack_huffman_bits_of(symbol) {
+fn _hpack_huffman_bits_of(symbol): i64 {
     return load64(_hpack_huffman_codes + symbol * 16 + 8);
 }
 
@@ -174,7 +174,7 @@ fn _hpack_huffman_bits_of(symbol) {
 # from `a`. Returns 0 on malformed input or OOM. The decoded cstr is
 # the only escaping allocation; arena callers can reset_via(a) once
 # the cstr is consumed.
-fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes) {
+fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes): i64 {
     _hpack_huffman_init();
     if (nbytes < 0) { return 0; }
     var out_cap = nbytes * 8 + 1;     # max ratio: shortest code is 5 bits
@@ -224,7 +224,7 @@ fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes) {
     return out;
 }
 
-fn sandhi_hpack_huffman_decode(buf, start, nbytes) {
+fn sandhi_hpack_huffman_decode(buf, start, nbytes): i64 {
     return sandhi_hpack_huffman_decode_a(default_alloc(), buf, start, nbytes);
 }
 
@@ -239,7 +239,7 @@ fn sandhi_hpack_huffman_decode(buf, start, nbytes) {
 # payloads, ASCII URLs); short binary tokens often round-trip larger
 # under Huffman, in which case we keep the raw form.
 
-fn sandhi_hpack_huffman_encoded_len(s) {
+fn sandhi_hpack_huffman_encoded_len(s): i64 {
     _hpack_huffman_init();
     if (s == 0) { return 0; }
     var n = strlen(s);
@@ -264,7 +264,7 @@ fn sandhi_hpack_huffman_encoded_len(s) {
 # final partial byte is padded with the most-significant bits of the
 # EOS code (all 1s up to 7 bits), which is the canonical pad pattern
 # the decoder accepts.
-fn sandhi_hpack_huffman_encode(out, off, s) {
+fn sandhi_hpack_huffman_encode(out, off, s): i64 {
     _hpack_huffman_init();
     if (s == 0) { return off; }
     var n = strlen(s);

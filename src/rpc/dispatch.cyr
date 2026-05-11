@@ -29,22 +29,22 @@ enum SandhiRpcRespOff {
 
 var SANDHI_RPC_RESP_SIZE = 40;
 
-fn sandhi_rpc_http_status(r) { return load64(r + SANDHI_RPC_OFF_STATUS); }
-fn sandhi_rpc_body(r)        { return load64(r + SANDHI_RPC_OFF_BODY); }
-fn sandhi_rpc_body_len(r)    { return load64(r + SANDHI_RPC_OFF_BLEN); }
-fn sandhi_rpc_err_kind(r)    { return load64(r + SANDHI_RPC_OFF_ERR); }
-fn sandhi_rpc_err_message(r) { return load64(r + SANDHI_RPC_OFF_ERR_MSG); }
+fn sandhi_rpc_http_status(r): i64 { return load64(r + SANDHI_RPC_OFF_STATUS); }
+fn sandhi_rpc_body(r): i64 { return load64(r + SANDHI_RPC_OFF_BODY); }
+fn sandhi_rpc_body_len(r): i64 { return load64(r + SANDHI_RPC_OFF_BLEN); }
+fn sandhi_rpc_err_kind(r): i64 { return load64(r + SANDHI_RPC_OFF_ERR); }
+fn sandhi_rpc_err_message(r): i64 { return load64(r + SANDHI_RPC_OFF_ERR_MSG); }
 
 # 1 if the rpc call succeeded at the dialect level (no error envelope
 # extracted and HTTP 2xx). Handy for early returns.
-fn sandhi_rpc_ok(r) {
+fn sandhi_rpc_ok(r): i64 {
     if (sandhi_rpc_err_kind(r) != SANDHI_OK) { return 0; }
     var s = sandhi_rpc_http_status(r);
     if (s < 200 || s >= 300) { return 0; }
     return 1;
 }
 
-fn _sandhi_rpc_resp_new_a(a, status, body, blen, err_kind, err_msg) {
+fn _sandhi_rpc_resp_new_a(a, status, body, blen, err_kind, err_msg): i64 {
     var r = alloc_via(a, SANDHI_RPC_RESP_SIZE);
     if (r == 0) { return 0; }
     store64(r + SANDHI_RPC_OFF_STATUS, status);
@@ -55,7 +55,7 @@ fn _sandhi_rpc_resp_new_a(a, status, body, blen, err_kind, err_msg) {
     return r;
 }
 
-fn _sandhi_rpc_resp_new(status, body, blen, err_kind, err_msg) {
+fn _sandhi_rpc_resp_new(status, body, blen, err_kind, err_msg): i64 {
     return _sandhi_rpc_resp_new_a(default_alloc(), status, body, blen, err_kind, err_msg);
 }
 
@@ -64,7 +64,7 @@ fn _sandhi_rpc_resp_new(status, body, blen, err_kind, err_msg) {
 # caller to set err_kind based on context.
 # Extract the dialect-specific error envelope into `a`. JSON path
 # scratch + the returned message both flow through `a`.
-fn _sandhi_rpc_err_extract_a(a, body, dialect) {
+fn _sandhi_rpc_err_extract_a(a, body, dialect): i64 {
     if (body == 0) { return 0; }
     if (dialect == SANDHI_RPC_DIALECT_WEBDRIVER) {
         if (sandhi_json_has_path_a(a, body, "value.error") == 1) {
@@ -85,11 +85,11 @@ fn _sandhi_rpc_err_extract_a(a, body, dialect) {
     return 0;
 }
 
-fn _sandhi_rpc_err_extract(body, dialect) {
+fn _sandhi_rpc_err_extract(body, dialect): i64 {
     return _sandhi_rpc_err_extract_a(default_alloc(), body, dialect);
 }
 
-fn _sandhi_rpc_dup_a(a, s) {
+fn _sandhi_rpc_dup_a(a, s): i64 {
     if (s == 0) { return 0; }
     var n = strlen(s);
     var out = alloc_via(a, n + 1);
@@ -99,14 +99,14 @@ fn _sandhi_rpc_dup_a(a, s) {
     return out;
 }
 
-fn _sandhi_rpc_dup(s) {
+fn _sandhi_rpc_dup(s): i64 {
     return _sandhi_rpc_dup_a(default_alloc(), s);
 }
 
 # Pick the HTTP verb for the request shape. WebDriver / MCP / Appium
 # all use POST or GET or DELETE; the dispatcher stays method-agnostic.
 # `http_method` is a cstr: "GET" / "POST" / "DELETE" / "PUT" / "PATCH".
-fn _sandhi_rpc_http_send(url, http_method, body_json, headers) {
+fn _sandhi_rpc_http_send(url, http_method, body_json, headers): i64 {
     var body_len = 0;
     if (body_json != 0) { body_len = strlen(body_json); }
     if (streq(http_method, "GET") == 1) {
@@ -129,18 +129,18 @@ fn _sandhi_rpc_http_send(url, http_method, body_json, headers) {
 # resp struct all flow through `a`. The HTTP response struct itself
 # is owned by the http client (Batch 4 / 6 routes those through an
 # Allocator); we wrap its body pointer here without re-dup'ing.
-fn sandhi_rpc_call_a(a, url, http_method, body_json, dialect) {
+fn sandhi_rpc_call_a(a, url, http_method, body_json, dialect): i64 {
     sandhi_trace_begin("sandhi.rpc");
     var r = _sandhi_rpc_call_impl_a(a, url, http_method, body_json, dialect);
     sandhi_trace_end();
     return r;
 }
 
-fn sandhi_rpc_call(url, http_method, body_json, dialect) {
+fn sandhi_rpc_call(url, http_method, body_json, dialect): i64 {
     return sandhi_rpc_call_a(default_alloc(), url, http_method, body_json, dialect);
 }
 
-fn _sandhi_rpc_call_impl_a(a, url, http_method, body_json, dialect) {
+fn _sandhi_rpc_call_impl_a(a, url, http_method, body_json, dialect): i64 {
     var headers = sandhi_headers_new_a(a);
     if (headers == 0) { return _sandhi_rpc_resp_new_a(a, 0, 0, 0, SANDHI_ERR_INTERNAL, 0); }
     if (body_json != 0) {
@@ -151,7 +151,7 @@ fn _sandhi_rpc_call_impl_a(a, url, http_method, body_json, dialect) {
     return _sandhi_rpc_wrap_a(a, hr, dialect);
 }
 
-fn _sandhi_rpc_call_impl(url, http_method, body_json, dialect) {
+fn _sandhi_rpc_call_impl(url, http_method, body_json, dialect): i64 {
     return _sandhi_rpc_call_impl_a(default_alloc(), url, http_method, body_json, dialect);
 }
 
@@ -159,18 +159,18 @@ fn _sandhi_rpc_call_impl(url, http_method, body_json, dialect) {
 # cookies, etc.). Content-Type / Accept still auto-injected when absent.
 # Header mutations land in `a`; the user_headers block itself is the
 # caller's responsibility.
-fn sandhi_rpc_call_with_headers_a(a, url, http_method, body_json, user_headers, dialect) {
+fn sandhi_rpc_call_with_headers_a(a, url, http_method, body_json, user_headers, dialect): i64 {
     sandhi_trace_begin("sandhi.rpc");
     var r = _sandhi_rpc_call_with_headers_impl_a(a, url, http_method, body_json, user_headers, dialect);
     sandhi_trace_end();
     return r;
 }
 
-fn sandhi_rpc_call_with_headers(url, http_method, body_json, user_headers, dialect) {
+fn sandhi_rpc_call_with_headers(url, http_method, body_json, user_headers, dialect): i64 {
     return sandhi_rpc_call_with_headers_a(default_alloc(), url, http_method, body_json, user_headers, dialect);
 }
 
-fn _sandhi_rpc_call_with_headers_impl_a(a, url, http_method, body_json, user_headers, dialect) {
+fn _sandhi_rpc_call_with_headers_impl_a(a, url, http_method, body_json, user_headers, dialect): i64 {
     var headers = user_headers;
     if (headers == 0) {
         headers = sandhi_headers_new_a(a);
@@ -186,14 +186,14 @@ fn _sandhi_rpc_call_with_headers_impl_a(a, url, http_method, body_json, user_hea
     return _sandhi_rpc_wrap_a(a, hr, dialect);
 }
 
-fn _sandhi_rpc_call_with_headers_impl(url, http_method, body_json, user_headers, dialect) {
+fn _sandhi_rpc_call_with_headers_impl(url, http_method, body_json, user_headers, dialect): i64 {
     return _sandhi_rpc_call_with_headers_impl_a(default_alloc(), url, http_method, body_json, user_headers, dialect);
 }
 
 # Wrap an HTTP response into an rpc-response, allocating the wrapper
 # and the extracted err message into `a`. The HTTP response's body
 # pointer is shared (not dup'd) — caller manages its lifetime.
-fn _sandhi_rpc_wrap_a(a, hr, dialect) {
+fn _sandhi_rpc_wrap_a(a, hr, dialect): i64 {
     var ek = sandhi_http_err_kind(hr);
     if (ek != SANDHI_OK) {
         return _sandhi_rpc_resp_new_a(a, 0, 0, 0, ek, 0);
@@ -212,7 +212,7 @@ fn _sandhi_rpc_wrap_a(a, hr, dialect) {
     return _sandhi_rpc_resp_new_a(a, status, body, blen, SANDHI_OK, 0);
 }
 
-fn _sandhi_rpc_wrap(hr, dialect) {
+fn _sandhi_rpc_wrap(hr, dialect): i64 {
     return _sandhi_rpc_wrap_a(default_alloc(), hr, dialect);
 }
 

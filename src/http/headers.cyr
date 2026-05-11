@@ -18,7 +18,7 @@
 # Internal entry constructor — `_a` variant takes the Allocator first.
 # Returns 0 on OOM. Callers MUST null-check (existing call sites in
 # sandhi_headers_add_a do).
-fn _sandhi_hdr_entry_new_a(a, name, value) {
+fn _sandhi_hdr_entry_new_a(a, name, value): i64 {
     var e = alloc_via(a, 16);
     if (e == 0) { return 0; }
     store64(e, name);
@@ -26,26 +26,26 @@ fn _sandhi_hdr_entry_new_a(a, name, value) {
     return e;
 }
 
-fn _sandhi_hdr_entry_new(name, value) {
+fn _sandhi_hdr_entry_new(name, value): i64 {
     return _sandhi_hdr_entry_new_a(default_alloc(), name, value);
 }
 
-fn _sandhi_hdr_entry_name(e) {
+fn _sandhi_hdr_entry_name(e): i64 {
     return load64(e);
 }
 
-fn _sandhi_hdr_entry_value(e) {
+fn _sandhi_hdr_entry_value(e): i64 {
     return load64(e + 8);
 }
 
 # ASCII lowercase — header names are ASCII-only per RFC 7230.
-fn _sandhi_hdr_to_lower(c) {
+fn _sandhi_hdr_to_lower(c): i64 {
     if (c >= 65) { if (c <= 90) { return c + 32; } }
     return c;
 }
 
 # Case-insensitive cstr equality. Returns 1 if equal, 0 otherwise.
-fn _sandhi_hdr_ieq(a, b) {
+fn _sandhi_hdr_ieq(a, b): i64 {
     var i = 0;
     while (1 == 1) {
         var ca = _sandhi_hdr_to_lower(load8(a + i));
@@ -59,7 +59,7 @@ fn _sandhi_hdr_ieq(a, b) {
 
 # Trim ASCII SP / HTAB from both ends of a cstr range and copy into
 # `a`. Returns 0 on OOM.
-fn _sandhi_hdr_trim_copy_a(a, ptr, start, end) {
+fn _sandhi_hdr_trim_copy_a(a, ptr, start, end): i64 {
     var s = start;
     var e = end;
     while (s < e && (load8(ptr + s) == 32 || load8(ptr + s) == 9)) { s = s + 1; }
@@ -72,14 +72,14 @@ fn _sandhi_hdr_trim_copy_a(a, ptr, start, end) {
     return out;
 }
 
-fn _sandhi_hdr_trim_copy(ptr, start, end) {
+fn _sandhi_hdr_trim_copy(ptr, start, end): i64 {
     return _sandhi_hdr_trim_copy_a(default_alloc(), ptr, start, end);
 }
 
 # Duplicate a cstr into a fresh null-terminated alloc owned by `a`.
 # Returns 0 on null input OR on OOM (caller distinguishes via the
 # input-null pre-check that lives in the public verbs).
-fn _sandhi_hdr_cstr_dup_a(a, s) {
+fn _sandhi_hdr_cstr_dup_a(a, s): i64 {
     if (s == 0) { return 0; }
     var n = strlen(s);
     var out = alloc_via(a, n + 1);
@@ -89,7 +89,7 @@ fn _sandhi_hdr_cstr_dup_a(a, s) {
     return out;
 }
 
-fn _sandhi_hdr_cstr_dup(s) {
+fn _sandhi_hdr_cstr_dup(s): i64 {
     return _sandhi_hdr_cstr_dup_a(default_alloc(), s);
 }
 
@@ -99,16 +99,16 @@ fn _sandhi_hdr_cstr_dup(s) {
 
 # Allocate an empty header block from `a`. Returns a vec of entry
 # pointers; 0 on OOM.
-fn sandhi_headers_new_a(a) {
+fn sandhi_headers_new_a(a): i64 {
     return vec_new_a(a);
 }
 
-fn sandhi_headers_new() {
+fn sandhi_headers_new(): i64 {
     return sandhi_headers_new_a(default_alloc());
 }
 
 # Total entry count (includes duplicate-name entries).
-fn sandhi_headers_count(h) {
+fn sandhi_headers_count(h): i64 {
     return vec_len(h);
 }
 
@@ -117,7 +117,7 @@ fn sandhi_headers_count(h) {
 # is the only failure mode; CR/LF are header smuggling vectors).
 # Returns 1 = unsafe, 0 = safe. Used by add / set to refuse caller-
 # injected smuggled-header bytes.
-fn _sandhi_hdr_has_unsafe_byte(s) {
+fn _sandhi_hdr_has_unsafe_byte(s): i64 {
     if (s == 0) { return 0; }
     var i = 0;
     while (load8(s + i) != 0) {
@@ -133,7 +133,7 @@ fn _sandhi_hdr_has_unsafe_byte(s) {
 #
 # 0.9.1 P1 — refuses caller-supplied name/value containing CR / LF.
 # Returns 0 on success, `0 - 1` on byte-rejection, `0 - 2` on OOM.
-fn sandhi_headers_add_a(a, h, name, value) {
+fn sandhi_headers_add_a(a, h, name, value): i64 {
     if (_sandhi_hdr_has_unsafe_byte(name) == 1)  { return 0 - 1; }
     if (_sandhi_hdr_has_unsafe_byte(value) == 1) { return 0 - 1; }
     var name_dup = _sandhi_hdr_cstr_dup_a(a, name);
@@ -146,26 +146,26 @@ fn sandhi_headers_add_a(a, h, name, value) {
     return 0;
 }
 
-fn sandhi_headers_add(h, name, value) {
+fn sandhi_headers_add(h, name, value): i64 {
     return sandhi_headers_add_a(default_alloc(), h, name, value);
 }
 
 # Replace all entries with the given name, then append one new entry,
 # allocating any new storage in `a`. Use for single-value headers.
-fn sandhi_headers_set_a(a, h, name, value) {
+fn sandhi_headers_set_a(a, h, name, value): i64 {
     if (_sandhi_hdr_has_unsafe_byte(name) == 1)  { return 0 - 1; }
     if (_sandhi_hdr_has_unsafe_byte(value) == 1) { return 0 - 1; }
     sandhi_headers_remove(h, name);
     return sandhi_headers_add_a(a, h, name, value);
 }
 
-fn sandhi_headers_set(h, name, value) {
+fn sandhi_headers_set(h, name, value): i64 {
     return sandhi_headers_set_a(default_alloc(), h, name, value);
 }
 
 # Remove all entries with the given name. Returns number removed.
 # Order-preserving for surviving entries.
-fn sandhi_headers_remove(h, name) {
+fn sandhi_headers_remove(h, name): i64 {
     var i = 0;
     var w = 0;
     var removed = 0;
@@ -189,7 +189,7 @@ fn sandhi_headers_remove(h, name) {
 
 # First value for the given name, case-insensitive. Returns 0 if absent.
 # For multi-value headers (Set-Cookie), iterate via the _at() verbs.
-fn sandhi_headers_get(h, name) {
+fn sandhi_headers_get(h, name): i64 {
     var i = 0;
     var n = vec_len(h);
     while (i < n) {
@@ -203,21 +203,21 @@ fn sandhi_headers_get(h, name) {
 }
 
 # Indexed name access (iteration). Returns 0 if out of range.
-fn sandhi_headers_name_at(h, idx) {
+fn sandhi_headers_name_at(h, idx): i64 {
     if (idx < 0) { return 0; }
     if (idx >= vec_len(h)) { return 0; }
     return _sandhi_hdr_entry_name(vec_get(h, idx));
 }
 
 # Indexed value access (iteration). Returns 0 if out of range.
-fn sandhi_headers_value_at(h, idx) {
+fn sandhi_headers_value_at(h, idx): i64 {
     if (idx < 0) { return 0; }
     if (idx >= vec_len(h)) { return 0; }
     return _sandhi_hdr_entry_value(vec_get(h, idx));
 }
 
 # 1 if any entry matches the given name (case-insensitive).
-fn sandhi_headers_has(h, name) {
+fn sandhi_headers_has(h, name): i64 {
     if (sandhi_headers_get(h, name) == 0) { return 0; }
     return 1;
 }
@@ -230,7 +230,7 @@ fn sandhi_headers_has(h, name) {
 # Does NOT append the terminating blank line — caller emits that
 # after any request-line / status-line framing so the builder can
 # be shared with method-specific prefixes.
-fn sandhi_headers_serialize(h, sb) {
+fn sandhi_headers_serialize(h, sb): i64 {
     var i = 0;
     var n = vec_len(h);
     while (i < n) {
@@ -261,7 +261,7 @@ fn sandhi_headers_serialize(h, sb) {
 # best-effort partial parse (matches pre-migration behavior where
 # alloc-fail aborted, since the global bump can't fail in practice
 # until the heap is exhausted).
-fn sandhi_headers_parse_a(a, buf, blen) {
+fn sandhi_headers_parse_a(a, buf, blen): i64 {
     var h = sandhi_headers_new_a(a);
     if (h == 0) { return 0; }
     var i = 0;
@@ -314,7 +314,7 @@ fn sandhi_headers_parse_a(a, buf, blen) {
     return h;
 }
 
-fn sandhi_headers_parse(buf, blen) {
+fn sandhi_headers_parse(buf, blen): i64 {
     return sandhi_headers_parse_a(default_alloc(), buf, blen);
 }
 
@@ -334,7 +334,7 @@ fn sandhi_headers_parse(buf, blen) {
 # response parser + server-side accept loop call it after parse
 # and reject on truthy.
 
-fn _sandhi_hdr_count_ci(h, name) {
+fn _sandhi_hdr_count_ci(h, name): i64 {
     var count = 0;
     var n = sandhi_headers_count(h);
     var i = 0;
@@ -348,7 +348,7 @@ fn _sandhi_hdr_count_ci(h, name) {
     return count;
 }
 
-fn sandhi_headers_smuggle_dup(h) {
+fn sandhi_headers_smuggle_dup(h): i64 {
     if (h == 0) { return 0; }
     if (_sandhi_hdr_count_ci(h, "Host") > 1)              { return 1; }
     if (_sandhi_hdr_count_ci(h, "Content-Length") > 1)    { return 1; }

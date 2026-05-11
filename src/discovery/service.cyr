@@ -20,7 +20,7 @@ enum SandhiServiceOff {
 var SANDHI_SERVICE_STRUCT_SIZE = 32;
 
 # Allocate a service struct from `a`. Returns 0 on OOM.
-fn sandhi_service_new_a(a, name, host, port, ipv4) {
+fn sandhi_service_new_a(a, name, host, port, ipv4): i64 {
     var s = alloc_via(a, SANDHI_SERVICE_STRUCT_SIZE);
     if (s == 0) { return 0; }
     store64(s + SANDHI_SERVICE_OFF_NAME, name);
@@ -30,14 +30,14 @@ fn sandhi_service_new_a(a, name, host, port, ipv4) {
     return s;
 }
 
-fn sandhi_service_new(name, host, port, ipv4) {
+fn sandhi_service_new(name, host, port, ipv4): i64 {
     return sandhi_service_new_a(default_alloc(), name, host, port, ipv4);
 }
 
-fn sandhi_service_name(s) { return load64(s + SANDHI_SERVICE_OFF_NAME); }
-fn sandhi_service_host(s) { return load64(s + SANDHI_SERVICE_OFF_HOST); }
-fn sandhi_service_port(s) { return load64(s + SANDHI_SERVICE_OFF_PORT); }
-fn sandhi_service_ipv4(s) { return load64(s + SANDHI_SERVICE_OFF_IPV4); }
+fn sandhi_service_name(s): i64 { return load64(s + SANDHI_SERVICE_OFF_NAME); }
+fn sandhi_service_host(s): i64 { return load64(s + SANDHI_SERVICE_OFF_HOST); }
+fn sandhi_service_port(s): i64 { return load64(s + SANDHI_SERVICE_OFF_PORT); }
+fn sandhi_service_ipv4(s): i64 { return load64(s + SANDHI_SERVICE_OFF_IPV4); }
 
 # ================================================================
 # Resolver — a function pointer + opaque context.
@@ -59,7 +59,7 @@ enum SandhiResolverOff {
 var SANDHI_RESOLVER_STRUCT_SIZE = 16;
 
 # Allocate a resolver wrapper from `a`. Returns 0 on OOM.
-fn sandhi_resolver_new_a(a, lookup_fn, ctx) {
+fn sandhi_resolver_new_a(a, lookup_fn, ctx): i64 {
     var r = alloc_via(a, SANDHI_RESOLVER_STRUCT_SIZE);
     if (r == 0) { return 0; }
     store64(r + SANDHI_RESOLVER_OFF_FN, lookup_fn);
@@ -67,15 +67,15 @@ fn sandhi_resolver_new_a(a, lookup_fn, ctx) {
     return r;
 }
 
-fn sandhi_resolver_new(lookup_fn, ctx) {
+fn sandhi_resolver_new(lookup_fn, ctx): i64 {
     return sandhi_resolver_new_a(default_alloc(), lookup_fn, ctx);
 }
 
-fn sandhi_resolver_fn(r)  { return load64(r + SANDHI_RESOLVER_OFF_FN); }
-fn sandhi_resolver_ctx(r) { return load64(r + SANDHI_RESOLVER_OFF_CTX); }
+fn sandhi_resolver_fn(r): i64 { return load64(r + SANDHI_RESOLVER_OFF_FN); }
+fn sandhi_resolver_ctx(r): i64 { return load64(r + SANDHI_RESOLVER_OFF_CTX); }
 
 # Invoke a resolver directly. Chain + consumers use this shape.
-fn sandhi_resolver_lookup(r, name) {
+fn sandhi_resolver_lookup(r, name): i64 {
     if (r == 0) { return 0; }
     var fp = sandhi_resolver_fn(r);
     if (fp == 0) { return 0; }

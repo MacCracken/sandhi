@@ -16,7 +16,7 @@
 #   SANDHI_ERR_CONNECT    — daimon unreachable
 #   SANDHI_ERR_REMOTE     — daimon answered but refused (non-2xx)
 #   SANDHI_ERR_INTERNAL   — malformed input
-fn sandhi_discovery_register(base_url, name, host, port) {
+fn sandhi_discovery_register(base_url, name, host, port): i64 {
     if (base_url == 0 || name == 0 || host == 0) { return SANDHI_ERR_INTERNAL; }
     if (port <= 0 || port > 65535) { return SANDHI_ERR_INTERNAL; }
 
@@ -39,7 +39,7 @@ fn sandhi_discovery_register(base_url, name, host, port) {
 }
 
 # Withdraw a previously-registered service.
-fn sandhi_discovery_deregister(base_url, name) {
+fn sandhi_discovery_deregister(base_url, name): i64 {
     if (base_url == 0 || name == 0) { return SANDHI_ERR_INTERNAL; }
     var url = _sandhi_daimon_url(base_url, name);
     var resp = sandhi_http_delete(url, 0);

@@ -39,7 +39,7 @@ enum SandhiDaimonCtxOff {
 var SANDHI_DAIMON_CTX_SIZE = 24;
 
 # Build a daimon resolver context backed by `a`. Returns 0 on OOM.
-fn _sandhi_discovery_daimon_ctx_new_a(a, base_url) {
+fn _sandhi_discovery_daimon_ctx_new_a(a, base_url): i64 {
     var c = alloc_via(a, SANDHI_DAIMON_CTX_SIZE);
     if (c == 0) { return 0; }
     store64(c + SANDHI_DAIMON_CTX_OFF_BASE, base_url);
@@ -48,7 +48,7 @@ fn _sandhi_discovery_daimon_ctx_new_a(a, base_url) {
     return c;
 }
 
-fn _sandhi_discovery_daimon_ctx_new(base_url) {
+fn _sandhi_discovery_daimon_ctx_new(base_url): i64 {
     return _sandhi_discovery_daimon_ctx_new_a(default_alloc(), base_url);
 }
 
@@ -57,7 +57,7 @@ fn _sandhi_discovery_daimon_ctx_new(base_url) {
 # concatenate the final URL still goes through the global bump
 # (str_builder lacks `_a` variants in the pinned stdlib); only the
 # trim-copy and the final cstr land in `a`.
-fn _sandhi_daimon_url_a(a, base, name) {
+fn _sandhi_daimon_url_a(a, base, name): i64 {
     var sb = str_builder_new();
     var blen = strlen(base);
     if (blen > 0 && load8(base + blen - 1) == 47) {
@@ -75,14 +75,14 @@ fn _sandhi_daimon_url_a(a, base, name) {
     return str_data(str_builder_build(sb));
 }
 
-fn _sandhi_daimon_url(base, name) {
+fn _sandhi_daimon_url(base, name): i64 {
     return _sandhi_daimon_url_a(default_alloc(), base, name);
 }
 
 # The resolver callback. Matches fn(ctx, name) → *service. The
 # allocator stored on ctx (slot +16, 0 = process default) drives
 # every alloc on the resolved-service path.
-fn _sandhi_daimon_lookup(ctx, name) {
+fn _sandhi_daimon_lookup(ctx, name): i64 {
     if (ctx == 0 || name == 0) { return 0; }
     var base = load64(ctx + SANDHI_DAIMON_CTX_OFF_BASE);
     if (base == 0) { return 0; }
@@ -103,7 +103,7 @@ fn _sandhi_daimon_lookup(ctx, name) {
 # Parse daimon's {"host":"...","port":N} response into a service
 # allocated from `a`. Returns 0 on missing fields, malformed input,
 # or OOM.
-fn _sandhi_daimon_parse_service_a(a, body, name) {
+fn _sandhi_daimon_parse_service_a(a, body, name): i64 {
     var host = sandhi_json_get_string(body, "host");
     if (host == 0) { return 0; }
     var port = sandhi_json_get_int(body, "port");
@@ -128,20 +128,20 @@ fn _sandhi_daimon_parse_service_a(a, body, name) {
     return sandhi_service_new_a(a, name_copy, host, port, ipv4);
 }
 
-fn _sandhi_daimon_parse_service(body, name) {
+fn _sandhi_daimon_parse_service(body, name): i64 {
     return _sandhi_daimon_parse_service_a(default_alloc(), body, name);
 }
 
 # Build a resolver for the given daimon base URL, owned by `a`.
 # Returns 0 on OOM.
-fn sandhi_discovery_daimon_resolver_a(a, base_url) {
+fn sandhi_discovery_daimon_resolver_a(a, base_url): i64 {
     if (base_url == 0) { return 0; }
     var ctx = _sandhi_discovery_daimon_ctx_new_a(a, base_url);
     if (ctx == 0) { return 0; }
     return sandhi_resolver_new_a(a, &_sandhi_daimon_lookup, ctx);
 }
 
-fn sandhi_discovery_daimon_resolver(base_url) {
+fn sandhi_discovery_daimon_resolver(base_url): i64 {
     return sandhi_discovery_daimon_resolver_a(default_alloc(), base_url);
 }
 

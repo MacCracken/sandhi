@@ -18,7 +18,7 @@ enum SandhiErrorKind {
     SANDHI_ERR_INTERNAL    = 99;
 }
 
-fn sandhi_err_kind_name(kind) {
+fn sandhi_err_kind_name(kind): i64 {
     if (kind == SANDHI_OK)             { return "OK";         }
     if (kind == SANDHI_ERR_PARSE)      { return "PARSE";      }
     if (kind == SANDHI_ERR_CONNECT)    { return "CONNECT";    }

@@ -28,7 +28,7 @@ var SANDHI_ALPN_DEFAULT = "h2,http/1.1";
 # Returns the number of bytes written, or `0 - 1` on overflow.
 #
 # Example: "h2,http/1.1" → 13 bytes.
-fn sandhi_alpn_encode_protos(protos_csv, out, out_cap) {
+fn sandhi_alpn_encode_protos(protos_csv, out, out_cap): i64 {
     if (protos_csv == 0) { return 0; }
     var p = 0;        # input cursor
     var w = 0;        # output cursor
@@ -67,13 +67,13 @@ fn sandhi_alpn_encode_protos(protos_csv, out, out_cap) {
 # Returns the negotiated ALPN protocol as a NUL-terminated cstr
 # ("h2", "http/1.1", or 0 if ALPN didn't fire). The cstr is owned
 # by the conn — do not free, do not retain past `sandhi_conn_close`.
-fn sandhi_conn_alpn_selected(conn) {
+fn sandhi_conn_alpn_selected(conn): i64 {
     if (conn == 0) { return 0; }
     return load64(conn + SANDHI_CONN_OFF_ALPN_DATA);
 }
 
 # 1 if h2 was negotiated, 0 otherwise.
-fn sandhi_conn_alpn_is_h2(conn) {
+fn sandhi_conn_alpn_is_h2(conn): i64 {
     var sel = sandhi_conn_alpn_selected(conn);
     if (sel == 0) { return 0; }
     if (strlen(sel) != 2) { return 0; }

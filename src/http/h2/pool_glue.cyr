@@ -17,7 +17,7 @@
 
 # Take the h2 conn for a route, or 0 if none. Doesn't remove from
 # the map — h2 conns are shared, not exclusive.
-fn sandhi_http_pool_take_h2(pool, host, port, tls) {
+fn sandhi_http_pool_take_h2(pool, host, port, tls): i64 {
     if (pool == 0) { return 0; }
     var key = _sandhi_pool_route_key(host, port, tls);
     var h2m = load64(pool + SANDHI_POOL_OFF_H2_MAP);
@@ -37,7 +37,7 @@ fn sandhi_http_pool_take_h2(pool, host, port, tls) {
 # responsible for closing the prior entry's underlying socket if
 # they care about leaks (no-op today since we only call this once
 # per route per process).
-fn sandhi_http_pool_put_h2(pool, host, port, tls, h2c) {
+fn sandhi_http_pool_put_h2(pool, host, port, tls, h2c): i64 {
     if (pool == 0 || h2c == 0) { return 0; }
     var key = _sandhi_pool_route_key(host, port, tls);
     var h2m = load64(pool + SANDHI_POOL_OFF_H2_MAP);
@@ -50,7 +50,7 @@ fn sandhi_http_pool_put_h2(pool, host, port, tls, h2c) {
 # before `sandhi_http_pool_close` to avoid fd leaks at process exit.
 # (Order matters because pool.cyr's close clears the map without
 # walking values.)
-fn sandhi_http_pool_close_h2_conns(pool) {
+fn sandhi_http_pool_close_h2_conns(pool): i64 {
     if (pool == 0) { return 0; }
     var h2m = load64(pool + SANDHI_POOL_OFF_H2_MAP);
     if (h2m == 0) { return 0; }

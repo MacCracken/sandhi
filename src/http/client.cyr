@@ -26,23 +26,23 @@ var _SANDHI_HTTP_RESP_BUF_SIZE = 262144;  # 256 KB — enough for most API respo
 # order uint32), or (0 - 1) on any failure.
 # Resolve `host` via IPv4 literal then DNS, allocating any DNS scratch
 # from `a`. Returns the address on hit, (0 - 1) on miss.
-fn _sandhi_client_resolve_a(a, host) {
+fn _sandhi_client_resolve_a(a, host): i64 {
     var lit = sandhi_net_parse_ipv4(host);
     if (lit != 0 - 1) { return lit; }
     return sandhi_resolve_ipv4_a(a, host);
 }
 
-fn _sandhi_client_resolve(host) {
+fn _sandhi_client_resolve(host): i64 {
     return _sandhi_client_resolve_a(default_alloc(), host);
 }
 
 # IPv6 fallback into `a`. Returns a 16-byte AAAA buffer or 0.
-fn _sandhi_client_resolve_v6_a(a, host) {
+fn _sandhi_client_resolve_v6_a(a, host): i64 {
     if (host == 0) { return 0; }
     return sandhi_resolve_ipv6_a(a, host);
 }
 
-fn _sandhi_client_resolve_v6(host) {
+fn _sandhi_client_resolve_v6(host): i64 {
     return _sandhi_client_resolve_v6_a(default_alloc(), host);
 }
 
@@ -52,7 +52,7 @@ fn _sandhi_client_resolve_v6(host) {
 
 # Combine path + query into a single cstr "path?query" (or just path).
 # Caller owns the returned alloc.
-fn _sandhi_client_full_path_a(a, url_struct) {
+fn _sandhi_client_full_path_a(a, url_struct): i64 {
     var path = sandhi_url_path(url_struct);
     var query = sandhi_url_query(url_struct);
     if (query == 0) {
@@ -75,14 +75,14 @@ fn _sandhi_client_full_path_a(a, url_struct) {
     return out2;
 }
 
-fn _sandhi_client_full_path(url_struct) {
+fn _sandhi_client_full_path(url_struct): i64 {
     return _sandhi_client_full_path_a(default_alloc(), url_struct);
 }
 
 # Build the Host header value into `a`. The str_builder used in the
 # port-bearing variant is on the global bump; only the final cstr
 # (dup'd into `a`) is tied to the caller's lifetime.
-fn _sandhi_client_host_header_a(a, url_struct) {
+fn _sandhi_client_host_header_a(a, url_struct): i64 {
     var host = sandhi_url_host(url_struct);
     var port = sandhi_url_port(url_struct);
     var scheme = sandhi_url_scheme(url_struct);
@@ -103,7 +103,7 @@ fn _sandhi_client_host_header_a(a, url_struct) {
     return _sandhi_json_dup_a(a, str_data(str_builder_build(sb)));
 }
 
-fn _sandhi_client_host_header(url_struct) {
+fn _sandhi_client_host_header(url_struct): i64 {
     return _sandhi_client_host_header_a(default_alloc(), url_struct);
 }
 
@@ -117,7 +117,7 @@ fn _sandhi_client_host_header(url_struct) {
 # from response.cyr (bundled before client.cyr); client.cyr's own
 # `_sandhi_streq_ci` sits later in the file and isn't reachable from
 # here under single-pass compilation.
-fn _sandhi_client_user_header_is_reserved(name) {
+fn _sandhi_client_user_header_is_reserved(name): i64 {
     if (_sandhi_resp_streq_ci(name, "Host") == 1)              { return 1; }
     if (_sandhi_resp_streq_ci(name, "Content-Length") == 1)    { return 1; }
     if (_sandhi_resp_streq_ci(name, "Transfer-Encoding") == 1) { return 1; }
@@ -138,20 +138,20 @@ fn _sandhi_client_user_header_is_reserved(name) {
 # `_add_int_a` / `_build_a`. The four-fn family (`_a` / bare / `_v` /
 # `_va`) preserves every existing call shape; only the under-the-hood
 # allocator changes when `a` is supplied.
-fn _sandhi_client_build_request_a(a, method, full_path, host_header, user_headers, body_len) {
+fn _sandhi_client_build_request_a(a, method, full_path, host_header, user_headers, body_len): i64 {
     return _sandhi_client_build_request_va(a, method, full_path, host_header, user_headers, body_len, 0);
 }
 
-fn _sandhi_client_build_request(method, full_path, host_header, user_headers, body_len) {
+fn _sandhi_client_build_request(method, full_path, host_header, user_headers, body_len): i64 {
     return _sandhi_client_build_request_va(default_alloc(), method, full_path, host_header, user_headers, body_len, 0);
 }
 
-fn _sandhi_client_build_request_v(method, full_path, host_header, user_headers, body_len, keep_alive) {
+fn _sandhi_client_build_request_v(method, full_path, host_header, user_headers, body_len, keep_alive): i64 {
     return _sandhi_client_build_request_va(default_alloc(), method, full_path,
     host_header, user_headers, body_len, keep_alive);
 }
 
-fn _sandhi_client_build_request_va(a, method, full_path, host_header, user_headers, body_len, keep_alive) {
+fn _sandhi_client_build_request_va(a, method, full_path, host_header, user_headers, body_len, keep_alive): i64 {
     var sb = str_builder_new_a(a);
     # OOM on the builder header alloc → return 0 cleanly. Without
     # this guard, downstream str_builder_add_cstr_a's dereference 0
@@ -248,7 +248,7 @@ fn _sandhi_client_build_request_va(a, method, full_path, host_header, user_heade
 # Outer trace wrapper — opt-in span via sandhi_trace_enable(1). Span
 # no-op by default; the inner does all the work either way.
 fn _sandhi_http_do_a(a, method, url, user_headers, body, body_len, max_bytes,
-connect_ms, read_ms, write_ms, total_ms, pool) {
+connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     sandhi_trace_begin("sandhi.http");
     var r = _sandhi_http_do_impl_a(a, method, url, user_headers, body, body_len,
     max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
@@ -257,7 +257,7 @@ connect_ms, read_ms, write_ms, total_ms, pool) {
 }
 
 fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes,
-connect_ms, read_ms, write_ms, total_ms, pool) {
+connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     return _sandhi_http_do_a(default_alloc(), method, url, user_headers, body, body_len,
     max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
 }
@@ -268,7 +268,7 @@ connect_ms, read_ms, write_ms, total_ms, pool) {
 # GET, HEAD, OPTIONS, TRACE — sandhi exposes the first three. PUT
 # is idempotent but not safe (changes server state), so it stays
 # out per OpenSSL's recommended posture.
-fn _sandhi_method_is_replay_safe(method) {
+fn _sandhi_method_is_replay_safe(method): i64 {
     if (streq(method, "GET") == 1) { return 1; }
     if (streq(method, "HEAD") == 1) { return 1; }
     if (streq(method, "OPTIONS") == 1) { return 1; }
@@ -279,7 +279,7 @@ fn _sandhi_method_is_replay_safe(method) {
 # `h` so the cred digest can chain multiple header values together
 # in one accumulator without losing entropy across them. Same
 # offset basis / prime as stdlib `hash_str` (lib/hashmap.cyr).
-fn _sandhi_fnv1a_mix(h, s) {
+fn _sandhi_fnv1a_mix(h, s): i64 {
     if (s == 0) { return h; }
     var i = 0;
     while (load8(s + i) != 0) {
@@ -306,7 +306,7 @@ fn _sandhi_fnv1a_mix(h, s) {
 # the flag when calling `sandhi_session_cache_lookup` / `_store`.
 # Named `_compute_` rather than just `_cred_digest` to avoid
 # collision with the module-level variable of the same root.
-fn _sandhi_compute_cred_digest(headers) {
+fn _sandhi_compute_cred_digest(headers): i64 {
     if (headers == 0) { return 0; }
     var found = 0;
     var h = 0xCBF29CE484222325;  # FNV offset basis
@@ -336,7 +336,7 @@ fn _sandhi_compute_cred_digest(headers) {
 # Returns connect_ms unchanged when deadline is disabled; otherwise
 # clamps to `deadline - now`. Returns 0 if the deadline has already
 # elapsed (caller treats as TIMEOUT).
-fn _sandhi_http_clamp_ms(raw_ms, deadline_ms) {
+fn _sandhi_http_clamp_ms(raw_ms, deadline_ms): i64 {
     if (deadline_ms <= 0) { return raw_ms; }
     var remaining = deadline_ms - clock_now_ms();
     if (remaining <= 0) { return 0 - 1; }  # sentinel: already elapsed
@@ -352,7 +352,7 @@ fn _sandhi_http_clamp_ms(raw_ms, deadline_ms) {
 # buffer. Pool ops keep using the pool's own allocator (per
 # `_sandhi_pool_alloc`) — pool entries outlive any per-request arena.
 fn _sandhi_http_do_impl_a(a, method, url, user_headers, body, body_len, max_bytes,
-connect_ms, read_ms, write_ms, total_ms, pool) {
+connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     sandhi_prof_reset();
     var u = sandhi_url_parse_a(a, url);
     sandhi_prof_capture(SANDHI_PROF_PHASE_URL_PARSE_END);
@@ -469,7 +469,7 @@ connect_ms, read_ms, write_ms, total_ms, pool) {
 }
 
 fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
-connect_ms, read_ms, write_ms, total_ms, pool) {
+connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     return _sandhi_http_do_impl_a(default_alloc(), method, url, user_headers, body, body_len,
     max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
 }
@@ -480,7 +480,7 @@ connect_ms, read_ms, write_ms, total_ms, pool) {
 # for any other I/O fail. 1.2.0: `_a` threads `a` through the recv
 # buffer alloc + response parse + every error-path resp construction;
 # the bare version calls `_a` with default_alloc() for back-compat.
-fn _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms) {
+fn _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms): i64 {
     if (deadline_ms > 0 && clock_now_ms() >= deadline_ms) {
         sandhi_conn_close(conn);
         return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT);
@@ -540,7 +540,7 @@ fn _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms)
     return sandhi_http_response_parse_a(a, rbuf, nread);
 }
 
-fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms) {
+fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms): i64 {
     return _sandhi_http_exchange_a(default_alloc(), conn, req, body, body_len, max_bytes, deadline_ms);
 }
 
@@ -553,7 +553,7 @@ fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms) {
 # allocator (`_sandhi_pool_alloc`) — pool entries outlive any per-
 # request arena, so the put-back path is intentionally arena-skipping.
 fn _sandhi_http_exchange_keepalive_a(a, conn, req, body, body_len, max_bytes,
-deadline_ms, pool, host, port, use_tls) {
+deadline_ms, pool, host, port, use_tls): i64 {
     if (deadline_ms > 0 && clock_now_ms() >= deadline_ms) {
         sandhi_conn_close(conn);
         return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT);
@@ -636,7 +636,7 @@ deadline_ms, pool, host, port, use_tls) {
 }
 
 fn _sandhi_http_exchange_keepalive(conn, req, body, body_len, max_bytes,
-deadline_ms, pool, host, port, use_tls) {
+deadline_ms, pool, host, port, use_tls): i64 {
     return _sandhi_http_exchange_keepalive_a(default_alloc(), conn, req, body, body_len,
     max_bytes, deadline_ms, pool, host, port, use_tls);
 }
@@ -691,7 +691,7 @@ var SANDHI_HTTP_OPT_STRUCT_SIZE = 72;
 var SANDHI_HTTP_DEFAULT_MAX_HOPS = 5;
 var SANDHI_HTTP_DEFAULT_MAX_BYTES = 262144;
 
-fn sandhi_http_options_new_a(a) {
+fn sandhi_http_options_new_a(a): i64 {
     var o = alloc_via(a, SANDHI_HTTP_OPT_STRUCT_SIZE);
     if (o == 0) { return 0; }
     store64(o + SANDHI_HTTP_OPT_OFF_FOLLOW, 0);
@@ -706,46 +706,46 @@ fn sandhi_http_options_new_a(a) {
     return o;
 }
 
-fn sandhi_http_options_new() {
+fn sandhi_http_options_new(): i64 {
     return sandhi_http_options_new_a(default_alloc());
 }
 
-fn sandhi_http_options_follow_redirects(opts, on) {
+fn sandhi_http_options_follow_redirects(opts, on): i64 {
     store64(opts + SANDHI_HTTP_OPT_OFF_FOLLOW, on);
     return 0;
 }
 
-fn sandhi_http_options_max_hops(opts, n) {
+fn sandhi_http_options_max_hops(opts, n): i64 {
     store64(opts + SANDHI_HTTP_OPT_OFF_MAX_HOPS, n);
     return 0;
 }
 
-fn sandhi_http_options_max_response_bytes(opts, n) {
+fn sandhi_http_options_max_response_bytes(opts, n): i64 {
     store64(opts + SANDHI_HTTP_OPT_OFF_MAX_BYTES, n);
     return 0;
 }
 
-fn sandhi_http_options_read_ms(opts, ms) {
+fn sandhi_http_options_read_ms(opts, ms): i64 {
     store64(opts + SANDHI_HTTP_OPT_OFF_READ_MS, ms);
     return 0;
 }
 
-fn sandhi_http_options_write_ms(opts, ms) {
+fn sandhi_http_options_write_ms(opts, ms): i64 {
     store64(opts + SANDHI_HTTP_OPT_OFF_WRITE_MS, ms);
     return 0;
 }
 
-fn sandhi_http_options_connect_ms(opts, ms) {
+fn sandhi_http_options_connect_ms(opts, ms): i64 {
     store64(opts + SANDHI_HTTP_OPT_OFF_CONNECT_MS, ms);
     return 0;
 }
 
-fn sandhi_http_options_total_ms(opts, ms) {
+fn sandhi_http_options_total_ms(opts, ms): i64 {
     store64(opts + SANDHI_HTTP_OPT_OFF_TOTAL_MS, ms);
     return 0;
 }
 
-fn sandhi_http_options_pool(opts, pool) {
+fn sandhi_http_options_pool(opts, pool): i64 {
     store64(opts + SANDHI_HTTP_OPT_OFF_POOL, pool);
     return 0;
 }
@@ -759,58 +759,58 @@ fn sandhi_http_options_pool(opts, pool) {
 # `tls_supports_early_data()` (libssl capability) + session-cache
 # hit + cached session advertising 0-RTT support
 # (`tls_session_get_max_early_data >= req_len`).
-fn sandhi_http_options_allow_0rtt(opts, on) {
+fn sandhi_http_options_allow_0rtt(opts, on): i64 {
     store64(opts + SANDHI_HTTP_OPT_OFF_ALLOW_0RTT, on);
     return 0;
 }
 
-fn sandhi_http_options_get_allow_0rtt(opts) {
+fn sandhi_http_options_get_allow_0rtt(opts): i64 {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_ALLOW_0RTT);
 }
 
-fn sandhi_http_options_follow(opts) {
+fn sandhi_http_options_follow(opts): i64 {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_FOLLOW);
 }
 
-fn sandhi_http_options_hops(opts) {
+fn sandhi_http_options_hops(opts): i64 {
     if (opts == 0) { return SANDHI_HTTP_DEFAULT_MAX_HOPS; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_MAX_HOPS);
 }
 
-fn sandhi_http_options_bytes(opts) {
+fn sandhi_http_options_bytes(opts): i64 {
     if (opts == 0) { return SANDHI_HTTP_DEFAULT_MAX_BYTES; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_MAX_BYTES);
 }
 
-fn sandhi_http_options_get_read_ms(opts) {
+fn sandhi_http_options_get_read_ms(opts): i64 {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_READ_MS);
 }
 
-fn sandhi_http_options_get_write_ms(opts) {
+fn sandhi_http_options_get_write_ms(opts): i64 {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_WRITE_MS);
 }
 
-fn sandhi_http_options_get_connect_ms(opts) {
+fn sandhi_http_options_get_connect_ms(opts): i64 {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_CONNECT_MS);
 }
 
-fn sandhi_http_options_get_total_ms(opts) {
+fn sandhi_http_options_get_total_ms(opts): i64 {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_TOTAL_MS);
 }
 
-fn sandhi_http_options_get_pool(opts) {
+fn sandhi_http_options_get_pool(opts): i64 {
     if (opts == 0) { return 0; }
     return load64(opts + SANDHI_HTTP_OPT_OFF_POOL);
 }
 
 # 1 if the status code indicates a redirect we follow.
-fn _sandhi_is_redirect(status) {
+fn _sandhi_is_redirect(status): i64 {
     if (status == 301) { return 1; }
     if (status == 302) { return 1; }
     if (status == 303) { return 1; }
@@ -821,7 +821,7 @@ fn _sandhi_is_redirect(status) {
 
 # Resolve a Location header value against a base URL. Returns an alloc'd
 # cstr with a fully-qualified URL, or 0 if resolution fails.
-fn _sandhi_resolve_location_a(a, base_url, location) {
+fn _sandhi_resolve_location_a(a, base_url, location): i64 {
     if (location == 0) { return 0; }
     if (_sandhi_url_sceq(location, "http://", 7) == 1
     || _sandhi_url_sceq(location, "https://", 8) == 1) {
@@ -859,14 +859,14 @@ fn _sandhi_resolve_location_a(a, base_url, location) {
     return _sandhi_json_dup_a(a, str_data(str_builder_build_a(a, sb)));
 }
 
-fn _sandhi_resolve_location(base_url, location) {
+fn _sandhi_resolve_location(base_url, location): i64 {
     return _sandhi_resolve_location_a(default_alloc(), base_url, location);
 }
 
 # 0.9.0 P0 #4 — case-insensitive cstr compare. Used by the redirect
 # follower for header-name filtering. Inlined here rather than in
 # headers.cyr because the only consumer is right below.
-fn _sandhi_streq_ci(a, b) {
+fn _sandhi_streq_ci(a, b): i64 {
     if (a == 0 || b == 0) { return 0; }
     var i = 0;
     while (1 == 1) {
@@ -883,7 +883,7 @@ fn _sandhi_streq_ci(a, b) {
 
 # 1 if `next_url` has the same scheme+host+port as `prev_url`. Used
 # to decide whether to forward sensitive headers across a redirect.
-fn _sandhi_url_same_authority(prev_url, next_url) {
+fn _sandhi_url_same_authority(prev_url, next_url): i64 {
     var pu = sandhi_url_parse(prev_url);
     var nu = sandhi_url_parse(next_url);
     if (pu == 0 || nu == 0) { return 0; }
@@ -896,7 +896,7 @@ fn _sandhi_url_same_authority(prev_url, next_url) {
 # 1 if `prev_url` was HTTPS and `next_url` is HTTP — a security
 # downgrade we refuse to follow per the curl CVE-2025-0167 /
 # 14524 cluster lessons.
-fn _sandhi_url_is_https_downgrade(prev_url, next_url) {
+fn _sandhi_url_is_https_downgrade(prev_url, next_url): i64 {
     var pu = sandhi_url_parse(prev_url);
     var nu = sandhi_url_parse(next_url);
     if (pu == 0 || nu == 0) { return 0; }
@@ -909,7 +909,7 @@ fn _sandhi_url_is_https_downgrade(prev_url, next_url) {
 # `Authorization`, `Cookie`, and `Proxy-Authorization` stripped.
 # Used when a redirect crosses authorities — the caller's secret
 # wasn't intended for the new origin.
-fn _sandhi_strip_sensitive_headers_a(a, src) {
+fn _sandhi_strip_sensitive_headers_a(a, src): i64 {
     if (src == 0) { return 0; }
     var out = sandhi_headers_new_a(a);
     if (out == 0) { return 0; }
@@ -928,7 +928,7 @@ fn _sandhi_strip_sensitive_headers_a(a, src) {
     return out;
 }
 
-fn _sandhi_strip_sensitive_headers(src) {
+fn _sandhi_strip_sensitive_headers(src): i64 {
     return _sandhi_strip_sensitive_headers_a(default_alloc(), src);
 }
 
@@ -951,7 +951,7 @@ fn _sandhi_strip_sensitive_headers(src) {
 #     the same; matches RFC 7235 §2.2 spirit even though the spec
 #     doesn't mandate.)
 fn _sandhi_http_follow_a(a, method, url, headers, body, body_len, max_hops,
-max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
+max_bytes, connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     var m = method;
     var u = url;
     var b = body;
@@ -990,7 +990,7 @@ max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
 }
 
 fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
-max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
+max_bytes, connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     return _sandhi_http_follow_a(default_alloc(), method, url, headers, body, body_len,
     max_hops, max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
 }
@@ -1003,7 +1003,7 @@ max_bytes, connect_ms, read_ms, write_ms, total_ms, pool) {
 # engages the redirect-following driver up to max_hops. 1.2.1: both
 # the no-follow and follow paths thread `a` end-to-end (the 1.2.0
 # partial-arena leak on follow=1 is closed).
-fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts) {
+fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts): i64 {
     var max_bytes = sandhi_http_options_bytes(opts);
     var read_ms = sandhi_http_options_get_read_ms(opts);
     var write_ms = sandhi_http_options_get_write_ms(opts);
@@ -1046,7 +1046,7 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts) {
     return r;
 }
 
-fn _sandhi_http_dispatch(method, url, headers, body, body_len, opts) {
+fn _sandhi_http_dispatch(method, url, headers, body, body_len, opts): i64 {
     return _sandhi_http_dispatch_a(default_alloc(), method, url, headers, body, body_len, opts);
 }
 
@@ -1059,51 +1059,51 @@ fn _sandhi_http_dispatch(method, url, headers, body, body_len, opts) {
 # a per-request arena now have an end-to-end path:
 # `sandhi_http_get_a(arena, url, headers)` allocates response +
 # body + parsed headers entirely in the arena.
-fn sandhi_http_get_a(a, url, user_headers) {
+fn sandhi_http_get_a(a, url, user_headers): i64 {
     return _sandhi_http_dispatch_a(a, "GET", url, user_headers, 0, 0, 0);
 }
 
-fn sandhi_http_get(url, user_headers) {
+fn sandhi_http_get(url, user_headers): i64 {
     return sandhi_http_get_a(default_alloc(), url, user_headers);
 }
 
-fn sandhi_http_post_a(a, url, user_headers, body, body_len) {
+fn sandhi_http_post_a(a, url, user_headers, body, body_len): i64 {
     return _sandhi_http_dispatch_a(a, "POST", url, user_headers, body, body_len, 0);
 }
 
-fn sandhi_http_post(url, user_headers, body, body_len) {
+fn sandhi_http_post(url, user_headers, body, body_len): i64 {
     return sandhi_http_post_a(default_alloc(), url, user_headers, body, body_len);
 }
 
-fn sandhi_http_put_a(a, url, user_headers, body, body_len) {
+fn sandhi_http_put_a(a, url, user_headers, body, body_len): i64 {
     return _sandhi_http_dispatch_a(a, "PUT", url, user_headers, body, body_len, 0);
 }
 
-fn sandhi_http_put(url, user_headers, body, body_len) {
+fn sandhi_http_put(url, user_headers, body, body_len): i64 {
     return sandhi_http_put_a(default_alloc(), url, user_headers, body, body_len);
 }
 
-fn sandhi_http_patch_a(a, url, user_headers, body, body_len) {
+fn sandhi_http_patch_a(a, url, user_headers, body, body_len): i64 {
     return _sandhi_http_dispatch_a(a, "PATCH", url, user_headers, body, body_len, 0);
 }
 
-fn sandhi_http_patch(url, user_headers, body, body_len) {
+fn sandhi_http_patch(url, user_headers, body, body_len): i64 {
     return sandhi_http_patch_a(default_alloc(), url, user_headers, body, body_len);
 }
 
-fn sandhi_http_delete_a(a, url, user_headers) {
+fn sandhi_http_delete_a(a, url, user_headers): i64 {
     return _sandhi_http_dispatch_a(a, "DELETE", url, user_headers, 0, 0, 0);
 }
 
-fn sandhi_http_delete(url, user_headers) {
+fn sandhi_http_delete(url, user_headers): i64 {
     return sandhi_http_delete_a(default_alloc(), url, user_headers);
 }
 
-fn sandhi_http_head_a(a, url, user_headers) {
+fn sandhi_http_head_a(a, url, user_headers): i64 {
     return _sandhi_http_dispatch_a(a, "HEAD", url, user_headers, 0, 0, 0);
 }
 
-fn sandhi_http_head(url, user_headers) {
+fn sandhi_http_head(url, user_headers): i64 {
     return sandhi_http_head_a(default_alloc(), url, user_headers);
 }
 
@@ -1112,19 +1112,19 @@ fn sandhi_http_head(url, user_headers) {
 # 1.2.3 Batch E: each gains an `_a` variant; bare versions stay
 # as back-compat wrappers passing `default_alloc()`. Underlying
 # `_sandhi_http_dispatch_a` has been `_a`-threaded since 1.2.0.
-fn sandhi_http_get_opts_a(a, url, user_headers, opts) {
+fn sandhi_http_get_opts_a(a, url, user_headers, opts): i64 {
     return _sandhi_http_dispatch_a(a, "GET", url, user_headers, 0, 0, opts);
 }
 
-fn sandhi_http_get_opts(url, user_headers, opts) {
+fn sandhi_http_get_opts(url, user_headers, opts): i64 {
     return sandhi_http_get_opts_a(default_alloc(), url, user_headers, opts);
 }
 
-fn sandhi_http_post_opts_a(a, url, user_headers, body, body_len, opts) {
+fn sandhi_http_post_opts_a(a, url, user_headers, body, body_len, opts): i64 {
     return _sandhi_http_dispatch_a(a, "POST", url, user_headers, body, body_len, opts);
 }
 
-fn sandhi_http_post_opts(url, user_headers, body, body_len, opts) {
+fn sandhi_http_post_opts(url, user_headers, body, body_len, opts): i64 {
     return sandhi_http_post_opts_a(default_alloc(), url, user_headers, body, body_len, opts);
 }
 

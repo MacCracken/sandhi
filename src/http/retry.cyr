@@ -34,7 +34,7 @@ var SANDHI_RETRY_DEFAULT_INITIAL  = 50;
 var SANDHI_RETRY_DEFAULT_MAX      = 2000;
 
 # Allocate a retry-policy struct from `a`. Returns 0 on OOM.
-fn sandhi_retry_new_a(a) {
+fn sandhi_retry_new_a(a): i64 {
     var r = alloc_via(a, SANDHI_RETRY_STRUCT_SIZE);
     if (r == 0) { return 0; }
     store64(r + SANDHI_RETRY_OFF_ATTEMPTS, SANDHI_RETRY_DEFAULT_ATTEMPTS);
@@ -43,36 +43,36 @@ fn sandhi_retry_new_a(a) {
     return r;
 }
 
-fn sandhi_retry_new() {
+fn sandhi_retry_new(): i64 {
     return sandhi_retry_new_a(default_alloc());
 }
 
-fn sandhi_retry_max_attempts(r, n) {
+fn sandhi_retry_max_attempts(r, n): i64 {
     store64(r + SANDHI_RETRY_OFF_ATTEMPTS, n);
     return 0;
 }
 
-fn sandhi_retry_initial_backoff_ms(r, ms) {
+fn sandhi_retry_initial_backoff_ms(r, ms): i64 {
     store64(r + SANDHI_RETRY_OFF_INITIAL, ms);
     return 0;
 }
 
-fn sandhi_retry_max_backoff_ms(r, ms) {
+fn sandhi_retry_max_backoff_ms(r, ms): i64 {
     store64(r + SANDHI_RETRY_OFF_MAX, ms);
     return 0;
 }
 
-fn _sandhi_retry_attempts(r) {
+fn _sandhi_retry_attempts(r): i64 {
     if (r == 0) { return SANDHI_RETRY_DEFAULT_ATTEMPTS; }
     return load64(r + SANDHI_RETRY_OFF_ATTEMPTS);
 }
 
-fn _sandhi_retry_initial(r) {
+fn _sandhi_retry_initial(r): i64 {
     if (r == 0) { return SANDHI_RETRY_DEFAULT_INITIAL; }
     return load64(r + SANDHI_RETRY_OFF_INITIAL);
 }
 
-fn _sandhi_retry_max(r) {
+fn _sandhi_retry_max(r): i64 {
     if (r == 0) { return SANDHI_RETRY_DEFAULT_MAX; }
     return load64(r + SANDHI_RETRY_OFF_MAX);
 }
@@ -82,7 +82,7 @@ fn _sandhi_retry_max(r) {
 # property we want is "different clients pick different values" so
 # they don't all retry on the same millisecond. clock_now_ns() XOR
 # folded into a 32-bit value is plenty.
-fn _sandhi_retry_jitter_sleep(ceiling_ms) {
+fn _sandhi_retry_jitter_sleep(ceiling_ms): i64 {
     if (ceiling_ms <= 0) { return 0; }
     var ns = clock_now_ns();
     var mix = ns ^ (ns >> 17) ^ (ns >> 31);
@@ -96,7 +96,7 @@ fn _sandhi_retry_jitter_sleep(ceiling_ms) {
 # 1 if `response` represents a transient failure worth retrying.
 # Retryable: CONNECT, TIMEOUT, DISCOVERY (flaky resolver), 5xx.
 # NOT retryable: PARSE, TLS, PROTOCOL, REMOTE (non-5xx), AUTH, INTERNAL, 4xx.
-fn _sandhi_retry_should_retry(response) {
+fn _sandhi_retry_should_retry(response): i64 {
     var ek = sandhi_http_err_kind(response);
     if (ek == SANDHI_ERR_CONNECT)   { return 1; }
     if (ek == SANDHI_ERR_TIMEOUT)   { return 1; }
@@ -126,7 +126,7 @@ fn _sandhi_retry_should_retry(response) {
 # bytes when an arena_allocator is reused. Practically retry callers
 # only inspect the last response, which the back-compat shape
 # already returns.
-fn _sandhi_http_retry_a(a, method, url, user_headers, body, body_len, opts, retry) {
+fn _sandhi_http_retry_a(a, method, url, user_headers, body, body_len, opts, retry): i64 {
     var attempts = _sandhi_retry_attempts(retry);
     var backoff = _sandhi_retry_initial(retry);
     var max_backoff = _sandhi_retry_max(retry);
@@ -146,7 +146,7 @@ fn _sandhi_http_retry_a(a, method, url, user_headers, body, body_len, opts, retr
     return r;
 }
 
-fn _sandhi_http_retry(method, url, user_headers, body, body_len, opts, retry) {
+fn _sandhi_http_retry(method, url, user_headers, body, body_len, opts, retry): i64 {
     return _sandhi_http_retry_a(default_alloc(), method, url, user_headers, body, body_len, opts, retry);
 }
 
@@ -158,35 +158,35 @@ fn _sandhi_http_retry(method, url, user_headers, body, body_len, opts, retry) {
 # `_sandhi_http_retry_a` (which has been `_a`-threaded since
 # 1.2.1). Bare versions stay as back-compat wrappers passing
 # `default_alloc()`.
-fn sandhi_http_get_retry_a(a, url, user_headers, opts, retry) {
+fn sandhi_http_get_retry_a(a, url, user_headers, opts, retry): i64 {
     return _sandhi_http_retry_a(a, "GET", url, user_headers, 0, 0, opts, retry);
 }
 
-fn sandhi_http_get_retry(url, user_headers, opts, retry) {
+fn sandhi_http_get_retry(url, user_headers, opts, retry): i64 {
     return sandhi_http_get_retry_a(default_alloc(), url, user_headers, opts, retry);
 }
 
-fn sandhi_http_head_retry_a(a, url, user_headers, opts, retry) {
+fn sandhi_http_head_retry_a(a, url, user_headers, opts, retry): i64 {
     return _sandhi_http_retry_a(a, "HEAD", url, user_headers, 0, 0, opts, retry);
 }
 
-fn sandhi_http_head_retry(url, user_headers, opts, retry) {
+fn sandhi_http_head_retry(url, user_headers, opts, retry): i64 {
     return sandhi_http_head_retry_a(default_alloc(), url, user_headers, opts, retry);
 }
 
-fn sandhi_http_put_retry_a(a, url, user_headers, body, body_len, opts, retry) {
+fn sandhi_http_put_retry_a(a, url, user_headers, body, body_len, opts, retry): i64 {
     return _sandhi_http_retry_a(a, "PUT", url, user_headers, body, body_len, opts, retry);
 }
 
-fn sandhi_http_put_retry(url, user_headers, body, body_len, opts, retry) {
+fn sandhi_http_put_retry(url, user_headers, body, body_len, opts, retry): i64 {
     return sandhi_http_put_retry_a(default_alloc(), url, user_headers, body, body_len, opts, retry);
 }
 
-fn sandhi_http_delete_retry_a(a, url, user_headers, opts, retry) {
+fn sandhi_http_delete_retry_a(a, url, user_headers, opts, retry): i64 {
     return _sandhi_http_retry_a(a, "DELETE", url, user_headers, 0, 0, opts, retry);
 }
 
-fn sandhi_http_delete_retry(url, user_headers, opts, retry) {
+fn sandhi_http_delete_retry(url, user_headers, opts, retry): i64 {
     return sandhi_http_delete_retry_a(default_alloc(), url, user_headers, opts, retry);
 }
 

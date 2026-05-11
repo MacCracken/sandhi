@@ -34,7 +34,7 @@ enum SandhiTlsPolicyOff {
 
 var SANDHI_TLS_POLICY_STRUCT_SIZE = 48;
 
-fn _sandhi_tls_policy_dup_a(a, s) {
+fn _sandhi_tls_policy_dup_a(a, s): i64 {
     if (s == 0) { return 0; }
     var n = strlen(s);
     var out = alloc_via(a, n + 1);
@@ -44,11 +44,11 @@ fn _sandhi_tls_policy_dup_a(a, s) {
     return out;
 }
 
-fn _sandhi_tls_policy_dup(s) {
+fn _sandhi_tls_policy_dup(s): i64 {
     return _sandhi_tls_policy_dup_a(default_alloc(), s);
 }
 
-fn _sandhi_tls_policy_empty_a(a) {
+fn _sandhi_tls_policy_empty_a(a): i64 {
     var p = alloc_via(a, SANDHI_TLS_POLICY_STRUCT_SIZE);
     if (p == 0) { return 0; }
     store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, 0);
@@ -60,7 +60,7 @@ fn _sandhi_tls_policy_empty_a(a) {
     return p;
 }
 
-fn _sandhi_tls_policy_empty() {
+fn _sandhi_tls_policy_empty(): i64 {
     return _sandhi_tls_policy_empty_a(default_alloc());
 }
 
@@ -69,17 +69,17 @@ fn _sandhi_tls_policy_empty() {
 # ================================================================
 
 # Default policy allocated from `a`. Returns 0 on OOM.
-fn sandhi_tls_policy_new_default_a(a) {
+fn sandhi_tls_policy_new_default_a(a): i64 {
     return _sandhi_tls_policy_empty_a(a);
 }
 
-fn sandhi_tls_policy_new_default() {
+fn sandhi_tls_policy_new_default(): i64 {
     return sandhi_tls_policy_new_default_a(default_alloc());
 }
 
 # Pinned policy allocated from `a`. The caller-supplied hex is dup'd
 # into `a` so the policy is self-contained against arena reset.
-fn sandhi_tls_policy_new_pinned_a(a, spki_hex) {
+fn sandhi_tls_policy_new_pinned_a(a, spki_hex): i64 {
     var p = _sandhi_tls_policy_empty_a(a);
     if (p == 0) { return 0; }
     store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_PINNED);
@@ -87,12 +87,12 @@ fn sandhi_tls_policy_new_pinned_a(a, spki_hex) {
     return p;
 }
 
-fn sandhi_tls_policy_new_pinned(spki_hex) {
+fn sandhi_tls_policy_new_pinned(spki_hex): i64 {
     return sandhi_tls_policy_new_pinned_a(default_alloc(), spki_hex);
 }
 
 # mTLS policy allocated from `a`. Cert + key paths are dup'd into `a`.
-fn sandhi_tls_policy_new_mtls_a(a, cert_path, key_path) {
+fn sandhi_tls_policy_new_mtls_a(a, cert_path, key_path): i64 {
     var p = _sandhi_tls_policy_empty_a(a);
     if (p == 0) { return 0; }
     store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_MTLS);
@@ -101,12 +101,12 @@ fn sandhi_tls_policy_new_mtls_a(a, cert_path, key_path) {
     return p;
 }
 
-fn sandhi_tls_policy_new_mtls(cert_path, key_path) {
+fn sandhi_tls_policy_new_mtls(cert_path, key_path): i64 {
     return sandhi_tls_policy_new_mtls_a(default_alloc(), cert_path, key_path);
 }
 
 # Trust-store-override policy allocated from `a`.
-fn sandhi_tls_policy_new_trust_store_a(a, bundle_path) {
+fn sandhi_tls_policy_new_trust_store_a(a, bundle_path): i64 {
     var p = _sandhi_tls_policy_empty_a(a);
     if (p == 0) { return 0; }
     store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_CUSTOM_TRUST);
@@ -114,7 +114,7 @@ fn sandhi_tls_policy_new_trust_store_a(a, bundle_path) {
     return p;
 }
 
-fn sandhi_tls_policy_new_trust_store(bundle_path) {
+fn sandhi_tls_policy_new_trust_store(bundle_path): i64 {
     return sandhi_tls_policy_new_trust_store_a(default_alloc(), bundle_path);
 }
 
@@ -132,7 +132,7 @@ fn sandhi_tls_policy_new_trust_store(bundle_path) {
 # Right-hand fields win; left-hand fills the gaps. Field cstrs are
 # NOT re-dup'd — the resulting struct shares string ownership with
 # its inputs (caller must keep them alive). Returns 0 on OOM.
-fn sandhi_tls_policy_combine_a(alloc, a, b) {
+fn sandhi_tls_policy_combine_a(alloc, a, b): i64 {
     if (a == 0) { return b; }
     if (b == 0) { return a; }
     var out = _sandhi_tls_policy_empty_a(alloc);
@@ -164,7 +164,7 @@ fn sandhi_tls_policy_combine_a(alloc, a, b) {
     return out;
 }
 
-fn sandhi_tls_policy_combine(a, b) {
+fn sandhi_tls_policy_combine(a, b): i64 {
     return sandhi_tls_policy_combine_a(default_alloc(), a, b);
 }
 
@@ -172,32 +172,32 @@ fn sandhi_tls_policy_combine(a, b) {
 # Accessors
 # ================================================================
 
-fn sandhi_tls_policy_flags(p) {
+fn sandhi_tls_policy_flags(p): i64 {
     if (p == 0) { return 0; }
     return load64(p + SANDHI_TLS_POLICY_OFF_FLAGS);
 }
 
-fn sandhi_tls_policy_pinned_hash(p) {
+fn sandhi_tls_policy_pinned_hash(p): i64 {
     if (p == 0) { return 0; }
     return load64(p + SANDHI_TLS_POLICY_OFF_PINNED);
 }
 
-fn sandhi_tls_policy_mtls_cert(p) {
+fn sandhi_tls_policy_mtls_cert(p): i64 {
     if (p == 0) { return 0; }
     return load64(p + SANDHI_TLS_POLICY_OFF_MTLS_CERT);
 }
 
-fn sandhi_tls_policy_mtls_key(p) {
+fn sandhi_tls_policy_mtls_key(p): i64 {
     if (p == 0) { return 0; }
     return load64(p + SANDHI_TLS_POLICY_OFF_MTLS_KEY);
 }
 
-fn sandhi_tls_policy_trust_store(p) {
+fn sandhi_tls_policy_trust_store(p): i64 {
     if (p == 0) { return 0; }
     return load64(p + SANDHI_TLS_POLICY_OFF_TRUST_STORE);
 }
 
-fn sandhi_tls_policy_has_flag(p, flag) {
+fn sandhi_tls_policy_has_flag(p, flag): i64 {
     if (p == 0) { return 0; }
     var f = load64(p + SANDHI_TLS_POLICY_OFF_FLAGS);
     if ((f & flag) == flag) { return 1; }

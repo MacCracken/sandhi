@@ -64,7 +64,7 @@ var _sandhi_session_cache_map        = 0;   # hashmap<cstr → SSL_SESSION*>
 var _sandhi_session_cache_hit_count  = 0;
 var _sandhi_session_cache_miss_count = 0;
 
-fn _sandhi_session_cache_init() {
+fn _sandhi_session_cache_init(): i64 {
     if (_sandhi_session_cache_initialized == 1) { return 0; }
     if (tls_supports_session_resumption() == 0) {
         # libssl missing the session-resumption symbols. Stay
@@ -81,7 +81,7 @@ fn _sandhi_session_cache_init() {
 
 # Toggle the cache on. Returns 1 on success, 0 if libssl doesn't
 # support session resumption. Idempotent.
-fn sandhi_session_cache_enable(on) {
+fn sandhi_session_cache_enable(on): i64 {
     _sandhi_session_cache_init();
     if (on == 1 && _sandhi_session_cache_map == 0) {
         # init ran but libssl didn't support — stay off
@@ -91,7 +91,7 @@ fn sandhi_session_cache_enable(on) {
     return 1;
 }
 
-fn sandhi_session_cache_enabled() {
+fn sandhi_session_cache_enabled(): i64 {
     return _sandhi_session_cache_enabled;
 }
 
@@ -106,7 +106,7 @@ fn sandhi_session_cache_enabled() {
 # fresh handshake. Pass 0 for cred_digest when no cred-bearing
 # headers are present; rendered as `|0000000000000000`, the common
 # case for service-to-service traffic.
-fn _sandhi_session_cache_key_a(a, sni_host, hook_fp, cred_digest) {
+fn _sandhi_session_cache_key_a(a, sni_host, hook_fp, cred_digest): i64 {
     if (sni_host == 0) { return 0; }
     var sb = str_builder_new_a(a);
     if (sb == 0) { return 0; }
@@ -144,7 +144,7 @@ fn _sandhi_session_cache_key_a(a, sni_host, hook_fp, cred_digest) {
 # cred-bearing header values from this request (computed via
 # `_sandhi_cred_digest_a` in client.cyr). Pass 0 when no
 # cred-bearing headers are present.
-fn sandhi_session_cache_lookup(sni_host, hook_fp, cred_digest) {
+fn sandhi_session_cache_lookup(sni_host, hook_fp, cred_digest): i64 {
     if (_sandhi_session_cache_enabled == 0) { return 0; }
     if (_sandhi_session_cache_map == 0) { return 0; }
     if (sni_host == 0) { return 0; }
@@ -165,7 +165,7 @@ fn sandhi_session_cache_lookup(sni_host, hook_fp, cred_digest) {
 # entry for the same key, freeing the prior session.
 #
 # No-op when disabled / cache uninitialized / session is 0.
-fn sandhi_session_cache_store(sni_host, hook_fp, cred_digest, session) {
+fn sandhi_session_cache_store(sni_host, hook_fp, cred_digest, session): i64 {
     if (_sandhi_session_cache_enabled == 0) { return 0; }
     if (_sandhi_session_cache_map == 0) { return 0; }
     if (sni_host == 0 || session == 0) { return 0; }
@@ -181,22 +181,22 @@ fn sandhi_session_cache_store(sni_host, hook_fp, cred_digest, session) {
 
 # Number of cache slots currently occupied. Useful for tests +
 # observability sampling.
-fn sandhi_session_cache_size() {
+fn sandhi_session_cache_size(): i64 {
     if (_sandhi_session_cache_map == 0) { return 0; }
     return hashmap_len(_sandhi_session_cache_map);
 }
 
-fn sandhi_session_cache_hit_count() {
+fn sandhi_session_cache_hit_count(): i64 {
     return _sandhi_session_cache_hit_count;
 }
 
-fn sandhi_session_cache_miss_count() {
+fn sandhi_session_cache_miss_count(): i64 {
     return _sandhi_session_cache_miss_count;
 }
 
 # Reset hit/miss counters. Doesn't clear the cache itself —
 # entries persist for the next round of measurements.
-fn sandhi_session_cache_reset_stats() {
+fn sandhi_session_cache_reset_stats(): i64 {
     _sandhi_session_cache_hit_count = 0;
     _sandhi_session_cache_miss_count = 0;
     return 0;

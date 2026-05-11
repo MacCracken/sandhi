@@ -48,7 +48,7 @@ var _hpack_static_inited = 0;
 var _hpack_static_names  = 0;
 var _hpack_static_values = 0;
 
-fn _hpack_static_pair(n, v) {
+fn _hpack_static_pair(n, v): i64 {
     vec_push(_hpack_static_names, n);
     vec_push(_hpack_static_values, v);
     return 0;
@@ -56,7 +56,7 @@ fn _hpack_static_pair(n, v) {
 
 # Split into 4 chunks so each function stays under the Cyrius
 # fixup-table cap. Each chunk handles ~15 entries.
-fn _hpack_static_init_a() {
+fn _hpack_static_init_a(): i64 {
     _hpack_static_pair(":authority", "");
     _hpack_static_pair(":method", "GET");
     _hpack_static_pair(":method", "POST");
@@ -75,7 +75,7 @@ fn _hpack_static_init_a() {
     return 0;
 }
 
-fn _hpack_static_init_b() {
+fn _hpack_static_init_b(): i64 {
     _hpack_static_pair("accept-encoding", "gzip, deflate");
     _hpack_static_pair("accept-language", "");
     _hpack_static_pair("accept-ranges", "");
@@ -94,7 +94,7 @@ fn _hpack_static_init_b() {
     return 0;
 }
 
-fn _hpack_static_init_c() {
+fn _hpack_static_init_c(): i64 {
     _hpack_static_pair("content-type", "");
     _hpack_static_pair("cookie", "");
     _hpack_static_pair("date", "");
@@ -113,7 +113,7 @@ fn _hpack_static_init_c() {
     return 0;
 }
 
-fn _hpack_static_init_d() {
+fn _hpack_static_init_d(): i64 {
     _hpack_static_pair("location", "");
     _hpack_static_pair("max-forwards", "");
     _hpack_static_pair("proxy-authenticate", "");
@@ -137,7 +137,7 @@ fn _hpack_static_init_d() {
 # `default_alloc()` — the parallel name + value vecs are process-wide
 # singletons consulted by every HPACK encode/decode and must outlive
 # any per-request arena.
-fn _hpack_static_init() {
+fn _hpack_static_init(): i64 {
     if (_hpack_static_inited == 1) { return 0; }
     var ga = default_alloc();
     _hpack_static_names  = vec_new_a(ga);
@@ -150,18 +150,18 @@ fn _hpack_static_init() {
     return 0;
 }
 
-fn sandhi_hpack_static_size() {
+fn sandhi_hpack_static_size(): i64 {
     _hpack_static_init();
     return vec_len(_hpack_static_names);
 }
 
-fn sandhi_hpack_static_name(idx) {
+fn sandhi_hpack_static_name(idx): i64 {
     _hpack_static_init();
     if (idx < 1 || idx > vec_len(_hpack_static_names)) { return 0; }
     return vec_get(_hpack_static_names, idx - 1);
 }
 
-fn sandhi_hpack_static_value(idx) {
+fn sandhi_hpack_static_value(idx): i64 {
     _hpack_static_init();
     if (idx < 1 || idx > vec_len(_hpack_static_values)) { return 0; }
     return vec_get(_hpack_static_values, idx - 1);
@@ -201,7 +201,7 @@ var SANDHI_HPACK_ENTRY_OVERHEAD    = 32;
 # allocate (rebuilt name/value vecs on every insert at the head); use
 # the `_table_add_a` variant to keep that churn in `a` too. Returns
 # 0 on OOM.
-fn sandhi_hpack_table_new_a(a, max_size) {
+fn sandhi_hpack_table_new_a(a, max_size): i64 {
     var t = alloc_via(a, SANDHI_HPACK_TABLE_STRUCT_SIZE);
     if (t == 0) { return 0; }
     store64(t + SANDHI_HPACK_TBL_OFF_NAMES, vec_new_a(a));
@@ -213,32 +213,32 @@ fn sandhi_hpack_table_new_a(a, max_size) {
     return t;
 }
 
-fn sandhi_hpack_table_new(max_size) {
+fn sandhi_hpack_table_new(max_size): i64 {
     return sandhi_hpack_table_new_a(default_alloc(), max_size);
 }
 
-fn sandhi_hpack_table_count(t) {
+fn sandhi_hpack_table_count(t): i64 {
     if (t == 0) { return 0; }
     return vec_len(load64(t + SANDHI_HPACK_TBL_OFF_NAMES));
 }
 
-fn sandhi_hpack_table_size(t) {
+fn sandhi_hpack_table_size(t): i64 {
     if (t == 0) { return 0; }
     return load64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE);
 }
 
-fn sandhi_hpack_table_max_size(t) {
+fn sandhi_hpack_table_max_size(t): i64 {
     if (t == 0) { return SANDHI_HPACK_DEFAULT_TABLE_SIZE; }
     return load64(t + SANDHI_HPACK_TBL_OFF_MAX_SIZE);
 }
 
-fn _hpack_entry_size(name, value) {
+fn _hpack_entry_size(name, value): i64 {
     return strlen(name) + strlen(value) + SANDHI_HPACK_ENTRY_OVERHEAD;
 }
 
 # Drop oldest entries until cur_size + need ≤ max_size. Used by
 # add() before insertion and by set_max_size() on shrink.
-fn _hpack_table_evict_until_fits(t, need) {
+fn _hpack_table_evict_until_fits(t, need): i64 {
     var names = load64(t + SANDHI_HPACK_TBL_OFF_NAMES);
     var values = load64(t + SANDHI_HPACK_TBL_OFF_VALUES);
     var cur = load64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE);
@@ -261,7 +261,7 @@ fn _hpack_table_evict_until_fits(t, need) {
 # (RFC 7541 §4.4). Returns 0 on success — silently ignores OOM on
 # the rebuilt vecs since dropping the insert is the same observable
 # behavior as the §4.4 over-budget drop.
-fn sandhi_hpack_table_add_a(a, t, name, value) {
+fn sandhi_hpack_table_add_a(a, t, name, value): i64 {
     if (t == 0) { return 0; }
     var sz = _hpack_entry_size(name, value);
     var max = load64(t + SANDHI_HPACK_TBL_OFF_MAX_SIZE);
@@ -291,13 +291,13 @@ fn sandhi_hpack_table_add_a(a, t, name, value) {
     return 0;
 }
 
-fn sandhi_hpack_table_add(t, name, value) {
+fn sandhi_hpack_table_add(t, name, value): i64 {
     return sandhi_hpack_table_add_a(default_alloc(), t, name, value);
 }
 
 # Update max_size; shrink immediately if needed (peer sent a
 # Dynamic-Table-Size-Update or a SETTINGS_HEADER_TABLE_SIZE change).
-fn sandhi_hpack_table_set_max_size(t, max_size) {
+fn sandhi_hpack_table_set_max_size(t, max_size): i64 {
     if (t == 0) { return 0; }
     store64(t + SANDHI_HPACK_TBL_OFF_MAX_SIZE, max_size);
     _hpack_table_evict_until_fits(t, 0);
@@ -306,7 +306,7 @@ fn sandhi_hpack_table_set_max_size(t, max_size) {
 
 # Index lookup. Static = 1..61; dynamic = 62..(61+count).
 # Returns (name, value) cstrs via out cells; -1 on bad index.
-fn sandhi_hpack_lookup(t, idx, name_out, value_out) {
+fn sandhi_hpack_lookup(t, idx, name_out, value_out): i64 {
     var static_count = sandhi_hpack_static_size();
     if (idx < 1) { return _SANDHI_HPACK_ERR_BAD_INDEX; }
     if (idx <= static_count) {
@@ -338,7 +338,7 @@ fn sandhi_hpack_lookup(t, idx, name_out, value_out) {
 # `value_out`, updates `off_cell` to next byte; returns 0 on success
 # or a negative error sentinel.
 
-fn _hpack_int_encode(out, off, prefix_high, prefix_bits, value) {
+fn _hpack_int_encode(out, off, prefix_high, prefix_bits, value): i64 {
     var max_prefix = (1 << prefix_bits) - 1;
     if (value < max_prefix) {
         store8(out + off, prefix_high | value);
@@ -356,7 +356,7 @@ fn _hpack_int_encode(out, off, prefix_high, prefix_bits, value) {
     return p + 1;
 }
 
-fn _hpack_int_decode(buf, blen, off_cell, prefix_bits, value_out) {
+fn _hpack_int_decode(buf, blen, off_cell, prefix_bits, value_out): i64 {
     var off = load64(off_cell);
     if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     var max_prefix = (1 << prefix_bits) - 1;
@@ -399,7 +399,7 @@ fn _hpack_int_decode(buf, blen, off_cell, prefix_bits, value_out) {
 # the canonical RFC 7541 Appendix C.4 examples. Binary / short tokens
 # often round-trip larger under Huffman — we keep raw for those.
 
-fn _hpack_string_encode(out, off, s) {
+fn _hpack_string_encode(out, off, s): i64 {
     var raw_len = strlen(s);
     var huff_len = sandhi_hpack_huffman_encoded_len(s);
     if (huff_len < raw_len) {
@@ -418,7 +418,7 @@ fn _hpack_string_encode(out, off, s) {
 # Decode a string into `a`. Both the transient length cell and the
 # returned cstr (or Huffman-decoded cstr) live in `a`; arena reset
 # after the caller has copied/consumed the string reclaims everything.
-fn _hpack_string_decode_a(a, buf, blen, off_cell, out_cell) {
+fn _hpack_string_decode_a(a, buf, blen, off_cell, out_cell): i64 {
     var off = load64(off_cell);
     if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     var huffman = (load8(buf + off) & 0x80) >> 7;
@@ -453,7 +453,7 @@ fn _hpack_string_decode_a(a, buf, blen, off_cell, out_cell) {
     return 0;
 }
 
-fn _hpack_string_decode(buf, blen, off_cell, out_cell) {
+fn _hpack_string_decode(buf, blen, off_cell, out_cell): i64 {
     return _hpack_string_decode_a(default_alloc(), buf, blen, off_cell, out_cell);
 }
 
@@ -467,7 +467,7 @@ fn _hpack_string_decode(buf, blen, off_cell, out_cell) {
 # + name + value bytes + Huffman-disable so always raw).
 
 # §6.1 Indexed Header Field — single byte 1xxxxxxx (7-bit prefix).
-fn sandhi_hpack_encode_indexed(out, off, idx) {
+fn sandhi_hpack_encode_indexed(out, off, idx): i64 {
     return _hpack_int_encode(out, off, 0x80, 7, idx);
 }
 
@@ -475,7 +475,7 @@ fn sandhi_hpack_encode_indexed(out, off, idx) {
 # 01xxxxxx (6-bit prefix on name index; 0 = inline name).
 # Caller passes name_idx=0 + name string for inline, or name_idx>0 for
 # indexed-name variant.
-fn sandhi_hpack_encode_literal_indexed(t, out, off, name, value) {
+fn sandhi_hpack_encode_literal_indexed(t, out, off, name, value): i64 {
     var p = _hpack_int_encode(out, off, 0x40, 6, 0);  # name_idx=0 (inline)
     p = _hpack_string_encode(out, p, name);
     p = _hpack_string_encode(out, p, value);
@@ -483,7 +483,7 @@ fn sandhi_hpack_encode_literal_indexed(t, out, off, name, value) {
     return p;
 }
 
-fn sandhi_hpack_encode_literal_indexed_name(t, out, off, name_idx, name, value) {
+fn sandhi_hpack_encode_literal_indexed_name(t, out, off, name_idx, name, value): i64 {
     var p = _hpack_int_encode(out, off, 0x40, 6, name_idx);
     p = _hpack_string_encode(out, p, value);
     if (t != 0) { sandhi_hpack_table_add(t, name, value); }
@@ -491,7 +491,7 @@ fn sandhi_hpack_encode_literal_indexed_name(t, out, off, name_idx, name, value) 
 }
 
 # §6.2.2 Literal without Indexing — 0000xxxx (4-bit prefix).
-fn sandhi_hpack_encode_literal_no_index(out, off, name, value) {
+fn sandhi_hpack_encode_literal_no_index(out, off, name, value): i64 {
     var p = _hpack_int_encode(out, off, 0x00, 4, 0);
     p = _hpack_string_encode(out, p, name);
     p = _hpack_string_encode(out, p, value);
@@ -499,7 +499,7 @@ fn sandhi_hpack_encode_literal_no_index(out, off, name, value) {
 }
 
 # §6.2.3 Literal Never Indexed — 0001xxxx (4-bit prefix).
-fn sandhi_hpack_encode_literal_never(out, off, name, value) {
+fn sandhi_hpack_encode_literal_never(out, off, name, value): i64 {
     var p = _hpack_int_encode(out, off, 0x10, 4, 0);
     p = _hpack_string_encode(out, p, name);
     p = _hpack_string_encode(out, p, value);
@@ -507,7 +507,7 @@ fn sandhi_hpack_encode_literal_never(out, off, name, value) {
 }
 
 # §6.3 Dynamic Table Size Update — 001xxxxx (5-bit prefix).
-fn sandhi_hpack_encode_table_size_update(out, off, new_max_size) {
+fn sandhi_hpack_encode_table_size_update(out, off, new_max_size): i64 {
     return _hpack_int_encode(out, off, 0x20, 5, new_max_size);
 }
 
@@ -532,7 +532,7 @@ var _SANDHI_HPACK_TBL_UPDATE = 1;  # not zero so caller can distinguish
 # (incremental-indexing inserts via `_table_add_a`) also routes through
 # `a` so per-request callers can wire up an arena that owns both the
 # decoded headers AND the dynamic-table churn from this hop.
-fn sandhi_hpack_decode_field_a(a, t, buf, blen, off_cell, name_out, value_out) {
+fn sandhi_hpack_decode_field_a(a, t, buf, blen, off_cell, name_out, value_out): i64 {
     var off = load64(off_cell);
     if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     var first = load8(buf + off);
@@ -623,7 +623,7 @@ fn sandhi_hpack_decode_field_a(a, t, buf, blen, off_cell, name_out, value_out) {
     return 0;
 }
 
-fn sandhi_hpack_decode_field(t, buf, blen, off_cell, name_out, value_out) {
+fn sandhi_hpack_decode_field(t, buf, blen, off_cell, name_out, value_out): i64 {
     return sandhi_hpack_decode_field_a(default_alloc(), t, buf, blen, off_cell, name_out, value_out);
 }
 

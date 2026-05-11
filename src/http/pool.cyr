@@ -60,7 +60,7 @@ var SANDHI_POOL_DEFAULT_IDLE_TIMEOUT_MS  = 90000;  # 90 s — Go default
 # place — important when consumers want pool churn isolated from the
 # global bump (e.g., a long-lived service backed by an arena it
 # periodically reset). Returns 0 on OOM.
-fn sandhi_http_pool_new_a(a, max_per_host, idle_timeout_ms) {
+fn sandhi_http_pool_new_a(a, max_per_host, idle_timeout_ms): i64 {
     var p = alloc_via(a, SANDHI_POOL_STRUCT_SIZE);
     if (p == 0) { return 0; }
     store64(p + SANDHI_POOL_OFF_MAP, map_new_a(a));
@@ -80,38 +80,38 @@ fn sandhi_http_pool_new_a(a, max_per_host, idle_timeout_ms) {
     return p;
 }
 
-fn sandhi_http_pool_new(max_per_host, idle_timeout_ms) {
+fn sandhi_http_pool_new(max_per_host, idle_timeout_ms): i64 {
     return sandhi_http_pool_new_a(default_alloc(), max_per_host, idle_timeout_ms);
 }
 
 # Read back the Allocator stored at construction time. Returns
 # default_alloc() if the pool was built before 1.1.0 (legacy callers
 # can't reach this path; the slot is always written by `_new_a`).
-fn _sandhi_pool_alloc(p) {
+fn _sandhi_pool_alloc(p): i64 {
     if (p == 0) { return default_alloc(); }
     var a = load64(p + SANDHI_POOL_OFF_ALLOC);
     if (a == 0) { return default_alloc(); }
     return a;
 }
 
-fn sandhi_http_pool_max_per_host(p) {
+fn sandhi_http_pool_max_per_host(p): i64 {
     if (p == 0) { return SANDHI_POOL_DEFAULT_MAX_PER_HOST; }
     return load64(p + SANDHI_POOL_OFF_MAX_PER_HOST);
 }
 
-fn sandhi_http_pool_idle_timeout_ms(p) {
+fn sandhi_http_pool_idle_timeout_ms(p): i64 {
     if (p == 0) { return SANDHI_POOL_DEFAULT_IDLE_TIMEOUT_MS; }
     return load64(p + SANDHI_POOL_OFF_IDLE_TIMEOUT);
 }
 
-fn sandhi_http_pool_idle_count(p) {
+fn sandhi_http_pool_idle_count(p): i64 {
     if (p == 0) { return 0; }
     return load64(p + SANDHI_POOL_OFF_TOTAL_IDLE);
 }
 
 # Drop every idle conn (closes fds + TLS contexts). Pool struct stays
 # allocated and reusable; map is cleared.
-fn sandhi_http_pool_close(p) {
+fn sandhi_http_pool_close(p): i64 {
     if (p == 0) { return 0; }
     var m = load64(p + SANDHI_POOL_OFF_MAP);
     var keys = map_keys(m);
@@ -153,7 +153,7 @@ fn sandhi_http_pool_close(p) {
 
 # Build a route key "host:port:tls" as a NUL-terminated cstr that
 # map_get/map_set can use directly. tls is "0" or "1".
-fn _sandhi_pool_route_key(host, port, tls) {
+fn _sandhi_pool_route_key(host, port, tls): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, host);
     str_builder_add_cstr(sb, ":");
@@ -164,7 +164,7 @@ fn _sandhi_pool_route_key(host, port, tls) {
     return str_data(str_builder_build(sb));
 }
 
-fn _sandhi_pool_idle_conn_new_a(a, conn, now_ms) {
+fn _sandhi_pool_idle_conn_new_a(a, conn, now_ms): i64 {
     var ic = alloc_via(a, SANDHI_IDLE_CONN_STRUCT_SIZE);
     if (ic == 0) { return 0; }
     store64(ic + SANDHI_IDLE_OFF_CONN, conn);
@@ -172,7 +172,7 @@ fn _sandhi_pool_idle_conn_new_a(a, conn, now_ms) {
     return ic;
 }
 
-fn _sandhi_pool_idle_conn_new(conn, now_ms) {
+fn _sandhi_pool_idle_conn_new(conn, now_ms): i64 {
     return _sandhi_pool_idle_conn_new_a(default_alloc(), conn, now_ms);
 }
 
@@ -194,7 +194,7 @@ fn _sandhi_pool_idle_conn_new(conn, now_ms) {
 #     gone until something else reaped the stale entries.
 # The walk is non-destructive — `_sandhi_pool_take` already does
 # stale-skip on the take path, so reaping happens naturally.
-fn _sandhi_pool_has_idle(pool, host, port, tls) {
+fn _sandhi_pool_has_idle(pool, host, port, tls): i64 {
     if (pool == 0) { return 0; }
     var key = _sandhi_pool_route_key(host, port, tls);
     var m = load64(pool + SANDHI_POOL_OFF_MAP);
@@ -225,7 +225,7 @@ fn _sandhi_pool_has_idle(pool, host, port, tls) {
 # are closed and skipped before returning a fresh one. take is LIFO
 # over the per-route vec (freshest first) — keeps the most-recently-
 # used conn hot in the kernel buffer cache.
-fn _sandhi_pool_take(pool, host, port, tls) {
+fn _sandhi_pool_take(pool, host, port, tls): i64 {
     if (pool == 0) { return 0; }
     var key = _sandhi_pool_route_key(host, port, tls);
     var m = load64(pool + SANDHI_POOL_OFF_MAP);
@@ -255,7 +255,7 @@ fn _sandhi_pool_take(pool, host, port, tls) {
 # the oldest (front of vec) is evicted to make room — bounded memory.
 # Caller guarantees the conn is still usable (2xx/3xx response, no
 # server-sent Connection: close).
-fn _sandhi_pool_put(pool, host, port, tls, conn) {
+fn _sandhi_pool_put(pool, host, port, tls, conn): i64 {
     if (pool == 0 || conn == 0) {
         if (conn != 0) { sandhi_conn_close(conn); }
         return 0;
@@ -323,7 +323,7 @@ fn _sandhi_pool_put(pool, host, port, tls, conn) {
 # bytes that follow are consumed by the response parser when the
 # scratch buffer is handed to `sandhi_http_response_parse`.
 
-fn _sandhi_pool_chunked_complete(buf, body_start, blen) {
+fn _sandhi_pool_chunked_complete(buf, body_start, blen): i64 {
     # Walk the chunked body looking for terminal 0-chunk. Returns 1
     # if a complete chunked stream is present in [body_start, blen),
     # 0 if more bytes are needed, (0 - 1) on malformed chunk-size.
@@ -373,7 +373,7 @@ fn _sandhi_pool_chunked_complete(buf, body_start, blen) {
 # allocated (`buf`, capacity `cap`). Returns total bytes read, or
 # negative sentinel per top-of-section. `deadline_ms` (0 = none)
 # bounds the total recv loop. Reads in 4 KB chunks for sane progress.
-fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms) {
+fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms): i64 {
     var have = 0;
     var headers_end = 0 - 1;
     var body_start = 0;

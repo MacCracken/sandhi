@@ -47,7 +47,7 @@ var _sandhi_apply_resolved           = 0;
 # OpenSSL constants we need.
 var _SANDHI_SSL_FILETYPE_PEM = 1;
 
-fn _sandhi_apply_resolve_fns() {
+fn _sandhi_apply_resolve_fns(): i64 {
     if (_sandhi_apply_resolved == 1) { return 0; }
     _sandhi_apply_load_verify_fp   = tls_dlsym("SSL_CTX_load_verify_locations");
     _sandhi_apply_use_cert_fp      = tls_dlsym("SSL_CTX_use_certificate_file");
@@ -73,7 +73,7 @@ fn _sandhi_apply_resolve_fns() {
 # trust store, SPKI pinning) is resolved. Anything missing → 0,
 # and the fail-closed gate in sandhi_conn_open_with_policy refuses
 # to open enforcement-demanding policies.
-fn sandhi_tls_policy_enforcement_available() {
+fn sandhi_tls_policy_enforcement_available(): i64 {
     _sandhi_apply_resolve_fns();
     # ALPN gate: previously checked the fp cache; now we trust
     # stdlib's `tls_set_alpn` to be present whenever `tls_available()`
@@ -98,7 +98,7 @@ fn sandhi_tls_policy_enforcement_available() {
 #   +16  policy_ptr     (sandhi_tls_policy* — for trust/mTLS lookup)
 # ================================================================
 
-fn _sandhi_apply_hook(hook_ctx, ssl_ctx) {
+fn _sandhi_apply_hook(hook_ctx, ssl_ctx): i64 {
     _sandhi_apply_resolve_fns();
     if (hook_ctx == 0 || ssl_ctx == 0) { return 0; }
 
@@ -150,7 +150,7 @@ fn _sandhi_apply_hook(hook_ctx, ssl_ctx) {
 # 0 on any failure (cert missing, pubkey extraction failure, hash
 # mismatch, OOM). Frees the X509 + EVP_PKEY it pulls. None of the
 # allocs escape; an arena reset after this call reclaims everything.
-fn _sandhi_check_spki_a(a, tls_ctx, expected_hex) {
+fn _sandhi_check_spki_a(a, tls_ctx, expected_hex): i64 {
     _sandhi_apply_resolve_fns();
     if (tls_ctx == 0 || expected_hex == 0) { return 0; }
     if (_sandhi_apply_get_peer_cert_fp == 0)   { return 0; }
@@ -203,7 +203,7 @@ fn _sandhi_check_spki_a(a, tls_ctx, expected_hex) {
     return 0;
 }
 
-fn _sandhi_check_spki(tls_ctx, expected_hex) {
+fn _sandhi_check_spki(tls_ctx, expected_hex): i64 {
     return _sandhi_check_spki_a(default_alloc(), tls_ctx, expected_hex);
 }
 
@@ -227,7 +227,7 @@ fn _sandhi_check_spki(tls_ctx, expected_hex) {
 # land in `a` here.
 #
 # Returns the conn struct on success or 0 on failure / OOM.
-fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy) {
+fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy): i64 {
     if (use_tls == 0) {
         return sandhi_conn_open(addr, port, 0, sni_host);
     }
@@ -299,7 +299,7 @@ fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy) {
     return conn;
 }
 
-fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy) {
+fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy): i64 {
     return sandhi_conn_open_with_policy_a(default_alloc(), addr, port, use_tls, sni_host, policy);
 }
 
