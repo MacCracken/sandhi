@@ -2,7 +2,11 @@
 
 **Filed:** 2026-05-03 (the day cyrius v5.8.36 deferred sandhi from
 its stdlib pass 2 because sandhi entered maintenance mode at v1.0.0)
-**Status:** OPEN — handed off to a parallel agent
+**Status:** ✅ SHIPPED — landed as sandhi 1.1.0 (2026-05-03)
+and extended across the 1.2.x optimization arc (1.2.0–1.2.4
+hot-path orchestrator + RPC dialect fold; 1.2.5 prof
+instrumentation; 1.2.6 / 1.2.7 / 1.2.8 OOM-guard audit). See
+CHANGELOG `[1.1.0]` through `[1.2.8]` for the per-batch detail.
 **Target version:** sandhi v1.0.1 (small) → v1.1.0 if scope grows
 **Affects:** every alloc-touching source file in `src/`
 (27 files, ~135 alloc sites)

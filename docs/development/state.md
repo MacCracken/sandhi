@@ -228,6 +228,17 @@ roadmap. Concrete slots in roadmap.md.
 - **1.4.x** — `tests/sandhi.tcyr` cap-drift watch
   (background; carve out another split if a slot pushes
   against the per-program fixup cap).
+- **1.4.x closeout — P-1 / security / code-audit pass.**
+  Full-codebase audit before sit-adoption reshapes the
+  roadmap. Mirrors the 0.9.0 (P0) + 0.9.1 (P1) audit shapes
+  applied to everything post-fold: the 1.1.0 allocator
+  migration, the 1.2.x optimization arc, the 1.3.x TLS arc,
+  and 1.4.0's session-cache work. Also covers a
+  `tls_dlsym`-callers audit, a `default_alloc()`
+  lifetime sweep, public-surface diff vs. 1.0.0, and a
+  static-analysis re-pass. Drive-by docs work (issue audits,
+  proposal-archive cleanup) folds in here. Closes the arc;
+  next release shapes against sit adoption.
 
 **1.5.x — sit-driven reshape** (post-native-TLS in cyrius
 6.0.x). Don't pre-bake — surface scope from real-workload

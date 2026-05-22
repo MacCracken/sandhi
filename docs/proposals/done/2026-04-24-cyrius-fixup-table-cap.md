@@ -1,7 +1,17 @@
 # 2026-04-24 — Cyrius compiler fixup-table cap (32768)
 
-**Status**: Internal note. Not yet filed against cyrius. Captured at
-0.8.0 Bite 2 (HPACK) when it first hit sandhi.
+**Status**: ✅ RESOLVED on the sandhi side — workarounds shipped
+at 0.8.0 Bite 2.5 (test-file split into `sandhi.tcyr` / `h2.tcyr`)
+and 1.2.8 (`sandhi.tcyr` → `rpc.tcyr` carve-out). Ongoing
+**cap-drift watch** lives in `docs/development/roadmap.md`
+under 1.4.x as a background slot — when the next slot's
+implementation pushes any `tests/*.tcyr` against the cap,
+split out another file in the same patch.
+
+The original "ask cyrius to raise the cap" angle was never
+filed against cyrius — sandhi's per-file split discipline
+(`architecture/001`) has been sufficient. Re-file against
+cyrius only if a future split can't relieve the pressure.
 
 **Type**: Toolchain limitation worth raising / investigating upstream
 when a future bite hits the wall again.

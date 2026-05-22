@@ -249,6 +249,75 @@ carve out another `tests/<name>.tcyr` (mirroring 1.2.8's
 sandhi.tcyr → rpc.tcyr split) in the same slot — don't let
 it block the ship.
 
+#### 1.4.x — closeout: P-1 / security / code-audit pass
+
+**Theme**: full-codebase audit before the sit-adoption-driven
+reshape opens 1.5.x. The 1.3.x TLS arc closed with the
+session-cache subsystem operational (1.4.0 wired the eviction
++ uncovered two silent 1.3.1 bugs in the process). Before
+sit-adoption surfaces real-workload friction, the closeout
+slot does a full sweep so the audit history is in a known
+state at the 1.5.x reshape boundary.
+
+**Scope** (each line gets a checklist entry in the slot's
+CHANGELOG):
+
+- **P-1 / P-2 self-audit** — re-run the kind of audit
+  shape that landed 0.9.0 (5 P0 fixes) and 0.9.1 (7 P1
+  hardening fixes) against everything that shipped post-fold:
+  the 1.1.0 allocator migration, the 1.2.x optimization arc,
+  the 1.3.x TLS arc, 1.4.0's session-cache TTL/eviction +
+  the contract relax on `enable()`. Look for unguarded OOM
+  paths missed by the 1.2.6 / 1.2.7 / 1.2.8 audits, security
+  regressions in the 0-RTT / cred-strip / session-resumption
+  interactions, dup-prevention gaps similar to 1.1.2 in any
+  new request paths, and trailer / header forbidden-list
+  drift in any new chunked / SSE / h2 code.
+- **`tls_dlsym` callers audit** — the 1.3.0 typed-wrapper
+  migration covered ALPN; 7 other libssl symbols in
+  `apply.cyr` stay on `tls_dlsym`. Inventory each callsite,
+  confirm none leak symbol-name assumptions past the
+  hook-surface contract that needs to survive a hypothetical
+  native-TLS swap.
+- **Static-analysis sweep** — `cyrius lint` across `src/`,
+  `programs/`, `tests/`; review every accepted suppression
+  for whether it still applies. The `src/http/h2/huffman.cyr`
+  long-line allowlist entry stays (RFC table); anything else
+  on the allowlist that's older than 1.0.0 gets reconfirmed
+  or retired.
+- **Memory + lifetime audit** — every `default_alloc()` use
+  in `src/` reviewed for "is this actually process-singleton
+  outliving any arena, or did we just default lazily?". Same
+  shape as the 1.1.0 batch-by-batch singleton-vs-arena call,
+  applied to additions since 1.1.0.
+- **Public surface review** — diff `fn sandhi_*` declarations
+  from 1.0.0 (fold-time) through 1.4.0 (current). Confirm
+  every name added has its docstring + a test or probe;
+  retire anything that's dead or that consumers never picked
+  up. Mirror the 1.0.0 closeout's surface-confirmation pass.
+- **Issue-directory tidy** — drive-by housekeeping; fold in
+  the docs-update work (the issue-doc audits, the proposal
+  archives, any consumer-coordination doc drift since the
+  M0–M5 sweep). No source change for this part — pure docs.
+
+**Acceptance**:
+
+- All four test suites green (`sandhi.tcyr` / `h2.tcyr` /
+  `alloc.tcyr` / `rpc.tcyr`).
+- `cyrius lint` 0 warnings on `src/` (modulo the existing
+  `huffman.cyr` allowlist entry).
+- `cyrfmt --check` clean across `src/` + `tests/` + `programs/`.
+- `cyrius distlib` clean rebuild.
+- Live-network gate (`_policy_runtime_probe.cyr`) ALL GATES
+  PASS.
+- New audit findings either fixed in the same slot (P-1 / P-2),
+  filed as their own 1.4.x slot (if scope-large), or deferred
+  with explicit reasoning in the CHANGELOG.
+
+**Closes 1.4.x.** After this slot, the arc is done; the next
+release shapes against sit adoption (which gates on cyrius
+native TLS).
+
 ### Cross-repo dependencies
 
 Sandhi tracks (but does not own) these cyrius-side items
@@ -371,7 +440,12 @@ its job is keeping the post-v1 patch window honest. The shape:
   1.4.0 = session-cache TTL + eviction;
   1.4.1 = max_conns enforcement;
   1.4.2 = conn_nb factoring decision;
-  1.4.x+ = profile-justified picks + cap-drift watch.
+  1.4.x  = profile-justified picks (parked);
+  1.4.x  = cap-drift watch (background);
+  **1.4.x closeout** = P-1 / security / code-audit pass.
+  Drive-by docs work (issue audits, proposal archive
+  cleanup, coordination-doc drift) folds into whichever slot
+  it lands alongside — not a slot of its own.
 - **1.5.x** — sit-driven reshape, when sit adopts
   post-native-TLS (cyrius 6.0.x). Don't pre-bake — surface
   scope from real-workload friction.
