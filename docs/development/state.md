@@ -188,105 +188,67 @@ No external git deps. sandhi is pure-stdlib-composition.
 
 Post-fold release sequence (see `roadmap.md` for full detail):
 
-**Currently shipped** — all releases through 1.2.8 (1.1.0-era
-OOM audit + cap relief; final sandhi-side slot before holding
-for cyrius TLS hooks). The 1.2.x optimization arc opened at
-1.2.0 closes here. Total post-1.1.0 public surface: 53 `_a`
-verbs + 8 prof verbs = 61. **Audit story complete**: every
-`_a` chain through stdlib allocators (1.1.0 + 1.2.0–1.2.4 +
-1.2.7) is null-guarded; SIGSEGV-on-OOM patterns closed across
-the codebase. **CI plumbing**: alloc.tcyr + rpc.tcyr now CI-
-verified (closed pre-existing gap from 1.1.0).
-
-**1.3.0 shipped** (live-network gate + typed-wrapper migration).
-**1.3.1 shipped** (session-resumption cache + staged-connect
-wire-up at v5.10.27 unblock). **1.3.2 shipped** (opt-in TLS 1.3
-0-RTT with rejection-detection retry; the cyrius v5.10.34 release
-closed the status-accessor gap filed in
-`docs/issues/archive/2026-05-10-stdlib-tls-early-data-status.md`).
-**1.3.3 shipped** (cred-strip-aware session-cache keying;
-closes the 1.3.1 layering gap where rotating auth headers
-shared a session against the same authority+hook). 1.3.4
-(provisional, may slip) is the remaining session-cache
-hardening item — TTL + max-size eviction.
+**Currently shipped** — all releases through **1.3.5** (cyrius
+6.0.1 pin bump + cycc/cybs binary-rename adaptation; mechanical,
+zero source change). The 1.3.x TLS arc closes here.
 
 - **1.2.x — optimization arc** ✅ closed at 1.2.8.
-  +49 public `_a` verbs across 1.2.0–1.2.4 (RPC fold);
-  +8 prof verbs at 1.2.5; +6 internal hardening fixes
-  across 1.2.6 / 1.2.7 / 1.2.8; cap relief + CI plumbing
-  at 1.2.8.
+- **1.3.x — TLS arc** ✅ closed at 1.3.5. Live-network policy
+  gate (1.3.0), session-resumption cache + staged-connect
+  (1.3.1), opt-in 0-RTT (1.3.2), cred-strip-aware keying
+  (1.3.3), stdlib annotation pass (1.3.4 — TTL+eviction slot
+  moved to 1.4.0), cyrius 6.0.1 pin bump (1.3.5).
 
-- **1.3.x — TLS arc** (1.3.0 / 1.3.1 / 1.3.2 / 1.3.3 shipped;
-  1.3.4 stays provisional — TTL + max-size eviction).
-  Sandhi-owned policy + state work over stdlib
-  `tls_connect` and the v5.10.21 typed-wrapper surface.
-  - ~~**1.3.0**~~ ✅ shipped 2026-05-09 (live-network
-    gate + typed-wrapper migration onto v5.10.13's
-    `tls_set_alpn`).
-  - ~~**1.3.1**~~ ✅ shipped 2026-05-10. Session-cache
-    + staged-connect wire-up. Cache keyed by
-    `(sni_host, hook_fp_hex)`. Default-OFF; opt-in via
-    `sandhi_session_cache_enable(1)` (capability-gated).
-    Filed staged-connect issue cleared at cyrius
-    v5.10.27.
-  - ~~**1.3.2**~~ ✅ shipped 2026-05-10. TLS 1.3 0-RTT
-    (opt-in via `sandhi_http_options_allow_0rtt`).
-    Composes `tls_ctx_set_max_early_data` /
-    `tls_write_early_data` / `tls_read_early_data` (v5.10.21)
-    + `tls_get_early_data_status` /
-    `tls_session_get_max_early_data` (v5.10.34) on top of
-    an installed session. Replay-safe methods only per
-    RFC 8446 §8 (GET/HEAD/OPTIONS — `_sandhi_method_is_replay_safe`).
-    Capability probe via `tls_supports_early_data()`.
-    Three-layer eligibility gate (opt-in + method-safe +
-    cap + session-cache hit + `max_early_data >= req_len`),
-    rejection-detection retry on the established stream.
-    Toolchain pin 5.10.31 → 5.10.34 (closed the issue
-    filed at `docs/issues/archive/2026-05-10-stdlib-tls-early-data-status.md`).
-  - ~~**1.3.3**~~ ✅ shipped 2026-05-10. Cred-strip-aware
-    session-cache keying. Cache key extended from
-    `(sni_host, hook_fp_hex)` to `(sni_host, hook_fp_hex,
-    cred_digest)`. New internal helpers
-    `_sandhi_fnv1a_mix(h, s)` + `_sandhi_compute_cred_digest(headers)`
-    (FNV-1a 64-bit over Authorization / Cookie /
-    Proxy-Authorization values, with per-header marker
-    prefix to avoid same-value collisions across header
-    names; returns 0 when no cred-bearing headers).
-    Module-level `_sandhi_cred_digest` flag in conn.cyr
-    follows the `_sandhi_allow_0rtt` precedent — set+restore
-    in dispatch entry-points. Signature evolution stays
-    inside sandhi (only consumer of these verbs is sandhi
-    itself; 1.3.1 added them).
-  - **1.3.4 — session-cache TTL + max-size eviction**
-    (provisional, may slip). Bounded cache size +
-    age-based eviction; uses the `last_used_ms` slot
-    reserved on the entry struct at 1.3.1. New config
-    verbs `sandhi_session_cache_set_max_size` /
-    `_set_max_age_ms`. Eviction-on-insert + age-check-
-    on-lookup pattern; no periodic sweep.
-  - **1.2.6+ — profile-justified optimizations**.
-    Now that the prof captures landed at 1.2.5, the
-    next picks wait for real-workload data. The
-    earlier roadmap candidates (HPACK Huffman tie-break,
-    `_sandhi_resp_new` collapse, pool LRU,
-    `_sandhi_conn_connect_nb` factoring) all turned out
-    to be either no-ops or wait-for-consumer-ask on
-    close inspection — not picking them speculatively.
-    Defer until prof captures from a real workload show
-    where time and bytes actually go.
+**Currently active: 1.4.x — closeout arc.** Drains the
+small/medium pending queue before sit-adoption reshapes the
+roadmap. Concrete slots in roadmap.md.
 
-**Not sandhi's slot** (filed in state for the same reason
-roadmap surfaces it — drop-back protection): `tls_connect`
-native-transport prep audit. The hook surface is owned by
-stdlib `lib/tls.cyr`; auditing it for fdlopen-leaning
-assumptions ahead of a hypothetical native-TLS swap is a
-cyrius-side issue against `lib/tls.cyr`. Sandhi composes,
-doesn't reimplement (ADR 0001). Earlier framings of this
-as sandhi-side work were wrong.
+- **1.4.0** — session-cache TTL + max-size eviction (lead;
+  half-implemented since 1.3.1 reserved `last_used_ms`).
+  Adds `sandhi_session_cache_set_max_size` /
+  `_set_max_age_ms`; eviction-on-insert + age-check-on-lookup.
+- **1.4.1** — `sandhi_server_options_max_conns` enforcement
+  (daimon ask; design choice gates the slot — in-process
+  worker pool vs. epoll-cooperative via `lib/async.cyr`).
+- **1.4.2** — `_sandhi_conn_connect_nb` factoring decision
+  (likely doc-only; document parallel evolution at both
+  callsites unless prof says otherwise).
+- **1.4.x** — profile-justified picks (HPACK Huffman
+  tie-break, `_sandhi_resp_new` collapse, pool LRU). No
+  pre-committed ordering — prof data drives.
+- **1.4.x** — `tests/sandhi.tcyr` cap-drift watch
+  (background; carve out another split if a slot pushes
+  against the per-program fixup cap).
 
-**Post-arc** — items wait for their unblock signal
-(consumer ask / stdlib prerequisite / profile evidence).
-See `roadmap.md` for the full bucket list.
+**1.5.x — sit-driven reshape** (post-native-TLS in cyrius
+6.0.x). Don't pre-bake — surface scope from real-workload
+friction. Per memory [`project_sit_adoption_drives_roadmap`].
+
+**Cross-repo dependencies** (cyrius-side; sandhi tracks, does
+not own):
+
+- **Native TLS in cyrius `lib/tls.cyr`** *(6.0.x arc)* —
+  gates sit adoption. CLAUDE.md "No FFI" means sandhi's
+  hook-surface contract is unchanged across any libssl→native
+  swap; the work itself is purely cyrius-side.
+- **mDNS multicast primitives in cyrius `lib/net.cyr`** —
+  gates sandhi's `discovery/local.cyr` real implementation
+  (`IP_ADD_MEMBERSHIP` / `IP_MULTICAST_TTL` /
+  `IP_MULTICAST_LOOP` / `SO_REUSEPORT` / `IP_MULTICAST_IF`).
+  Quality-of-implementation gate, not a hard blocker — the
+  0.9.3 unicast-response (QU bit) impl works against most
+  responders.
+
+**Not sandhi's slot** (filed for drop-back protection):
+`tls_connect` native-transport prep audit. The hook surface
+is owned by stdlib `lib/tls.cyr`; auditing it for
+fdlopen-leaning assumptions ahead of the native-TLS swap is
+a cyrius-side issue against `lib/tls.cyr`. ADR 0001:
+sandhi composes, doesn't reimplement.
+
+**Post-arc** — items wait for their unblock signal (consumer
+ask / profile evidence / stdlib prerequisite / cross-repo
+dependency). See `roadmap.md` for the full bucket list.
 
 **Under-v1 milestone back-matter**:
 
