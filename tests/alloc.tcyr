@@ -1468,14 +1468,27 @@ fn test_alloc_131_session_cache_default_off() {
 }
 
 fn test_alloc_131_session_cache_enable_capability_gated() {
+    # 1.4.0: enable() no longer gates on TLS capability — it just
+    # toggles the sandhi-side flag. Capability is queried separately
+    # via `sandhi_session_cache_supported()`. This test now verifies
+    # the new contract: enable(1) always succeeds (modulo OOM), and
+    # `_supported()` independently reports TLS capability.
     var was_enabled = sandhi_session_cache_enabled();
     var rc = sandhi_session_cache_enable(1);
-    if (rc == 1) {
-        assert_eq(sandhi_session_cache_enabled(), 1, "enabled when capable");
+    assert_eq(rc, 1, "enable(1) succeeds regardless of TLS capability");
+    assert_eq(sandhi_session_cache_enabled(), 1, "enabled flag flipped");
+
+    # _supported() reflects the underlying TLS layer's symbols. It
+    # may return 0 in this test env (sandhi binaries don't always
+    # have full libssl resolution); the assertion just covers the
+    # accessor's return-shape contract.
+    var sup = sandhi_session_cache_supported();
+    if (sup == 1 || sup == 0) {
+        assert_eq(1, 1, "supported() returns 1 or 0");
     } else {
-        assert_eq(sandhi_session_cache_enabled(), 0,
-        "stays off when libssl can't resume");
+        assert_eq(sup, 0, "supported() must return 0 or 1");
     }
+
     sandhi_session_cache_enable(was_enabled);
     return 0;
 }
@@ -1483,12 +1496,10 @@ fn test_alloc_131_session_cache_enable_capability_gated() {
 fn test_alloc_131_session_cache_store_lookup_roundtrip() {
     var was_enabled = sandhi_session_cache_enabled();
     var rc = sandhi_session_cache_enable(1);
-    if (rc != 1) {
-        # libssl can't resume — skip round-trip; disabled-path
-        # already covered above.
-        sandhi_session_cache_enable(was_enabled);
-        return 0;
-    }
+    # 1.4.0: enable() no longer gates on TLS capability — the cache
+    # itself is just a hashmap and works regardless. Round-trip uses
+    # fake session pointers so it doesn't depend on libssl.
+    assert_eq(rc, 1, "enable(1) succeeds (1.4.0 contract: no cap gate)");
 
     var sz_before = sandhi_session_cache_size();
     sandhi_session_cache_reset_stats();
@@ -1671,15 +1682,13 @@ fn test_alloc_133_cred_digest_case_insensitive_header_name() {
 }
 
 # Cache-key isolation — the same (host, hook_fp) under different
-# cred_digest values must produce distinct cache slots. Run the
-# whole assertion under enable=1; if libssl can't resume, skip.
+# cred_digest values must produce distinct cache slots. 1.4.0:
+# enable() no longer gates on TLS capability, so this now runs
+# unconditionally with fake session pointers.
 fn test_alloc_133_cache_isolates_by_cred_digest() {
     var was_enabled = sandhi_session_cache_enabled();
     var rc = sandhi_session_cache_enable(1);
-    if (rc != 1) {
-        sandhi_session_cache_enable(was_enabled);
-        return 0;
-    }
+    assert_eq(rc, 1, "enable(1) succeeds (1.4.0 contract)");
     var sz_before = sandhi_session_cache_size();
 
     var fake_a = 0x11AA11AA;
@@ -1751,6 +1760,192 @@ fn test_alloc_131_session_cache_disabled_noops() {
     assert_eq(sandhi_session_cache_hit_count(), 0, "no hit-count delta");
     assert_eq(sandhi_session_cache_miss_count(), 0, "no miss-count delta");
 
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
+# ================================================================
+# 1.4.0 — session-cache TTL + max-size eviction. Closes the
+# "cache grows unbounded" gap left after 1.3.1. Also fixes the
+# silent `hashmap_*` → `map_*` naming bug carried since 1.3.1
+# that NOPed the underlying hashmap calls — these tests are the
+# first to actually exercise a real round-trip end-to-end.
+# ================================================================
+
+# Defaults — 256 entries, 24h (86_400_000 ms). No skip needed;
+# the config vars exist regardless of TLS capability.
+fn test_alloc_134_defaults() {
+    assert_eq(sandhi_session_cache_max_size(), 256,
+    "default max_size is 256");
+    assert_eq(sandhi_session_cache_max_age_ms(), 86400000,
+    "default max_age_ms is 24h");
+    return 0;
+}
+
+# Setter round-trip + clamp behavior — both setters clamp to 1
+# on `n < 1` so we can't disable the bound by accident.
+fn test_alloc_134_set_max_size_roundtrip() {
+    var was = sandhi_session_cache_max_size();
+    sandhi_session_cache_set_max_size(100);
+    assert_eq(sandhi_session_cache_max_size(), 100, "set to 100");
+    sandhi_session_cache_set_max_size(0);
+    assert_eq(sandhi_session_cache_max_size(), 1, "clamped to 1 on n<1");
+    sandhi_session_cache_set_max_size(0 - 5);
+    assert_eq(sandhi_session_cache_max_size(), 1, "clamped to 1 on n<1 (neg)");
+    sandhi_session_cache_set_max_size(was);
+    return 0;
+}
+
+fn test_alloc_134_set_max_age_ms_roundtrip() {
+    var was = sandhi_session_cache_max_age_ms();
+    sandhi_session_cache_set_max_age_ms(1000);
+    assert_eq(sandhi_session_cache_max_age_ms(), 1000, "set to 1000");
+    sandhi_session_cache_set_max_age_ms(0);
+    assert_eq(sandhi_session_cache_max_age_ms(), 1, "clamped to 1 on ms<1");
+    sandhi_session_cache_set_max_age_ms(was);
+    return 0;
+}
+
+# Eviction counters default to 0 and reset_stats clears them.
+fn test_alloc_134_evict_counters_default_zero() {
+    sandhi_session_cache_reset_stats();
+    assert_eq(sandhi_session_cache_evict_count(), 0, "evict_count starts 0");
+    assert_eq(sandhi_session_cache_age_evict_count(), 0,
+    "age_evict_count starts 0");
+    return 0;
+}
+
+# LRU eviction-on-insert: when the cache is at max_size and a NEW
+# key arrives, the entry with the oldest last_used_ms is evicted.
+# Three SNI hosts; max=2; insert three; verify the first is gone
+# and evict_count == 1.
+fn test_alloc_134_evict_oldest_at_max() {
+    var was_enabled = sandhi_session_cache_enabled();
+    var rc = sandhi_session_cache_enable(1);
+    assert_eq(rc, 1, "enable(1) succeeds (1.4.0 contract)");
+    sandhi_session_cache_clear();
+    var was_max = sandhi_session_cache_max_size();
+    sandhi_session_cache_set_max_size(2);
+    sandhi_session_cache_reset_stats();
+
+    var sz_before = sandhi_session_cache_size();
+
+    sandhi_session_cache_store("evict1.example.com", 0, 0, 0x11111111);
+    sandhi_session_cache_store("evict2.example.com", 0, 0, 0x22222222);
+    sandhi_session_cache_store("evict3.example.com", 0, 0, 0x33333333);
+
+    # evict1 was inserted first → smallest last_used_ms → evicted.
+    assert_eq(sandhi_session_cache_lookup("evict1.example.com", 0, 0), 0,
+    "evict1 was evicted (oldest)");
+    assert_eq(sandhi_session_cache_lookup("evict2.example.com", 0, 0),
+    0x22222222, "evict2 still present");
+    assert_eq(sandhi_session_cache_lookup("evict3.example.com", 0, 0),
+    0x33333333, "evict3 still present");
+    assert_eq(sandhi_session_cache_evict_count(), 1,
+    "exactly one LRU eviction recorded");
+
+    # Cleanup — drop bound back, clear residual entries via store
+    # under a fresh max so they don't bleed into later tests.
+    sandhi_session_cache_set_max_size(was_max);
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
+# Lookup touches last_used_ms — promoting an entry above the
+# would-be-evicted slot. max=2; store A; store B; lookup A
+# (A becomes newest); store C; expect B (now oldest) evicted,
+# not A.
+fn test_alloc_134_lookup_touch_promotes_lru() {
+    var was_enabled = sandhi_session_cache_enabled();
+    var rc = sandhi_session_cache_enable(1);
+    assert_eq(rc, 1, "enable(1) succeeds (1.4.0 contract)");
+    sandhi_session_cache_clear();
+    var was_max = sandhi_session_cache_max_size();
+    sandhi_session_cache_set_max_size(2);
+    sandhi_session_cache_reset_stats();
+
+    sandhi_session_cache_store("touch_a.example.com", 0, 0, 0xAAAA0001);
+    # Tiny clock advance so B's last_used_ms is strictly > A's.
+    # clock_now_ms is monotonic; the busy-wait guarantees a tick.
+    var t0 = clock_now_ms();
+    while (clock_now_ms() <= t0) { }
+    sandhi_session_cache_store("touch_b.example.com", 0, 0, 0xBBBB0002);
+
+    # Touch A — last_used_ms becomes now (> B's).
+    var t1 = clock_now_ms();
+    while (clock_now_ms() <= t1) { }
+    assert_eq(sandhi_session_cache_lookup("touch_a.example.com", 0, 0),
+    0xAAAA0001, "A lookup hit");
+
+    # Now store C → B should be evicted (oldest), not A.
+    var t2 = clock_now_ms();
+    while (clock_now_ms() <= t2) { }
+    sandhi_session_cache_store("touch_c.example.com", 0, 0, 0xCCCC0003);
+
+    assert_eq(sandhi_session_cache_lookup("touch_a.example.com", 0, 0),
+    0xAAAA0001, "A preserved (touched, became newest)");
+    assert_eq(sandhi_session_cache_lookup("touch_b.example.com", 0, 0), 0,
+    "B evicted (oldest after A was touched)");
+    assert_eq(sandhi_session_cache_lookup("touch_c.example.com", 0, 0),
+    0xCCCC0003, "C present (newly stored)");
+
+    sandhi_session_cache_set_max_size(was_max);
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
+# Replace-in-place doesn't count as an LRU eviction. max=1;
+# store A; store A again with a different session pointer.
+# Size stays 1; evict_count stays 0.
+fn test_alloc_134_replace_in_place_no_evict() {
+    var was_enabled = sandhi_session_cache_enabled();
+    var rc = sandhi_session_cache_enable(1);
+    assert_eq(rc, 1, "enable(1) succeeds (1.4.0 contract)");
+    sandhi_session_cache_clear();
+    var was_max = sandhi_session_cache_max_size();
+    sandhi_session_cache_set_max_size(1);
+    sandhi_session_cache_reset_stats();
+
+    var sz_before = sandhi_session_cache_size();
+    sandhi_session_cache_store("repl.example.com", 0, 0, 0xDDDD0001);
+    sandhi_session_cache_store("repl.example.com", 0, 0, 0xDDDD0002);
+
+    assert_eq(sandhi_session_cache_lookup("repl.example.com", 0, 0),
+    0xDDDD0002, "second store overwrote first");
+    assert_eq(sandhi_session_cache_evict_count(), 0,
+    "replace-in-place doesn't count as LRU eviction");
+
+    sandhi_session_cache_set_max_size(was_max);
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
+# Age-based eviction on lookup: set max_age very small; store an
+# entry; wait past the age window; lookup → miss + age_evict_count++.
+fn test_alloc_134_age_evict_on_lookup() {
+    var was_enabled = sandhi_session_cache_enabled();
+    var rc = sandhi_session_cache_enable(1);
+    assert_eq(rc, 1, "enable(1) succeeds (1.4.0 contract)");
+    sandhi_session_cache_clear();
+    var was_age = sandhi_session_cache_max_age_ms();
+    sandhi_session_cache_set_max_age_ms(1);
+    sandhi_session_cache_reset_stats();
+
+    sandhi_session_cache_store("age.example.com", 0, 0, 0xEEEE0001);
+
+    # Busy-wait long enough that clock_now_ms advances past the
+    # 1ms window. 5ms is conservative.
+    var deadline = clock_now_ms() + 5;
+    while (clock_now_ms() < deadline) { }
+
+    var sess = sandhi_session_cache_lookup("age.example.com", 0, 0);
+    assert_eq(sess, 0, "stale entry returns miss");
+    assert_eq(sandhi_session_cache_age_evict_count(), 1,
+    "age-eviction recorded");
+    assert_eq(sandhi_session_cache_miss_count(), 1,
+    "stale-evict also counts as miss for stats");
+
+    sandhi_session_cache_set_max_age_ms(was_age);
     sandhi_session_cache_enable(was_enabled);
     return 0;
 }
@@ -2023,6 +2218,30 @@ fn main() {
 
     test_group("alloc/133/cred_digest_flag_default");
     test_alloc_133_cred_digest_flag_default();
+
+    test_group("alloc/134/defaults");
+    test_alloc_134_defaults();
+
+    test_group("alloc/134/set_max_size_roundtrip");
+    test_alloc_134_set_max_size_roundtrip();
+
+    test_group("alloc/134/set_max_age_ms_roundtrip");
+    test_alloc_134_set_max_age_ms_roundtrip();
+
+    test_group("alloc/134/evict_counters_default_zero");
+    test_alloc_134_evict_counters_default_zero();
+
+    test_group("alloc/134/evict_oldest_at_max");
+    test_alloc_134_evict_oldest_at_max();
+
+    test_group("alloc/134/lookup_touch_promotes_lru");
+    test_alloc_134_lookup_touch_promotes_lru();
+
+    test_group("alloc/134/replace_in_place_no_evict");
+    test_alloc_134_replace_in_place_no_evict();
+
+    test_group("alloc/134/age_evict_on_lookup");
+    test_alloc_134_age_evict_on_lookup();
 
     return assert_summary();
 }

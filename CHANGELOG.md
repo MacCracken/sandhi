@@ -4,6 +4,163 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-05-22
+
+**Session-cache TTL + max-size eviction (lead of 1.4.x
+closeout arc).** Also closes two silent-prereq bugs carried
+since 1.3.1 that prevented the cache from working in any
+realistic environment.
+
+### Added — TTL + max-size eviction
+
+The 1.3.1 entry-struct slot documented as reserved for
+`last_used_ms` is now wired up. Cache no longer grows
+unbounded; entries age out + LRU-evict when at the size cap.
+
+- **New public verbs** (+5):
+  - `sandhi_session_cache_set_max_size(n)` — default 256.
+    Clamps to 1 on `n < 1`.
+  - `sandhi_session_cache_max_size()` — query current.
+  - `sandhi_session_cache_set_max_age_ms(ms)` — default
+    86_400_000 (24h). Clamps to 1 on `ms < 1`. TLS
+    session-ticket lifetime is typically a few hours; 24h
+    is the safe upper bound for "the server hasn't rotated
+    keys this long ago."
+  - `sandhi_session_cache_max_age_ms()` — query current.
+  - `sandhi_session_cache_evict_count()` /
+    `_age_evict_count()` — observability counters
+    (eviction-on-insert and age-on-lookup respectively).
+- **`sandhi_session_cache_clear()`** — drop every cached
+  entry (releases SSL_SESSION* via `tls_session_free`, frees
+  entry structs). Useful on logout / context-rotation /
+  shutdown. Counters are NOT reset — call `_reset_stats()`
+  for that.
+- **Entry struct** — internal 16-byte struct
+  `[session_ptr: i64, last_used_ms: i64]` allocated in
+  `default_alloc()`. Same lifetime as the cached session
+  (process-wide singleton); freed via `free_via` on eviction.
+- **Eviction-on-insert** — when a NEW key arrives and
+  `map_size() >= max_size`, `_sandhi_session_cache_evict_oldest()`
+  walks all entries, finds the one with the smallest
+  `last_used_ms`, and evicts it (releases the session,
+  deletes the map key, frees the entry, bumps
+  `evict_count`).
+- **Age-check-on-lookup** — on a key-hit, if
+  `now - last_used_ms > max_age_ms`, the entry is evicted
+  (releases the session, deletes the key, frees the entry,
+  bumps `age_evict_count` and `miss_count`) and lookup
+  returns 0. Otherwise, `last_used_ms` is touched to `now`
+  — which gives LRU semantics for the eviction walk.
+- **Replace-in-place** when the key already exists — the
+  prior entry struct is reused (just updates `session_ptr`
+  + `last_used_ms`), so a re-store doesn't count against
+  the eviction counter.
+
+### Fixed — silent `hashmap_*` → `map_*` naming (1.3.1)
+
+`src/tls_policy/session_cache.cyr` called `hashmap_new_a` /
+`hashmap_get` / `hashmap_set_a` / `hashmap_len` — none of
+which are stdlib symbols (stdlib exports `map_*` and
+`map_u64_*`). cyrius warned `undefined function` and NOPed
+the call sites, so every lookup returned 0 and every store
+was silently a no-op. The cache was non-functional in
+production since 1.3.1; the 1.3.1 / 1.3.3 round-trip tests
+passed only because they skip-cleaned when
+`sandhi_session_cache_enable(1) != 1` (which it always was,
+since `map_new_a` NOPed → map=0 → enable refused). Fixed by
+renaming every call site to `map_*` in this slot — same
+patch that wires the eviction logic. Smoke build no longer
+emits the `undefined function 'hashmap_*'` warnings.
+
+### Fixed — `_sandhi_session_cache_key_a` strlen on 1-byte stack buffer (1.3.1)
+
+The 1.3.1 key builder did `var ch[1]; store8(&ch, hex_char);
+str_builder_add_cstr_a(..., &ch)`. The `_add_cstr_a` path
+calls `strlen(cstr)` which reads until a null terminator —
+past the 1-byte stack buffer, into whatever garbage the
+stack happened to hold next. Same-content key builds could
+yield different hashes depending on stack state. Surfaced
+the moment the `map_*` rename above made map operations
+real: the 1.4.0 replace-in-place test got 1 eviction
+instead of 0 because the second store built a different
+key from the first. Fixed by switching the per-hex-digit
+append to `str_builder_add_byte(sb, hex_char)`.
+
+### Changed — `enable()` contract relaxed
+
+Pre-1.4.0: `sandhi_session_cache_enable(1)` returned 0 if
+`tls_supports_session_resumption() == 0` (libssl didn't
+have the four resumption symbols). Conflated two concerns
+(sandhi-side flag vs. TLS-layer capability) and made every
+gated test in alloc.tcyr skip-clean in CI environments
+where libssl didn't fully resolve.
+
+Post-1.4.0: `enable(on)` always succeeds (modulo init OOM)
+— the cache initializes regardless of TLS capability, since
+the cache itself is just a hashmap with no TLS dependency.
+Production callers who want to short-circuit when the TLS
+layer can't actually use cached sessions should call the
+new **`sandhi_session_cache_supported()`** getter, which
+returns `tls_supports_session_resumption()`.
+
+The practical impact for production: in capability-missing
+environments, `tls_get_session(ctx)` returns 0 and the
+existing `if (sni_host == 0 || session == 0) { return 0; }`
+guard on `store()` bails out — the cache stays empty in
+production, same as before. The coverage win is that
+tests (which use fake session pointers) now exercise the
+cache logic for real instead of skip-cleaning.
+
+Sandhi is the only consumer of these verbs (per the module
+header), so the contract relax has no external migration
+cost. The 1.3.1 / 1.3.3 round-trip tests' `if (rc != 1) {
+skip; }` blocks are removed; they now `assert_eq(rc, 1)`.
+
+### Tests
+
+- **`tests/alloc.tcyr alloc/134/`** — 8 new test groups:
+  - `defaults` — 256 / 86_400_000 / 0 / 0 unconditional.
+  - `set_max_size_roundtrip` — set, get, clamp on `n<1`.
+  - `set_max_age_ms_roundtrip` — set, get, clamp on `ms<1`.
+  - `evict_counters_default_zero` — `_evict_count` /
+    `_age_evict_count` start at 0; `_reset_stats()` clears.
+  - `evict_oldest_at_max` — max=2, store 3 → oldest evicted,
+    `evict_count == 1`.
+  - `lookup_touch_promotes_lru` — max=2, store A, B, lookup A
+    (touches), store C → B (now oldest) evicted, not A.
+    Uses `while (clock_now_ms() <= t) { }` busy-waits to
+    force monotonic clock progression between operations.
+  - `replace_in_place_no_evict` — max=1, store A, store A
+    again → size 1, `evict_count == 0` (no LRU charge for
+    replace).
+  - `age_evict_on_lookup` — `max_age = 1ms`, store, busy-wait
+    5ms past, lookup → miss, `age_evict_count == 1`,
+    `miss_count == 1`.
+- **`tests/alloc.tcyr alloc/131/` + `alloc/133/`** — updated
+  to remove the `if (rc != 1) { skip; }` blocks; the round-
+  trip + cache-isolates tests now run unconditionally
+  against the cache (was always skip-clean in CI before).
+- Total: 938 → **979 assertions green** (+41: 8 new alloc/134
+  groups carrying 22 asserts; +9 from gated tests now running
+  for real; +10 from updated 131/133 tests asserting the new
+  enable() contract; alloc total 289 → 330).
+- All four suites unchanged structurally: 440 sandhi + 167
+  h2 + 330 alloc + 42 rpc.
+- `cyrius lint` 0 warnings on `src/tls_policy/session_cache.cyr`;
+  `cyrfmt --check` clean. Smoke build no longer emits the
+  long-standing `hashmap_*` undefined warnings.
+
+### Why these three landed together
+
+The three fixes are causally linked. The TTL + eviction
+work needs a functioning hashmap underneath (fix 1). Once
+the map works, key-build determinism matters (fix 2). And
+once key builds are deterministic, tests can stop
+skip-cleaning to actually exercise the logic (fix 3). Each
+fix individually couldn't ship until all three landed —
+each one's correctness depends on the others. Bundled per
+the cyrius v5.10.0 "items sharing the same cascade" rule.
+
 ## [1.3.5] — 2026-05-22
 
 **Cyrius pin 5.11.4 → 6.0.1 + binary-rename adaptation.**

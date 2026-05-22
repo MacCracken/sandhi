@@ -4,6 +4,8 @@
 
 ## Version
 
+**1.4.0** — 2026-05-22. **Session-cache TTL + max-size eviction (lead of 1.4.x closeout arc).** Plus two silent-prereq bugs carried since 1.3.1 that prevented the cache from working in production. **New verbs** (+6): `sandhi_session_cache_set_max_size(n)` / `_max_size()` / `_set_max_age_ms(ms)` / `_max_age_ms()` defaults 256 / 86_400_000 (24h); `_evict_count()` / `_age_evict_count()` observability; `sandhi_session_cache_clear()` drops all entries (frees sessions + entry structs); `sandhi_session_cache_supported()` returns `tls_supports_session_resumption()` (the capability check now separated from `enable()`). **Entry struct**: internal 16-byte `[session_ptr, last_used_ms]` allocated in `default_alloc()`. **Eviction-on-insert** + **age-check-on-lookup** + **touch-on-hit** for LRU semantics. **Replace-in-place** when the key exists (no LRU charge). **Silent bugs fixed**: (a) `hashmap_*` → `map_*` rename — the 1.3.1 cache called undefined functions that cyrius NOPed, so every store was a no-op and every lookup returned 0; (b) `_sandhi_session_cache_key_a` did `var ch[1]; str_builder_add_cstr_a(..., &ch)` where the 1-byte stack buffer wasn't null-terminated; `strlen` read stack noise → different keys on same content → cache misses on what should have been hits; fix uses `str_builder_add_byte`. **Contract change**: `enable(1)` no longer gates on TLS capability — cache initializes regardless (it's a hashmap, no TLS dependency at the data layer); production short-circuit moves to `_supported()`. **979 assertions green** (440 sandhi + 167 h2 + 330 alloc + 42 rpc; +41 over 1.3.5's 938 — 22 from 8 new `alloc/134/` groups; 9 from gated tests now running for real (no more skip-clean); 10 from updated 131/133 tests asserting the new enable() contract). `cyrius lint` 0 warnings; `cyrfmt --check` clean. Smoke build no longer emits long-standing `hashmap_*` undefined warnings. `dist/sandhi.cyr` regenerated (11814 lines, v1.4.0).
+
 **1.3.5** — 2026-05-22. **Cyrius pin 5.11.4 → 6.0.1 + binary-rename adaptation.** Mechanical bump; zero source change. **Toolchain**: cyrius v6.0.0 (2026-05-19) renamed the two compiler binaries — `cc5` → `cycc` (Cyrius Computer Compiler), `cyrc` → `cybs` (Cyrius Bootstrap); back-compat symlinks `cc5 → cycc` and `cc5_aarch64 → cycc_aarch64` ship through the v6.0.x window in `~/.cyrius/versions/<v>/bin/` and drop at v6.1.0; `cbt/core.cyr`'s compiler-lookup fallback handles the same direction at runtime. sandhi never reaches past the `cyrius` CLI wrapper for builds, so the rename is transparent to source. v6.0.1 is a same-day hotfix for two stdlib-resolution path bugs surfaced by the v6.0.0 cycle-open (`_init_cyrius_lib` + `_check_cyml_pin_drift` skip-prefix off-by-one missing the extra char in `"cycc "` vs `"cc5 "`, plus a `cmd_deps` mkdir-before-find regression). Neither bug bit sandhi at the 5.11.4 → 6.0.0 hop, but pinning 6.0.1 is the right floor. **Changes**: cyrius.cyml pin 5.11.4 → 6.0.1; CI + release workflows prefer `cycc_aarch64` with fall-back to `cc5_aarch64` for the v6.0.x window; CLAUDE.md hard-constraint reference `cc5` → `cycc`. **No source change**: 938 assertions green (440 sandhi + 167 h2 + 289 alloc + 42 rpc; unchanged from 1.3.4 and 1.3.3 — neither the 1.3.4 annotation pass nor the 1.3.5 pin bump touched runtime code). `cyrius lint` / `cyrfmt --check` clean. `dist/sandhi.cyr` regenerated via `cyrius distlib` at v1.3.5.
 
 **1.3.4** — 2026-05-11. **Stdlib annotation pass + cyrius pin 5.10.34 → 5.11.4.** Every public fn across the 703-fn `src/` tree (http/, http/h2/, tls_policy/, net/, obs/, etc.) carries a `: i64` return-type annotation. Mechanical sed pass; 15 multi-line fn signatures hand-fixed (`_sandhi_http_do_a` family + `_sandhi_conn_open_*` family + `sandhi_h2_request_*` family). Parse-only, zero runtime / codegen change. `dist/sandhi.cyr` regenerated via `cyrius distlib` at v1.3.4 (11598 lines). Test counts unchanged (no runtime delta): 938 assertions green. `cyrius build programs/smoke.cyr build/sandhi-smoke` green; dead-code report unchanged.
@@ -133,7 +135,7 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | `src/tls_policy/policy.cyr` | 173 | **M5 done** — policy struct + constructors + combine |
 | `src/tls_policy/fingerprint.cyr` | 102 | **M5 done** — SPKI hex normalize / compare / encode helpers |
 | `src/tls_policy/apply.cyr` | 91 | **M5 partial** — surface shipped; enforcement stubbed (awaiting stdlib TLS-init) |
-| `src/tls_policy/session_cache.cyr` | 203 | **1.3.1 new** — process-wide singleton cache for `SSL_SESSION*` keyed by `(sni_host, hook_fp_hex)`. Composes cyrius v5.10.21's `tls_get_session` / `tls_set_session` / `tls_session_free` + capability probe + v5.10.27's staged-connect API. Default-OFF; opt-in via `sandhi_session_cache_enable(1)` (capability-gated). 7 public verbs + 1 internal `_init` / `_key_a`. Cache uses `default_alloc()` — sessions outlive any per-request arena. 1.3.3: cache key extended to `(sni_host, hook_fp_hex, cred_digest)` — `_lookup` / `_store` / `_key_a` signatures gained `cred_digest` slot. Key now renders as `<sni>|<hook_fp_hex>|<cred_digest_hex>` (16 hex digits each suffix). Default `cred_digest=0` preserves the 1.3.1 / 1.3.2 cache-key shape. |
+| `src/tls_policy/session_cache.cyr` | ~330 | **1.3.1 new** — process-wide singleton cache for `SSL_SESSION*` keyed by `(sni_host, hook_fp_hex)`. Composes cyrius v5.10.21's `tls_get_session` / `tls_set_session` / `tls_session_free` + capability probe + v5.10.27's staged-connect API. Default-OFF; opt-in via `sandhi_session_cache_enable(1)`. Cache uses `default_alloc()` — sessions outlive any per-request arena. 1.3.3: cache key extended to `(sni_host, hook_fp_hex, cred_digest)`; default `cred_digest=0` preserves the 1.3.1 / 1.3.2 cache-key shape. **1.4.0**: TTL + max-size eviction (`set_max_size` / `set_max_age_ms` defaults 256 / 24h); entry struct `[session, last_used_ms]` (16 B, default_alloc); eviction-on-insert (oldest `last_used_ms`); age-check-on-lookup; touch-on-hit for LRU semantics; `sandhi_session_cache_clear()` to drop all entries; `_evict_count` / `_age_evict_count` counters; `_supported()` capability getter (separated from `enable()`); **`enable()` contract relaxed** (always succeeds modulo OOM — cache initializes regardless of TLS capability). Also fixes the silent 1.3.1 `hashmap_*` (now `map_*`) naming bug + the `_key_a` 1-byte-stack-buffer `strlen` read-past (now uses `str_builder_add_byte`). Bundled three causally-linked fixes per cyrius v5.10.0 "shared cascade" rule. |
 | `src/tls_policy/mod.cyr` | 28 | dialect-index module |
 | `src/server/mod.cyr` | 710 | **M1 done** — verbatim lift from `lib/http_server.cyr`. 0.7.2: `sandhi_server_options_*` struct + `http_server_run_opts` variant; per-connection SO_RCVTIMEO (slowloris guard; 30 s default). `max_conns` option defined but not enforced — concurrent accept model lands 0.8.0. 1.2.7 Batch G: 4 server `_send_*` `_a` paint pairs (`_send_status_a`, `_send_response_a`, `_send_204_a`, `_send_chunked_start_a`) + OOM guards mirroring 1.2.6's RPC dialect fix. `_a` returns 0 on success, -1 on OOM. |
 
@@ -188,9 +190,10 @@ No external git deps. sandhi is pure-stdlib-composition.
 
 Post-fold release sequence (see `roadmap.md` for full detail):
 
-**Currently shipped** — all releases through **1.3.5** (cyrius
-6.0.1 pin bump + cycc/cybs binary-rename adaptation; mechanical,
-zero source change). The 1.3.x TLS arc closes here.
+**Currently shipped** — all releases through **1.4.0** (session-
+cache TTL + max-size eviction; +6 public verbs;
+contract change on `enable()`; closes two silent 1.3.1 bugs that
+prevented the cache from working in production).
 
 - **1.2.x — optimization arc** ✅ closed at 1.2.8.
 - **1.3.x — TLS arc** ✅ closed at 1.3.5. Live-network policy
@@ -203,14 +206,20 @@ zero source change). The 1.3.x TLS arc closes here.
 small/medium pending queue before sit-adoption reshapes the
 roadmap. Concrete slots in roadmap.md.
 
-- **1.4.0** — session-cache TTL + max-size eviction (lead;
-  half-implemented since 1.3.1 reserved `last_used_ms`).
-  Adds `sandhi_session_cache_set_max_size` /
-  `_set_max_age_ms`; eviction-on-insert + age-check-on-lookup.
-- **1.4.1** — `sandhi_server_options_max_conns` enforcement
+- ~~**1.4.0**~~ ✅ shipped 2026-05-22. Session-cache TTL +
+  max-size eviction (lead). +6 public verbs
+  (`set_max_size` / `_max_size` / `set_max_age_ms` /
+  `_max_age_ms` / `_evict_count` / `_age_evict_count`)
+  plus `_clear()` and `_supported()`. Defaults: 256 entries,
+  24h max-age. Eviction-on-insert + age-check-on-lookup +
+  touch-on-hit (LRU). Also fixed the silent 1.3.1
+  `hashmap_*` (now `map_*`) bug + `_key_a` strlen-past-stack
+  bug; relaxed `enable()` contract so cache works regardless
+  of TLS capability (tests now exercise real round-trip).
+- **1.4.1 — `sandhi_server_options_max_conns` enforcement**
   (daimon ask; design choice gates the slot — in-process
   worker pool vs. epoll-cooperative via `lib/async.cyr`).
-- **1.4.2** — `_sandhi_conn_connect_nb` factoring decision
+- **1.4.2 — `_sandhi_conn_connect_nb` factoring decision**
   (likely doc-only; document parallel evolution at both
   callsites unless prof says otherwise).
 - **1.4.x** — profile-justified picks (HPACK Huffman

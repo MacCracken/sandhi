@@ -30,7 +30,7 @@ zero ambiguity on what to put on its roadmap.
 
 | Doc | Filed | Status | Summary |
 |-----|-------|--------|---------|
-| _(none currently open)_ | — | — | All upstream blockers cleared as of 2026-05-10. See archive below for resolved filings. |
+| [`2026-05-22-cyrius-native-tls-in-6.0.x.md`](2026-05-22-cyrius-native-tls-in-6.0.x.md) | 2026-05-22 | Open — cyrius 6.0.x arc | `lib/tls.cyr` native-TLS swap (off the fdlopen-libssl bridge). Sandhi-side contract unchanged per ADR 0001 + CLAUDE.md "No FFI"; filing makes the cross-repo coupling visible. **Sit adoption gates on this landing** — sit is sandhi's next roadmap-reshape trigger (1.5.x scope surfaces from sit's real-workload friction). No specific date; the arc's own pacing decides. Sandhi 1.4.x is the closeout queue before that reshape. |
 
 ## Archived (resolved)
 
