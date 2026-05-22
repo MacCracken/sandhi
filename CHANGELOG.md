@@ -4,6 +4,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.5] — 2026-05-22
+
+**Cyrius pin 5.11.4 → 6.0.1 + binary-rename adaptation.**
+Mechanical bump; no runtime / codegen change in sandhi sources.
+
+Cyrius v6.0.0 (2026-05-19) renamed the two compiler binaries:
+`cc5` → `cycc` (Cyrius Computer Compiler) and `cyrc` → `cybs`
+(Cyrius Bootstrap). Back-compat symlinks `cc5 → cycc` and
+`cc5_aarch64 → cycc_aarch64` ship in `~/.cyrius/versions/<v>/bin/`
+through v6.0.x and drop at v6.1.0; `cbt/core.cyr`'s
+compiler-lookup fallback handles the same direction for the
+runtime. So sandhi's `cyrius build` / `cyrius test` / `cyrius
+lint` / `cyrius distlib` invocations are unaffected — they go
+through the `cyrius` CLI wrapper either way.
+
+Cyrius v6.0.1 (same day) is a hotfix for two stdlib-resolution
+path bugs surfaced by the v6.0.0 cycle-open (`_init_cyrius_lib`
++ `_check_cyml_pin_drift` skip-prefix off-by-one missing the
+extra char in `"cycc "` vs `"cc5 "`, plus a `cmd_deps`
+mkdir-before-find regression that broke `cyrius deps` for
+downstream repos with both `src/main.cyr` and a non-empty
+`stdlib = [...]` pin). Neither bug affected sandhi at the
+intervening 5.11.4 → 6.0.0 hop, but pinning 6.0.1 is the
+right floor going forward.
+
+### Changed
+
+- **`cyrius.cyml`** `[package].cyrius` pin: `5.11.4` → `6.0.1`.
+- **`.github/workflows/ci.yml`** + **`release.yml`** —
+  cross-arch aarch64 step prefers `$HOME/.cyrius/bin/cycc_aarch64`,
+  falls back to `cc5_aarch64` during the v6.0.x back-compat
+  window (so v5.x snapshot installs still on PATH keep
+  working). Warning text updated to name `cycc_aarch64`.
+- **`CLAUDE.md`** hard-constraints — "Do not bypass `cyrius
+  build` with raw `cc5` invocations" → `cycc`. Same intent
+  (don't reach past the build CLI); new binary name.
+
+### Verified
+
+- `cyrius build programs/smoke.cyr build/sandhi-smoke`: green.
+- `dist/sandhi.cyr` regenerated via `cyrius distlib` at v1.3.5.
+- Test counts unchanged (no source change): 938 assertions
+  green (440 sandhi + 167 h2 + 289 alloc + 42 rpc).
+- `cyrius lint` / `cyrfmt --check`: clean.
+
 ## [1.3.4] — 2026-05-11
 
 **Stdlib annotation pass + cyrius pin 5.10.34 → 5.11.4.**

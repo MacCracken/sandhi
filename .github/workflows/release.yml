@@ -74,12 +74,14 @@ jobs:
           echo "sandhi-smoke: $(wc -c < build/sandhi-smoke) bytes"
 
       - name: Cross-build aarch64 (best-effort)
+        # cc5_aarch64 → cycc_aarch64 rename at cyrius v6.0.0; back-
+        # compat symlink ships through v6.0.x. Prefer the new name.
         run: |
-          if [ -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
+          if [ -x "$HOME/.cyrius/bin/cycc_aarch64" ] || [ -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
             CYRIUS_DCE=1 cyrius build --aarch64 programs/smoke.cyr build/sandhi-smoke-aarch64
             echo "sandhi-smoke-aarch64: $(wc -c < build/sandhi-smoke-aarch64) bytes"
           else
-            echo "::warning::cc5_aarch64 not in toolchain — aarch64 binary skipped in release"
+            echo "::warning::cycc_aarch64 not in toolchain — aarch64 binary skipped in release"
           fi
 
       - name: Test

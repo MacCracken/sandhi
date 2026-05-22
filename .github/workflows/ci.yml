@@ -129,11 +129,19 @@ jobs:
         run: xxd -l 4 build/sandhi-smoke | grep -q "7f45 4c46"
 
       - name: Cross-build aarch64 (best-effort)
-        # Cyrius 2.1.1+ added native aarch64 support. Skip with a
-        # warning if the toolchain release doesn't bundle cc5_aarch64.
+        # Cyrius 2.1.1+ added native aarch64 support. Renamed
+        # cc5_aarch64 → cycc_aarch64 at v6.0.0; back-compat symlink
+        # ships through v6.0.x and drops at v6.1.0. Check the new
+        # name first, fall back to the old name for v5.x snapshot
+        # installs that might still be on PATH. Skip with a warning
+        # if neither is present.
         run: |
-          if [ ! -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
-            echo "::warning::cc5_aarch64 not shipped with Cyrius $CYRIUS_VERSION — skipping aarch64 cross-build"
+          if [ -x "$HOME/.cyrius/bin/cycc_aarch64" ]; then
+            AARCH64_BIN=cycc_aarch64
+          elif [ -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
+            AARCH64_BIN=cc5_aarch64
+          else
+            echo "::warning::cycc_aarch64 (nor cc5_aarch64) shipped with Cyrius $CYRIUS_VERSION — skipping aarch64 cross-build"
             exit 0
           fi
           CYRIUS_DCE=1 cyrius build --aarch64 programs/smoke.cyr build/sandhi-smoke-aarch64
