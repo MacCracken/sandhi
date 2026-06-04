@@ -26,6 +26,12 @@ Each doc carries its own "what's assumed vs. actual" note. sandhi's
 side is shipped; the doc exists so the consumer/producer crate has
 zero ambiguity on what to put on its roadmap.
 
+## Sandhi-side defects
+
+| Doc | Filed | Status | Summary |
+|-----|-------|--------|---------|
+| [`2026-06-03-http-close-path-drains-until-eof.md`](2026-06-03-http-close-path-drains-until-eof.md) | 2026-06-03 | Open (filed by yantra) | `Connection: close` request path (`_sandhi_http_exchange_a`, `src/http/client.cyr:535`) drains until EOF instead of framing by `Content-Length`. Servers that send a complete CL-framed response but don't promptly close the socket (chromedriver, Chromium DevTools — both observed) cause `SANDHI_ERR_TIMEOUT` despite the full response being buffered. Framed-recv already exists on the keep-alive path; the close path should share it. yantra M2 works around it with a minimal CL-framed client; will switch back once fixed. |
+
 ## Upstream dependencies (sandhi is blocked on stdlib / toolchain)
 
 | Doc | Filed | Status | Summary |

@@ -532,12 +532,28 @@ fn _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms)
         sandhi_conn_close(conn);
         return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL);
     }
-    var nread = sandhi_conn_recv_all_deadline(conn, rbuf, cap, deadline_ms);
+    # 1.4.1 — frame the response by Content-Length / chunked (the same
+    # `_sandhi_http_recv_framed` the keep-alive path uses) instead of draining
+    # until EOF. A server that sends a complete, Content-Length-framed response
+    # with `Connection: close` but does NOT promptly close the socket
+    # (chromedriver, Chromium's DevTools — see
+    # docs/issues/2026-06-03-http-close-path-drains-until-eof.md) otherwise
+    # stalls this read until the deadline and we return TIMEOUT despite having
+    # the whole response buffered. We close the conn right after regardless, so
+    # the must-close sentinel (0 - 2) simply means "full response received" —
+    # treat it as success. EOF-delimited (HTTP/1.0, no CL/chunked) still works:
+    # recv_framed returns the bytes read at EOF.
+    var nread = _sandhi_http_recv_framed(conn, rbuf, cap, deadline_ms);
     sandhi_conn_close(conn);
-    sandhi_prof_record_recv(cap, nread);
     if (nread == 0 - _SANDHI_EAGAIN) { return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT); }
-    if (nread < 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT); }
-    return sandhi_http_response_parse_a(a, rbuf, nread);
+    var actual_n = nread;
+    if (nread == 0 - 2) {
+        actual_n = strlen(rbuf);
+    } elif (nread < 0) {
+        return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT);
+    }
+    sandhi_prof_record_recv(cap, actual_n);
+    return sandhi_http_response_parse_a(a, rbuf, actual_n);
 }
 
 fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms): i64 {
