@@ -30,7 +30,7 @@ zero ambiguity on what to put on its roadmap.
 
 | Doc | Filed | Status | Summary |
 |-----|-------|--------|---------|
-| [`2026-06-03-http-close-path-drains-until-eof.md`](2026-06-03-http-close-path-drains-until-eof.md) | 2026-06-03 | Open (filed by yantra) | `Connection: close` request path (`_sandhi_http_exchange_a`, `src/http/client.cyr:535`) drains until EOF instead of framing by `Content-Length`. Servers that send a complete CL-framed response but don't promptly close the socket (chromedriver, Chromium DevTools — both observed) cause `SANDHI_ERR_TIMEOUT` despite the full response being buffered. Framed-recv already exists on the keep-alive path; the close path should share it. yantra M2 works around it with a minimal CL-framed client; will switch back once fixed. |
+| [`2026-06-03-http-close-path-drains-until-eof.md`](2026-06-03-http-close-path-drains-until-eof.md) | 2026-06-03 | ✅ Resolved 1.4.1 | `Connection: close` request path (`_sandhi_http_exchange_a`) drained until EOF instead of framing by `Content-Length`. Servers that send a complete CL-framed response but don't promptly close (chromedriver, Chromium DevTools) caused `SANDHI_ERR_TIMEOUT`. **Fixed in 1.4.1**: close path now uses `_sandhi_http_recv_framed` (shared with keep-alive). Verified live against chromedriver. |
 
 ## Upstream dependencies (sandhi is blocked on stdlib / toolchain)
 

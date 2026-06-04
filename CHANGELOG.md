@@ -4,6 +4,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-06-03
+
+**HTTP/1.1 `Connection: close` read path now frames by Content-Length /
+chunked instead of draining until EOF + cyrius pin 6.0.1 → 6.0.55.** Fixes a
+hang/timeout against servers that send a complete, Content-Length-framed
+response with `Connection: close` but do not promptly close the socket —
+notably **chromedriver** and **Chromium's DevTools** HTTP endpoint (filed
+`docs/issues/2026-06-03-http-close-path-drains-until-eof.md`, surfaced by
+yantra's M2 WebDriver work). `_sandhi_http_exchange_a` (the non-keep-alive
+path, `src/http/client.cyr`) called `sandhi_conn_recv_all_deadline`, which
+reads until EOF / max / deadline and never consults the framing headers; the
+peer's complete CL-framed response sat buffered while the read blocked to the
+deadline and returned `SANDHI_ERR_TIMEOUT`. Fix swaps in
+`_sandhi_http_recv_framed` — the **same** incremental, header-framed reader the
+keep-alive path (`_sandhi_http_exchange_keepalive_a`) has used since 0.8.0 — and
+mirrors its `0 - 2` must-close-sentinel handling (the close path closes the conn
+right after, so the sentinel just means "full response received"). EOF-delimited
+HTTP/1.0 responses (no CL, no chunked) still work — `_sandhi_http_recv_framed`
+returns the bytes read at EOF. No public API change; read-path behavior only.
+**Verified**: live GET to chromedriver `/status` now returns `err_kind=0
+status=200` (was `err_kind=4` TIMEOUT); a normal Content-Length+close server
+still returns 200 (no regression). **979 assertions green** (440 sandhi + 167
+h2 + 330 alloc + 42 rpc; unchanged — the fix reuses already-tested framing).
+`cyrius lint` 0 warnings; `cyrfmt --check` clean. Pin floor 6.0.1 → 6.0.55
+(latest 6.0.x; tested green). `dist/sandhi.cyr` regenerated at v1.4.1.
+
 ## [1.4.0] — 2026-05-22
 
 **Session-cache TTL + max-size eviction (lead of 1.4.x

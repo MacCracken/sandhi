@@ -1,10 +1,15 @@
 # 2026-06-03 — HTTP/1.1 `Connection: close` path drains until EOF instead of framing by Content-Length
 
-**Status**: Open — filed from yantra during the M2 (WebDriver) backend work.
+**Status**: ✅ **Resolved in sandhi 1.4.1** (2026-06-03) — `_sandhi_http_exchange_a`
+now reads via `_sandhi_http_recv_framed` (Content-Length/chunked framing, the
+same reader the keep-alive path uses) instead of draining until EOF. Verified
+live against chromedriver (`/status` → `err_kind=0 status=200`, was TIMEOUT);
+normal Content-Length+close server still 200; 979 assertions green. See
+CHANGELOG [1.4.1].
 **Filed**: yantra side, against sandhi.
 **Side**: sandhi-side (`src/http/client.cyr` response read on the non-keep-alive path).
-**Severity**: blocks sandhi against chromium-family HTTP servers (chromedriver, Chromium DevTools).
-**Observed**: sandhi 1.3.4 (vendored in yantra) and confirmed present in 1.4.0 source.
+**Severity**: blocked sandhi against chromium-family HTTP servers (chromedriver, Chromium DevTools).
+**Observed**: sandhi 1.3.4 (vendored in yantra) and 1.4.0 source. **Fixed**: 1.4.1.
 
 ## Summary
 
