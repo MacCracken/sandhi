@@ -4,13 +4,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.4] — 2026-06-07
+
+**Closeout housekeeping batch: roadmap slot realignment +
+`_sandhi_conn_connect_nb` factoring decision.** Two small closeout-arc
+items; the only code change is a doc comment. No public-API or behavioral
+change. (The sigil transitive-deps fix landed in 1.4.3, documented there.)
+
+### Changed — `_sandhi_conn_connect_nb` factoring decision (option b)
+
+Resolved the parked factoring slot. sandhi's `_sandhi_conn_connect_nb`
+(nb-connect + `poll(POLLOUT)` + `SO_ERROR` readback) shares its shape
+with cyrius `regression_network_probe`. Decision: **(b) parallel
+evolution** — do not extract a shared `net_connect_nb` primitive.
+Connect runs once per conn-open (not per request), so a shared primitive
+would not measure. Documented at the callsite (`src/http/conn.cyr`) and
+here; no code change, no cyrius dependency.
+
+### Changed — roadmap slot-number realignment
+
+The 1.4.x closeout-arc subsections still labeled the pending `max_conns`
+/ `connect_nb` slots "1.4.1" / "1.4.2", but those version numbers shipped
+other work (1.4.1 close-path framing fix; 1.4.2 ALPN/SPKI native-TLS
+rewire; 1.4.3 buried-deferral sweep + pin + sigil deps). Renumbered to
+the real sequence: `connect_nb` resolved here at 1.4.4; `max_conns`
+enforcement → 1.4.5 (still gated on the worker-shape design pick).
+Updated the shipped log + the "Why this roadmap exists" slot mapping.
+
+### Verified
+
+- 979 assertions green (440 sandhi + 167 h2 + 330 alloc + 42 rpc;
+  unchanged — no behavioral change).
+- `cyrius lint` 0 warnings, 0 untracked deferrals; `cyrfmt --check` clean.
+- `cyrius build programs/smoke.cyr` green; `dist/sandhi.cyr` regenerated
+  at v1.4.4.
+
 ## [1.4.3] — 2026-06-07
 
 **Buried-deferral gate sweep (drains the 1.4.x closeout queue's P2
-lead) + cyrius pin 6.0.82 → 6.0.87.** Bundled mechanical closeout
-housekeeping — the deferral drain is comment-only and the pin bump is
-source-free, so they ride one patch (mirrors 1.3.4's annotation-pass +
-pin-bump bundling).
+lead) + cyrius pin 6.0.82 → 6.0.87 + sigil transitive-deps fix.**
+Bundled closeout housekeeping — the deferral drain is comment-only, the
+pin bump is source-free, and the sigil fix is a `[deps]` / build-include
+change (mirrors 1.3.4's annotation-pass + pin-bump bundling).
 
 ### Changed — buried-deferral gate drained + flipped to fail-mode
 
@@ -60,11 +95,30 @@ since 1.4.2 put sandhi's transport on the sovereign native-TLS backend).
 The Windows-pillar + AGNOS getenv/envp work is not sandhi-facing. Pin
 floor 6.0.82 → 6.0.87 (latest 6.0.x; tested green).
 
+### Fixed — sigil transitive deps (`sha256` linkage)
+
+`src/tls_policy/apply.cyr`'s SPKI-pin digest calls sigil's one-shot
+`sha256`, but sigil does not declare its own transitive deps
+(`ct` / `keccak` / `thread_local`). With only `sigil` in `[deps] stdlib`,
+`cyrius deps` left `sha256` unresolved — the symbol dropped from the link
+(a `ud2` fixup that SIGILLs if the SPKI digest path executes). Fixed
+sandhi-side, native-clean (no FFI): added `ct` / `keccak` /
+`thread_local` to `[deps] stdlib`, and included the crypto chain
+explicitly in `programs/_policy_runtime_probe.cyr` (the live-gate target)
+so `sha256` links there. Verified `sha256` links and hashes correctly
+(`SHA-256("ABC")` → `b5d4…`). This is sigil's packaging gap surfaced from
+the consumer side; the fix is declaring the deps, never re-adding libssl
+FFI (ADR 0001 / CLAUDE.md "No FFI"). The live SPKI gate's remaining fault
+is in the **deprecated libssl backend**'s cert-extraction path (inside
+libcrypto) — that backend is retiring for native TLS and is out of
+sandhi's scope.
+
 ### Verified
 
 - **Buried-deferral sweep**: 0 untracked deferrals across `src/` (was 12).
+- **sigil `sha256`**: links + hashes correctly (`SHA-256("ABC")` → `b5d4…`).
 - **979 assertions green** against the 6.0.87 snapshot (440 sandhi + 167
-  h2 + 330 alloc + 42 rpc; unchanged — comment + pin only).
+  h2 + 330 alloc + 42 rpc; unchanged — comment / pin / deps-list only).
 - `cyrius lint` 0 warnings (modulo the `huffman.cyr` allowlist);
   `cyrfmt --check` clean across `src/` + `programs/` + `tests/`.
 - `cyrius build programs/smoke.cyr` green; ELF OK.

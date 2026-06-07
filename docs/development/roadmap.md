@@ -69,7 +69,8 @@ details, state.md the current snapshot.
 - **1.4.0** — Session-cache TTL + max-size eviction (lead of 1.4.x closeout arc). +6 public verbs (`set_max_size` / `_max_size` / `set_max_age_ms` / `_max_age_ms` / `_evict_count` / `_age_evict_count`) plus `_clear()` and `_supported()`. Defaults 256 / 24h. Eviction-on-insert + age-check-on-lookup + touch-on-hit (LRU). Also closes two silent 1.3.1 bugs that prevented the cache from working in production: (a) `hashmap_*` → `map_*` naming (undef → NOP since 1.3.1); (b) `_key_a` strlen-past-stack on 1-byte buffer → non-deterministic keys. `enable()` contract relaxed (no longer gated on TLS capability; new `_supported()` getter separates the concern). 979 assertions green (+41 over 1.3.5's 938; 22 new in alloc/134, 19 from previously-skip-clean tests now running for real).
 - **1.4.1** — HTTP/1.1 `Connection: close` read path frames by Content-Length / chunked instead of draining until EOF (fixes `SANDHI_ERR_TIMEOUT` hang vs chromedriver / Chromium DevTools; surfaced by yantra M2). `_sandhi_http_exchange_a` reuses the keep-alive `_sandhi_http_recv_framed` + `0 - 2` must-close sentinel; EOF-delimited HTTP/1.0 still works. cyrius pin 6.0.1 → 6.0.55. No public API change. 979 assertions green (unchanged). Verified live against chromedriver.
 - **1.4.2** — Dropped the ALPN-read + SPKI-pin libssl bindings onto cyrius 6.0.82's typed backend-agnostic `tls_get_alpn_selected` / `tls_get_peer_spki_der`. sandhi now runs over the sovereign native TLS transport (`tls_set_backend`) with no ALPN/SPKI libssl coupling — closes the cyrius native-TLS Mini-arc E consumer rewire. Remaining `tls_dlsym` sites are pre-handshake `SSL_CTX_*` mTLS / trust-store config. cyrius pin 6.0.55 → 6.0.82. 167 h2 + 440 sandhi green.
-- **1.4.3** — Buried-deferral gate sweep (drains the P2 closeout lead) + cyrius pin 6.0.82 → 6.0.87. All **12** untracked deferrals drained (the list of 8 undercounted — 4 more lived in `src/http/h2/`): real work → new Wait-for-second-consumer-ask roadmap bullets + comment crossref (per no-silent-scope-outs); incidental → reworded to drop the trigger; `HTTP_NOT_IMPLEMENTED` status constant → `#skip-lint`. CI lint gate flipped report-mode → fail-mode on untracked deferrals. Pin bump mechanical (full TLS ciphersuite enablement + macOS native-TLS fixes). 979 assertions green (unchanged); 0 untracked deferrals.
+- **1.4.3** — Buried-deferral gate sweep (drains the P2 closeout lead) + cyrius pin 6.0.82 → 6.0.87. All **12** untracked deferrals drained (the list of 8 undercounted — 4 more lived in `src/http/h2/`): real work → new Wait-for-second-consumer-ask roadmap bullets + comment crossref (per no-silent-scope-outs); incidental → reworded to drop the trigger; `HTTP_NOT_IMPLEMENTED` status constant → `#skip-lint`. CI lint gate flipped report-mode → fail-mode on untracked deferrals. Pin bump mechanical (full TLS ciphersuite enablement + macOS native-TLS fixes). Plus sigil transitive-deps fix (`ct` / `keccak` / `thread_local` added to `[deps]` + crypto-chain include in the live-gate probe so sigil's `sha256` links — native-clean, no FFI; sigil's packaging gap, surfaced consumer-side). 979 assertions green (unchanged); 0 untracked deferrals.
+- **1.4.4** — Closeout housekeeping: roadmap slot-number realignment + `_sandhi_conn_connect_nb` factoring decision (option b — parallel evolution with `regression_network_probe`, no shared primitive; the only code change is a doc comment). Fixed roadmap drift: the `max_conns` / `connect_nb` slots were mislabeled "1.4.1" / "1.4.2" (those numbers shipped other work — 1.4.1 close-path, 1.4.2 ALPN/SPKI, 1.4.3 deferral sweep + pin + sigil); renumbered — `connect_nb` resolved here, `max_conns` → 1.4.5. 979 assertions green (unchanged); no public-API change.
 
 ## What's next
 
@@ -185,7 +186,7 @@ Why lead: smallest, most concrete, half-implemented already
 (`last_used_ms` slot present since 1.3.1). Closes the
 session-cache subsystem so the 1.3.x TLS arc fully retires.
 
-#### 1.4.1 — `sandhi_server_options_max_conns` enforcement
+#### 1.4.5 — `sandhi_server_options_max_conns` enforcement
 
 Daimon's filed ask:
 [`docs/issues/2026-05-10-daimon-server-max-conns.md`](../issues/2026-05-10-daimon-server-max-conns.md).
@@ -205,11 +206,11 @@ first (could be a sub-slot or paired with the implementation):
 
 Low severity (no security impact — daimon closed its own
 slowloris exposure at 1.2.2). Pure refactor / dedup
-unblocker. If the design choice itself drags out, ship 1.4.1
+unblocker. If the design choice itself drags out, ship 1.4.5
 as a decision-only slot (CHANGELOG documents the pick) and
-land the implementation as 1.4.2.
+land the implementation as 1.4.6.
 
-#### 1.4.2 — `_sandhi_conn_connect_nb` factoring decision
+#### `_sandhi_conn_connect_nb` factoring decision ✅ resolved 1.4.4
 
 Cyrius v5.9.42 carved `lib/regression.cyr`'s
 `regression_network_probe` using the same non-blocking-connect
@@ -230,6 +231,11 @@ Likely doc-only slot — the CHANGELOG entry documents the
 choice so the parallel evolution is intentional, not
 accidental. If user picks (a), the coordination doc lands
 here; the actual code change is filed against cyrius.
+
+**Resolved 1.4.4 — option (b)**: parallel evolution documented at the
+`_sandhi_conn_connect_nb` callsite (`src/http/conn.cyr`) + CHANGELOG. No
+shared `net_connect_nb` primitive, no cyrius dependency (connect runs
+once per conn-open, not per request — profile won't measure).
 
 #### 1.4.x — profile-justified optimization picks (parked)
 
@@ -487,8 +493,11 @@ its job is keeping the post-v1 patch window honest. The shape:
 - **1.4.x** — closeout arc. Drains the small/medium pending
   queue before sit-adoption reshapes the roadmap.
   1.4.0 = session-cache TTL + eviction;
-  1.4.1 = max_conns enforcement;
-  1.4.2 = conn_nb factoring decision;
+  1.4.1 = HTTP close-path framing fix;
+  1.4.2 = ALPN/SPKI libssl-binding drop (native-TLS rewire);
+  1.4.3 = buried-deferral sweep + pin 6.0.87 + sigil deps;
+  1.4.4 = slot realignment + conn_nb factoring decision;
+  1.4.5 = max_conns enforcement (pending worker-shape pick);
   1.4.x  = profile-justified picks (parked);
   1.4.x  = cap-drift watch (background);
   **1.4.x closeout** = P-1 / security / code-audit pass.

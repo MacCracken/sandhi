@@ -296,6 +296,12 @@ fn _sandhi_conn_set_timeout_ms(fd, ms, opt): i64 {
 # refused, then restores blocking mode. Leaves the fd in blocking
 # mode on every exit path so subsequent recv/send behave normally.
 #
+# Factoring (1.4.4): this nb-connect + poll(POLLOUT) + SO_ERROR-readback
+# shape parallels cyrius `regression_network_probe` (lib/regression.cyr).
+# Kept as parallel evolution by design rather than extracting a shared
+# `net_connect_nb` primitive — connect runs once per conn-open, not per
+# request, so a shared primitive would not measure. See roadmap 1.4.4.
+#
 # Returns:
 #   _SANDHI_CONN_NB_OK      (0)  — connected
 #   _SANDHI_CONN_NB_TIMEOUT (-2) — poll timed out waiting for completion
