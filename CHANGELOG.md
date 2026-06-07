@@ -31,6 +31,14 @@ the real sequence: `connect_nb` resolved here at 1.4.4; `max_conns`
 enforcement → 1.4.5 (still gated on the worker-shape design pick).
 Updated the shipped log + the "Why this roadmap exists" slot mapping.
 
+Also refreshed `docs/development/state.md`'s live-state sections, which
+had drifted to pre-fold / 1.4.0-era values: Toolchain pin → 6.0.87;
+Fold-status → folded / post-fold maintenance; Source module
+statuses/counts (dropped stale "scaffold"/"stubbed" on done modules —
+`error`, `apply`, `local`); Tests → 979 across four suites;
+Dependencies → actual `[deps]` (incl. the 1.4.3 `ct`/`keccak`/
+`thread_local` crypto deps); Next → 1.4.5 as the unambiguous next-up.
+
 ### Verified
 
 - 979 assertions green (440 sandhi + 167 h2 + 330 alloc + 42 rpc;

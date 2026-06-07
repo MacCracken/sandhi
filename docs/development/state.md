@@ -100,17 +100,17 @@
 
 ## Toolchain
 
-- **Cyrius pin**: `6.0.1` (in `cyrius.cyml [package].cyrius`). 1.3.4 pin-bumped from 5.10.34 → 5.11.4 (stdlib annotation arc); 1.3.5 pin-bumped 5.11.4 → 6.0.1 (cycc / cybs binary-rename ceremony at v6.0.0 + v6.0.1 stdlib-path hotfix).
+- **Cyrius pin**: `6.0.87` (`cyrius.cyml [package].cyrius`). Bump trail: 5.11.4 → 6.0.1 (1.3.5, cycc/cybs binary rename) → 6.0.55 (1.4.1) → 6.0.82 (1.4.2, native-TLS ALPN/SPKI typed verbs) → 6.0.87 (1.4.3, full TLS ciphersuite enablement + macOS native-TLS fixes).
 
 ## Fold-into-stdlib status
 
-**Pre-fold, target at Cyrius v5.7.0** as a clean-break fold per [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md). Revised from the original "before v5.6.x closeout" target. Follows the sakshi / mabda / sankoch / sigil precedent (sibling crate → fold), but with one twist: no stdlib-side alias window. 5.6.YY emits a deprecation warning on `include "lib/http_server.cyr"`; 5.7.0 deletes it and adds `lib/sandhi.cyr` vendored from `dist/sandhi.cyr`.
+**Folded.** Shipped at sandhi **1.0.0** / Cyrius **v5.7.0** (2026-04-25) per [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md) — clean-break, no stdlib-side alias window. Cyrius stdlib vendors `dist/sandhi.cyr` as `lib/sandhi.cyr`; consumers `include "lib/sandhi.cyr"` and drop their `[deps.sandhi]` pins.
 
-M2–M5 must land pre-5.7.0 — the fold freezes the public surface.
+Now in **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is regenerated each release, and a small cyrius-side slot refreshes `lib/sandhi.cyr` from it. The public surface is no longer frozen (ADR 0005's freeze applied only between 0.9.2 and 1.0.0).
 
 ## Source
 
-Server module + full HTTP client surface + DNS resolver are live; RPC / discovery / tls_policy still scaffold.
+All milestone surfaces are live: M1 server, M2 HTTP client + DNS, M3 RPC dialects, M3.5 SSE / streaming, M4 discovery, M5 TLS policy. ~11.9k lines across the modules below (715 fns; 428 public `sandhi_*`). **Per-module line counts are approximate** — refreshed at major refactors; per-release detail lives in CHANGELOG.
 
 | Module | Lines | Status |
 |--------|-------|--------|
@@ -119,7 +119,7 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | `src/http/h2/dispatch.cyr` | 355 | **0.8.1 new** — `sandhi_http_request_auto` (per-method `_get_auto` / `_head_auto` / `_post_auto` / `_put_auto` / `_patch_auto` / `_delete_auto`). Pool h2-take → 1.1 single-shot fallback. 0.9.5: redirect-following hoisted to this layer — new `_sandhi_http_auto_once` (per-hop dispatch) + `_sandhi_http_auto_follow` (mirrors 1.1 follow's security semantics; each hop re-evaluates h2 selection). 0.9.6: ALPN-driven h2 auto-promotion — `_sandhi_http_try_h2_promote` opens advertising `h2,http/1.1`, runs preface + SETTINGS on h2-pick and caches via `sandhi_http_pool_put_h2`, donates conn to 1.1 pool slot on http/1.1-pick. First release where live h2 fires end-to-end via the auto path. 1.2.1: `_a` variants for the entire family (`_try_h2_promote_a`, `_auto_once_a`, `_auto_follow_a`, `sandhi_http_request_auto_a`) thread allocator through h2 take / promote / 1.1 fallback uniformly. 1.3.2: `sandhi_http_request_auto_a` save+restores the module-level `_sandhi_allow_0rtt` flag from `sandhi_http_options_get_allow_0rtt(opts)` for the duration of the dispatch — the 1.1 fallback's `_do_impl_a` eligibility check reads the flag. h2 path doesn't enable 0-RTT yet (CONNECTION preface vs. early-data ordering pinned for a later milestone). 1.3.3: same save+restore shape extended to `_sandhi_cred_digest` from `_sandhi_compute_cred_digest(user_headers)`, so the conn-finalize sees the right cred-digest for the cache-key isolation. |
 | `src/obs/trace.cyr` | 57 | **0.7.2 new** — opt-in sakshi-span wrapper. Default off; `sandhi_trace_enable(1)` turns on emission. Boundary spans: `sandhi.http` / `sandhi.dns.v4` / `sandhi.dns.v6` / `sandhi.rpc`. |
 | `src/obs/prof.cyr` | 140 | **1.2.5 new** — per-request per-phase timing instrumentation + recv-buffer cap/used tracking. Default off; runtime toggle via `sandhi_prof_enable(1)`. 5 phase boundaries (URL_PARSE_END / DNS_END / CONN_OPEN_END / REQ_BUILD_END / EXCHANGE_END) captured inside `_sandhi_http_do_impl_a`. 8 public verbs + `SANDHI_PROF_PHASE_*` enum. ~500 ns/request when enabled; zero overhead disabled. |
-| `src/error.cyr` | 33 | scaffold — error kinds defined |
+| `src/error.cyr` | 33 | unified error kinds (PARSE / CONNECT / TLS / TIMEOUT / REMOTE / PROTOCOL / AUTH / DISCOVERY / INTERNAL) |
 | `src/http/headers.cyr` | 258 | **M2 done** — key-value store, case-insensitive lookup, wire-format serialize + parse |
 | `src/http/url.cyr` | 193 | **M2 done** — http/https parser with CRLF hardening |
 | `src/http/conn.cyr` | 877 | **M2 done** — tagged plain/TLS connection abstraction. 0.7.2: `sandhi_conn_open_timed` + SO_RCVTIMEO/SO_SNDTIMEO helpers; EAGAIN surfaced as `0 - _SANDHI_EAGAIN`. 0.7.3: non-blocking connect via `_sandhi_conn_connect_nb` (O_NONBLOCK + poll + SO_ERROR); `sandhi_conn_open_fully_timed`; `sandhi_conn_recv_all_deadline`; module-level `_sandhi_conn_last_err` for failure classification. 1.3.0 Batch: switched `_sandhi_alpn_hook` to v5.10.13's typed `tls_set_alpn` wrapper. 1.3.1: `_sandhi_conn_finalize_a` switched from one-shot `tls_connect_with_ctx_hook` to staged-connect (`tls_connect_alloc` → optional `tls_set_session` → `tls_connect_complete` → capture via `tls_get_session`). 1.3.2: staged-connect finalize gained early-data parameters — `_sandhi_conn_finalize_a` becomes a back-compat wrapper forwarding to `_sandhi_conn_finalize_with_early_data_a` which checks `tls_session_get_max_early_data(cached) >= req_len`, writes via `tls_write_early_data`, captures `tls_get_early_data_status` into new conn-struct slot `SANDHI_CONN_OFF_0RTT_STATUS` (struct grew 32 → 40 bytes). New v4/v6 conn-open variants `_sandhi_conn_open_fully_timed_with_early_data_a` / `_v6_fully_timed_with_early_data_a`. Module-level `_sandhi_allow_0rtt` flag added next to `_sandhi_alpn_advertise_h2`. Public `sandhi_conn_0rtt_status(c)` accessor exposes the latched TLS_EARLY_DATA_* value. 1.3.3: module-level `_sandhi_cred_digest` flag added; finalize reads it for the session-cache key — same flag-pattern precedent as `_sandhi_allow_0rtt` and `_sandhi_alpn_advertise_h2`. |
@@ -137,12 +137,12 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 | `src/discovery/service.cyr` | 75 | **M4 done** — service + resolver type vocabulary |
 | `src/discovery/chain.cyr` | 61 | **M4 done** — fallback sequence of resolvers |
 | `src/discovery/daimon.cyr` | 116 | **M4 done** — HTTP-backed resolver against daimon registry |
-| `src/discovery/local.cyr` | 70 | **M4 partial** — interface shipped; lookup stubbed (awaiting net.cyr multicast) |
+| `src/discovery/local.cyr` | 194 | **M4** — mDNS link-local resolver; unicast (QU-bit) A-record query shipped (0.9.3, works against most responders); multicast membership awaits cyrius `lib/net.cyr` primitives |
 | `src/discovery/register.cyr` | 55 | **M4 done** — publish/withdraw via daimon |
 | `src/discovery/mod.cyr` | 24 | dialect-index module |
 | `src/tls_policy/policy.cyr` | 173 | **M5 done** — policy struct + constructors + combine |
 | `src/tls_policy/fingerprint.cyr` | 102 | **M5 done** — SPKI hex normalize / compare / encode helpers |
-| `src/tls_policy/apply.cyr` | 91 | **M5 partial** — surface shipped; enforcement stubbed (awaiting stdlib TLS-init) |
+| `src/tls_policy/apply.cyr` | 259 | **M5 done** — TLS policy enforcement (default / pinned / mTLS / trust-store); 0.9.3 enforcement, 1.3.0 typed ALPN wrapper, 1.4.2 ALPN-read + SPKI-pin onto typed backend-agnostic `tls.cyr` verbs (`tls_get_alpn_selected` / `tls_get_peer_spki_der`). SPKI digest uses sigil `sha256` (deps declared 1.4.3). |
 | `src/tls_policy/session_cache.cyr` | ~330 | **1.3.1 new** — process-wide singleton cache for `SSL_SESSION*` keyed by `(sni_host, hook_fp_hex)`. Composes cyrius v5.10.21's `tls_get_session` / `tls_set_session` / `tls_session_free` + capability probe + v5.10.27's staged-connect API. Default-OFF; opt-in via `sandhi_session_cache_enable(1)`. Cache uses `default_alloc()` — sessions outlive any per-request arena. 1.3.3: cache key extended to `(sni_host, hook_fp_hex, cred_digest)`; default `cred_digest=0` preserves the 1.3.1 / 1.3.2 cache-key shape. **1.4.0**: TTL + max-size eviction (`set_max_size` / `set_max_age_ms` defaults 256 / 24h); entry struct `[session, last_used_ms]` (16 B, default_alloc); eviction-on-insert (oldest `last_used_ms`); age-check-on-lookup; touch-on-hit for LRU semantics; `sandhi_session_cache_clear()` to drop all entries; `_evict_count` / `_age_evict_count` counters; `_supported()` capability getter (separated from `enable()`); **`enable()` contract relaxed** (always succeeds modulo OOM — cache initializes regardless of TLS capability). Also fixes the silent 1.3.1 `hashmap_*` (now `map_*`) naming bug + the `_key_a` 1-byte-stack-buffer `strlen` read-past (now uses `str_builder_add_byte`). Bundled three causally-linked fixes per cyrius v5.10.0 "shared cascade" rule. |
 | `src/tls_policy/mod.cyr` | 28 | dialect-index module |
 | `src/server/mod.cyr` | 710 | **M1 done** — verbatim lift from `lib/http_server.cyr`. 0.7.2: `sandhi_server_options_*` struct + `http_server_run_opts` variant; per-connection SO_RCVTIMEO (slowloris guard; 30 s default). `max_conns` option defined but not enforced — concurrent accept model lands 0.8.0. 1.2.7 Batch G: 4 server `_send_*` `_a` paint pairs (`_send_status_a`, `_send_response_a`, `_send_204_a`, `_send_chunked_start_a`) + OOM guards mirroring 1.2.6's RPC dialect fix. `_a` returns 0 on success, -1 on OOM. |
@@ -150,25 +150,33 @@ Server module + full HTTP client surface + DNS resolver are live; RPC / discover
 Build outputs:
 - `build/sandhi-smoke` — link-proof smoke program.
 - `build/dns-probe` — ad-hoc live DNS check (not part of test suite; `cyrius run programs/dns-probe.cyr <host>`).
-- `build/http-probe` — ad-hoc live HTTP round-trip (`cyrius run programs/http-probe.cyr <url>`). Plain HTTP works end-to-end; HTTPS known-issue (TLS init).
+- `build/http-probe` — ad-hoc live HTTP/HTTPS round-trip (`cyrius run programs/http-probe.cyr <url>`).
+- `build/_policy_runtime_probe` — live-network TLS-policy gate (CI step).
 
-Planned `dist/sandhi.cyr` bundle via `cyrius distlib` — can now be produced any time (M1 complete); first formal bundle pairs with M6 fold prep.
+`dist/sandhi.cyr` regenerated via `cyrius distlib` each release (~11.9k lines at v1.4.4); CI gates that it stays in sync with `src/`.
 
 ## Tests
 
-- `tests/sandhi.tcyr` — **482 assertions green** across the public surface: headers / URL / response / client / redirect (P0-hardened: cred-strip cross-authority, https→http refusal, 303→GET) / DNS / RPC dialects / discovery / TLS policy + fingerprint / SSE / streaming. File is at the per-program fixup cap (architecture/001) — additional verification lands as `programs/_*_probe.cyr` standalone probes (e.g., `_trailers_probe.cyr` covers RFC 7230 §4.1.2 trailer parsing).
-- `tests/h2.tcyr` — **153 assertions green** for HTTP/2: HPACK static table + Huffman (RFC 7541 C.4.1) / frame wire format (SETTINGS / PING / WINDOW_UPDATE / RST_STREAM / GOAWAY / HEADERS) / connection lifecycle / request-encode + roundtrip / response-decode / pool routing.
-- **649 total** as of 0.9.8 (`sandhi.tcyr` 482 + `h2.tcyr` 167; the +14 are encoder-side bytes for the RFC 7541 C.4.1 reference vector).
+**979 assertions green** across four suites (CI runs all four):
+
+- `tests/sandhi.tcyr` — **440** — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery / TLS policy + fingerprint / SSE / streaming.
+- `tests/h2.tcyr` — **167** — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
+- `tests/alloc.tcyr` — **330** — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0).
+- `tests/rpc.tcyr` — **42** — JSON builder/extractor, RPC dispatch err-envelope, WebDriver URL helpers, MCP envelope.
+
+Beyond unit tests: `programs/_policy_runtime_probe.cyr` is a live-network TLS-policy gate (CI step; skip-cleanly offline). Per-program fixup-cap pressure (architecture/001) keeps some coverage in standalone `programs/_*_probe.cyr`.
 
 ## Dependencies
 
 Declared in `cyrius.cyml` (all Cyrius stdlib):
 
 - **Core**: `syscalls`, `alloc`, `fmt`, `io`, `fs`, `str`, `string`, `vec`, `args`, `hashmap`, `process`, `thread`, `fnptr`, `chrono`, `tagged`, `assert`
-- **Network primitives** (the things sandhi composes): `net`, `http`, `tls`, `ws`, `json`, `base64` — `http_server` dropped at M1 since the content now lives in `src/server/mod.cyr`.
-- **Infrastructure** (already folded into stdlib): `sakshi`, `sigil`
+- **Network primitives** (the layer sandhi composes): `net`, `http`, `tls`, `ws`, `json`. `http_server` dropped at M1 (content lives in `src/server/mod.cyr`).
+- **TLS / libssl-bridge transitive**: `mmap`, `dynlib`, `fdlopen`, `bigint`, `freelist`
+- **Crypto** — `sigil` plus its undeclared transitive deps (added 1.4.3): `sigil`, `ct`, `keccak`, `thread_local`
+- **Infrastructure**: `sakshi` (tracing), `regression` (live-network test probe, 1.3.0)
 
-No external git deps. sandhi is pure-stdlib-composition.
+No external git deps — pure stdlib composition. **Known dep gap**: `src/rpc/appium.cyr` references `base64` but it isn't declared in `[deps]` (resolves transitively today; same class as the 1.4.3 sigil gap — declare it if a build ever surfaces an undefined `base64_*`).
 
 ## Consumers
 
@@ -192,16 +200,15 @@ No external git deps. sandhi is pure-stdlib-composition.
 ## Migration status
 
 - `lib/http_server.cyr` — **sandhi-side lift-and-shift complete** (v0.2.0). Canonical implementation now at `src/server/mod.cyr`; sandhi's own build pulls the module directly and no longer depends on stdlib `http_server`.
-- **No stdlib-side alias.** Per [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md), stdlib keeps `lib/http_server.cyr` unchanged through the 5.6.x window, emits a deprecation warning in 5.6.YY releases, and deletes it outright at v5.7.0 as the `lib/sandhi.cyr` fold lands in the same release. This is a cyrius-agent-side change; sandhi repo is unaffected.
+- **No stdlib-side alias** (per [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)) — done. At the v5.7.0 fold cyrius deleted `lib/http_server.cyr` and added `lib/sandhi.cyr` (vendored from `dist/sandhi.cyr`) in the same release. Cyrius-agent-side change; sandhi repo unaffected.
 
 ## Next
 
 Post-fold release sequence (see `roadmap.md` for full detail):
 
-**Currently shipped** — all releases through **1.4.0** (session-
-cache TTL + max-size eviction; +6 public verbs;
-contract change on `enable()`; closes two silent 1.3.1 bugs that
-prevented the cache from working in production).
+**Currently shipped** — all releases through **1.4.4** (see the
+Version log above + CHANGELOG). The 1.4.x closeout arc is in
+progress.
 
 - **1.2.x — optimization arc** ✅ closed at 1.2.8.
 - **1.3.x — TLS arc** ✅ closed at 1.3.5. Live-network policy
@@ -214,22 +221,21 @@ prevented the cache from working in production).
 small/medium pending queue before sit-adoption reshapes the
 roadmap. Concrete slots in roadmap.md.
 
-- ~~**1.4.0**~~ ✅ shipped 2026-05-22. Session-cache TTL +
-  max-size eviction (lead). +6 public verbs
-  (`set_max_size` / `_max_size` / `set_max_age_ms` /
-  `_max_age_ms` / `_evict_count` / `_age_evict_count`)
-  plus `_clear()` and `_supported()`. Defaults: 256 entries,
-  24h max-age. Eviction-on-insert + age-check-on-lookup +
-  touch-on-hit (LRU). Also fixed the silent 1.3.1
-  `hashmap_*` (now `map_*`) bug + `_key_a` strlen-past-stack
-  bug; relaxed `enable()` contract so cache works regardless
-  of TLS capability (tests now exercise real round-trip).
-- **1.4.1 — `sandhi_server_options_max_conns` enforcement**
-  (daimon ask; design choice gates the slot — in-process
-  worker pool vs. epoll-cooperative via `lib/async.cyr`).
-- **1.4.2 — `_sandhi_conn_connect_nb` factoring decision**
-  (likely doc-only; document parallel evolution at both
-  callsites unless prof says otherwise).
+- ~~**1.4.0–1.4.4**~~ ✅ shipped. 1.4.0 session-cache TTL +
+  eviction; 1.4.1 HTTP close-path framing fix; 1.4.2 ALPN/SPKI
+  native-TLS rewire; 1.4.3 buried-deferral sweep + pin 6.0.87 +
+  sigil deps; 1.4.4 slot realignment + `connect_nb` factoring
+  decision (option b — parallel evolution, no shared primitive).
+- **NEXT — `1.4.5`: `sandhi_server_options_max_conns`
+  enforcement** (daimon's ask,
+  `docs/issues/2026-05-10-daimon-server-max-conns.md`). Setter /
+  getter exist since 0.7.2; the `sandhi_server_run_opts` accept
+  loop is still single-flight. **Gated on a worker-shape design
+  pick** — (a) in-process worker pool (N threads, one accept fd,
+  blocking-accept back-pressure) or (b) epoll-cooperative
+  (consumer event loop via `lib/async.cyr`). Low severity; can
+  ship decision-only (CHANGELOG documents the pick), with the
+  implementation at 1.4.6 if the design drags.
 - **1.4.x** — profile-justified picks (HPACK Huffman
   tie-break, `_sandhi_resp_new` collapse, pool LRU). No
   pre-committed ordering — prof data drives.
@@ -256,9 +262,11 @@ friction. Per memory [`project_sit_adoption_drives_roadmap`].
 not own):
 
 - **Native TLS in cyrius `lib/tls.cyr`** *(6.0.x arc)* —
-  gates sit adoption. CLAUDE.md "No FFI" means sandhi's
-  hook-surface contract is unchanged across any libssl→native
-  swap; the work itself is purely cyrius-side.
+  **substantially landed** (sandhi runs on `tls_set_backend`
+  since 1.4.2; ALPN/SPKI on typed backend-agnostic verbs). Gates
+  sit adoption. CLAUDE.md "No FFI" — sandhi's hook-surface
+  contract is unchanged across the libssl→native swap.
+  `docs/issues/2026-05-22-cyrius-native-tls-in-6.0.x.md`.
 - **mDNS multicast primitives in cyrius `lib/net.cyr`** —
   gates sandhi's `discovery/local.cyr` real implementation
   (`IP_ADD_MEMBERSHIP` / `IP_MULTICAST_TTL` /
@@ -284,12 +292,6 @@ dependency). See `roadmap.md` for the full bucket list.
 2. ~~**M2 — `sandhi::http::client` real implementation.**~~ ✅ landed 2026-04-24 (v0.3.0).
 3. ~~**M3 — `sandhi::rpc` WebDriver + Appium + MCP.**~~ ✅ landed 2026-04-24 (v0.4.0).
 3.5. ~~**M3.5 — SSE streaming.**~~ ✅ landed 2026-04-24 (v0.7.0).
-4. ~~**M4 — `sandhi::discovery` chain resolver + daimon integration.**~~ ✅ landed 2026-04-24 (v0.5.0). Cross-repo daimon-side registry endpoints still tracked at `docs/issues/2026-04-24-daimon-registry-endpoints.md`. mDNS lookup stubbed — impl awaits multicast primitives in stdlib net.cyr.
+4. ~~**M4 — `sandhi::discovery` chain resolver + daimon integration.**~~ ✅ landed 2026-04-24 (v0.5.0). Cross-repo daimon-side registry endpoints still tracked at `docs/issues/2026-04-24-daimon-registry-endpoints.md`. mDNS unicast (QU-bit) lookup shipped 0.9.3; multicast membership awaits stdlib `net.cyr` primitives.
 5. ~~**M5 — `sandhi::tls_policy` cert pinning + mTLS.**~~ ✅ **surface** landed 2026-04-24 (v0.6.0); enforcement filled in 0.9.3. (Earlier closeout-note framing of "native-TLS transport audit pinned for 1.2.0" has been corrected — the audit, if needed, is a cyrius-side issue against `lib/tls.cyr`, not a sandhi slot. ADR 0001: sandhi composes, doesn't reimplement.)
 6. ~~**M6 — Fold-into-stdlib at v5.7.0.**~~ ✅ landed at sandhi 1.0.0 / Cyrius v5.7.0.
-
-Receipts-oriented: sandhi's fold-into-stdlib moment shipped 2026-04-25; the
-short-form article ("sandhi folded — the service-boundary layer has a home")
-in the [what-5.5.x-taught-5.6.x.md](https://github.com/MacCracken/agnosticos/blob/main/docs/articles/what-5.5.x-taught-5.6.x.md) /
-[micro-work-and-agent-deferment.md](https://github.com/MacCracken/agnosticos/blob/main/docs/articles/micro-work-and-agent-deferment.md)
-shape is still pending.
