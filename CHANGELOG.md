@@ -4,6 +4,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.2] — 2026-06-06
+
+### Changed
+
+- **Dropped the ALPN-read + SPKI-pin libssl bindings** — moved onto cyrius 6.0.82's typed,
+  backend-agnostic stdlib verbs `tls_get_alpn_selected` / `tls_get_peer_spki_der`. sandhi no
+  longer reads the raw libssl `SSL*` (`load64(tls_ctx+8)`) or `tls_dlsym`-resolves
+  `SSL_get0_alpn_selected` / `SSL_get1_peer_certificate` / `X509_get_pubkey` / `i2d_PUBKEY`
+  for these post-handshake reads — they live in `lib/tls.cyr` now and work on either the
+  libssl or the native TLS backend. Closes the cyrius native-TLS Mini-arc E consumer rewire:
+  with this, sandhi runs over the sovereign native TLS transport (`tls_set_backend`) with no
+  ALPN/SPKI libssl coupling. `_sandhi_alpn_read_selected` → `tls_get_alpn_selected`;
+  `_sandhi_check_spki` → `tls_get_peer_spki_der` + SHA-256. Pinned cyrius 6.0.55 → 6.0.82.
+  (The remaining `tls_dlsym` sites are pre-handshake `SSL_CTX_*` mTLS / trust-store config —
+  a separate rewire when typed wrappers ship for those.) Tests: h2 167, sandhi 440 — green.
+
 ## [1.4.1] — 2026-06-03
 
 **HTTP/1.1 `Connection: close` read path now frames by Content-Length /

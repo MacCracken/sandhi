@@ -37,11 +37,6 @@
 var _sandhi_apply_load_verify_fp     = 0;  # SSL_CTX_load_verify_locations
 var _sandhi_apply_use_cert_fp        = 0;  # SSL_CTX_use_certificate_file
 var _sandhi_apply_use_key_fp         = 0;  # SSL_CTX_use_PrivateKey_file
-var _sandhi_apply_get_peer_cert_fp   = 0;  # SSL_get_peer_certificate (1.1.x) / SSL_get1_peer_certificate (3.0+)
-var _sandhi_apply_get_pubkey_fp      = 0;  # X509_get_pubkey
-var _sandhi_apply_i2d_pubkey_fp      = 0;  # i2d_PUBKEY
-var _sandhi_apply_x509_free_fp       = 0;  # X509_free
-var _sandhi_apply_evp_pkey_free_fp   = 0;  # EVP_PKEY_free
 var _sandhi_apply_resolved           = 0;
 
 # OpenSSL constants we need.
@@ -52,19 +47,10 @@ fn _sandhi_apply_resolve_fns(): i64 {
     _sandhi_apply_load_verify_fp   = tls_dlsym("SSL_CTX_load_verify_locations");
     _sandhi_apply_use_cert_fp      = tls_dlsym("SSL_CTX_use_certificate_file");
     _sandhi_apply_use_key_fp       = tls_dlsym("SSL_CTX_use_PrivateKey_file");
-    # OpenSSL 3.0 renamed SSL_get_peer_certificate to
-    # SSL_get1_peer_certificate; the old name remained as a macro
-    # forwarding to the new one. The macro means symbol-by-name
-    # may resolve only the new spelling on some installs. Try the
-    # new name first, fall back to the legacy.
-    _sandhi_apply_get_peer_cert_fp = tls_dlsym("SSL_get1_peer_certificate");
-    if (_sandhi_apply_get_peer_cert_fp == 0) {
-        _sandhi_apply_get_peer_cert_fp = tls_dlsym("SSL_get_peer_certificate");
-    }
-    _sandhi_apply_get_pubkey_fp    = tls_dlsym("X509_get_pubkey");
-    _sandhi_apply_i2d_pubkey_fp    = tls_dlsym("i2d_PUBKEY");
-    _sandhi_apply_x509_free_fp     = tls_dlsym("X509_free");
-    _sandhi_apply_evp_pkey_free_fp = tls_dlsym("EVP_PKEY_free");
+    # 1.4.2: the SPKI-pin libssl bindings (SSL_get1_peer_certificate /
+    # X509_get_pubkey / i2d_PUBKEY / frees) are GONE — _sandhi_check_spki now
+    # uses the stdlib `tls_get_peer_spki_der` verb. Only the mTLS / trust-store
+    # SSL_CTX_* config fns remain here (no typed wrapper for those yet).
     _sandhi_apply_resolved = 1;
     return 0;
 }
@@ -83,11 +69,9 @@ fn sandhi_tls_policy_enforcement_available(): i64 {
     if (_sandhi_apply_load_verify_fp == 0)     { return 0; }
     if (_sandhi_apply_use_cert_fp == 0)        { return 0; }
     if (_sandhi_apply_use_key_fp == 0)         { return 0; }
-    if (_sandhi_apply_get_peer_cert_fp == 0)   { return 0; }
-    if (_sandhi_apply_get_pubkey_fp == 0)      { return 0; }
-    if (_sandhi_apply_i2d_pubkey_fp == 0)      { return 0; }
-    if (_sandhi_apply_x509_free_fp == 0)       { return 0; }
-    if (_sandhi_apply_evp_pkey_free_fp == 0)   { return 0; }
+    # 1.4.2: SPKI pinning no longer needs libssl fn pointers here — it goes
+    # through the stdlib `tls_get_peer_spki_der` verb, which self-resolves and
+    # fail-closes the pin check if the SPKI can't be read.
     return 1;
 }
 
@@ -151,45 +135,15 @@ fn _sandhi_apply_hook(hook_ctx, ssl_ctx): i64 {
 # mismatch, OOM). Frees the X509 + EVP_PKEY it pulls. None of the
 # allocs escape; an arena reset after this call reclaims everything.
 fn _sandhi_check_spki_a(a, tls_ctx, expected_hex): i64 {
-    _sandhi_apply_resolve_fns();
     if (tls_ctx == 0 || expected_hex == 0) { return 0; }
-    if (_sandhi_apply_get_peer_cert_fp == 0)   { return 0; }
-    if (_sandhi_apply_get_pubkey_fp == 0)      { return 0; }
-    if (_sandhi_apply_i2d_pubkey_fp == 0)      { return 0; }
-    if (_sandhi_apply_x509_free_fp == 0)       { return 0; }
-    if (_sandhi_apply_evp_pkey_free_fp == 0)   { return 0; }
-
-    var ssl = load64(tls_ctx + 8);
-    if (ssl == 0) { return 0; }
-
-    var x509 = fncall1(_sandhi_apply_get_peer_cert_fp, ssl);
-    if (x509 == 0) { return 0; }
-
-    var pkey = fncall1(_sandhi_apply_get_pubkey_fp, x509);
-    if (pkey == 0) {
-        fncall1(_sandhi_apply_x509_free_fp, x509);
-        return 0;
-    }
-
-    # i2d_PUBKEY(pkey, NULL) returns required buffer size.
-    # Then i2d_PUBKEY(pkey, &buf) writes DER and advances *buf.
-    var size = fncall2(_sandhi_apply_i2d_pubkey_fp, pkey, 0);
-    if (size <= 0) {
-        fncall1(_sandhi_apply_evp_pkey_free_fp, pkey);
-        fncall1(_sandhi_apply_x509_free_fp, x509);
-        return 0;
-    }
-    var der = alloc_via(a, size);
-    var p_cell = alloc_via(a, 8);
-    if (der == 0 || p_cell == 0) {
-        fncall1(_sandhi_apply_evp_pkey_free_fp, pkey);
-        fncall1(_sandhi_apply_x509_free_fp, x509);
-        return 0;
-    }
-    store64(p_cell, der);
-    var written = fncall2(_sandhi_apply_i2d_pubkey_fp, pkey, p_cell);
-    fncall1(_sandhi_apply_evp_pkey_free_fp, pkey);
-    fncall1(_sandhi_apply_x509_free_fp, x509);
+    # .82: typed, backend-agnostic SPKI read via the stdlib wrapper verb
+    # `tls_get_peer_spki_der` — no raw libssl SSL* (load64(ctx+8)) and no
+    # tls_dlsym binding (SSL_get1_peer_certificate / X509_get_pubkey /
+    # i2d_PUBKEY now live in lib/tls.cyr). Works on the native TLS backend too.
+    # 1024 holds any SubjectPublicKeyInfo (P-256 91 / P-384 120 / RSA-4096 ~550).
+    var der = alloc_via(a, 1024);
+    if (der == 0) { return 0; }
+    var written = tls_get_peer_spki_der(tls_ctx, der, 1024);
     if (written <= 0) { return 0; }
 
     # SHA-256 the SPKI DER, hex-encode, constant-time compare. The hex
