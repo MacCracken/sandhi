@@ -146,4 +146,12 @@ stdlib = [
     "base64",
     "sakshi",
     "sigil",
+    # ct / keccak / thread_local: sigil's transitive crypto deps
+    # (constant-time compares + Keccak/SHAKE + TLS-thread-local NI
+    # cache) that sigil itself does not declare. sigil's sha256 — the
+    # SPKI-pin digest in src/tls_policy/apply.cyr — needs them; without
+    # them the symbol drops out of the link and the SPKI path ud2's.
+    "ct",
+    "keccak",
+    "thread_local",
 ]

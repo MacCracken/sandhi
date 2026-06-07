@@ -34,6 +34,16 @@
 #   4   — wrong-pin err_kind != SANDHI_CONN_OPEN_TLS (wrong
 #         classification)
 
+# sigil's SHA-256 (the SPKI-pin digest in src/tls_policy/apply.cyr)
+# pulls thread_local / ct / keccak, which sigil does not declare as
+# deps. Include the chain explicitly so `sha256` links into this
+# standalone program — a bare [deps] "sigil" leaves it unresolved and
+# the SPKI gate ud2's (SIGILL) at runtime. Order: deps before sigil,
+# all before the src chain that calls sha256.
+include "lib/thread_local.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+include "lib/sigil.cyr"
 include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"
