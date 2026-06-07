@@ -70,6 +70,34 @@ details, state.md the current snapshot.
 
 ## What's next
 
+### Cleanup — buried-deferral gate sweep (P2) ⬅ top of queue
+
+The 1.4.2 CI added the cyrlint **buried-deferral gate** (the cross-AGNOS
+check from sigil's roadmap: flags `for now` / `out of scope` / `follow-up`
+/ `not yet` / `deferred` / `NOT_IMPLEMENTED` / … in `src/` comments that
+aren't cross-referenced to a CHANGELOG / issue / roadmap entry). It runs in
+**report mode** today — the CI lint step fails only on `warn` lines
+(`ci.yml:75`), so these don't block a ship — but they should be drained
+before the gate flips to fail-mode. **8 pre-existing untracked deferrals**
+(none in the 1.4.2 TLS-rewire files — `conn.cyr` / `apply.cyr` lint clean):
+
+- `src/discovery/daimon.cyr:29` — `for now`
+- `src/discovery/local.cyr:21` — `out of scope`
+- `src/http/client.cyr:1046` — `follow-up`
+- `src/http/pool.cyr:31` — `follow-up`
+- `src/http/pool.cyr:380` — `not yet`
+- `src/http/response.cyr:313` — `deferred`
+- `src/http/stream.cyr:116` — `not yet`
+- `src/server/mod.cyr:32` — `NOT_IMPLEMENTED`
+
+**Action** (per deferral): either (a) the deferred work is real → file or
+point to a CHANGELOG / issue / roadmap entry and cross-reference it in the
+comment; or (b) the phrase is incidental / the behaviour is permanent by
+design → reword or add `#skip-lint`. Pairs with the 1.4.x closeout's
+"Static-analysis sweep" line below (the `cyrius lint` pass) — this is the
+deferral-vocabulary half, pulled to the top per maintainer call
+(2026-06-06). Once drained, flip the gate to fail-mode in CI.
+
 ### 1.1.x — post-fold patch window ✅ closed; track stays open
 
 Small-fixes lane that cleared the 0.9.9 audit deferrals
