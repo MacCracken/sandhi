@@ -310,9 +310,10 @@ fn _sandhi_resp_trailer_forbidden(name): i64 {
     # `Set-Cookie` closes the trailer-side equivalent of the redirect
     # cred-strip filter (`_sandhi_strip_sensitive_headers`).
     # `Proxy-Authenticate` rounds out the proxy-auth pair (1.1.1).
-    # Originally deferred from 0.9.9 on per-program-fixup-cap grounds;
-    # the cap re-baselined post-fold once consumers stopped re-
-    # concatenating sandhi's `src/`.
+    # Originally held back from 0.9.9 on per-program-fixup-cap grounds
+    # (architecture/001); the cap re-baselined post-fold once consumers
+    # stopped re-concatenating sandhi's `src/`. Shipped 1.1.1 (CHANGELOG
+    # [1.1.1]).
     if (_sandhi_resp_streq_ci(name, "Connection") == 1)          { return 1; }
     if (_sandhi_resp_streq_ci(name, "Cookie") == 1)              { return 1; }
     if (_sandhi_resp_streq_ci(name, "Proxy-Authorization") == 1) { return 1; }

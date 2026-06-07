@@ -12,9 +12,10 @@
 #   - PING (non-ACK): echo back with the ACK flag.
 #   - GOAWAY: surface as SANDHI_ERR_REMOTE; stream is dead.
 #   - PRIORITY / WINDOW_UPDATE: silently accepted (we don't enforce
-#     flow control yet — peer's default window keeps responses
-#     bounded; if a consumer hits a flow-controlled stall we wire
-#     a real window manager in a follow-up).
+#     flow control today — peer's default window keeps responses
+#     bounded). A real window manager is a wait-for-consumer-ask
+#     roadmap item (h2 spec-completeness), for if a consumer hits a
+#     flow-controlled stall.
 #
 # Stream-level frames on our stream:
 #   - HEADERS: append payload to header block; on END_HEADERS,

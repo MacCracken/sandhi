@@ -1,6 +1,10 @@
 # 2026-05-22 — `lib/tls.cyr` native-TLS transport for the cyrius v6.0.x arc
 
-**Status**: Open — filed sandhi 1.3.5 close / 1.4.x arc-open.
+**Status**: Open — substantially landed. Native transport
+operational; sandhi runs over `tls_set_backend` since 1.4.2, with
+the post-handshake ALPN-read + SPKI-pin `tls_dlsym` callers retired
+onto typed wrappers. Remaining before close: typed wrappers for the
+pre-handshake `SSL_CTX_*` mTLS / trust-store `tls_dlsym` sites.
 **Filed**: sandhi side, against cyrius repo. Sit adoption of
 sandhi is gated on this landing.
 **Side**: Upstream (cyrius stdlib).
@@ -77,16 +81,19 @@ the post-conditions, the error classification (per
 ### `tls_dlsym` callers (cyrius can either keep or replace)
 
 Sandhi still reaches a few libssl symbols by name via
-`tls_dlsym` from `src/tls_policy/apply.cyr`:
+`tls_dlsym` from `src/tls_policy/apply.cyr` — now only the
+pre-handshake `SSL_CTX_*` config set:
 
 - `SSL_CTX_set_verify` / `SSL_CTX_set_verify_paths` /
   `SSL_CTX_load_verify_locations`
 - `SSL_CTX_use_certificate_file` / `SSL_CTX_use_PrivateKey_file`
-- `SSL_get0_alpn_selected`
-- `X509_get_pubkey` / `i2d_PUBKEY`
 
-These were left on dlsym at 1.3.0 because typed wrappers didn't
-exist yet. For the native-transport swap, two viable shapes:
+The post-handshake reads `SSL_get0_alpn_selected` and
+`X509_get_pubkey` / `i2d_PUBKEY` were **retired at 1.4.2** onto the
+typed, backend-agnostic `tls_get_alpn_selected` /
+`tls_get_peer_spki_der` (option (a) below, applied to the ALPN/SPKI
+half). The remaining set was left on dlsym at 1.3.0 because typed
+wrappers didn't exist yet. For it, two viable shapes:
 
 - **(a)** ship typed wrappers for these too, retire the dlsym
   callers in sandhi. Smallest cyrius-side delta, but means
@@ -202,3 +209,14 @@ own.
   reshape as the explicit cross-repo dependency for sit
   adoption. No cyrius-side activity yet — opens cleanly when
   the 6.0.x arc pulls it.
+- **2026-06-07** — substantial progress. Cyrius's native-TLS
+  Mini-arc E landed the sovereign native transport; sandhi 1.4.2
+  rewired onto `tls_set_backend` and retired the post-handshake
+  ALPN-read + SPKI-pin `tls_dlsym` callers onto typed
+  `tls_get_alpn_selected` / `tls_get_peer_spki_der` (option (a),
+  ALPN/SPKI half). sandhi 1.4.3 advanced the pin 6.0.82 → 6.0.87,
+  picking up full TLS ciphersuite enablement + macOS native-TLS
+  fixes (mechanical; no sandhi source change). Test suite (979)
+  still green. Remaining before close: typed wrappers for the
+  pre-handshake `SSL_CTX_*` mTLS / trust-store dlsym sites — then
+  the sit-adoption gate can fire.

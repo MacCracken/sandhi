@@ -210,8 +210,11 @@ fn _h2_conn_apply_setting(c, id, value): i64 {
     } elif (id == SANDHI_H2_SETTINGS_HEADER_TABLE_SIZE) {
         sandhi_hpack_table_set_max_size(sandhi_h2_conn_dec_table(c), value);
     }
-    # ENABLE_PUSH + MAX_HEADER_LIST_SIZE: ignored for now. Bite 5c
-    # may want them; layered in when needed.
+    # ENABLE_PUSH + MAX_HEADER_LIST_SIZE: not applied to conn state.
+    # sandhi is a client and never asks for push, so ignoring
+    # ENABLE_PUSH is correct; MAX_HEADER_LIST_SIZE is advisory.
+    # Enforcement is a wait-for-consumer-ask roadmap item (h2
+    # spec-completeness) — layer in when a peer/consumer requires it.
     return 0;
 }
 

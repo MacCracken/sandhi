@@ -63,6 +63,15 @@ jobs:
         # docs/architecture/001) — its line-length warning is by design.
         # tests/ and programs/ get an informational lint pass; they
         # can carry longer lines without gating CI.
+        #
+        # Buried-deferral gate: fail-mode since 1.4.3 (was report-mode).
+        # cyrlint emits `deferral line N: untracked '<phrase>'` for any
+        # `for now` / `out of scope` / `follow-up` / `not yet` /
+        # `deferred` / `NOT_IMPLEMENTED` comment in src/ that isn't
+        # cross-referenced to a CHANGELOG / issue / roadmap entry (or
+        # marked `#skip-lint`). Those lines are sub-`warn`, so the
+        # warn-grep below misses them — the dedicated deferral-grep
+        # gates them now.
         run: |
           fail=0
           for f in src/*.cyr src/**/*.cyr; do
@@ -75,8 +84,12 @@ jobs:
             if echo "$out" | grep -qE '^\s*warn '; then
               fail=1
             fi
+            if echo "$out" | grep -qE 'deferral line [0-9]+: untracked'; then
+              echo "untracked buried-deferral in $f — cross-reference a CHANGELOG/issue/roadmap entry or add #skip-lint"
+              fail=1
+            fi
           done
-          [ $fail -eq 0 ] || { echo "lint (src): warnings present"; exit 1; }
+          [ $fail -eq 0 ] || { echo "lint (src): warnings or untracked deferrals present"; exit 1; }
           echo "--- informational lint sweep (tests + programs) ---"
           for f in programs/*.cyr tests/*.tcyr; do
             [ -f "$f" ] || continue

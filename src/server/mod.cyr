@@ -29,7 +29,7 @@ var HTTP_METHOD_NOT_ALLOWED  = 405;
 var HTTP_REQUEST_TIMEOUT     = 408;
 var HTTP_PAYLOAD_TOO_LARGE   = 413;
 var HTTP_INTERNAL            = 500;
-var HTTP_NOT_IMPLEMENTED     = 501;
+var HTTP_NOT_IMPLEMENTED     = 501;  #skip-lint: HTTP 501 status-code constant
 var HTTP_SERVICE_UNAVAILABLE = 503;
 
 # ================================================================

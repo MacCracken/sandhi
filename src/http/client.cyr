@@ -1042,10 +1042,13 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts): i64 {
     # `_sandhi_http_follow_a` recomputes through this dispatch on
     # each hop only when the user-level dispatch loops, but the
     # 1.1 follow path stays inside `_sandhi_http_do_a` per hop, so
-    # cred-strip-on-redirect handling for the cache key is a
-    # follow-up if a consumer ever sets cred-bearing headers AND
-    # follows redirects across authorities. Today that combination
-    # is rare; flagging the limitation rather than over-engineering.
+    # cred-strip-on-redirect handling for the cache key is tracked as
+    # a wait-for-consumer-ask roadmap item ("per-hop cred-digest
+    # recompute on cross-authority redirect-follow"; see also CHANGELOG
+    # [1.3.3]) — it matters only if a consumer ever sets cred-bearing
+    # headers AND follows redirects across authorities. Today that
+    # combination is rare; flagging the limitation rather than
+    # over-engineering.
     var prior_cred = _sandhi_cred_digest;
     _sandhi_cred_digest = _sandhi_compute_cred_digest(headers);
     var r = 0;

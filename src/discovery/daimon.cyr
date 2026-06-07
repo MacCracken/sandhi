@@ -26,7 +26,9 @@
 
 # Context struct (24 bytes):
 #   +0   base_url  (cstr)
-#   +8   reserved  (kept 0 for now — future: auth token, timeouts)
+#   +8   reserved  (held 0 — future: auth token, timeouts; roadmap
+#                   wait-for-consumer-ask "Daimon resolver context:
+#                   auth token + timeouts")
 #   +16  alloc     (Allocator handed to the resolver-fn-pointer
 #                   callback; the (ctx, name) shape can't take an
 #                   extra arg, so the allocator rides on the ctx)

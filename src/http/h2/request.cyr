@@ -33,8 +33,9 @@ var _SANDHI_H2_REQ_IDX_SCHEME_HTTP   = 6;
 var _SANDHI_H2_REQ_IDX_SCHEME_HTTPS  = 7;
 
 # Default HEADERS-frame buffer cap. For typical RPC requests the
-# HPACK-encoded block is well under 1 KB. Caller-overridable in a
-# follow-up if a consumer ships absurdly large header sets.
+# HPACK-encoded block is well under 1 KB. A caller-override path is a
+# wait-for-consumer-ask roadmap item (h2 spec-completeness) — parked
+# until a consumer ships absurdly large header sets.
 var _SANDHI_H2_REQ_HBUF_CAP = 8192;
 
 # ================================================================
@@ -242,9 +243,10 @@ user_headers, body, body_len): i64 {
 
     if (has_body == 1) {
         # First cut: send the entire body in one DATA frame. If
-        # body_len > peer_max_frame, we need to fragment — that's a
-        # follow-up. Reject explicitly until then so we don't ship a
-        # silently-truncated request.
+        # body_len > peer_max_frame, we need to fragment across
+        # multiple DATA frames — a wait-for-consumer-ask roadmap item
+        # (h2 spec-completeness). Reject explicitly until then so we
+        # don't ship a silently-truncated request.
         if (body_len > sandhi_h2_conn_peer_max_frame(h2c)) {
             return _SANDHI_H2_ERR_BAD_LENGTH;
         }

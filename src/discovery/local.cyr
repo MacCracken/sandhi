@@ -17,9 +17,10 @@
 #     exactly what RFC 6762 calls for (link-local only). No setsockopt
 #     needed.
 #
-# Reference: RFC 6762 (Multicast DNS), RFC 6763 (DNS-Based Service
-# Discovery — out of scope here; this resolver answers names, not
-# services-by-type).
+# Reference: RFC 6762 (Multicast DNS) — implemented here. RFC 6763
+# (DNS-Based Service Discovery / service-by-type browsing) is a
+# distinct feature class; this module is a `<name>.local` name
+# resolver only, not a service-by-type resolver.
 
 # 224.0.0.251 packed as a network-byte-order uint32 in
 # little-endian-host repr (matches sock_connect's expectations:

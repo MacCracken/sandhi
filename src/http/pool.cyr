@@ -28,8 +28,8 @@
 #   - close drops every idle conn (calls sock_close + tls_close).
 #
 # Single-threaded today. Multi-threaded clients would need a
-# per-pool mutex; flagged as a follow-up when concurrent request
-# dispatch lands (no consumer asking yet).
+# per-pool mutex; tracked as a wait-for-consumer-ask roadmap item
+# (no consumer needs concurrent request dispatch today).
 
 enum SandhiPoolOff {
     SANDHI_POOL_OFF_MAP             = 0;
@@ -377,7 +377,7 @@ fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms): i64 {
     var have = 0;
     var headers_end = 0 - 1;
     var body_start = 0;
-    var content_length = 0 - 1;  # -1 = not yet parsed
+    var content_length = 0 - 1;  # -1 = unparsed sentinel
     var is_chunked = 0;
     var must_close = 0;
 

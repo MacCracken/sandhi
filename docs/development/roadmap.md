@@ -19,7 +19,7 @@ that picks up the change. The public surface is no longer
 frozen (ADR 0005's freeze applied "between 0.9.2 and 1.0.0";
 post-fold patches are explicitly allowed per the 1.1.0 ship).
 
-## Shipped (M0 through 1.4.0)
+## Shipped (M0 through 1.4.3)
 
 Compressed log — one line per release. CHANGELOG carries the
 details, state.md the current snapshot.
@@ -67,36 +67,24 @@ details, state.md the current snapshot.
 - **1.3.4** — Stdlib annotation pass + cyrius pin 5.10.34 → 5.11.4. Every public fn across the 703-fn `src/` tree carries a `: i64` return-type annotation. Mechanical sed pass; 15 multi-line fn signatures hand-fixed. Parse-only, zero runtime / codegen change. The slot the 1.3.x roadmap originally pinned for TTL+eviction got diverted to ride along with the 5.11.4 pin; TTL+eviction moves to 1.4.0. 938 assertions green (no delta — annotation-only change).
 - **1.3.5** — Cyrius pin 5.11.4 → 6.0.1 + binary-rename adaptation. Mechanical bump; zero source change. Cyrius v6.0.0 (2026-05-19) renamed compiler binaries: `cc5` → `cycc`, `cyrc` → `cybs`. Back-compat symlinks ship through v6.0.x; sandhi never reaches past the `cyrius` CLI wrapper, so the rename is transparent. v6.0.1 is a same-day hotfix for two stdlib-path resolution bugs. Workflows + CLAUDE.md updated for the new binary names. 938 assertions green. **1.3.x TLS arc CLOSED.**
 - **1.4.0** — Session-cache TTL + max-size eviction (lead of 1.4.x closeout arc). +6 public verbs (`set_max_size` / `_max_size` / `set_max_age_ms` / `_max_age_ms` / `_evict_count` / `_age_evict_count`) plus `_clear()` and `_supported()`. Defaults 256 / 24h. Eviction-on-insert + age-check-on-lookup + touch-on-hit (LRU). Also closes two silent 1.3.1 bugs that prevented the cache from working in production: (a) `hashmap_*` → `map_*` naming (undef → NOP since 1.3.1); (b) `_key_a` strlen-past-stack on 1-byte buffer → non-deterministic keys. `enable()` contract relaxed (no longer gated on TLS capability; new `_supported()` getter separates the concern). 979 assertions green (+41 over 1.3.5's 938; 22 new in alloc/134, 19 from previously-skip-clean tests now running for real).
+- **1.4.1** — HTTP/1.1 `Connection: close` read path frames by Content-Length / chunked instead of draining until EOF (fixes `SANDHI_ERR_TIMEOUT` hang vs chromedriver / Chromium DevTools; surfaced by yantra M2). `_sandhi_http_exchange_a` reuses the keep-alive `_sandhi_http_recv_framed` + `0 - 2` must-close sentinel; EOF-delimited HTTP/1.0 still works. cyrius pin 6.0.1 → 6.0.55. No public API change. 979 assertions green (unchanged). Verified live against chromedriver.
+- **1.4.2** — Dropped the ALPN-read + SPKI-pin libssl bindings onto cyrius 6.0.82's typed backend-agnostic `tls_get_alpn_selected` / `tls_get_peer_spki_der`. sandhi now runs over the sovereign native TLS transport (`tls_set_backend`) with no ALPN/SPKI libssl coupling — closes the cyrius native-TLS Mini-arc E consumer rewire. Remaining `tls_dlsym` sites are pre-handshake `SSL_CTX_*` mTLS / trust-store config. cyrius pin 6.0.55 → 6.0.82. 167 h2 + 440 sandhi green.
+- **1.4.3** — Buried-deferral gate sweep (drains the P2 closeout lead) + cyrius pin 6.0.82 → 6.0.87. All **12** untracked deferrals drained (the list of 8 undercounted — 4 more lived in `src/http/h2/`): real work → new Wait-for-second-consumer-ask roadmap bullets + comment crossref (per no-silent-scope-outs); incidental → reworded to drop the trigger; `HTTP_NOT_IMPLEMENTED` status constant → `#skip-lint`. CI lint gate flipped report-mode → fail-mode on untracked deferrals. Pin bump mechanical (full TLS ciphersuite enablement + macOS native-TLS fixes). 979 assertions green (unchanged); 0 untracked deferrals.
 
 ## What's next
 
-### Cleanup — buried-deferral gate sweep (P2) ⬅ top of queue
+### Cleanup — buried-deferral gate sweep (P2) ✅ shipped 1.4.3
 
-The 1.4.2 CI added the cyrlint **buried-deferral gate** (the cross-AGNOS
-check from sigil's roadmap: flags `for now` / `out of scope` / `follow-up`
-/ `not yet` / `deferred` / `NOT_IMPLEMENTED` / … in `src/` comments that
-aren't cross-referenced to a CHANGELOG / issue / roadmap entry). It runs in
-**report mode** today — the CI lint step fails only on `warn` lines
-(`ci.yml:75`), so these don't block a ship — but they should be drained
-before the gate flips to fail-mode. **8 pre-existing untracked deferrals**
-(none in the 1.4.2 TLS-rewire files — `conn.cyr` / `apply.cyr` lint clean):
-
-- `src/discovery/daimon.cyr:29` — `for now`
-- `src/discovery/local.cyr:21` — `out of scope`
-- `src/http/client.cyr:1046` — `follow-up`
-- `src/http/pool.cyr:31` — `follow-up`
-- `src/http/pool.cyr:380` — `not yet`
-- `src/http/response.cyr:313` — `deferred`
-- `src/http/stream.cyr:116` — `not yet`
-- `src/server/mod.cyr:32` — `NOT_IMPLEMENTED`
-
-**Action** (per deferral): either (a) the deferred work is real → file or
-point to a CHANGELOG / issue / roadmap entry and cross-reference it in the
-comment; or (b) the phrase is incidental / the behaviour is permanent by
-design → reword or add `#skip-lint`. Pairs with the 1.4.x closeout's
-"Static-analysis sweep" line below (the `cyrius lint` pass) — this is the
-deferral-vocabulary half, pulled to the top per maintainer call
-(2026-06-06). Once drained, flip the gate to fail-mode in CI.
+Drained all **12** untracked buried-deferrals the CI cyrlint gate
+reports (the original work-list enumerated 8 — it missed 4 in
+`src/http/h2/`) and flipped the gate from report-mode to **fail-mode**
+in `ci.yml`. Real-work deferrals moved into the
+**Wait-for-second-consumer-ask** bucket below (daimon resolver-ctx
+auth/timeouts; client per-hop cred-digest on cross-authority redirect;
+pool per-pool mutex; + h2 spec-completeness); incidental ones were
+reworded to drop the trigger phrase; the `HTTP_NOT_IMPLEMENTED` status
+constant got `#skip-lint`. See the 1.4.3 shipped-log line and
+CHANGELOG [1.4.3].
 
 ### 1.1.x — post-fold patch window ✅ closed; track stays open
 
@@ -402,6 +390,39 @@ design.
   wait for it.
 - **TLS ALPN extensions beyond `http/1.1` and `h2`** — both
   ship today; anything beyond that waits for a consumer ask.
+- **h2 spec-completeness** — several h2 paths are first-cut and
+  consumer-gated (drained from `src/http/h2/` comments at 1.4.3):
+  (a) request-body DATA-frame fragmentation when `body_len >
+  peer_max_frame` (today rejects with `_SANDHI_H2_ERR_BAD_LENGTH`
+  rather than fragmenting — `request.cyr`); (b) flow-control
+  window manager / `WINDOW_UPDATE` enforcement (today silently
+  accepted; the peer's default window keeps responses bounded —
+  `response.cyr`); (c) peer-SETTINGS `ENABLE_PUSH` /
+  `MAX_HEADER_LIST_SIZE` enforcement (today not applied to conn
+  state — `conn.cyr`; ENABLE_PUSH is moot client-side,
+  MAX_HEADER_LIST_SIZE is advisory); (d) caller-overridable
+  HEADERS-frame buffer cap (fixed 8 KB today — `request.cyr`).
+  Each waits for a consumer whose traffic actually exercises the
+  limit.
+- **Per-hop cred-digest recompute on cross-authority
+  redirect-follow** — the 1.3.3 session-cache cred-digest is
+  computed once per top-level dispatch, so an A→B redirect reuses
+  A's digest for the B handshake. Harmless for the AGNOS
+  service-to-service common case (no consumer combines
+  cred-bearing headers with cross-authority redirects). Fold the
+  recompute into `_sandhi_http_follow_a`'s hop loop when a
+  consumer needs it (`src/http/client.cyr`; CHANGELOG [1.3.3]).
+- **Daimon resolver context: auth token + timeouts** — the
+  daimon resolver ctx reserves its +8 slot (held 0) for a future
+  auth token / per-request timeouts; daimon's registry contract
+  defines no auth surface today
+  (`docs/issues/2026-04-24-daimon-registry-endpoints.md`). Wire
+  the slot when a consumer needs authenticated or timeout-bounded
+  discovery (`src/discovery/daimon.cyr`).
+- **Client connection-pool thread-safety (per-pool mutex)** —
+  the pool is single-threaded today; multi-threaded clients would
+  need a per-pool mutex. No consumer needs concurrent request
+  dispatch yet (`src/http/pool.cyr`).
 
 **Wait-for-stdlib-prerequisite** (sandhi-side once landed —
 cyrius-side cross-repo deps are tracked separately above):

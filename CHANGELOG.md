@@ -4,6 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.3] — 2026-06-07
+
+**Buried-deferral gate sweep (drains the 1.4.x closeout queue's P2
+lead) + cyrius pin 6.0.82 → 6.0.87.** Bundled mechanical closeout
+housekeeping — the deferral drain is comment-only and the pin bump is
+source-free, so they ride one patch (mirrors 1.3.4's annotation-pass +
+pin-bump bundling).
+
+### Changed — buried-deferral gate drained + flipped to fail-mode
+
+The CI cyrlint **buried-deferral gate** flags `src/` comments carrying
+deferral vocabulary (`for now` / `out of scope` / `follow-up` /
+`not yet` / `deferred` / `NOT_IMPLEMENTED`) that aren't cross-referenced
+to a CHANGELOG / issue / roadmap entry. It ran in report mode (sub-`warn`,
+so it never gated a ship). This slot drains every untracked deferral and
+flips the gate to fail-mode.
+
+- **12 sites drained.** The roadmap's enumerated list of 8 was an
+  undercount — it missed 4 in `src/http/h2/`; the gate reports the full 12.
+  Resolution per site:
+  - **Real deferred work → tracked in roadmap** (per the
+    no-silent-scope-outs rule), comment reworded to reference it:
+    - `src/discovery/daimon.cyr` — resolver-ctx +8 reserved slot
+      (auth token / timeouts).
+    - `src/http/client.cyr` — per-hop cred-digest recompute on
+      cross-authority redirect-follow (also CHANGELOG [1.3.3]).
+    - `src/http/pool.cyr:31` — per-pool mutex / thread-safety.
+    - four `src/http/h2/` items grouped under a new **h2
+      spec-completeness** roadmap bullet: peer-SETTINGS `ENABLE_PUSH` /
+      `MAX_HEADER_LIST_SIZE` enforcement (`conn.cyr`); HEADERS-frame
+      buffer-cap override + request-body DATA-frame fragmentation
+      (`request.cyr`); flow-control window manager (`response.cyr`).
+    All land in the **Wait-for-second-consumer-ask** bucket — none is
+    committed work; each unblocks on a consumer whose traffic exercises it.
+  - **Incidental / permanent-by-design → reworded** to drop the trigger
+    phrase: `src/discovery/local.cyr` (RFC 6763 DNS-SD is a distinct
+    feature class, not a deferral); `src/http/pool.cyr:380` +
+    `src/http/stream.cyr:116` (sentinel-value comments);
+    `src/http/response.cyr:313` (historical narration of work that
+    shipped at 1.1.1).
+  - **False-positive on a constant name → `#skip-lint`**:
+    `src/server/mod.cyr` `HTTP_NOT_IMPLEMENTED = 501` is the standard
+    RFC 7231 §6.6.2 status constant, not a deferral.
+- **Gate flipped to fail-mode** — `.github/workflows/ci.yml`'s lint step
+  now fails on any `deferral line N: untracked` cyrlint output (previously
+  only `warn` lines gated). Future untracked deferrals are caught at PR time.
+
+### Changed — cyrius pin 6.0.82 → 6.0.87
+
+Mechanical bump; zero sandhi source change. 6.0.83–6.0.87 are a TLS /
+Windows / AGNOS-env band; the sandhi-relevant pieces are **full TLS
+ciphersuite enablement** + **macOS native-TLS fixes** (directly relevant
+since 1.4.2 put sandhi's transport on the sovereign native-TLS backend).
+The Windows-pillar + AGNOS getenv/envp work is not sandhi-facing. Pin
+floor 6.0.82 → 6.0.87 (latest 6.0.x; tested green).
+
+### Verified
+
+- **Buried-deferral sweep**: 0 untracked deferrals across `src/` (was 12).
+- **979 assertions green** against the 6.0.87 snapshot (440 sandhi + 167
+  h2 + 330 alloc + 42 rpc; unchanged — comment + pin only).
+- `cyrius lint` 0 warnings (modulo the `huffman.cyr` allowlist);
+  `cyrfmt --check` clean across `src/` + `programs/` + `tests/`.
+- `cyrius build programs/smoke.cyr` green; ELF OK.
+- `dist/sandhi.cyr` regenerated via `cyrius distlib` at v1.4.3.
+
 ## [1.4.2] — 2026-06-06
 
 ### Changed
