@@ -17,7 +17,7 @@
 # the literal here ONLY by running version-bump.sh; CI's drift
 # check fails if VERSION and this file disagree.
 
-var SANDHI_VERSION = "1.4.1";
+var SANDHI_VERSION = "1.4.2";
 
 # --- error.cyr ---
 
