@@ -143,7 +143,6 @@ fn _sandhi_alpn_init_wire(): i64 {
     return 0;
 }
 
-
 # Hook fired by stdlib tls_connect_with_ctx_hook on the bare SSL_CTX
 # before SSL_new / SSL_connect. hook_ctx points to a pair
 # { protos_ptr, protos_len } (16 bytes); ssl_ctx is the SSL_CTX*.
