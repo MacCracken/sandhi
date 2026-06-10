@@ -4,6 +4,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.10] — 2026-06-09
+
+**Closeout audit (P-1 / security / code-audit pass) — closes the 1.4.x arc.**
+Full-codebase sweep over everything post-fold, with the heaviest scrutiny on the
+least-audited 1.4.6–1.4.9 surfaces (TLS-policy threading, backend-aware
+enforcement, the epoll server). Findings fixed in-slot; no cyrius pin change
+(stays 6.1.21).
+
+### Fixed — P1: async server hang on a silent client (DoS)
+
+`_sandhi_server_async_handler` (1.4.9) called `async_await_readable(cfd)` before
+recv, but `lib/async.cyr`'s await is an `epoll_wait(..., -1)` with an **infinite
+timeout** — a client that connected and sent nothing blocked the entire
+cooperative loop forever (and every other connection in the batch). Fix: the
+handler no longer awaits — it recvs directly under the per-connection
+`SO_RCVTIMEO` (the runtime is run-to-completion, so the await bought no
+concurrency anyway). `sandhi_server_run_async` now also **floors `idle_ms` > 0**
+(default 30 s) and always sets the recv timeout, since a cooperative loop must
+bound every recv (a 0/blocking idle_ms is safe single-flight but not here).
+Regression added to `programs/_server_async_smoke.cyr`: a silent connection is
+held open while the real requests must still complete (the harness `timeout`
+catches the pre-fix hang).
+
+### Fixed — P2: unguarded allocations (null-after-alloc → SIGSEGV-on-OOM)
+
+- `src/server/mod.cyr` — `async_new()` result now null-checked at both
+  construction sites (matches the established "null-check every alloc" pattern;
+  a null runtime into `async_spawn`/`async_run` would SIGSEGV on OOM).
+- `src/http/stream.cyr` — `body_sb` (`_sandhi_sb_new_a`) and `chunk_state`
+  (`_sandhi_chunk_state_new_a`) in the SSE/chunked read loop were used without a
+  guard while their siblings (`header_sb`/`scratch`, `total_events_cell`/
+  `stop_cell`) were checked; both now return `SANDHI_ERR_INTERNAL` on OOM. On the
+  read path the 1.4.6 policy threading now drives into — a gap the 1.2.6–1.2.8
+  OOM-guard audits missed.
+
+### Audited — confirmed sound (no change)
+
+- **1.4.7 native-fail-closed property HOLDS.** Inventoried every `tls_dlsym`
+  callsite (3, all `SSL_CTX_*` in `apply.cyr`) and proved the only armer of
+  `_sandhi_apply_hook` (`_sandhi_policy_pre_open_a`, via all of
+  `sandhi_conn_open_with_policy_a` / `_sandhi_http_do_impl_a` /
+  `sandhi_http_stream_opts_a`) gates on `enforcement_available()` — which is 0 on
+  native via the active-backend check — before arming. Native never feeds a native
+  ctx to a libssl `SSL_CTX_*` fn. The key-without-cert edge is safe (no
+  constructor yields `mtls_key` without `mtls_cert`).
+- **Public surface (1.4.5–1.4.9)**: all eight new verbs
+  (`sandhi_tls_use_*` / `_backend` / `_native_available`, `_pin_available`,
+  `http_options_tls_policy` / `_get_tls_policy`, `server_run_async`) have
+  docstrings + test/probe coverage.
+
+### Docs — docstrings + tidy
+
+Added docstrings to two standalone verbs that lacked them
+(`sandhi_hpack_encode_literal_indexed_name`, `sandhi_discovery_chain_as_resolver`).
+Bare default-alloc wrappers intentionally rely on their `_a` twin's docstring
+(codebase-wide convention) — not treated as gaps.
+
+### Verified
+
+- 992 assertions green (440 + 167 + 343 + 42; unchanged).
+- `programs/_server_async_smoke.cyr` (with the silent-client regression): 2/2,
+  PASS in ~1.4 s; `_policy_runtime_probe.cyr` ALL GATES PASS.
+- Native (no-flag) + libssl (`-D CYRIUS_TLS_LIBSSL`) smoke link; `cyrius lint`
+  0 warnings / 0 deferrals; `cyrfmt --check` clean; `dist/sandhi.cyr` at v1.4.10.
+
+**Closes the 1.4.x arc.** The next release shapes against sit adoption (1.5.x).
+
 ## [1.4.9] — 2026-06-09
 
 **Epoll-cooperative server (`max_conns` enforced) + cyrius pin 6.1.20 → 6.1.21

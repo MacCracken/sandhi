@@ -4,7 +4,10 @@
 # Forks: child runs the async server on 127.0.0.1; parent connects
 # (raw, no DNS), sends a request, and checks for a 200. Proves the
 # cooperative accept loop accepts + dispatches the handler + responds.
-# Exit 0 PASS / non-zero FAIL.
+# Also a 1.4.10 regression: holds a SILENT connection open (connect,
+# send nothing) and asserts the real requests still complete — guards
+# the pre-1.4.10 infinite-`async_await_readable` DoS (a silent client
+# hung the whole loop). Exit 0 PASS / non-zero FAIL.
 include "lib/thread_local.cyr"
 include "lib/ct.cyr"
 include "lib/keccak.cyr"
@@ -69,15 +72,27 @@ fn main() {
         # child: epoll-cooperative server, max_conns=8. Never returns.
         var opts = sandhi_server_options_new();
         sandhi_server_options_max_conns(opts, 8);
-        sandhi_server_options_idle_ms(opts, 2000);
+        sandhi_server_options_idle_ms(opts, 1000);
         sandhi_server_run_async(INADDR_LOOPBACK(), port, &smoke_handler, 0, opts);
         syscall(60, 0);
     }
 
-    # parent: let the child bind, then drive two sequential requests
-    # (exercises the batch-drain → arena-reset → next-batch path).
+    # parent: let the child bind.
     async_sleep_ms(400);
 
+    # Regression (1.4.10): a client that connects and sends NOTHING must
+    # NOT hang the cooperative loop. Open a silent connection and leave it
+    # open — the server's handler must time out (SO_RCVTIMEO = idle_ms) and
+    # the loop must still serve the real requests below. Before 1.4.10 the
+    # handler's `async_await_readable(cfd)` (infinite epoll_wait) would block
+    # the whole loop forever and the real requests would hang → this program
+    # would never finish (the harness `timeout` would fire).
+    var silent = sandhi_conn_open(INADDR_LOOPBACK(), port, 0, "");
+    async_sleep_ms(200);
+
+    # Then drive two sequential real requests (exercises the batch-drain →
+    # arena-reset → next-batch path). Both must succeed despite the silent
+    # connection holding a handler slot until it times out.
     var ok = 0;
     var i = 0;
     while (i < 2) {
@@ -97,10 +112,11 @@ fn main() {
         i = i + 1;
     }
 
+    if (silent != 0) { sandhi_conn_close(silent); }
     sys_kill(pid, 9);
     syscall(61, pid, 0, 0, 0);   # wait4 — reap the child
 
-    say("requests OK: "); fmt_int(ok); say(" / 2\n");
+    say("requests OK (with a silent connection held open): "); fmt_int(ok); say(" / 2\n");
     if (ok == 2) { say("PASS\n"); return 0; }
     say("FAIL\n");
     return 1;

@@ -727,20 +727,26 @@ enum SandhiAsyncArgOff {
     SANDHI_ASYNC_ARG_BUF = 24;
 }
 
-# One handler task per accepted connection: await-readable (epoll), recv,
+# One handler task per accepted connection: recv (SO_RCVTIMEO-bounded),
 # smuggling-reject (the same fns the sync loop uses), dispatch to the
 # user handler, close. The recv buffer is PER-HANDLER (passed in `arg`) —
 # the no-interleave invariant sandhi owns under a concurrent server. The
 # sync path's process-global `_hsv_req_buf` is unsafe here because two
 # handlers could interleave their recv loops if the runtime ever gains
 # true preemption; per-handler buffers are correct regardless.
+#
+# NOTE: we do NOT `async_await_readable(cfd)` first — `lib/async.cyr`'s
+# await is an `epoll_wait(..., -1)` with an INFINITE timeout, so a client
+# that connects and never sends would block the whole cooperative loop
+# forever (a trivial DoS). The runtime is run-to-completion (no
+# preemption), so the await buys no concurrency anyway; the SO_RCVTIMEO'd
+# recv (idle_ms, floored > 0 by the caller) is the bounded wait.
 fn _sandhi_server_async_handler(arg): i64 {
     var cfd = load64(arg + SANDHI_ASYNC_ARG_CFD);
     var fp  = load64(arg + SANDHI_ASYNC_ARG_FP);
     var ctx = load64(arg + SANDHI_ASYNC_ARG_CTX);
     var buf = load64(arg + SANDHI_ASYNC_ARG_BUF);
 
-    async_await_readable(cfd);
     var n = sandhi_server_recv_request(cfd, buf, HSV_REQ_BUF_SIZE - 1);
     if (n > 0) {
         if (sandhi_server_request_has_cl_te_conflict(buf, n) == 1) {
@@ -776,6 +782,14 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
     var idle_ms   = sandhi_server_options_get_idle_ms(opts);
     var max_conns = sandhi_server_options_get_max_conns(opts);
     if (max_conns < 1) { max_conns = 1; }
+    # The cooperative loop runs handlers to completion with no preemption,
+    # so EVERY per-connection recv MUST be time-bounded — a single client
+    # that connects and sends nothing would otherwise hang the whole loop
+    # (and every other connection in the batch). Unlike the single-flight
+    # sync path, idle_ms == 0 (blocking) is unsafe here, so floor it to the
+    # default. SO_RCVTIMEO (set per accept below) is the bound; there is no
+    # unbounded epoll wait on a client fd.
+    if (idle_ms <= 0) { idle_ms = SANDHI_SERVER_DEFAULT_IDLE_MS; }
 
     var sfd_r = tcp_socket();
     if (is_err_result(sfd_r) == 1) { return 1; }
@@ -798,6 +812,7 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
     if (arena == 0) { sock_close(sfd); return 1; }
 
     var rt = async_new();
+    if (rt == 0) { sock_close(sfd); return 1; }
     var batch = 0;
     while (1 == 1) {
         var accepting = 1;
@@ -807,9 +822,8 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
                 accepting = 0;                 # EAGAIN — queue drained
             } else {
                 var cfd = payload(cr);
-                if (idle_ms > 0) {
-                    _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO);
-                }
+                # idle_ms is floored > 0 above — always bound the recv.
+                _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO);
                 var arg = alloc_via(arena, 32);
                 var buf = alloc_via(arena, HSV_REQ_BUF_SIZE);
                 if (arg == 0 || buf == 0) {
@@ -832,6 +846,7 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
             reset_via(arena);       # reclaim this batch's buffers + args
             batch = 0;
             rt = async_new();       # fresh runtime for the next batch
+            if (rt == 0) { sock_close(sfd); return 1; }
         } else {
             async_await_readable(sfd);   # empty queue — block until a conn
         }

@@ -483,6 +483,10 @@ fn sandhi_hpack_encode_literal_indexed(t, out, off, name, value): i64 {
     return p;
 }
 
+# §6.2.1 Literal with Incremental Indexing, indexed name — 01xxxxxx
+# (6-bit prefix). Emits the name by table index `name_idx` + the literal
+# `value` into `out` at `off`; also inserts (name, value) into the dynamic
+# table `t` when `t != 0`. Returns the new write offset.
 fn sandhi_hpack_encode_literal_indexed_name(t, out, off, name_idx, name, value): i64 {
     var p = _hpack_int_encode(out, off, 0x40, 6, name_idx);
     p = _hpack_string_encode(out, p, value);

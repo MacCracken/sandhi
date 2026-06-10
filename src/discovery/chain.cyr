@@ -52,6 +52,9 @@ fn _sandhi_discovery_chain_adapter(ctx, name): i64 {
     return sandhi_discovery_chain_resolve(ctx, name);
 }
 
+# Adapt a discovery chain into a `sandhi_resolver` handle (fn-ptr +
+# context), so a chain can be passed wherever a single resolver is
+# expected. Resolving through the handle runs the chain's fallback order.
 fn sandhi_discovery_chain_as_resolver(chain): i64 {
     return sandhi_resolver_new(&_sandhi_discovery_chain_adapter, chain);
 }

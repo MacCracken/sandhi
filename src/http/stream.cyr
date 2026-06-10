@@ -395,6 +395,7 @@ fn _sandhi_stream_read_loop_a(a, conn, cb, ctx, cap, deadline_ms): i64 {
 
     # Body-buffer starts with whatever's past the header marker.
     var body_sb = _sandhi_sb_new_a(a, cap);
+    if (body_sb == 0) { return _sandhi_stream_result_a(a, status, 0, SANDHI_ERR_INTERNAL, 0); }
     var total = _sandhi_sb_len(header_sb);
     if (total > header_end) {
         _sandhi_sb_append(body_sb, hp + header_end, total - header_end);
@@ -418,6 +419,7 @@ fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ct
     store64(total_events_cell, 0);
     store64(stop_cell, 0);
     var chunk_state = _sandhi_chunk_state_new_a(a);
+    if (chunk_state == 0) { return _sandhi_stream_result_a(a, status, 0, SANDHI_ERR_INTERNAL, 0); }
 
     var going = 1;
     while (going == 1) {
