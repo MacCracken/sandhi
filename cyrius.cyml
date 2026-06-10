@@ -122,6 +122,12 @@ stdlib = [
     "process",
     "thread",
     "fnptr",
+    # async + atomic: 1.4.9 epoll-cooperative server (sandhi_server_run_async).
+    # `lib/async.cyr` (async_new / _spawn / _run / _await_readable) is the
+    # cooperative runtime the consumer's event loop delegates to; it pulls
+    # `lib/atomic.cyr` for cancel tokens. Mirrors daimon's serve_async deps.
+    "async",
+    "atomic",
     "chrono",
     "tagged",
     "assert",

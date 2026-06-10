@@ -4,6 +4,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.9] — 2026-06-09
+
+**Epoll-cooperative server — `max_conns` enforced (`sandhi_server_run_async`).**
+Closes the daimon ask (`docs/issues/2026-05-10-daimon-server-max-conns.md`): the
+server's `max_conns` option, a no-op since 0.7.2, is now enforced via a new
+concurrent accept loop. Worker shape **decided: epoll-cooperative** (`lib/async.cyr`),
+per the 1.4.9 roadmap slot. No cyrius pin change (stays 6.1.20).
+
+### Added — `sandhi_server_run_async(addr, port, handler_fp, ctx, opts)` (+1 verb, `src/server/mod.cyr`)
+
+- Batched cooperative accept loop over the stdlib `lib/async.cyr` runtime:
+  drain the accept queue non-blocking up to `max_conns` (default 128) per cycle,
+  spawn a handler task per connection, run the batch to completion via
+  `async_run`, reset the per-batch arena, repeat; block on the listen fd
+  (`async_await_readable`) when the queue is empty. `max_conns` is the per-drain
+  concurrency cap — the enforcement daimon asked for.
+- The handler signature matches the sync path
+  (`fn handler(ctx, cfd, req_buf, req_len)`) and runs **single-threaded /
+  cooperative** — no thread-safety requirement (the rejected thread-pool shape
+  would have needed it), but it must not block indefinitely (per-connection
+  `idle_ms` / SO_RCVTIMEO bounds slow peers, as on the sync path). Smuggling
+  rejection (CL+TE / dup Host/CL/TE → 400) is applied per connection, mirroring
+  the sync loop.
+- **Per-handler recv buffers** (the no-interleave invariant a concurrent server
+  must own — the sync path's process-global `_hsv_req_buf` is unsafe under
+  concurrency): each handler's buffer + arg struct come from a single
+  `max_conns`-sized arena, reset each batch, so the large allocations don't
+  accumulate. New `deps`: `async` + `atomic`.
+
+### Unchanged — sync path
+
+`sandhi_server_run` / `sandhi_server_run_opts` stay single-flight; the async loop
+is strictly opt-in. daimon can now collapse its hand-rolled `serve_async` (accept
+loop + per-call buffer + smuggling-check duplication) onto `sandhi_server_run_async`.
+
+### Filed — cyrius-side `lib/async.cyr` leak (cross-repo)
+
+`cyrius/docs/development/issues/2026-06-09-async-runtime-no-free-task-leak.md` —
+`async.cyr` allocates its runtime + task structs from the global bump allocator
+(no `free`) and `async_run` closes the runtime's epfd, forcing a per-batch
+recreate, so each drained batch leaks ~32 B/connection there. sandhi bounds its
+own buffers via the arena; eliminating the residual leak needs an arena-aware
+async runtime (`async_new_in(allocator)`) upstream. Same leak daimon's
+`serve_async` already has. Tracked as a roadmap cross-repo dependency.
+
+### Verified
+
+- `programs/_server_async_smoke.cyr` (forked: child serves, parent drives two
+  sequential localhost requests across batch-drain → arena-reset → next-batch):
+  2/2 → 200, PASS.
+- 992 assertions green (440 + 167 + 343 + 42; unchanged — the async server is a
+  live/forked smoke gate, not a backend-agnostic unit suite).
+- Native + libssl smoke link; `cyrius lint` 0 warnings / 0 deferrals;
+  `cyrfmt --check` clean; `dist/sandhi.cyr` regenerated at v1.4.9.
+
 ## [1.4.8] — 2026-06-09
 
 **TLS backend flag-polarity flip (target convention) + interim green CI.**

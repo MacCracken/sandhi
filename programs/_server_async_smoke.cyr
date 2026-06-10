@@ -1,0 +1,110 @@
+# programs/_server_async_smoke.cyr — 1.4.9 smoke test for the
+# epoll-cooperative server (sandhi_server_run_async).
+#
+# Forks: child runs the async server on 127.0.0.1; parent connects
+# (raw, no DNS), sends a request, and checks for a 200. Proves the
+# cooperative accept loop accepts + dispatches the handler + responds.
+# Exit 0 PASS / non-zero FAIL.
+include "lib/thread_local.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+include "lib/sigil.cyr"
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
+include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+# User handler — fixed 200 with a tiny body.
+fn smoke_handler(ctx, cfd, buf, n): i64 {
+    sandhi_server_send_response(cfd, 200, "OK", "text/plain", "hi", 2, 0);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    say("=== sandhi async server smoke ===\n");
+    var port = 18391;
+
+    var pid = sys_fork();
+    if (pid == 0) {
+        # child: epoll-cooperative server, max_conns=8. Never returns.
+        var opts = sandhi_server_options_new();
+        sandhi_server_options_max_conns(opts, 8);
+        sandhi_server_options_idle_ms(opts, 2000);
+        sandhi_server_run_async(INADDR_LOOPBACK(), port, &smoke_handler, 0, opts);
+        syscall(60, 0);
+    }
+
+    # parent: let the child bind, then drive two sequential requests
+    # (exercises the batch-drain → arena-reset → next-batch path).
+    async_sleep_ms(400);
+
+    var ok = 0;
+    var i = 0;
+    while (i < 2) {
+        var conn = sandhi_conn_open(INADDR_LOOPBACK(), port, 0, "");
+        if (conn != 0) {
+            var req = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            sandhi_conn_send_all(conn, req, strlen(req));
+            var rbuf[512];
+            var got = sandhi_conn_recv(conn, &rbuf, 511);
+            if (got > 12) {
+                if (load8(&rbuf + 9) == 50 && load8(&rbuf + 10) == 48 && load8(&rbuf + 11) == 48) {
+                    ok = ok + 1;
+                }
+            }
+            sandhi_conn_close(conn);
+        }
+        i = i + 1;
+    }
+
+    sys_kill(pid, 9);
+    syscall(61, pid, 0, 0, 0);   # wait4 — reap the child
+
+    say("requests OK: "); fmt_int(ok); say(" / 2\n");
+    if (ok == 2) { say("PASS\n"); return 0; }
+    say("FAIL\n");
+    return 1;
+}
+
+var ec = main();
+syscall(60, ec);

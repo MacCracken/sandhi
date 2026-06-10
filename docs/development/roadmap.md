@@ -71,6 +71,7 @@ details, state.md the current snapshot.
 - **1.4.2** — Dropped the ALPN-read + SPKI-pin libssl bindings onto cyrius 6.0.82's typed backend-agnostic `tls_get_alpn_selected` / `tls_get_peer_spki_der`. sandhi now runs over the sovereign native TLS transport (`tls_set_backend`) with no ALPN/SPKI libssl coupling — closes the cyrius native-TLS Mini-arc E consumer rewire. Remaining `tls_dlsym` sites are pre-handshake `SSL_CTX_*` mTLS / trust-store config. cyrius pin 6.0.55 → 6.0.82. 167 h2 + 440 sandhi green.
 - **1.4.3** — Buried-deferral gate sweep (drains the P2 closeout lead) + cyrius pin 6.0.82 → 6.0.87. All **12** untracked deferrals drained (the list of 8 undercounted — 4 more lived in `src/http/h2/`): real work → new Wait-for-second-consumer-ask roadmap bullets + comment crossref (per no-silent-scope-outs); incidental → reworded to drop the trigger; `HTTP_NOT_IMPLEMENTED` status constant → `#skip-lint`. CI lint gate flipped report-mode → fail-mode on untracked deferrals. Pin bump mechanical (full TLS ciphersuite enablement + macOS native-TLS fixes). Plus sigil transitive-deps fix (`ct` / `keccak` / `thread_local` added to `[deps]` + crypto-chain include in the live-gate probe so sigil's `sha256` links — native-clean, no FFI; sigil's packaging gap, surfaced consumer-side). 979 assertions green (unchanged); 0 untracked deferrals.
 - **1.4.4** — Closeout housekeeping: roadmap slot-number realignment + `_sandhi_conn_connect_nb` factoring decision (option b — parallel evolution with `regression_network_probe`, no shared primitive; the only code change is a doc comment). Fixed roadmap drift: the `max_conns` / `connect_nb` slots were mislabeled "1.4.1" / "1.4.2" (those numbers shipped other work — 1.4.1 close-path, 1.4.2 ALPN/SPKI, 1.4.3 deferral sweep + pin + sigil); renumbered — `connect_nb` resolved here, `max_conns` → 1.4.5. 979 assertions green (unchanged); no public-API change.
+- **1.4.9** — epoll-cooperative server; `max_conns` enforced (no cyrius bump; stays 6.1.20). Closes the daimon ask: **+1 verb** `sandhi_server_run_async` over `lib/async.cyr` (worker shape decided (b) epoll-cooperative; handler stays cooperative). Batched accept up to `max_conns`/cycle → spawn handler task per conn → `async_run` → reset per-batch arena. Per-handler recv buffers (no-interleave invariant). New deps `async` + `atomic`. Sync `run`/`run_opts` unchanged. Filed cyrius cross-repo leak `2026-06-09-async-runtime-no-free-task-leak.md` (async.cyr no-free rt/task structs). Verified via forked `_server_async_smoke.cyr` (2/2 200). 992 assertions green (unchanged).
 - **1.4.8** — TLS backend flag-polarity flip (target convention) + interim green CI (no cyrius bump; stays 6.1.20). Docs/build-convention change: target is native-as-no-flag-default with `-D CYRIUS_TLS_LIBSSL` opt-in (inverse of the 1.4.5–1.4.7 `-D CYRIUS_TLS_NATIVE`), applied across CLAUDE.md / architecture/004 / gate-program comments / `src/tls_policy/mod.cyr` header. The target needs an upstream cyrius change not in 6.1.20 (`lib/tls.cyr` is still `#ifdef CYRIUS_TLS_NATIVE`), so CI/release keep `-D CYRIUS_TLS_NATIVE` on the native steps (interim banner) and build the libssl proof no-flag — keeping CI green and actually exercising native (native smoke 1.37 MB vs 562 KB libssl; 3 native gates PASS). Filed cyrius issue `2026-06-09-invert-tls-backend-default-native-no-flag.md` to complete the flip. 992 assertions green (unchanged).
 - **1.4.7** — backend-aware TLS-policy enforcement; eliminates the live-network SIGSEGV (no cyrius bump; stays 6.1.20). Fixes the P2 spun off from 1.4.6: native trust-store/mTLS fed the native ctx to libssl `SSL_CTX_*` → fault, and libssl SPKI-pin SIGSEGV'd in cyrius's `tls_get_peer_spki_der` (deprecated-backend regression). `sandhi_tls_policy_enforcement_available()` made backend-aware (trust/mTLS → 0 on native); **+1 verb** `sandhi_tls_policy_pin_available()` (SPKI backend-agnostic; native works without libssl; libssl excluded pending the cyrius fix). `_sandhi_policy_pre_open_a` gates the two modes separately + fails closed before arming the hook. `_policy_runtime_probe.cyr` reworked native (CI -D); `_https_policy_threading_gate.cyr` gates on `pin_available()`. Native gates ALL PASS, no crash. Cross-repo follow-ups (native `SSL_CTX_*`; cyrius libssl-SPKI fix) tracked under "native TLS-policy enforcement". 992 assertions green (unchanged).
 - **1.4.6** — high-level client TLS-policy threading + cyrius pin 6.1.19 → **6.1.20**. Closes the hoosh v2.2.0 P1: `sandhi_http_options_tls_policy` + getter; the high-level `sandhi_http_*` path (and `sandhi_http_stream`) brackets its HTTPS open with `_sandhi_policy_pre_open_a` / `_post_open_a` (refactored from `sandhi_conn_open_with_policy_a`) — fail-closed on unavailable enforcement, post-handshake SPKI pin, pool + 0-RTT bypassed for policy-bound requests; the request path's own v4/v6 timed opener is reused so deadlines + IPv6 thread for free. `policy` / `fingerprint` / `apply` modules reordered ahead of `client` / `stream` (25 include blocks) for single-pass reachability. New native live gate `_https_policy_threading_gate.cyr` (no-policy 200 / wrong-pin fail-closed TLS / correct-pin 200). Pin bump mechanical (6.1.20 folds sandhi 1.4.5 into `lib/sandhi.cyr` + a non-sandhi-facing macho-arm Darwin syscall port). Filed a pre-existing P2: low-level trust-store/mTLS enforcement SIGSEGVs on a live network (`2026-06-09-tls-policy-enforcement-live-segfault.md`). 992 assertions green (+13; new `alloc/146/`).
@@ -270,7 +271,7 @@ and native reaches public hosts).
   native-handshake-gap) — see Cross-repo dependencies. Full libssl *retirement*
   now gated only on native TLS-policy enforcement (currently libssl-coupled).
 
-#### 1.4.9 — `sandhi_server_options_max_conns` enforcement
+#### 1.4.9 — `sandhi_server_options_max_conns` enforcement ✅ shipped 2026-06-09
 
 Daimon's filed ask:
 [`docs/issues/2026-05-10-daimon-server-max-conns.md`](../issues/2026-05-10-daimon-server-max-conns.md).
@@ -502,6 +503,17 @@ downstream timing isn't accidentally forgotten.
   The 0.9.3 unicast-response (QU bit) implementation works
   against most responders without multicast support, so this
   is a quality-of-implementation gate, not a hard blocker.
+- **`lib/async.cyr` arena-aware runtime (no-free task leak)** *(filed;
+  affects 1.4.9 `sandhi_server_run_async`)*. `async.cyr` allocates its
+  runtime + task structs from the global bump (no `free`) and closes the
+  epfd in `async_run`, so the batched accept loop's per-batch recreate
+  leaks ~32 B/connection. sandhi bounds its own per-connection buffers
+  with a reset-per-batch arena; eliminating the residual leak needs an
+  arena-aware constructor (`async_new_in(allocator)`). Filed
+  [`cyrius .../2026-06-09-async-runtime-no-free-task-leak.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-06-09-async-runtime-no-free-task-leak.md).
+  Same leak daimon's `serve_async` already carries; a quality gate for
+  long-running high-traffic servers, not a correctness blocker for the
+  bounded-lifetime / low-traffic case.
 
 When these cyrius-side items land, the corresponding sandhi
 work opens. Until then, the wait is intentional.
@@ -638,7 +650,7 @@ its job is keeping the post-v1 patch window honest. The shape:
   1.4.6 = high-level TLS-policy threading + pin 6.1.20;
   1.4.7 = backend-aware TLS-policy enforcement (live-SIGSEGV fix);
   1.4.8 = TLS flag-polarity flip + interim green CI;
-  1.4.9 = max_conns enforcement (epoll-cooperative; worker-shape decided);
+  1.4.9 = max_conns enforcement (epoll-cooperative server) ✅;
   1.4.x  = profile-justified picks (parked);
   1.4.x  = cap-drift watch (background);
   **1.4.x closeout** = P-1 / security / code-audit pass.
