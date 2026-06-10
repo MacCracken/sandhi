@@ -9326,11 +9326,13 @@ fn sandhi_conn_alpn_is_h2(conn): i64 {
 # `2026-06-09-brk-bump-heap-vs-fdlopen-libssl-malloc.md`). The native
 # stack loads no libssl/glibc, so there is no contention.
 #
-# The native stack is the BUILD default only when compiled with
-# `-D CYRIUS_TLS_NATIVE`. sandhi's own build + CI + Quick Start pass it;
-# consumers MUST pass it to get the native default (otherwise the build
-# has no native stack compiled in and stays on libssl). See
-# docs/architecture/004-native-tls-default.md.
+# The native stack is the UNCONDITIONAL build default — no flag. The
+# flag polarity inverted past 1.4.7: native is compiled in by default
+# and `-D CYRIUS_TLS_LIBSSL` is the explicit opt-in for the deprecated
+# libssl bridge. sandhi's own build + CI + Quick Start build native with
+# no flag; consumers get native by default and pass `-D CYRIUS_TLS_LIBSSL`
+# only to fall back to libssl. Depends on the upstream cyrius
+# inverted-default build. See docs/architecture/004-native-tls-default.md.
 #
 # `sandhi_tls_use_libssl()` is an explicit backend override. The two
 # upstream gaps that motivated keeping it (native handshake coverage;
@@ -9341,7 +9343,8 @@ fn sandhi_conn_alpn_is_h2(conn): i64 {
 # native TLS-policy enforcement lands.
 
 # Switch the active backend to native. Returns 0 on success, -1 if the
-# native stack was not compiled in (no `-D CYRIUS_TLS_NATIVE`).
+# native stack was not compiled in (only possible under the deprecated
+# `-D CYRIUS_TLS_LIBSSL`-only build).
 fn sandhi_tls_use_native(): i64 {
     return tls_set_backend(TLS_BACKEND_NATIVE);
 }

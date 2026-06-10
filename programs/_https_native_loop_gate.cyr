@@ -1,7 +1,7 @@
 # P1 regression gate: N>=4 sequential HTTPS GETs to one host must NOT
 # crash. Guards the repeated-request SIGSEGV (cyrius brk/fdlopen issue).
-# Built native (-D CYRIUS_TLS_NATIVE) this runs over the native stack
-# (no libssl) and must complete crash-free. Skip-cleanly if offline.
+# Native is the no-flag default past 1.4.7, so this runs over the native
+# stack (no libssl) and must complete crash-free. Skip-cleanly if offline.
 include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/obs/trace.cyr"

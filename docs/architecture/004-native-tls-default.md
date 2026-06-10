@@ -34,18 +34,26 @@ the default rather than a someday.
 
 ## How it works
 
-- **Build default.** The native stack is compiled in — and becomes the
-  stdlib default backend (`_tls_backend = 1`) — **only when built with
-  `-D CYRIUS_TLS_NATIVE`.** There is no manifest-level way to set the
-  define (cyrius `-D` prepends `#define` lines ahead of the dep
-  includes; `cyrius.cyml` has no `[build].defines` key), so it must be
-  passed on the build command line.
+- **Build default (flag polarity inverted past 1.4.7).** The native
+  stack is compiled in and is the stdlib default backend
+  (`_tls_backend = 1`) with **no flag**. `-D CYRIUS_TLS_LIBSSL` is the
+  explicit opt-in for the deprecated libssl bridge. This inverts the
+  1.4.5–1.4.7 convention, where `-D CYRIUS_TLS_NATIVE` was required to
+  *get* native and a no-flag build fell back to libssl.
 
-  - sandhi's own builds, CI, and Quick Start pass `-D CYRIUS_TLS_NATIVE`.
-  - **Consumers MUST pass `-D CYRIUS_TLS_NATIVE`** to get the native
-    default. Without it, the native stack isn't compiled in and the
-    build stays on libssl (and is exposed to the brk/fdlopen crash on
-    repeated HTTPS requests).
+  - sandhi's own builds, CI, and Quick Start build native with **no flag**.
+  - **Consumers get native by default** and pass `-D CYRIUS_TLS_LIBSSL`
+    only to fall back to the deprecated libssl path.
+
+  > **Upstream dependency.** This inversion requires the cyrius-side
+  > inverted-default build (native compiled in by default; `-D
+  > CYRIUS_TLS_LIBSSL` as the opt-out). Until that ships in a pinned
+  > cyrius release, a no-flag `cyrius build` still resolves to libssl and
+  > sandhi's native gates will not pass — the sandhi-side switch is
+  > staged ahead of the upstream flip. The previous blocker (no
+  > `[build].defines` key in `cyrius.cyml`, so the define had to be on
+  > the command line) is resolved by making native the compiled-in
+  > default rather than a define-gated opt-in.
 
 - **Runtime surface** (`src/tls_policy/mod.cyr`):
   - `sandhi_tls_backend()` — active backend (0 = libssl, 1 = native).
@@ -82,6 +90,9 @@ libssl.
 3. ~~Upstream brk/fdlopen allocator fix~~ ✅ cyrius 6.1.19 (anonymous-mmap
    heap) — the residual libssl opt-in is no longer a process-killer.
 
-Once (2) lands, the libssl opt-in can be removed and the `-D` requirement
-folded into the default build path. Tracked in the roadmap cross-repo
-dependencies + the 1.5.x reshape.
+Once (2) lands, the libssl opt-in can be removed entirely. The
+`-D CYRIUS_TLS_NATIVE` *requirement* has already been removed (flag
+polarity inverted past 1.4.7: native is the no-flag default,
+`-D CYRIUS_TLS_LIBSSL` is the opt-in) — pending the upstream cyrius
+inverted-default build. Tracked in the roadmap cross-repo dependencies +
+the 1.5.x reshape.

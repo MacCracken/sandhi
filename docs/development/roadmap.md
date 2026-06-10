@@ -449,6 +449,19 @@ downstream timing isn't accidentally forgotten.
   Native now reaches the public host set. Dropping the
   `sandhi_tls_use_libssl()` opt-in entirely still needs TLS policy
   enforcement wired for native (currently libssl-coupled).
+- **Inverted-default TLS build (native compiled in by default).**
+  *(Gates the flag inversion staged in `[Unreleased]`.)* sandhi has
+  inverted its flag convention — native is the **no-flag default**,
+  `-D CYRIUS_TLS_LIBSSL` is the opt-in — across CI, release, docs, and
+  the gate programs. This requires cyrius to compile the native TLS
+  stack in **by default** (so a no-flag `cyrius build` resolves to
+  native) and to accept `-D CYRIUS_TLS_LIBSSL` as the opt-out, replacing
+  the 1.4.5–1.4.7 `-D CYRIUS_TLS_NATIVE` opt-in. **Owner: cyrius-side
+  (user).** Until the pinned cyrius release ships this, sandhi's no-flag
+  builds still resolve to libssl and the native gates do **not** pass —
+  the sandhi switch is staged ahead of the upstream flip. The cyrius pin
+  stays **6.1.20**; bump + the sandhi release that carries the inversion
+  are gated on this landing.
 - **Native TLS in cyrius `lib/tls.cyr`** *(6.0.x arc; landed —
   now the sandhi default at 1.4.5; gates sit adoption)*. Sit will
   only pick up sandhi when the underlying TLS transport is native

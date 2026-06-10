@@ -6,7 +6,7 @@
 # path (`sandhi_http_get_opts` / `_post_opts`), not just the
 # low-level `sandhi_conn_open_with_policy`.
 #
-# Built NATIVE (-D CYRIUS_TLS_NATIVE). The SPKI-pin path is
+# Built NATIVE (the no-flag default past 1.4.7). The SPKI-pin path is
 # backend-agnostic since 1.4.2 (`tls_get_peer_spki_der`), so this
 # gate is live-safe on native — unlike the low-level trust-store /
 # mTLS gates in `_policy_runtime_probe.cyr`, which hit the

@@ -4,6 +4,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — TLS backend flag polarity inverted (native = no-flag default)
+
+The `-D CYRIUS_TLS_NATIVE` build requirement is removed. Native is now the
+**unconditional no-flag default** and `-D CYRIUS_TLS_LIBSSL` is the explicit
+opt-in for the deprecated libssl bridge — the inverse of the 1.4.5–1.4.7
+convention. Inverted across the repo: `ci.yml` + `release.yml` build steps,
+`CLAUDE.md` Quick Start + TLS note, `docs/architecture/004`, the four
+`programs/*.cyr` gate comments + the probe skip message, and
+`src/tls_policy/mod.cyr` backend-selection header.
+
+> **Staged ahead of upstream — does NOT build green yet.** This inversion
+> depends on the cyrius-side inverted-default build (native compiled in by
+> default; `-D CYRIUS_TLS_LIBSSL` as the opt-out). Until that ships in a
+> pinned cyrius release, a no-flag `cyrius build` still resolves to libssl
+> and sandhi's native gates will not pass. The cyrius pin stays **6.1.20**
+> until the upstream flip lands; bump + release is gated on it. Tracked as a
+> roadmap cross-repo dependency.
+
 ## [1.4.7] — 2026-06-09
 
 **Backend-aware TLS-policy enforcement — eliminates the live-network

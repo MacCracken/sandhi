@@ -40,18 +40,20 @@ Project was scaffolded with `cyrius init sandhi` on 2026-04-24. **Do not manuall
 
 ```bash
 cyrius deps                                                # resolve stdlib deps
-cyrius build -D CYRIUS_TLS_NATIVE programs/smoke.cyr build/sandhi-smoke   # build (link proof, native TLS default)
+cyrius build programs/smoke.cyr build/sandhi-smoke        # build (link proof, native TLS — no flag)
 cyrius test src/test.cyr                                   # unit tests (backend-agnostic; no -D needed)
 cyrius lint src/*.cyr                                      # static checks
-CYRIUS_DCE=1 cyrius build -D CYRIUS_TLS_NATIVE programs/smoke.cyr build/sandhi-smoke  # release-parity build
+CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke  # release-parity build
+cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr build/sandhi-smoke-libssl  # deprecated libssl opt-in
 ```
 
-> **TLS backend (1.4.5+):** sandhi defaults to the **native** TLS backend; the
-> libssl fdlopen bridge is a deprecated opt-in (`sandhi_tls_use_libssl()`).
-> Native is the default **only when built with `-D CYRIUS_TLS_NATIVE`** — there
-> is no manifest-level define, so every `cyrius build` (and every consumer
-> build) must pass it. Without the flag the build stays on libssl and is exposed
-> to the repeated-request SIGSEGV. See [architecture/004](docs/architecture/004-native-tls-default.md).
+> **TLS backend (flag inverted past 1.4.7):** sandhi defaults to the **native**
+> TLS backend with **no flag** — native is compiled in by default and
+> `-D CYRIUS_TLS_LIBSSL` is the explicit opt-in for the deprecated libssl fdlopen
+> bridge (`sandhi_tls_use_libssl()`). This is the inverse of the 1.4.5–1.4.7
+> convention (`-D CYRIUS_TLS_NATIVE` to *get* native). **Depends on the upstream
+> cyrius inverted-default build** — until that lands, a no-flag build still
+> resolves to libssl. See [architecture/004](docs/architecture/004-native-tls-default.md).
 
 ## Architecture
 
@@ -63,7 +65,7 @@ Module responsibilities (file list in `state.md`):
 - **`src/http/headers.cyr`** — header management.
 - **`src/rpc/mod.cyr`** — JSON-RPC dialects (WebDriver, Appium, MCP). Absorbs the RPC-grade side of the `lib/json.cyr depth` item.
 - **`src/discovery/mod.cyr`** — service discovery (mDNS, daimon-registered, chained fallback). The genuinely new surface.
-- **`src/tls_policy/mod.cyr`** — cert pinning, mTLS, trust store + TLS backend selection (`sandhi_tls_use_native` / `_use_libssl` / `_backend` / `_native_available`). Wraps stdlib `lib/tls.cyr`. As of 1.4.5 sandhi defaults to the **native** backend (build with `-D CYRIUS_TLS_NATIVE`); libssl is a deprecated opt-in. Transport details live in stdlib; sandhi's hook-surface contract is unchanged across the swap. See [architecture/004](docs/architecture/004-native-tls-default.md).
+- **`src/tls_policy/mod.cyr`** — cert pinning, mTLS, trust store + TLS backend selection (`sandhi_tls_use_native` / `_use_libssl` / `_backend` / `_native_available`). Wraps stdlib `lib/tls.cyr`. sandhi defaults to the **native** backend with no flag (polarity inverted past 1.4.7); `-D CYRIUS_TLS_LIBSSL` is the deprecated opt-in. Transport details live in stdlib; sandhi's hook-surface contract is unchanged across the swap. See [architecture/004](docs/architecture/004-native-tls-default.md).
 - **`src/server/mod.cyr`** — canonical home of the HTTP server surface (lifted from `lib/http_server.cyr` at M1). Stdlib deletes its copy at Cyrius v5.7.0 per [ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md); until then, stdlib 5.6.YY emits a deprecation warning on include.
 
 ## Key Constraints

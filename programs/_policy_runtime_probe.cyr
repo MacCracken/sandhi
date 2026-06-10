@@ -19,8 +19,8 @@
 # (trust/mTLS, libssl-only) and `pin_available()` (SPKI, backend-agnostic
 # but libssl-excluded pending the cyrius fix) backend-aware, so the
 # pre-open helper fails closed instead of calling the faulting paths.
-# This gate exercises the **native** backend (the 1.4.5 default — build
-# with -D CYRIUS_TLS_NATIVE, else it skips): pinning succeeds/fails-closed
+# This gate exercises the **native** backend (the no-flag default past
+# 1.4.7; skips only on a libssl-only build): pinning succeeds/fails-closed
 # via the backend-agnostic SPKI read, trust/mTLS fails closed. The
 # deprecated libssl backend's crash-safety was verified separately during
 # development (see the main() note). The high-level threading enforcement
@@ -166,7 +166,7 @@ fn main() {
         return 0;
     }
     if (sandhi_tls_native_available() != 1) {
-        say("  skip: native backend not compiled in (build with -D CYRIUS_TLS_NATIVE)\n");
+        say("  skip: native backend not compiled in (deprecated -D CYRIUS_TLS_LIBSSL build)\n");
         return 0;
     }
 
