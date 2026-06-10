@@ -67,14 +67,17 @@ jobs:
 
       - name: Build (DCE)
         # sandhi is a library — programs/smoke.cyr is the link proof
-        # and the only thing that produces an actual ELF binary.
-        # Native TLS is the unconditional default backend — NO flag
-        # (polarity inverted past 1.4.7; libssl is the
-        # `-D CYRIUS_TLS_LIBSSL` opt-in). This is the default consumers
-        # get. Requires the upstream cyrius inverted-default build.
+        # and the only thing that produces an actual ELF binary. The
+        # shipped smoke binary exercises the native stack.
+        # INTERIM: the repo docs target native-as-no-flag-default, but the
+        # pinned cyrius (6.1.20) is still `#ifdef CYRIUS_TLS_NATIVE`
+        # (native opt-IN; no-flag = libssl), so `-D CYRIUS_TLS_NATIVE` is
+        # required here to actually build native. Drop the flag once the
+        # cyrius inverted-default lands (cyrius issue
+        # 2026-06-09-invert-tls-backend-default-native-no-flag.md).
         run: |
           mkdir -p build
-          CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke
+          CYRIUS_DCE=1 cyrius build -D CYRIUS_TLS_NATIVE programs/smoke.cyr build/sandhi-smoke
           echo "sandhi-smoke (native): $(wc -c < build/sandhi-smoke) bytes"
 
       - name: Cross-build aarch64 (best-effort)

@@ -129,27 +129,41 @@ jobs:
           fi
           echo "dist/sandhi.cyr matches src/"
 
-      - name: Build (DCE) — link proof against the library (native TLS default)
+      # ───────────────────────────────────────────────────────────────
+      # TLS-backend flag convention — INTERIM (cyrius ≤ 6.1.20)
+      #
+      # The repo docs (CLAUDE.md, architecture/004) describe the TARGET
+      # convention: native is the no-flag default and `-D CYRIUS_TLS_LIBSSL`
+      # is the opt-in. That convention requires an upstream cyrius change
+      # that is NOT in the pinned toolchain (6.1.20) — cyrius `lib/tls.cyr`
+      # is still `#ifdef CYRIUS_TLS_NATIVE` (native opt-IN; no-flag = libssl).
+      # Filed cyrius-side:
+      #   cyrius/docs/development/issues/2026-06-09-invert-tls-backend-default-native-no-flag.md
+      #
+      # So on the current pin the native steps MUST pass `-D CYRIUS_TLS_NATIVE`
+      # to actually compile in + default to the native stack; a no-flag build
+      # silently resolves to libssl. When the cyrius inverted-default lands and
+      # the pin moves to it: drop `-D CYRIUS_TLS_NATIVE` from the native steps
+      # and add `-D CYRIUS_TLS_LIBSSL` to the libssl step.
+      # ───────────────────────────────────────────────────────────────
+      - name: Build (DCE) — link proof against the library (native TLS)
         # `programs/smoke.cyr` is the canonical build target per
         # cyrius.cyml [build].entry. sandhi itself is a library; the
         # smoke program is what verifies all symbols link cleanly.
-        # Native TLS is the unconditional default backend — NO flag.
-        # The flag polarity inverted past 1.4.7: native is the no-flag
-        # default and libssl is the explicit `-D CYRIUS_TLS_LIBSSL`
-        # opt-in. This link proof exercises the native stack (what
-        # consumers get by default). Requires the upstream cyrius
-        # inverted-default build (see architecture/004).
+        # `-D CYRIUS_TLS_NATIVE` is required on the current pin to get the
+        # native stack (interim — see the flag banner above).
         run: |
           mkdir -p build
-          CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke
+          CYRIUS_DCE=1 cyrius build -D CYRIUS_TLS_NATIVE programs/smoke.cyr build/sandhi-smoke
           echo "sandhi-smoke (native): $(wc -c < build/sandhi-smoke) bytes"
 
-      - name: Build link proof — libssl opt-in path
-        # The libssl bridge is a deprecated opt-in (sandhi_tls_use_libssl)
-        # but must keep building. `-D CYRIUS_TLS_LIBSSL` opts into the
-        # deprecated libssl stack (native is now the no-flag default).
+      - name: Build link proof — libssl path
+        # The libssl bridge is a deprecated backend but must keep building.
+        # On the current pin libssl is the no-flag default, so this no-flag
+        # build is the libssl link proof. (Once the cyrius inverted-default
+        # lands, add `-D CYRIUS_TLS_LIBSSL` here.)
         run: |
-          CYRIUS_DCE=1 cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr build/sandhi-smoke-libssl
+          CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke-libssl
           echo "sandhi-smoke (libssl): $(wc -c < build/sandhi-smoke-libssl) bytes"
 
       - name: Verify ELF magic
@@ -201,36 +215,38 @@ jobs:
         # exits 0 on PASS or clean SKIP (network unreachable / TLS
         # unavailable), non-zero on real regression (default-policy
         # handshake fail, wrong-pin not fail-closed, etc.).
-        # Built native (the no-flag default past 1.4.7) — the gate now
-        # exercises the default backend, where pinning is enforced via
-        # the backend-agnostic SPKI read and trust/mTLS fails closed
-        # (no SIGSEGV; the pre-1.4.7 live crash). Informational gate:
-        # build runners may have no network, in which case it skips → 0.
+        # Built with `-D CYRIUS_TLS_NATIVE` (interim — see the flag banner
+        # above; the gate skips unless native is actually compiled in) — it
+        # exercises the native backend, where pinning is enforced via the
+        # backend-agnostic SPKI read and trust/mTLS fails closed (no SIGSEGV;
+        # the pre-1.4.7 live crash). Informational gate: build runners may
+        # have no network, in which case it skips → 0.
         run: |
-          cyrius build programs/_policy_runtime_probe.cyr build/_policy_runtime_probe
+          cyrius build -D CYRIUS_TLS_NATIVE programs/_policy_runtime_probe.cyr build/_policy_runtime_probe
           build/_policy_runtime_probe
 
       - name: Native HTTPS repeated-request gate (P1 regression)
         # 1.4.5: guards the repeated-request SIGSEGV (cyrius brk/fdlopen
-        # contention). Native is the no-flag default past 1.4.7, so no
-        # libssl is loaded; N>=4 sequential sandhi_http_get to one HTTPS
-        # host must complete crash-free. Targets 1.1.1.1 (a host the
-        # native stack can handshake today; example.com-class hosts await
-        # the upstream native-handshake gap). Skip-cleanly when offline.
+        # contention). Built `-D CYRIUS_TLS_NATIVE` (interim — see the flag
+        # banner above) so no libssl is loaded; N>=4 sequential
+        # sandhi_http_get to one HTTPS host must complete crash-free. Targets
+        # 1.1.1.1 (a host the native stack can handshake today; example.com-
+        # class hosts await the upstream native-handshake gap). Skip-cleanly
+        # when offline.
         run: |
-          cyrius build programs/_https_native_loop_gate.cyr build/_https_native_loop_gate
+          cyrius build -D CYRIUS_TLS_NATIVE programs/_https_native_loop_gate.cyr build/_https_native_loop_gate
           build/_https_native_loop_gate
 
       - name: High-level TLS-policy threading gate (1.4.6)
         # 1.4.6: a TLS policy attached to sandhi_http_options must be
         # enforced through the high-level sandhi_http_* path. Built
-        # native (the no-flag default past 1.4.7) — the SPKI-pin path is
-        # backend-agnostic since 1.4.2 and live-safe on native (unlike
-        # the libssl-coupled trust-store/mTLS gates). Gates: no-policy
-        # GET succeeds; wrong-pin GET fails closed (err=TLS); a pin
+        # `-D CYRIUS_TLS_NATIVE` (interim — see the flag banner above) — the
+        # SPKI-pin path is backend-agnostic since 1.4.2 and live-safe on
+        # native (unlike the libssl-coupled trust-store/mTLS gates). Gates:
+        # no-policy GET succeeds; wrong-pin GET fails closed (err=TLS); a pin
         # captured live from the peer SPKI succeeds. Skip-cleanly offline.
         run: |
-          cyrius build programs/_https_policy_threading_gate.cyr build/_https_policy_threading_gate
+          cyrius build -D CYRIUS_TLS_NATIVE programs/_https_policy_threading_gate.cyr build/_https_policy_threading_gate
           build/_https_policy_threading_gate
 
   security:
