@@ -181,16 +181,28 @@ fn _sandhi_check_spki(tls_ctx, expected_hex): i64 {
 # land in `a` here.
 #
 # Returns the conn struct on success or 0 on failure / OOM.
-fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy): i64 {
-    if (use_tls == 0) {
-        return sandhi_conn_open(addr, port, 0, sni_host);
-    }
+# ── Pre/post open helpers (1.4.6) ───────────────────────────────
+# The policy-open splits cleanly into a PRE step (install the
+# SSL_CTX hook override that layers trust-store / mTLS) and a POST
+# step (clear the override + run the post-handshake SPKI pin check).
+# Splitting them lets the high-level request paths (client.cyr /
+# stream.cyr) bracket THEIR OWN v4/v6 timed opener with policy
+# enforcement — those modules are parsed before this one, so they
+# reach these helpers through the `_sandhi_policy_pre_open_fp` /
+# `_sandhi_policy_post_open_fp` slots (declared in conn.cyr,
+# registered at the bottom of this file). `sandhi_conn_open_with_policy_a`
+# below is itself now just pre → open → post, so there's one
+# enforcement implementation.
 
-    # Read policy fields. NULL policy is the default — no enforcement
-    # requirements, plain conn-open path.
-    if (policy == 0) {
-        return sandhi_conn_open(addr, port, 1, sni_host);
-    }
+# Install the policy hook override for `policy`. Returns 0 to proceed
+# (override installed when the policy demands enforcement; left clear
+# for a NULL / default policy), or -1 fail-closed when the policy
+# demands enforcement we can't deliver (enforcement unavailable, or
+# OOM building the hook ctx). The caller MUST pair every 0 return with
+# a later `_sandhi_policy_post_open_a` (even if the open fails) so the
+# override is cleared. Sets `_sandhi_conn_last_err` = TLS on -1.
+fn _sandhi_policy_pre_open_a(a, policy): i64 {
+    if (policy == 0) { return 0; }
 
     var pinned      = sandhi_tls_policy_pinned_hash(policy);
     var mtls_cert   = sandhi_tls_policy_mtls_cert(policy);
@@ -200,19 +212,14 @@ fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy): i64
     if (mtls_cert != 0)   { demands_enforcement = 1; }
     if (trust_store != 0) { demands_enforcement = 1; }
 
-    if (demands_enforcement == 1
-    && sandhi_tls_policy_enforcement_available() == 0) {
+    if (demands_enforcement == 0) { return 0; }
+
+    if (sandhi_tls_policy_enforcement_available() == 0) {
         _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
-        return 0;
+        return 0 - 1;
     }
 
-    if (demands_enforcement == 0) {
-        # Default policy — same as plain open.
-        return sandhi_conn_open(addr, port, 1, sni_host);
-    }
-
-    # Build the policy hook ctx and route the open through
-    # conn.cyr's override mechanism.
+    # Build the policy hook ctx and arm conn.cyr's override mechanism.
     _sandhi_alpn_init_wire();
     var protos = _sandhi_alpn_h11_wire;
     var plen   = _sandhi_alpn_h11_wire_len;
@@ -223,7 +230,7 @@ fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy): i64
     var hook_ctx = alloc_via(a, 24);
     if (hook_ctx == 0) {
         _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
-        return 0;
+        return 0 - 1;
     }
     store64(hook_ctx,      protos);
     store64(hook_ctx + 8,  plen);
@@ -231,16 +238,20 @@ fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy): i64
 
     _sandhi_tls_hook_override     = &_sandhi_apply_hook;
     _sandhi_tls_hook_override_ctx = hook_ctx;
-    var conn = sandhi_conn_open(addr, port, 1, sni_host);
+    return 0;
+}
+
+# Clear the hook override and run the post-handshake SPKI pin check.
+# `conn` may be 0 (the open failed) — we still clear the override.
+# Returns `conn` on success, or 0 on SPKI mismatch (conn closed,
+# last-err = TLS). A NULL / un-pinned policy passes `conn` through.
+fn _sandhi_policy_post_open_a(a, conn, policy): i64 {
     _sandhi_tls_hook_override     = 0;
     _sandhi_tls_hook_override_ctx = 0;
+    if (conn == 0)   { return 0; }
+    if (policy == 0) { return conn; }
 
-    if (conn == 0) {
-        # last-err was set by sandhi_conn_open_fully_timed.
-        return 0;
-    }
-
-    # Post-handshake SPKI check.
+    var pinned = sandhi_tls_policy_pinned_hash(policy);
     if (pinned != 0) {
         var tls_ctx = sandhi_conn_tls_ctx(conn);
         if (_sandhi_check_spki_a(a, tls_ctx, pinned) == 0) {
@@ -249,8 +260,24 @@ fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy): i64
             return 0;
         }
     }
-
     return conn;
+}
+
+fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy): i64 {
+    if (use_tls == 0) {
+        return sandhi_conn_open(addr, port, 0, sni_host);
+    }
+    # NULL / default policy → plain open (no enforcement requirements).
+    if (policy == 0) {
+        return sandhi_conn_open(addr, port, 1, sni_host);
+    }
+
+    if (_sandhi_policy_pre_open_a(a, policy) != 0) {
+        # _sandhi_conn_last_err already set to TLS (fail-closed / OOM).
+        return 0;
+    }
+    var conn = sandhi_conn_open(addr, port, 1, sni_host);
+    return _sandhi_policy_post_open_a(a, conn, policy);
 }
 
 fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy): i64 {

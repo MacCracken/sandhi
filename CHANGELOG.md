@@ -4,6 +4,96 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.6] — 2026-06-09
+
+**High-level client TLS-policy threading + cyrius pin 6.1.19 → 6.1.20.**
+Closes the hoosh v2.2.0 P1: a TLS policy (cert pinning / mTLS /
+trust-store) can now be attached to `sandhi_http_options` and is enforced
+through the high-level `sandhi_http_*` request path — including
+`sandhi_http_stream` — instead of only the low-level
+`sandhi_conn_open_with_policy`. Wiring only; no new crypto.
+
+### Added — `sandhi_http_options_tls_policy` (+2 verbs, `src/http/client.cyr`)
+
+- `sandhi_http_options_tls_policy(opts, policy)` — attach a policy built
+  via `sandhi_tls_policy_new_pinned` / `_new_mtls` / `_new_trust_store` /
+  `_combine`. Default 0 = today's behavior (no enforcement).
+- `sandhi_http_options_get_tls_policy(opts)` — getter (0 for null opts).
+- Options struct grew 72 → 80 bytes (new slot at offset 72).
+
+### Changed — HTTPS request path honors the attached policy
+
+- `_sandhi_http_do_impl_a` (`src/http/client.cyr`) and
+  `sandhi_http_stream_opts_a` (`src/http/stream.cyr`): when `opts` carries
+  a policy and the scheme is HTTPS, the open is bracketed by
+  `_sandhi_policy_pre_open_a` / `_sandhi_policy_post_open_a`
+  (`src/tls_policy/apply.cyr`) — arm the `_sandhi_tls_hook_override` for
+  trust-store / mTLS layering, then run the post-handshake SPKI pin check.
+  The existing v4/v6 timed opener is reused, so connect/read/write
+  deadlines + IPv6 are threaded for free.
+- **Fail-closed**: if the policy demands enforcement and
+  `sandhi_tls_policy_enforcement_available()` is 0, the request returns
+  `SANDHI_ERR_TLS` rather than opening unpinned (matches ADR 0004).
+- **Pool + 0-RTT bypass**: a policy-bound HTTPS request skips the
+  connection pool (a pooled conn was opened under whatever policy created
+  it; policy conns are single-use) and skips 0-RTT.
+- Threaded via a module-level `_sandhi_tls_policy_pending` flag in the
+  dispatch entry-points (save+restore, mirroring the 0-RTT / cred-digest
+  flags); the streaming path reads the policy straight off `opts`. The
+  policy applies to every hop of a redirect-follow within a dispatch (a
+  pinned host that 30x's cross-authority fails closed on the next hop's
+  SPKI — the safe default; per-hop re-pin waits for a consumer ask).
+
+### Changed — module order (`cyrius.cyml` + program/test includes)
+
+- `tls_policy/policy.cyr` + `fingerprint.cyr` + `apply.cyr` moved ahead of
+  `http/client.cyr` / `http/stream.cyr` so the high-level paths call the
+  policy pre/post-open helpers directly under cyrius's single-pass model.
+  The trio depends only on `conn.cyr` (ALPN wire + hook-override globals)
+  + stdlib + sigil, so it rides high in the order. 25 program/test include
+  blocks reordered to match; no behavioral change for any module.
+
+### Added — live gate `programs/_https_policy_threading_gate.cyr`
+
+Native-built (`-D CYRIUS_TLS_NATIVE`). Three gates vs one.one.one.one:
+no-policy GET succeeds (unset path unchanged); WRONG-pin GET fails closed
+with `err=TLS`; a pin captured live from the peer SPKI succeeds (proves
+pinning accepts a matching cert, not just "always reject"). Skip-cleanly
+offline. Wired into CI. The SPKI path is backend-agnostic since 1.4.2, so
+this gate is live-safe on native.
+
+### Changed — cyrius pin 6.1.19 → 6.1.20
+
+Mechanical bump (zero runtime source change). cyrius 6.1.20 folds sandhi
+1.4.5 into `lib/sandhi.cyr` (the consumer-side companion to 6.1.19's TLS
+fixes) and lands a macho-arm `*at()`/stat Darwin syscall port — **not
+sandhi-facing** (arm64-macOS backend only; x86 / aarch64-Linux
+byte-identical). Silences the toolchain-drift warning against the local
+6.1.20 cycc.
+
+### Filed — pre-existing TLS-policy enforcement live SIGSEGV (not 1.4.6)
+
+`docs/issues/2026-06-09-tls-policy-enforcement-live-segfault.md`: the
+**low-level** `sandhi_conn_open_with_policy` faults on a LIVE network in
+the still-libssl-coupled enforcement (libssl SPKI read on the libssl
+backend; trust-store `SSL_CTX_*` config on the native backend). Pre-exists
+1.4.6 (reproduces on pristine `main`); `programs/_policy_runtime_probe.cyr`
+skip-cleans offline so CI stays green. Tied to the tracked "native
+TLS-policy enforcement" gate for full libssl retirement. The 1.4.6
+high-level gate deliberately exercises only the backend-agnostic SPKI
+path, which is live-safe.
+
+### Verified
+
+- 992 assertions green (440 sandhi + 167 h2 + 343 alloc + 42 rpc; +13 over
+  1.4.5's 979 — new `alloc/146/` groups: tls_policy roundtrip, pending-flag
+  default, options-layout-intact).
+- `programs/_https_policy_threading_gate.cyr` (native, live): ALL GATES
+  PASS — no-policy 200, wrong-pin fail-closed TLS, correct-pin 200.
+- `cyrius build -D CYRIUS_TLS_NATIVE programs/smoke.cyr` green.
+- `cyrius lint` 0 warnings / 0 untracked deferrals; `cyrfmt --check` clean.
+- `dist/sandhi.cyr` regenerated at v1.4.6.
+
 ## [1.4.5] — 2026-06-09
 
 **Native TLS by default + P1 repeated-request SIGSEGV fixed + cyrius

@@ -5,7 +5,7 @@ description = "Service-boundary layer for AGNOS — shared HTTP/TCP/TLS + servic
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sandhi"
 language = "cyrius"
-cyrius = "6.1.19"
+cyrius = "6.1.20"
 
 # sandhi (सन्धि — junction, connection, joining) is the service-boundary
 # layer for AGNOS. Named 2026-04-24 after extensive search confirmed the
@@ -64,6 +64,16 @@ modules = [
     # high in the order.
     "src/tls_policy/session_cache.cyr",
     "src/http/conn.cyr",
+    # tls_policy/policy + fingerprint + apply ordered here (ahead of
+    # http/client.cyr + http/stream.cyr) so the high-level request
+    # paths call the policy pre/post-open helpers directly for 1.4.6
+    # TLS-policy threading. The trio depends only on conn.cyr (ALPN
+    # wire + hook-override globals) + stdlib + sigil — nothing in
+    # response/resolve/client/pool/h2/sse/stream — so it rides this
+    # high. (Was after stream.cyr through 1.4.5.)
+    "src/tls_policy/policy.cyr",
+    "src/tls_policy/fingerprint.cyr",
+    "src/tls_policy/apply.cyr",
     "src/http/response.cyr",
     "src/net/resolve.cyr",
     "src/http/client.cyr",
@@ -79,9 +89,6 @@ modules = [
     "src/http/retry.cyr",
     "src/http/sse.cyr",
     "src/http/stream.cyr",
-    "src/tls_policy/policy.cyr",
-    "src/tls_policy/fingerprint.cyr",
-    "src/tls_policy/apply.cyr",
     "src/tls_policy/alpn.cyr",
     "src/tls_policy/mod.cyr",
     "src/rpc/json.cyr",

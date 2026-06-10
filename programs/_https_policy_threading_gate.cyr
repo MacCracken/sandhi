@@ -1,0 +1,182 @@
+# programs/_https_policy_threading_gate.cyr — 1.4.6 live gate for
+# high-level TLS-policy threading.
+#
+# Verifies the hoosh v2.2.0 ask: a TLS policy attached to
+# `sandhi_http_options` is enforced through the HIGH-LEVEL request
+# path (`sandhi_http_get_opts` / `_post_opts`), not just the
+# low-level `sandhi_conn_open_with_policy`.
+#
+# Built NATIVE (-D CYRIUS_TLS_NATIVE). The SPKI-pin path is
+# backend-agnostic since 1.4.2 (`tls_get_peer_spki_der`), so this
+# gate is live-safe on native — unlike the low-level trust-store /
+# mTLS gates in `_policy_runtime_probe.cyr`, which hit the
+# still-libssl-coupled native enforcement gap
+# (docs/issues/2026-06-09-tls-policy-enforcement-live-segfault.md).
+#
+# Skip-cleanly cascade (mirrors the 1.3.0 gate): tls_available →
+# regression_network_probe(1.1.1.1) → run the gates. Offline → exit 0.
+#
+# Gates (all against one.one.one.one / 1.1.1.1:443):
+#   [A] no policy on opts        → high-level GET must succeed (proves
+#                                  the unset path is unchanged).
+#   [B] WRONG pin on opts        → high-level GET must fail-closed with
+#                                  err=TLS (proves threaded enforcement).
+#   [C] CORRECT pin on opts      → high-level GET must succeed (proves
+#                                  pinning accepts the real cert, i.e.
+#                                  enforcement isn't "always reject").
+#                                  The pin is captured live from the
+#                                  peer SPKI so the gate is hermetic.
+#
+# Exit codes:
+#   0  — PASS or clean SKIP
+#   1  — enforcement_available() == 0 while tls_available() == 1
+#   2  — [A] no-policy GET failed (unset-path regression)
+#   3  — [B] wrong-pin GET did NOT fail-closed / wrong err_kind (SECURITY)
+#   4  — [C] could not capture the live peer SPKI
+#   5  — [C] correct-pin GET failed (pinning rejects a matching cert)
+
+# sigil's SHA-256 (SPKI digest) pulls thread_local / ct / keccak,
+# which sigil does not declare — include the chain so `sha256` links.
+include "lib/thread_local.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+include "lib/sigil.cyr"
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
+include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+# Capture the peer SPKI fingerprint (hex) of a freshly-opened
+# default-policy connection. Native default-open + the backend-agnostic
+# `tls_get_peer_spki_der` — the same primitive `_sandhi_check_spki_a`
+# uses, so a pin built from this WILL match the enforcement path.
+# Returns the hex cstr, or 0 on failure.
+fn capture_peer_spki_hex(ip, sni): i64 {
+    var c = sandhi_conn_open_with_policy(ip, 443, 1, sni, sandhi_tls_policy_new_default());
+    if (c == 0) { return 0; }
+    var ctx = sandhi_conn_tls_ctx(c);
+    var der[1024];
+    var n = tls_get_peer_spki_der(ctx, &der, 1024);
+    if (n <= 0) { sandhi_conn_close(c); return 0; }
+    var dg[32];
+    sha256(&der, n, &dg);
+    var hex = sandhi_fp_encode_bytes_a(default_alloc(), &dg, 32);
+    sandhi_conn_close(c);
+    return hex;
+}
+
+fn main() {
+    alloc_init();
+
+    say("=== sandhi high-level TLS-policy threading gate (native) ===\n");
+
+    if (tls_available() == 0) {
+        say("  skip: tls_available() == 0\n");
+        return 0;
+    }
+    var ip_111 = 1 | (1 << 8) | (1 << 16) | (1 << 24);  # 1.1.1.1
+    if (regression_network_probe(ip_111, 443, 3000) != 1) {
+        say("  skip: 1.1.1.1:443 unreachable (no network in 3s)\n");
+        return 0;
+    }
+    if (sandhi_tls_policy_enforcement_available() != 1) {
+        say("  FAIL: enforcement_available() == 0 (resolve gap)\n");
+        return 1;
+    }
+
+    var url = "https://one.one.one.one/";
+
+    say("[A] no policy on opts -> high-level GET must succeed\n");
+    var oa = sandhi_http_options_new();
+    sandhi_http_options_connect_ms(oa, 3000);
+    sandhi_http_options_read_ms(oa, 5000);
+    var ra = sandhi_http_get_opts(url, 0, oa);
+    if (sandhi_http_status(ra) <= 0) {
+        say("    FAIL: no-policy GET did not succeed; err_kind = ");
+        fmt_int(sandhi_http_err_kind(ra)); say("\n");
+        return 2;
+    }
+    say("    PASS (status = "); fmt_int(sandhi_http_status(ra)); say(")\n");
+
+    say("[B] WRONG pin on opts -> high-level GET must fail-closed (err=TLS)\n");
+    var bad_pin = "0000000000000000000000000000000000000000000000000000000000000000";
+    var ob = sandhi_http_options_new();
+    sandhi_http_options_connect_ms(ob, 3000);
+    sandhi_http_options_read_ms(ob, 5000);
+    sandhi_http_options_tls_policy(ob, sandhi_tls_policy_new_pinned(bad_pin));
+    var rb = sandhi_http_get_opts(url, 0, ob);
+    if (sandhi_http_status(rb) > 0) {
+        say("    FAIL: wrong-pin GET returned a status (fail-closed broken — SECURITY); status = ");
+        fmt_int(sandhi_http_status(rb)); say("\n");
+        return 3;
+    }
+    if (sandhi_http_err_kind(rb) != SANDHI_ERR_TLS) {
+        say("    FAIL: wrong-pin err_kind != SANDHI_ERR_TLS; got = ");
+        fmt_int(sandhi_http_err_kind(rb)); say("\n");
+        return 3;
+    }
+    say("    PASS (fail-closed, err=TLS)\n");
+
+    say("[C] CORRECT pin on opts -> high-level GET must succeed\n");
+    var hex = capture_peer_spki_hex(ip_111, "one.one.one.one");
+    if (hex == 0) {
+        say("    FAIL: could not capture live peer SPKI\n");
+        return 4;
+    }
+    var oc = sandhi_http_options_new();
+    sandhi_http_options_connect_ms(oc, 3000);
+    sandhi_http_options_read_ms(oc, 5000);
+    sandhi_http_options_tls_policy(oc, sandhi_tls_policy_new_pinned(hex));
+    var rc = sandhi_http_get_opts(url, 0, oc);
+    if (sandhi_http_status(rc) <= 0) {
+        say("    FAIL: correct-pin GET failed (pinning rejects a matching cert); err_kind = ");
+        fmt_int(sandhi_http_err_kind(rc)); say("\n");
+        return 5;
+    }
+    say("    PASS (status = "); fmt_int(sandhi_http_status(rc)); say(")\n");
+
+    say("\nALL GATES PASS\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

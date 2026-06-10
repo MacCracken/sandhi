@@ -21,6 +21,17 @@
 #   [4] non-existent trust_store path: must fail-closed (or note
 #       the system-CA-still-loaded edge case as a warning).
 #
+# 1.4.6 — the high-level TLS-policy *threading* (policy attached to
+# sandhi_http_options, enforced through sandhi_http_*) has its own
+# native-built gate, programs/_https_policy_threading_gate.cyr. It is
+# kept separate because the low-level gates [3]/[4] here hit a
+# pre-existing SIGSEGV on a LIVE network (libssl SPKI read faults at
+# [3]; native trust-store config faults at [4]) — the "native TLS-policy
+# enforcement" gap; see
+# docs/issues/2026-06-09-tls-policy-enforcement-live-segfault.md. This
+# gate skip-cleans offline (CI), so it stays green there; the new gate
+# exercises only the backend-agnostic SPKI path that is live-safe.
+#
 # mTLS is NOT exercised here — needs a server-side fixture
 # requiring client certs. Pinned for a future slot when sandhi
 # ships a self-signed-server harness.
@@ -52,6 +63,9 @@ include "src/http/headers.cyr"
 include "src/http/url.cyr"
 include "src/tls_policy/session_cache.cyr"
 include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
 include "src/http/response.cyr"
 include "src/net/resolve.cyr"
 include "src/http/client.cyr"
@@ -66,9 +80,6 @@ include "src/http/h2/pool_glue.cyr"
 include "src/http/h2/dispatch.cyr"
 include "src/http/sse.cyr"
 include "src/http/stream.cyr"
-include "src/tls_policy/policy.cyr"
-include "src/tls_policy/fingerprint.cyr"
-include "src/tls_policy/apply.cyr"
 include "src/tls_policy/alpn.cyr"
 include "src/tls_policy/mod.cyr"
 include "src/rpc/json.cyr"

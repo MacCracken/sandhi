@@ -14,6 +14,8 @@ include "src/http/headers.cyr"
 include "src/http/url.cyr"
 include "src/tls_policy/session_cache.cyr"
 include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
 include "src/http/response.cyr"
 include "src/net/resolve.cyr"
 include "src/http/client.cyr"
@@ -30,8 +32,6 @@ include "src/http/sse.cyr"
 include "src/http/stream.cyr"
 include "src/http/retry.cyr"
 include "src/server/mod.cyr"
-include "src/tls_policy/policy.cyr"
-include "src/tls_policy/fingerprint.cyr"
 include "src/rpc/json.cyr"
 include "src/rpc/dispatch.cyr"
 include "src/rpc/webdriver.cyr"
@@ -1950,6 +1950,58 @@ fn test_alloc_134_age_evict_on_lookup() {
     return 0;
 }
 
+# ----------------------------------------------------------------
+# 1.4.6 — high-level TLS-policy threading. The options struct gains
+# a tls_policy slot (offset 72); the dispatch path threads it through
+# the module-level `_sandhi_tls_policy_pending` flag (mirrors the
+# 0-RTT / cred-digest flags). Live enforcement is covered by
+# programs/_https_policy_threading_gate.cyr; these are the
+# deterministic accessor + default-state checks.
+# ----------------------------------------------------------------
+
+fn test_alloc_146_tls_policy_roundtrip() {
+    var opts = sandhi_http_options_new();
+    assert_neq(opts, 0, "options allocated");
+    assert_eq(sandhi_http_options_get_tls_policy(opts), 0,
+    "tls_policy defaults to 0 (no enforcement)");
+    # A policy handle is just an opaque pointer to the options slot;
+    # use a non-zero sentinel to prove the slot round-trips.
+    sandhi_http_options_tls_policy(opts, 4242);
+    assert_eq(sandhi_http_options_get_tls_policy(opts), 4242,
+    "set policy round-trips");
+    sandhi_http_options_tls_policy(opts, 0);
+    assert_eq(sandhi_http_options_get_tls_policy(opts), 0,
+    "clear policy round-trips");
+    # opts == 0 guard — getter returns 0 so the dispatch path treats a
+    # null-opts request as policy-free.
+    assert_eq(sandhi_http_options_get_tls_policy(0), 0, "null opts → 0");
+    return 0;
+}
+
+fn test_alloc_146_tls_policy_flag_default() {
+    # Module-level pending-policy flag (src/http/conn.cyr), set
+    # transiently around dispatch and restored after — same shape as
+    # `_sandhi_allow_0rtt` / `_sandhi_cred_digest`. Defaults to 0.
+    assert_eq(_sandhi_tls_policy_pending, 0,
+    "module-level pending-policy flag defaults to 0");
+    return 0;
+}
+
+# The 1.4.6 tls_policy slot must not have disturbed the other option
+# slots — every prior accessor still reads its own default after the
+# struct grew 72 → 80 bytes.
+fn test_alloc_146_options_layout_intact() {
+    var opts = sandhi_http_options_new();
+    assert_neq(opts, 0, "options allocated");
+    assert_eq(sandhi_http_options_follow(opts), 0, "follow default 0");
+    assert_eq(sandhi_http_options_get_connect_ms(opts), 0, "connect_ms default 0");
+    assert_eq(sandhi_http_options_get_total_ms(opts), 0, "total_ms default 0");
+    assert_eq(sandhi_http_options_get_pool(opts), 0, "pool default 0");
+    assert_eq(sandhi_http_options_get_allow_0rtt(opts), 0, "allow_0rtt default 0");
+    assert_eq(sandhi_http_options_get_tls_policy(opts), 0, "tls_policy default 0");
+    return 0;
+}
+
 # ================================================================
 # Runner
 # ================================================================
@@ -2242,6 +2294,15 @@ fn main() {
 
     test_group("alloc/134/age_evict_on_lookup");
     test_alloc_134_age_evict_on_lookup();
+
+    test_group("alloc/146/tls_policy_roundtrip");
+    test_alloc_146_tls_policy_roundtrip();
+
+    test_group("alloc/146/tls_policy_flag_default");
+    test_alloc_146_tls_policy_flag_default();
+
+    test_group("alloc/146/options_layout_intact");
+    test_alloc_146_options_layout_intact();
 
     return assert_summary();
 }

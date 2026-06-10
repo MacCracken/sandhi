@@ -102,6 +102,21 @@ var _sandhi_cred_digest = 0;
 var _sandhi_tls_hook_override     = 0;  # fn ptr (hook signature) or 0
 var _sandhi_tls_hook_override_ctx = 0;  # opaque hook_ctx ptr or 0
 
+# 1.4.6 — pending TLS policy for the in-flight request. Set by the
+# dispatch entry-points (client.cyr) to opts.tls_policy; read by
+# `_sandhi_http_do_impl_a` at its open site, where it brackets the
+# v4/v6 timed open with `_sandhi_policy_pre_open_a` /
+# `_sandhi_policy_post_open_a` (tls_policy/apply.cyr — ordered ahead
+# of client.cyr / stream.cyr in cyrius.cyml so the helpers are
+# reachable; those helpers arm/clear the `_sandhi_tls_hook_override`
+# above + run the post-handshake SPKI check). Same module-level-flag
+# rationale as `_sandhi_allow_0rtt` / `_sandhi_cred_digest` —
+# single-threaded client model, transient per-request state we don't
+# thread through 8+ fn signatures. The streaming path reads the
+# policy straight off `opts` instead (it doesn't route through
+# `_sandhi_http_dispatch_a`).
+var _sandhi_tls_policy_pending = 0;
+
 # 1.4.2: the ALPN-read libssl binding (SSL_get0_alpn_selected via tls_dlsym +
 # the raw SSL* at ctx+8) is GONE — replaced by the stdlib's typed, backend-
 # agnostic `tls_get_alpn_selected` verb (cyrius 6.0.82). See

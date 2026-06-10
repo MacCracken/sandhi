@@ -215,6 +215,18 @@ jobs:
           cyrius build -D CYRIUS_TLS_NATIVE programs/_https_native_loop_gate.cyr build/_https_native_loop_gate
           build/_https_native_loop_gate
 
+      - name: High-level TLS-policy threading gate (1.4.6)
+        # 1.4.6: a TLS policy attached to sandhi_http_options must be
+        # enforced through the high-level sandhi_http_* path. Built
+        # native (-D CYRIUS_TLS_NATIVE) — the SPKI-pin path is
+        # backend-agnostic since 1.4.2 and live-safe on native (unlike
+        # the libssl-coupled trust-store/mTLS gates). Gates: no-policy
+        # GET succeeds; wrong-pin GET fails closed (err=TLS); a pin
+        # captured live from the peer SPKI succeeds. Skip-cleanly offline.
+        run: |
+          cyrius build -D CYRIUS_TLS_NATIVE programs/_https_policy_threading_gate.cyr build/_https_policy_threading_gate
+          build/_https_policy_threading_gate
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest

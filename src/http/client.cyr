@@ -388,9 +388,15 @@ connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     # Try the pool first when attached. A taken conn skips the connect
     # phase entirely (and its timeout). Failure on a pooled conn falls
     # back to opening a fresh one — peer may have closed since put-back.
+    # 1.4.6 — a TLS policy on an HTTPS request bypasses the pool
+    # (a pooled conn was opened under whatever policy created it;
+    # policy-bound conns are single-use) and bypasses 0-RTT.
+    var has_policy = 0;
+    if (_sandhi_tls_policy_pending != 0 && use_tls == 1) { has_policy = 1; }
+
     var keep_alive = 0;
     var conn = 0;
-    if (pool != 0) {
+    if (pool != 0 && has_policy == 0) {
         keep_alive = 1;
         conn = _sandhi_pool_take(pool, host, port, use_tls);
     }
@@ -409,6 +415,18 @@ connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     if (conn == 0) {
         var eff_connect = _sandhi_http_clamp_ms(connect_ms, deadline_ms);
         if (eff_connect == 0 - 1) { return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT); }
+        # 1.4.6 — install the TLS policy hook before opening. _pre arms
+        # the _sandhi_tls_hook_override (consumed by finalize) when the
+        # policy demands enforcement; returns -1 fail-closed when
+        # enforcement is unavailable. The matching _post (after open)
+        # clears the override + runs the SPKI pin check. Both helpers
+        # live in tls_policy/apply.cyr, ordered ahead of client.cyr in
+        # cyrius.cyml so they're reachable here.
+        if (has_policy == 1) {
+            if (_sandhi_policy_pre_open_a(a, _sandhi_tls_policy_pending) != 0) {
+                return _sandhi_resp_err_a(a, SANDHI_ERR_TLS);
+            }
+        }
         # 1.3.2 — 0-RTT eligibility: opt-in flag set + TLS + method
         # is replay-safe + libssl exposes the full 0-RTT surface +
         # session-cache enabled (no session means no resumption).
@@ -417,7 +435,8 @@ connect_ms, read_ms, write_ms, total_ms, pool): i64 {
         # lookup); we just need the early_data bytes to be non-zero
         # for finalize to consider 0-RTT.
         var use_0rtt = 0;
-        if (_sandhi_allow_0rtt == 1
+        if (has_policy == 0
+        && _sandhi_allow_0rtt == 1
         && use_tls == 1
         && _sandhi_method_is_replay_safe(method) == 1
         && tls_supports_early_data() == 1
@@ -446,6 +465,14 @@ connect_ms, read_ms, write_ms, total_ms, pool): i64 {
                 conn = sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, host,
                 eff_connect, read_ms, write_ms);
             }
+        }
+        # 1.4.6 — clear the policy hook override + run the post-handshake
+        # SPKI pin check. _post always clears the override (even on a 0
+        # conn from a failed open) and, on an SPKI mismatch, closes the
+        # conn + sets last-err to TLS → the block below maps it to
+        # SANDHI_ERR_TLS. Pass-through (no policy) leaves conn untouched.
+        if (has_policy == 1) {
+            conn = _sandhi_policy_post_open_a(a, conn, _sandhi_tls_policy_pending);
         }
         if (conn == 0) {
             sandhi_prof_capture(SANDHI_PROF_PHASE_CONN_OPEN_END);
@@ -701,9 +728,10 @@ enum SandhiHttpOptOff {
     SANDHI_HTTP_OPT_OFF_TOTAL_MS     = 48;
     SANDHI_HTTP_OPT_OFF_POOL         = 56;
     SANDHI_HTTP_OPT_OFF_ALLOW_0RTT   = 64;   # 1.3.2 — opt-in TLS 1.3 0-RTT
+    SANDHI_HTTP_OPT_OFF_TLS_POLICY   = 72;   # 1.4.6 — opt-in TLS policy (pin/mTLS/trust)
 }
 
-var SANDHI_HTTP_OPT_STRUCT_SIZE = 72;
+var SANDHI_HTTP_OPT_STRUCT_SIZE = 80;
 var SANDHI_HTTP_DEFAULT_MAX_HOPS = 5;
 var SANDHI_HTTP_DEFAULT_MAX_BYTES = 262144;
 
@@ -719,6 +747,7 @@ fn sandhi_http_options_new_a(a): i64 {
     store64(o + SANDHI_HTTP_OPT_OFF_TOTAL_MS, 0);
     store64(o + SANDHI_HTTP_OPT_OFF_POOL, 0);
     store64(o + SANDHI_HTTP_OPT_OFF_ALLOW_0RTT, 0);
+    store64(o + SANDHI_HTTP_OPT_OFF_TLS_POLICY, 0);
     return o;
 }
 
@@ -778,6 +807,25 @@ fn sandhi_http_options_pool(opts, pool): i64 {
 fn sandhi_http_options_allow_0rtt(opts, on): i64 {
     store64(opts + SANDHI_HTTP_OPT_OFF_ALLOW_0RTT, on);
     return 0;
+}
+
+# 1.4.6 — attach a TLS policy (pin / mTLS / trust-store, built via
+# `sandhi_tls_policy_new_pinned` / `_new_mtls` / `_new_trust_store` /
+# `_combine`) to a high-level request. Default 0 = no enforcement
+# (today's behavior). When set on an HTTPS request, `_sandhi_http_do_impl_a`
+# (and `sandhi_http_stream_opts_a`) open through the policy opener:
+# fail-closed if enforcement is unavailable, post-handshake SPKI pin
+# check, and the connection is NOT pooled (policy-bound conns are
+# single-use). A policy on a plain-HTTP request is ignored (no TLS to
+# enforce). See docs/issues/2026-06-09-https-client-tls-policy-threading.md.
+fn sandhi_http_options_tls_policy(opts, policy): i64 {
+    store64(opts + SANDHI_HTTP_OPT_OFF_TLS_POLICY, policy);
+    return 0;
+}
+
+fn sandhi_http_options_get_tls_policy(opts): i64 {
+    if (opts == 0) { return 0; }
+    return load64(opts + SANDHI_HTTP_OPT_OFF_TLS_POLICY);
 }
 
 fn sandhi_http_options_get_allow_0rtt(opts): i64 {
@@ -1051,6 +1099,14 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts): i64 {
     # over-engineering.
     var prior_cred = _sandhi_cred_digest;
     _sandhi_cred_digest = _sandhi_compute_cred_digest(headers);
+    # 1.4.6 — pending TLS policy for this dispatch. do_impl_a reads it
+    # at the open site (HTTPS only). Save+restore mirrors the 0-RTT /
+    # cred-digest pattern; the policy applies to every hop of a
+    # redirect-follow within this dispatch (a pinned host that 30x's
+    # cross-authority will fail closed on the next hop's SPKI — the
+    # safe default; per-hop re-pin waits for a consumer ask).
+    var prior_policy = _sandhi_tls_policy_pending;
+    _sandhi_tls_policy_pending = sandhi_http_options_get_tls_policy(opts);
     var r = 0;
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
@@ -1060,6 +1116,7 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts): i64 {
         r = _sandhi_http_do_a(a, method, url, headers, body, body_len,
         max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
     }
+    _sandhi_tls_policy_pending = prior_policy;
     _sandhi_cred_digest = prior_cred;
     _sandhi_allow_0rtt = prior_0rtt;
     return r;
