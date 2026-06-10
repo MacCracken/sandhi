@@ -4,23 +4,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Changed — TLS backend flag polarity inverted (native = no-flag default)
+## [1.4.8] — 2026-06-09
 
-The `-D CYRIUS_TLS_NATIVE` build requirement is removed. Native is now the
-**unconditional no-flag default** and `-D CYRIUS_TLS_LIBSSL` is the explicit
-opt-in for the deprecated libssl bridge — the inverse of the 1.4.5–1.4.7
-convention. Inverted across the repo: `ci.yml` + `release.yml` build steps,
-`CLAUDE.md` Quick Start + TLS note, `docs/architecture/004`, the four
-`programs/*.cyr` gate comments + the probe skip message, and
+**TLS backend flag-polarity flip (target convention) + interim green CI.**
+Documentation/build-convention change; no functional source change (cyrius pin
+stays **6.1.20**).
+
+### Changed — TLS backend flag polarity flipped to native-as-no-flag-default
+
+The repo's **target convention** is now: native is the no-flag default and
+`-D CYRIUS_TLS_LIBSSL` is the explicit opt-in for the deprecated libssl bridge —
+the inverse of the 1.4.5–1.4.7 `-D CYRIUS_TLS_NATIVE` opt-in. Applied across the
+docs + gate programs: `CLAUDE.md` Quick Start + TLS note, `docs/architecture/004`,
+the four `programs/*.cyr` gate comments + the probe skip message, and the
 `src/tls_policy/mod.cyr` backend-selection header.
 
-> **Staged ahead of upstream — does NOT build green yet.** This inversion
-> depends on the cyrius-side inverted-default build (native compiled in by
-> default; `-D CYRIUS_TLS_LIBSSL` as the opt-out). Until that ships in a
-> pinned cyrius release, a no-flag `cyrius build` still resolves to libssl
-> and sandhi's native gates will not pass. The cyrius pin stays **6.1.20**
-> until the upstream flip lands; bump + release is gated on it. Tracked as a
-> roadmap cross-repo dependency.
+### Interim — CI/release keep `-D CYRIUS_TLS_NATIVE` until the cyrius flip lands
+
+The target convention needs an **upstream cyrius change** that is NOT in the
+pinned toolchain (6.1.20) or cyrius HEAD — `lib/tls.cyr` is still
+`#ifdef CYRIUS_TLS_NATIVE` (native opt-IN; a no-flag build resolves to libssl,
+verified directly). So `ci.yml` + `release.yml` **keep `-D CYRIUS_TLS_NATIVE`**
+on the native smoke link-proof + the three native live gates
+(`_policy_runtime_probe`, `_https_native_loop_gate`, `_https_policy_threading_gate`),
+with an interim banner pointing at the filed cyrius issue; the libssl link-proof
+builds with no flag (the real 6.1.20 default). This keeps CI **green and actually
+exercising native** (native smoke 1.37 MB with the native stack linked vs 562 KB
+libssl; all three native gates PASS) instead of the no-flag builds silently
+falling back to libssl. When cyrius ships the inverted default and the pin moves
+to it, drop `-D CYRIUS_TLS_NATIVE` from the native steps + add
+`-D CYRIUS_TLS_LIBSSL` to the libssl step, and remove the banner.
+
+### Filed — cyrius-side inverted-default (completes the flip)
+
+`cyrius/docs/development/issues/2026-06-09-invert-tls-backend-default-native-no-flag.md`
+— the exact `lib/tls.cyr` change (invert `#ifdef CYRIUS_TLS_NATIVE` →
+`#ifndef CYRIUS_TLS_LIBSSL`: native compiled-in + default, `-D CYRIUS_TLS_LIBSSL`
+opts out), keeping `-D CYRIUS_TLS_NATIVE` as a no-op alias for the transition,
+plus the binary-size trade-off + acceptance criteria. Tracked as a roadmap
+cross-repo dependency ("Inverted-default TLS build").
+
+### Verified
+
+- Native smoke (`-D CYRIUS_TLS_NATIVE`, DCE) links the native stack (1.37 MB);
+  libssl smoke (no flag) builds (562 KB).
+- All three native live gates PASS for real on the native build (not skip).
+- 992 assertions green; `cyrius lint` 0 warnings / 0 deferrals; `cyrfmt --check`
+  clean; `dist/sandhi.cyr` regenerated at v1.4.8.
 
 ## [1.4.7] — 2026-06-09
 
