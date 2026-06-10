@@ -40,11 +40,18 @@ Project was scaffolded with `cyrius init sandhi` on 2026-04-24. **Do not manuall
 
 ```bash
 cyrius deps                                                # resolve stdlib deps
-cyrius build programs/smoke.cyr build/sandhi-smoke        # build (link proof)
-cyrius test src/test.cyr                                   # unit tests
+cyrius build -D CYRIUS_TLS_NATIVE programs/smoke.cyr build/sandhi-smoke   # build (link proof, native TLS default)
+cyrius test src/test.cyr                                   # unit tests (backend-agnostic; no -D needed)
 cyrius lint src/*.cyr                                      # static checks
-CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke  # release-parity build
+CYRIUS_DCE=1 cyrius build -D CYRIUS_TLS_NATIVE programs/smoke.cyr build/sandhi-smoke  # release-parity build
 ```
+
+> **TLS backend (1.4.5+):** sandhi defaults to the **native** TLS backend; the
+> libssl fdlopen bridge is a deprecated opt-in (`sandhi_tls_use_libssl()`).
+> Native is the default **only when built with `-D CYRIUS_TLS_NATIVE`** — there
+> is no manifest-level define, so every `cyrius build` (and every consumer
+> build) must pass it. Without the flag the build stays on libssl and is exposed
+> to the repeated-request SIGSEGV. See [architecture/004](docs/architecture/004-native-tls-default.md).
 
 ## Architecture
 
@@ -56,14 +63,14 @@ Module responsibilities (file list in `state.md`):
 - **`src/http/headers.cyr`** — header management.
 - **`src/rpc/mod.cyr`** — JSON-RPC dialects (WebDriver, Appium, MCP). Absorbs the RPC-grade side of the `lib/json.cyr depth` item.
 - **`src/discovery/mod.cyr`** — service discovery (mDNS, daimon-registered, chained fallback). The genuinely new surface.
-- **`src/tls_policy/mod.cyr`** — cert pinning, mTLS, trust store. Wraps stdlib `lib/tls.cyr`. Transport details (fdlopen-libssl today; possibly native later) live in stdlib; sandhi's hook-surface contract is unchanged across any swap.
+- **`src/tls_policy/mod.cyr`** — cert pinning, mTLS, trust store + TLS backend selection (`sandhi_tls_use_native` / `_use_libssl` / `_backend` / `_native_available`). Wraps stdlib `lib/tls.cyr`. As of 1.4.5 sandhi defaults to the **native** backend (build with `-D CYRIUS_TLS_NATIVE`); libssl is a deprecated opt-in. Transport details live in stdlib; sandhi's hook-surface contract is unchanged across the swap. See [architecture/004](docs/architecture/004-native-tls-default.md).
 - **`src/server/mod.cyr`** — canonical home of the HTTP server surface (lifted from `lib/http_server.cyr` at M1). Stdlib deletes its copy at Cyrius v5.7.0 per [ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md); until then, stdlib 5.6.YY emits a deprecation warning on include.
 
 ## Key Constraints
 
 - **Compose, don't reimplement.** Stdlib primitives (`http.cyr`, `ws.cyr`, `tls.cyr`, `json.cyr`, `net.cyr`) already exist; sandhi wraps them with policy + dialect + pooling + discovery layers. Do not fork the primitives into sandhi — if a primitive needs work, that's a stdlib patch, not a sandhi feature.
 - **`lib/http_server.cyr` migration is lift-and-shift first, enhance second.** The verbatim lift into `src/server/mod.cyr` landed at M1 (v0.2.0). Routing / middleware layer on top in later milestones. No stdlib-side alias — stdlib deletes its copy in the v5.7.0 clean-break fold per [ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md). No architectural rework mid-migration.
-- **No FFI.** Sandhi imports stdlib `lib/tls.cyr` (and other stdlib net primitives) and never opens its own dlopen / fdlopen path. Whether stdlib's `tls.cyr` is fdlopen-libssl-backed or native is a stdlib implementation detail; sandhi's surface is unchanged across any swap. Auditing the hook surface for transport assumptions is a cyrius-side issue against `lib/tls.cyr`, not a sandhi slot.
+- **No FFI.** Sandhi imports stdlib `lib/tls.cyr` (and other stdlib net primitives) and never opens its own dlopen / fdlopen path. Whether stdlib's `tls.cyr` is fdlopen-libssl-backed or native is a stdlib implementation detail; sandhi's surface is unchanged across any swap. Sandhi only *selects* the backend (1.4.5 defaults to native via `tls_set_backend`); it never reaches past the stdlib `tls_*` contract. Auditing the hook surface for transport assumptions is a cyrius-side issue against `lib/tls.cyr`, not a sandhi slot.
 - **Dialect code stays in `src/rpc/`.** When a consumer (yantra, daimon, etc.) needs a new JSON-RPC dialect, the dialect wrapper lives here, not in the consumer. One dialect = one small file. Keeps the public surface of consumer crates clean.
 - **Discovery is pluggable, not load-bearing on any single backend.** `sandhi_discover_chain` lets consumers fall back gracefully; no resolver is a hard dependency.
 - **Fold-into-stdlib is the explicit target.** Keep the public surface small enough to fold cleanly. If sandhi grows wildly, it's a sign to push work into sibling crates rather than let sandhi balloon.

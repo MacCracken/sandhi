@@ -4,6 +4,90 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.5] — 2026-06-09
+
+**Native TLS by default + P1 repeated-request SIGSEGV fixed + cyrius
+pin 6.0.87 → 6.1.19.** Root-caused the hoosh-reported 4th-request HTTPS
+crash to an upstream cyrius allocator/fdlopen bug, switched sandhi's default
+TLS backend to the native stack, and re-pinned to cyrius 6.1.19 which lands
+the two upstream root fixes — verified end-to-end.
+
+### Fixed — P1: HTTPS repeated-request SIGSEGV (root cause = upstream; fixed 6.1.19)
+
+`sandhi_http_get`/`_post` to one HTTPS host SIGSEGV'd on the ~4th
+sequential call (reported by hoosh v2.2.0;
+`docs/issues/2026-06-09-https-repeated-request-segfault.md`). Traced to
+**cyrius `lib/alloc.cyr`'s `brk(2)` bump heap colliding with glibc
+malloc's brk arena** (pulled in by `lib/fdlopen.cyr` loading libssl) —
+two brk managers, one program break; the collision lands when cyrius's
+heap first grows past its initial 1 MB (request #4, given the high-level
+client leaks ~256 KB/request into `default_alloc()`). **Not a sandhi
+conn-lifecycle bug** — reproduces with zero sandhi code, and switching
+the per-iter leak from `brk` `alloc()` to `mmap` eliminates it (the
+smoking gun). Filed two upstream cyrius issues, **both fixed in cyrius
+6.1.19**:
+- `2026-06-09-brk-bump-heap-vs-fdlopen-libssl-malloc.md` — cyrius moved the
+  Linux heap off raw `brk(2)` onto an **anonymous-`mmap` chunk-bump
+  allocator**; no more brk-vs-glibc contention.
+- `2026-06-09-native-tls-handshake-gap-public-servers.md` — cyrius fixed
+  cert-chain / intermediate ordering so the native stack handshakes
+  Cloudflare-fronted hosts (example.com), not just 1.1.1.1.
+
+Verified at 6.1.19: **native** `sandhi_http_get` ×6 to example.com → 6/6
+status 200, no crash (was handshake-fail at 6.1.18); **libssl opt-in** ×6 to
+example.com → 6/6 status 200, EXIT 0 (was SIGSEGV/139 on the 4th).
+
+### Changed — native TLS is the default backend; libssl is a deprecated opt-in
+
+sandhi now defaults to the native TLS stack (`lib/tls_native.cyr`), which
+loads no libssl/glibc and so has no brk contention — verified crash-free
+(6/6 sequential native `sandhi_http_get` to one HTTPS host). The native
+stack is the build default **only when compiled with `-D CYRIUS_TLS_NATIVE`**
+(no manifest-level define exists); sandhi's build, CI, and Quick Start
+pass it, and **consumers must too** to get the native default. See
+`docs/architecture/004-native-tls-default.md`.
+
+### Added — TLS backend-selection surface (+4 verbs, `src/tls_policy/mod.cyr`)
+
+- `sandhi_tls_use_native()` — switch to native (returns -1 if not compiled in).
+- `sandhi_tls_use_libssl()` — opt out to the deprecated libssl bridge
+  (safe on repeated requests as of the 6.1.19 alloc fix; still deprecated).
+- `sandhi_tls_backend()` — active backend (0 = libssl, 1 = native).
+- `sandhi_tls_native_available()` — 1 if the native stack was compiled in.
+
+### Fixed — unconditional `tls_get_session` session-ref leak (libssl path)
+
+`_sandhi_conn_finalize_with_early_data_a` (`src/http/conn.cyr`) captured a
+refcount-bumped `SSL_SESSION` on **every** TLS connection, even with the
+session cache off (the default) — where `_store` is a no-op that never
+frees it, leaking one session ref per connection on the libssl backend.
+Gated the capture on `sandhi_session_cache_enabled()`.
+
+### Added — P1 regression gate
+
+`programs/_https_native_loop_gate.cyr` — N≥4 sequential native
+`sandhi_http_get` to one HTTPS host must complete crash-free
+(skip-cleanly when offline). Wired into CI; targets 1.1.1.1 (a host the
+native stack handshakes today). CI also gains a libssl-path link proof so
+the opt-in keeps building.
+
+### Verified
+
+- 979 assertions green (440 sandhi + 167 h2 + 330 alloc + 42 rpc;
+  unchanged — backend-agnostic unit suites).
+- Native HTTPS loop gate: backend=native, 6/6 requests OK, no crash (vs
+  1.1.1.1). libssl path still builds.
+- `cyrius build -D CYRIUS_TLS_NATIVE programs/smoke.cyr` green; libssl
+  smoke build green.
+
+### Notes
+
+The two upstream cyrius P1 fixes landed in 6.1.19 (re-pinned here). Full
+libssl *retirement* now has one remaining blocker: wiring TLS policy
+enforcement (pinning / mTLS / trust-store in `apply.cyr`, still
+`tls_dlsym`/libssl-coupled) for the native backend. Plain HTTPS is native
+today; policy-bearing connections still imply libssl.
+
 ## [1.4.4] — 2026-06-07
 
 **Closeout housekeeping batch: roadmap slot realignment +

@@ -129,14 +129,24 @@ jobs:
           fi
           echo "dist/sandhi.cyr matches src/"
 
-      - name: Build (DCE) — link proof against the library
+      - name: Build (DCE) — link proof against the library (native TLS default)
         # `programs/smoke.cyr` is the canonical build target per
         # cyrius.cyml [build].entry. sandhi itself is a library; the
         # smoke program is what verifies all symbols link cleanly.
+        # 1.4.5: native TLS is the default backend — build with
+        # `-D CYRIUS_TLS_NATIVE` so the link proof exercises the native
+        # stack (what consumers get by default).
         run: |
           mkdir -p build
-          CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke
-          echo "sandhi-smoke: $(wc -c < build/sandhi-smoke) bytes"
+          CYRIUS_DCE=1 cyrius build -D CYRIUS_TLS_NATIVE programs/smoke.cyr build/sandhi-smoke
+          echo "sandhi-smoke (native): $(wc -c < build/sandhi-smoke) bytes"
+
+      - name: Build link proof — libssl opt-in path
+        # The libssl bridge is a deprecated opt-in (sandhi_tls_use_libssl)
+        # but must keep building. No -D: stdlib defaults to libssl.
+        run: |
+          CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke-libssl
+          echo "sandhi-smoke (libssl): $(wc -c < build/sandhi-smoke-libssl) bytes"
 
       - name: Verify ELF magic
         run: xxd -l 4 build/sandhi-smoke | grep -q "7f45 4c46"
@@ -193,6 +203,17 @@ jobs:
         run: |
           cyrius build programs/_policy_runtime_probe.cyr build/_policy_runtime_probe
           build/_policy_runtime_probe
+
+      - name: Native HTTPS repeated-request gate (P1 regression)
+        # 1.4.5: guards the repeated-request SIGSEGV (cyrius brk/fdlopen
+        # contention). Built native (-D CYRIUS_TLS_NATIVE) so no libssl is
+        # loaded; N>=4 sequential sandhi_http_get to one HTTPS host must
+        # complete crash-free. Targets 1.1.1.1 (a host the native stack
+        # can handshake today; example.com-class hosts await the upstream
+        # native-handshake gap). Skip-cleanly when offline.
+        run: |
+          cyrius build -D CYRIUS_TLS_NATIVE programs/_https_native_loop_gate.cyr build/_https_native_loop_gate
+          build/_https_native_loop_gate
 
   security:
     name: Security Scan

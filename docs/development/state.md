@@ -4,6 +4,8 @@
 
 ## Version
 
+**1.4.5** — 2026-06-09. **Native TLS by default + P1 repeated-request SIGSEGV fixed + cyrius pin 6.0.87 → 6.1.19.** Root-caused the hoosh-reported 4th-request HTTPS crash to **cyrius `lib/alloc.cyr` `brk(2)` bump heap colliding with glibc malloc's brk arena** (pulled in by `fdlopen`-libssl) — two brk managers, one program break; collides when cyrius's heap first grows past 1 MB (request #4, ~256 KB/request leak into `default_alloc()`). **Not a sandhi bug** — reproduces with zero sandhi code; `mmap`-leak variant doesn't crash. Filed two upstream cyrius issues, **both fixed in cyrius 6.1.19** (re-pinned here): the alloc heap moved off `brk` onto anonymous-`mmap` chunk-bump (no more contention), and native cert-chain ordering fixed (handshakes example.com). Independently, sandhi default-switched to the **native** TLS backend (no libssl/glibc → no contention even pre-fix); libssl demoted to opt-in (now also crash-safe at 6.1.19). **+4 public verbs** (`sandhi_tls_use_native`/`_use_libssl`/`_backend`/`_native_available`, `src/tls_policy/mod.cyr`) — native is the build default under `-D CYRIUS_TLS_NATIVE` (build/CI/Quick Start pass it; consumers must too; architecture/004). Fixed an unconditional `tls_get_session` session-ref leak on the libssl path (`conn.cyr`, gated on cache-enabled). New CI gate `programs/_https_native_loop_gate.cyr` (N≥4 native GETs, must not crash) + libssl-path link proof. **979 assertions green** (440 sandhi + 167 h2 + 330 alloc + 42 rpc; unchanged — backend-agnostic unit suites). **Verified at 6.1.19:** native `sandhi_http_get` ×6 to example.com → 6/6 status 200 no crash (was handshake-fail); libssl opt-in ×6 to example.com → 6/6 status 200 EXIT 0 (was SIGSEGV on 4th). Full libssl *retirement* now gated only on native TLS-policy enforcement (pinning/mTLS/trust-store still libssl-coupled). `dist/sandhi.cyr` regenerated at v1.4.5.
+
 **1.4.4** — 2026-06-07. **Closeout housekeeping batch: roadmap slot realignment + `_sandhi_conn_connect_nb` factoring decision.** Two small closeout-arc items; the only code change is a doc comment; no public-API / behavioral change. **(1) `_sandhi_conn_connect_nb` factoring** resolved as option (b) — parallel evolution with cyrius `regression_network_probe`, no shared `net_connect_nb` primitive (connect runs once per conn-open; won't measure). Documented at the callsite (`src/http/conn.cyr`) + CHANGELOG. **(2) Roadmap drift fix** — the closeout subsections still labeled pending `max_conns` / `connect_nb` slots "1.4.1" / "1.4.2", but those numbers shipped other work (1.4.1 close-path; 1.4.2 ALPN/SPKI; 1.4.3 deferral sweep + pin + sigil deps); renumbered (`connect_nb` → resolved 1.4.4; `max_conns` → 1.4.5, gated on worker-shape pick). **979 assertions green** (unchanged). `cyrius lint` 0 warnings, 0 deferrals; `cyrfmt --check` clean. `dist/sandhi.cyr` regenerated at v1.4.4.
 
 **1.4.3** — 2026-06-07. **Buried-deferral gate sweep + cyrius pin 6.0.82 → 6.0.87.** Bundled closeout housekeeping (comment-only drain + source-free pin bump; mirrors 1.3.4). Drained all **12** untracked buried-deferrals reported by the CI cyrlint gate — the roadmap's enumerated list of 8 undercounted, missing 4 in `src/http/h2/`. **Real deferred work** (daimon resolver-ctx auth/timeouts; client per-hop cred-digest on cross-authority redirect; pool per-pool mutex; + 4 h2 spec-completeness items: peer-SETTINGS ENABLE_PUSH/MAX_HEADER_LIST_SIZE, HEADERS-cap override, DATA-frame fragmentation, flow-control window manager) → tracked as new **Wait-for-second-consumer-ask** roadmap bullets and cross-referenced from the comments (per the no-silent-scope-outs rule). **Incidental/permanent** (local.cyr RFC-6763 boundary; pool.cyr:380 + stream.cyr:116 sentinel comments; response.cyr:313 historical 1.1.1 note) → reworded to drop the trigger phrase. **False-positive** `server/mod.cyr HTTP_NOT_IMPLEMENTED` (RFC 7231 §6.6.2 status constant) → `#skip-lint`. CI lint step **flipped to fail-mode** on untracked deferrals (`deferral line N: untracked` now sets the fail flag). **Pin bump** 6.0.82 → 6.0.87 is mechanical (zero source change) — picks up cyrius full TLS ciphersuite enablement + macOS native-TLS fixes (relevant since 1.4.2's native-TLS transport rewire); Windows-pillar / AGNOS getenv-envp work not sandhi-facing. **Plus sigil transitive-deps fix** (landed in the 1.4.3 "fixing issues" follow-up commit): `apply.cyr`'s SPKI digest calls sigil's `sha256`, which needs sigil's undeclared transitive deps — added `ct` / `keccak` / `thread_local` to `[deps]` + a crypto-chain include in the live-gate probe so `sha256` links (native-clean, no FFI; sigil's packaging gap, surfaced consumer-side). **979 assertions green** (440 sandhi + 167 h2 + 330 alloc + 42 rpc; unchanged) verified against the 6.0.87 snapshot. 0 untracked deferrals (was 12). `cyrius lint` 0 warnings; `cyrfmt --check` clean. `dist/sandhi.cyr` regenerated at v1.4.3 (11873 lines).
@@ -100,7 +102,8 @@
 
 ## Toolchain
 
-- **Cyrius pin**: `6.0.87` (`cyrius.cyml [package].cyrius`). Bump trail: 5.11.4 → 6.0.1 (1.3.5, cycc/cybs binary rename) → 6.0.55 (1.4.1) → 6.0.82 (1.4.2, native-TLS ALPN/SPKI typed verbs) → 6.0.87 (1.4.3, full TLS ciphersuite enablement + macOS native-TLS fixes).
+- **Cyrius pin**: `6.1.19` (`cyrius.cyml [package].cyrius`). Bump trail: 5.11.4 → 6.0.1 (1.3.5, cycc/cybs binary rename) → 6.0.55 (1.4.1) → 6.0.82 (1.4.2, native-TLS ALPN/SPKI typed verbs) → 6.0.87 (1.4.3) → 6.1.19 (1.4.5, native-TLS-default switch + the two upstream P1 fixes: alloc moved off brk onto anonymous-mmap chunk-bump, and native cert-chain ordering for public hosts).
+- **TLS backend**: **native by default** as of 1.4.5 — build with `-D CYRIUS_TLS_NATIVE` (sandhi build/CI/Quick Start pass it; consumers must too). libssl is the deprecated opt-in (`sandhi_tls_use_libssl()`). See [architecture/004](../architecture/004-native-tls-default.md).
 
 ## Fold-into-stdlib status
 
@@ -164,7 +167,9 @@ Build outputs:
 - `tests/alloc.tcyr` — **330** — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0).
 - `tests/rpc.tcyr` — **42** — JSON builder/extractor, RPC dispatch err-envelope, WebDriver URL helpers, MCP envelope.
 
-Beyond unit tests: `programs/_policy_runtime_probe.cyr` is a live-network TLS-policy gate (CI step; skip-cleanly offline). Per-program fixup-cap pressure (architecture/001) keeps some coverage in standalone `programs/_*_probe.cyr`.
+Beyond unit tests: `programs/_policy_runtime_probe.cyr` is a live-network TLS-policy gate (CI step; skip-cleanly offline). **1.4.5** adds `programs/_https_native_loop_gate.cyr` — the P1 regression gate (N≥4 sequential native `sandhi_http_get` must not crash; built `-D CYRIUS_TLS_NATIVE`; targets 1.1.1.1; skip-cleanly offline) + `programs/_backend_probe.cyr` (backend-selection smoke). Per-program fixup-cap pressure (architecture/001) keeps some coverage in standalone `programs/_*_probe.cyr`.
+
+Backend-agnostic note: the four `.tcyr` suites are unit tests (parsing / headers / wire format) and don't hit live handshakes, so they run on the default backend without `-D` (counts unchanged 1.4.4 → 1.4.5).
 
 ## Dependencies
 
@@ -221,12 +226,15 @@ progress.
 small/medium pending queue before sit-adoption reshapes the
 roadmap. Concrete slots in roadmap.md.
 
-- ~~**1.4.0–1.4.4**~~ ✅ shipped. 1.4.0 session-cache TTL +
+- ~~**1.4.0–1.4.5**~~ ✅ shipped. 1.4.0 session-cache TTL +
   eviction; 1.4.1 HTTP close-path framing fix; 1.4.2 ALPN/SPKI
   native-TLS rewire; 1.4.3 buried-deferral sweep + pin 6.0.87 +
   sigil deps; 1.4.4 slot realignment + `connect_nb` factoring
-  decision (option b — parallel evolution, no shared primitive).
-- **NEXT — `1.4.5`: `sandhi_server_options_max_conns`
+  decision; 1.4.5 native TLS default + P1 SIGSEGV fixed +
+  pin 6.1.19 (root cause = upstream cyrius alloc brk×glibc-malloc
+  contention + native handshake gap; both cyrius issues fixed in
+  6.1.19 and verified end-to-end).
+- **NEXT — `1.4.6`: `sandhi_server_options_max_conns`
   enforcement** (daimon's ask,
   `docs/issues/2026-05-10-daimon-server-max-conns.md`). Setter /
   getter exist since 0.7.2; the `sandhi_server_run_opts` accept
@@ -235,7 +243,10 @@ roadmap. Concrete slots in roadmap.md.
   blocking-accept back-pressure) or (b) epoll-cooperative
   (consumer event loop via `lib/async.cyr`). Low severity; can
   ship decision-only (CHANGELOG documents the pick), with the
-  implementation at 1.4.6 if the design drags.
+  implementation at 1.4.7 if the design drags.
+- ~~**Watch — cyrius 6.1.19 re-pin**~~ ✅ done in 1.4.5 — both
+  upstream P1 fixes landed in 6.1.19, re-pinned + verified (native
+  & libssl both reach example.com crash-free).
 - **1.4.x** — profile-justified picks (HPACK Huffman
   tie-break, `_sandhi_resp_new` collapse, pool LRU). No
   pre-committed ordering — prof data drives.

@@ -574,11 +574,17 @@ read_ms, write_ms, early_data, early_data_len): i64 {
         # Post-handshake early-data status — drives the
         # exchange path's send-or-skip decision.
         early_data_status = tls_get_early_data_status(tls_ctx);
-        # Capture session for next time. tls_get_session bumps the
-        # refcount; the cache takes ownership of that ref.
-        var fresh_sess = tls_get_session(tls_ctx);
-        if (fresh_sess != 0) {
-            sandhi_session_cache_store(sni_host, hook_fp, _sandhi_cred_digest, fresh_sess);
+        # Capture session for next time — ONLY when the cache is enabled.
+        # tls_get_session bumps the SSL_SESSION refcount and hands us an
+        # owned ref; the cache takes ownership via _store. When the cache
+        # is OFF (the default), _store is a no-op that never frees, so an
+        # unconditional capture here leaks one SSL_SESSION per connection
+        # on the libssl backend. Gate the whole capture on enabled. [1.4.5]
+        if (sandhi_session_cache_enabled() == 1) {
+            var fresh_sess = tls_get_session(tls_ctx);
+            if (fresh_sess != 0) {
+                sandhi_session_cache_store(sni_host, hook_fp, _sandhi_cred_digest, fresh_sess);
+            }
         }
         alpn_data = _sandhi_alpn_read_selected_a(a, tls_ctx);
         kind = SANDHI_CONN_TLS;

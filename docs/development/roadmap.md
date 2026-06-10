@@ -71,8 +71,32 @@ details, state.md the current snapshot.
 - **1.4.2** — Dropped the ALPN-read + SPKI-pin libssl bindings onto cyrius 6.0.82's typed backend-agnostic `tls_get_alpn_selected` / `tls_get_peer_spki_der`. sandhi now runs over the sovereign native TLS transport (`tls_set_backend`) with no ALPN/SPKI libssl coupling — closes the cyrius native-TLS Mini-arc E consumer rewire. Remaining `tls_dlsym` sites are pre-handshake `SSL_CTX_*` mTLS / trust-store config. cyrius pin 6.0.55 → 6.0.82. 167 h2 + 440 sandhi green.
 - **1.4.3** — Buried-deferral gate sweep (drains the P2 closeout lead) + cyrius pin 6.0.82 → 6.0.87. All **12** untracked deferrals drained (the list of 8 undercounted — 4 more lived in `src/http/h2/`): real work → new Wait-for-second-consumer-ask roadmap bullets + comment crossref (per no-silent-scope-outs); incidental → reworded to drop the trigger; `HTTP_NOT_IMPLEMENTED` status constant → `#skip-lint`. CI lint gate flipped report-mode → fail-mode on untracked deferrals. Pin bump mechanical (full TLS ciphersuite enablement + macOS native-TLS fixes). Plus sigil transitive-deps fix (`ct` / `keccak` / `thread_local` added to `[deps]` + crypto-chain include in the live-gate probe so sigil's `sha256` links — native-clean, no FFI; sigil's packaging gap, surfaced consumer-side). 979 assertions green (unchanged); 0 untracked deferrals.
 - **1.4.4** — Closeout housekeeping: roadmap slot-number realignment + `_sandhi_conn_connect_nb` factoring decision (option b — parallel evolution with `regression_network_probe`, no shared primitive; the only code change is a doc comment). Fixed roadmap drift: the `max_conns` / `connect_nb` slots were mislabeled "1.4.1" / "1.4.2" (those numbers shipped other work — 1.4.1 close-path, 1.4.2 ALPN/SPKI, 1.4.3 deferral sweep + pin + sigil); renumbered — `connect_nb` resolved here, `max_conns` → 1.4.5. 979 assertions green (unchanged); no public-API change.
+- **1.4.5** — native TLS by default + P1 repeated-request SIGSEGV **fixed** + cyrius pin 6.0.87 → **6.1.19**. Root-caused the 4th-request crash to **cyrius `lib/alloc.cyr` brk-heap × glibc-malloc contention** via `fdlopen`-libssl (reproduces with zero sandhi code; mmap-leak variant doesn't crash) — filed two upstream cyrius issues (alloc-brk-contention + native-handshake-gap), **both fixed in 6.1.19** (alloc → anonymous-mmap chunk-bump; native cert-chain ordering). sandhi also default-switched to the **native** TLS backend (no libssl/glibc → no contention); libssl demoted to opt-in (now crash-safe too at 6.1.19). +4 backend-selection verbs (`sandhi_tls_use_native`/`_use_libssl`/`_backend`/`_native_available`); native is the build default under `-D CYRIUS_TLS_NATIVE` (build/CI/Quick Start pass it; consumers must too — architecture/004). Fixed an unconditional `tls_get_session` session-ref leak on the libssl path. New CI gate `_https_native_loop_gate.cyr` (N≥4 native GETs, must not crash). 979 assertions green (unchanged). Verified at 6.1.19: native + libssl `sandhi_http_get` ×6 to example.com both 6/6 status 200, no crash. Full libssl *retirement* now gated only on native TLS-policy enforcement.
 
 ## What's next
+
+### ✅ P1 — HTTPS repeated-request SIGSEGV — FIXED in 1.4.5 (cyrius 6.1.19)
+
+**Root-caused, fixed, verified.** `sandhi_http_get`/`_post` to the same HTTPS
+host SIGSEGV'd on the ~4th sequential call. Investigation (1.4.5) traced it to
+**cyrius `lib/alloc.cyr`'s `brk(2)` bump heap colliding with glibc malloc's brk
+arena** (pulled in by `lib/fdlopen.cyr` loading libssl) — two brk managers, one
+program break; the collision lands when cyrius's heap first grows past its
+initial 1 MB (request #4, given sandhi leaks ~256 KB/request into
+`default_alloc()`). **Not a sandhi conn-lifecycle bug** — reproduces with zero
+sandhi code; switching the leak to `mmap` eliminates it.
+
+First surfaced by **hoosh v2.2.0** remote provider transport. Full writeup +
+confirmed root cause + reproducer:
+[`docs/issues/2026-06-09-https-repeated-request-segfault.md`](../issues/2026-06-09-https-repeated-request-segfault.md).
+
+**Resolution (1.4.5):** (a) sandhi default-switched to the **native** TLS backend
+(loads no libssl/glibc → no brk contention); (b) re-pinned cyrius 6.0.87 →
+**6.1.19**, which lands both upstream root fixes — the alloc heap moved off `brk`
+onto anonymous-`mmap` chunk-bump, and native cert-chain ordering fixed so native
+reaches public hosts. Verified at 6.1.19: native AND libssl `sandhi_http_get` ×6
+to example.com both → 6/6 status 200, no crash. Both cyrius issues resolved (see
+**Cross-repo dependencies**). **sandhi 1.4.5 / cyrius 6.1.19.**
 
 ### Cleanup — buried-deferral gate sweep (P2) ✅ shipped 1.4.3
 
@@ -186,7 +210,34 @@ Why lead: smallest, most concrete, half-implemented already
 (`last_used_ms` slot present since 1.3.1). Closes the
 session-cache subsystem so the 1.3.x TLS arc fully retires.
 
-#### 1.4.5 — `sandhi_server_options_max_conns` enforcement
+#### 1.4.5 — native TLS by default + P1 repeated-request SIGSEGV fixed ✅ shipped 2026-06-09
+
+The P1 crash (above) is a cyrius `lib/alloc.cyr` brk-heap × glibc-malloc
+contention exposed via the libssl fdlopen bridge. 1.4.5 makes the **native**
+TLS backend the default (no libssl/glibc loaded → no brk contention), with
+libssl demoted to an explicit opt-in, **and** re-pins cyrius 6.0.87 → 6.1.19
+which lands both upstream root fixes (so the libssl opt-in is crash-safe too
+and native reaches public hosts).
+
+**Scope (shipped):**
+- TLS backend-selection surface in `src/tls_policy/mod.cyr` (+4 verbs):
+  `sandhi_tls_use_native` / `_use_libssl` / `_backend` / `_native_available`.
+- Native is the build default when compiled with `-D CYRIUS_TLS_NATIVE`
+  (sandhi's build + CI + Quick Start pass it; consumers must too — no
+  manifest-level define exists). See
+  [architecture/004](../architecture/004-native-tls-default.md).
+- Fixed an unconditional `tls_get_session` session-ref leak on the libssl path
+  (`src/http/conn.cyr`) — gated on `sandhi_session_cache_enabled()`.
+- P1 regression gate `programs/_https_native_loop_gate.cyr` (N≥4 sequential
+  native `sandhi_http_get`, must not crash; 6/6 verified vs 1.1.1.1) wired into CI.
+- cyrius pin 6.0.87 → **6.1.19** — lands both upstream P1 root fixes (alloc
+  off-brk onto anonymous-mmap chunk-bump; native cert-chain ordering for public
+  hosts). Verified: native + libssl both reach example.com crash-free (6/6).
+- Two upstream cyrius issues filed + resolved in 6.1.19 (alloc-brk-contention;
+  native-handshake-gap) — see Cross-repo dependencies. Full libssl *retirement*
+  now gated only on native TLS-policy enforcement (currently libssl-coupled).
+
+#### 1.4.6 — `sandhi_server_options_max_conns` enforcement
 
 Daimon's filed ask:
 [`docs/issues/2026-05-10-daimon-server-max-conns.md`](../issues/2026-05-10-daimon-server-max-conns.md).
@@ -194,7 +245,8 @@ Public setter / getter exist since 0.7.2; accept loop in
 `sandhi_server_run_opts` remains single-flight today. Daimon
 owns its own epoll-cooperative `serve_async` and wants to
 collapse ~60 LOC into a shared `sandhi_server_run_opts` call
-when enforcement lands.
+when enforcement lands. (Renumbered from 1.4.5 — that slot
+shipped the native-TLS default switch.)
 
 **Design choice gates the slot** — pick the worker shape
 first (could be a sub-slot or paired with the implementation):
@@ -206,9 +258,9 @@ first (could be a sub-slot or paired with the implementation):
 
 Low severity (no security impact — daimon closed its own
 slowloris exposure at 1.2.2). Pure refactor / dedup
-unblocker. If the design choice itself drags out, ship 1.4.5
+unblocker. If the design choice itself drags out, ship 1.4.6
 as a decision-only slot (CHANGELOG documents the pick) and
-land the implementation as 1.4.6.
+land the implementation as 1.4.7.
 
 #### `_sandhi_conn_connect_nb` factoring decision ✅ resolved 1.4.4
 
@@ -347,17 +399,32 @@ because consumer-adoption timelines depend on them. Each is a
 cyrius-side issue / slot; sandhi notes the linkage so the
 downstream timing isn't accidentally forgotten.
 
-- **Native TLS in cyrius `lib/tls.cyr`** *(6.0.x arc;
-  gates sit adoption)*. Sit will only pick up sandhi when
-  the underlying TLS transport is native (not fdlopen-libssl
-  bridged). The swap lives in cyrius's 6.0.x arc;
-  sandhi's hook-surface contract is unchanged across the
-  swap per CLAUDE.md ("No FFI"). When sit adopts
-  post-native-TLS, that's the roadmap-reshape moment for
-  1.5.x — surface scope from real-workload friction, don't
-  pre-bake. (No corresponding sandhi slot lives here — the
-  work is purely cyrius-side. This block exists so the
-  cross-repo dependency stays visible.)
+- ✅ **`lib/alloc.cyr` brk-heap × glibc-malloc contention** *(P1
+  root fix — RESOLVED cyrius 6.1.19)*. The repeated-request
+  SIGSEGV root cause: cyrius's `brk(2)` bump heap and glibc
+  malloc's brk arena (loaded via `fdlopen`→libssl) corrupted each
+  other once the cyrius heap first grew. Filed
+  [`cyrius .../2026-06-09-brk-bump-heap-vs-fdlopen-libssl-malloc.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-06-09-brk-bump-heap-vs-fdlopen-libssl-malloc.md);
+  fixed in 6.1.19 by moving the Linux heap off `brk` onto an
+  anonymous-`mmap` chunk-bump allocator. The libssl opt-in is now
+  crash-safe.
+- ✅ **Native TLS handshake gap vs public servers** *(unblocks
+  libssl retirement — RESOLVED cyrius 6.1.19)*. Native handshook
+  1.1.1.1 but not example.com (both Cloudflare); fixed in 6.1.19
+  via cert-chain / intermediate ordering. Filed
+  [`cyrius .../2026-06-09-native-tls-handshake-gap-public-servers.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-06-09-native-tls-handshake-gap-public-servers.md).
+  Native now reaches the public host set. Dropping the
+  `sandhi_tls_use_libssl()` opt-in entirely still needs TLS policy
+  enforcement wired for native (currently libssl-coupled).
+- **Native TLS in cyrius `lib/tls.cyr`** *(6.0.x arc; landed —
+  now the sandhi default at 1.4.5; gates sit adoption)*. Sit will
+  only pick up sandhi when the underlying TLS transport is native
+  (not fdlopen-libssl bridged). The native stack shipped in the
+  6.0.x arc and sandhi 1.4.5 defaults to it; sandhi's hook-surface
+  contract is unchanged across the swap per CLAUDE.md ("No FFI").
+  When sit adopts post-native-TLS, that's the roadmap-reshape
+  moment for 1.5.x — surface scope from real-workload friction,
+  don't pre-bake.
 - **mDNS multicast primitives in cyrius `lib/net.cyr`**.
   Gates sandhi's `discovery/local.cyr` real implementation:
   `IP_ADD_MEMBERSHIP` / `IP_MULTICAST_TTL` /
@@ -497,7 +564,8 @@ its job is keeping the post-v1 patch window honest. The shape:
   1.4.2 = ALPN/SPKI libssl-binding drop (native-TLS rewire);
   1.4.3 = buried-deferral sweep + pin 6.0.87 + sigil deps;
   1.4.4 = slot realignment + conn_nb factoring decision;
-  1.4.5 = max_conns enforcement (pending worker-shape pick);
+  1.4.5 = native TLS default + P1 SIGSEGV fixed + pin 6.1.19;
+  1.4.6 = max_conns enforcement (pending worker-shape pick);
   1.4.x  = profile-justified picks (parked);
   1.4.x  = cap-drift watch (background);
   **1.4.x closeout** = P-1 / security / code-audit pass.
