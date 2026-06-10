@@ -91,8 +91,10 @@ libssl.
    heap) — the residual libssl opt-in is no longer a process-killer.
 
 Once (2) lands, the libssl opt-in can be removed entirely. The
-`-D CYRIUS_TLS_NATIVE` *requirement* has already been removed (flag
-polarity inverted past 1.4.7: native is the no-flag default,
-`-D CYRIUS_TLS_LIBSSL` is the opt-in) — pending the upstream cyrius
-inverted-default build. Tracked in the roadmap cross-repo dependencies +
-the 1.5.x reshape.
+`-D CYRIUS_TLS_NATIVE` *requirement* is gone: **cyrius 6.1.21 inverted the
+`lib/tls.cyr` default** (native compiled in + selected with no flag;
+`-D CYRIUS_TLS_LIBSSL` opts out; legacy `-D CYRIUS_TLS_NATIVE` is a no-op
+alias), and sandhi 1.4.9 re-pinned to it + dropped the interim flag from
+CI/release. The remaining libssl coupling is native TLS-policy
+*enforcement* (2), not the build default. Tracked in the roadmap cross-repo
+dependencies + the 1.5.x reshape.

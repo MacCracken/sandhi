@@ -6,11 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [1.4.9] — 2026-06-09
 
-**Epoll-cooperative server — `max_conns` enforced (`sandhi_server_run_async`).**
-Closes the daimon ask (`docs/issues/2026-05-10-daimon-server-max-conns.md`): the
-server's `max_conns` option, a no-op since 0.7.2, is now enforced via a new
-concurrent accept loop. Worker shape **decided: epoll-cooperative** (`lib/async.cyr`),
-per the 1.4.9 roadmap slot. No cyrius pin change (stays 6.1.20).
+**Epoll-cooperative server (`max_conns` enforced) + cyrius pin 6.1.20 → 6.1.21
+(TLS flag flip completed).** The server's `max_conns` option, a no-op since
+0.7.2, is now enforced via a new concurrent accept loop (worker shape **decided:
+epoll-cooperative**, `lib/async.cyr`); and the 1.4.8 native-as-no-flag-default
+convention is now real, since cyrius 6.1.21 inverted its `lib/tls.cyr` default.
 
 ### Added — `sandhi_server_run_async(addr, port, handler_fp, ctx, opts)` (+1 verb, `src/server/mod.cyr`)
 
@@ -48,6 +48,25 @@ recreate, so each drained batch leaks ~32 B/connection there. sandhi bounds its
 own buffers via the arena; eliminating the residual leak needs an arena-aware
 async runtime (`async_new_in(allocator)`) upstream. Same leak daimon's
 `serve_async` already has. Tracked as a roadmap cross-repo dependency.
+
+### Changed — cyrius pin 6.1.20 → 6.1.21; TLS flag flip completed
+
+cyrius 6.1.21 inverted its `lib/tls.cyr` backend default (the change filed at
+1.4.8): **native is now the no-flag default**, `-D CYRIUS_TLS_LIBSSL` opts out to
+the deprecated libssl-only build, and legacy `-D CYRIUS_TLS_NATIVE` is a no-op
+alias. 6.1.21 also re-folded sandhi 1.4.5→1.4.8 into `lib/sandhi.cyr`. So the
+1.4.8 interim is removed:
+
+- `ci.yml` + `release.yml`: dropped `-D CYRIUS_TLS_NATIVE` from the native smoke
+  link-proof + the three native live gates (native is the no-flag default now);
+  the libssl link-proof builds with `-D CYRIUS_TLS_LIBSSL`. The interim flag
+  banner is gone.
+- Verified on 6.1.21: no-flag build → native (`tls_get_backend()` = native,
+  smoke 1.38 MB); `-D CYRIUS_TLS_LIBSSL` → libssl (0.57 MB); legacy
+  `-D CYRIUS_TLS_NATIVE` → native (no-op alias).
+- The "Inverted-default TLS build" roadmap cross-repo dependency is resolved.
+  CLAUDE.md / `docs/architecture/004` updated to drop the "depends on upstream /
+  until it lands" caveat.
 
 ### Verified
 

@@ -16,22 +16,30 @@ scales.
 
 ## Status
 
-**1.0.0** (2026-04-25) — **fold-ready release**. Cyrius v5.7.0 vendors
-this repo's `dist/sandhi.cyr` as `lib/sandhi.cyr` in stdlib and deletes
-its own `lib/http_server.cyr` per the clean-break fold ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)).
-After the fold, sandhi enters maintenance mode — subsequent patches
-land via the Cyrius release cycle, not this repo.
+**1.4.9** (2026-06-09) — **post-fold maintenance.** sandhi folded into
+Cyrius stdlib as `lib/sandhi.cyr` at **1.0.0 / Cyrius v5.7.0** ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)).
+Patches now land here first; `dist/sandhi.cyr` is regenerated each release
+and a small cyrius slot re-folds it. The surface freeze ([ADR 0005](docs/adr/0005-public-surface-freeze-at-0-9-2.md))
+applied only 0.9.2 → 1.0.0; post-fold patches add verbs as consumers ask.
 
-**649 test assertions green** (482 sandhi + 167 h2). Public surface
-frozen per [ADR 0005](docs/adr/0005-public-surface-freeze-at-0-9-2.md);
-278 `sandhi_*` verbs at fold time.
+**992 test assertions green** — 440 sandhi + 167 h2 + 343 alloc + 42 rpc.
+Pinned to **Cyrius 6.1.21** (`cyrius.cyml`).
 
-The 0.9.x sequence (10 releases between the 0.9.2 freeze and 1.0.0
-fold) was pure internal wire-up + hardening — TLS runtime enablement,
-HTTP/2 redirects/retries, ALPN auto-promotion, `TE: trailers`, HPACK
-Huffman encode, and an internal P1 self-audit pass. Detail in
-[CHANGELOG.md](CHANGELOG.md); shipped log in
-[docs/development/roadmap.md](docs/development/roadmap.md).
+**TLS backend: native by default, no flag** (since Cyrius 6.1.21 / sandhi
+1.4.9). `-D CYRIUS_TLS_LIBSSL` opts out to the deprecated libssl bridge;
+legacy `-D CYRIUS_TLS_NATIVE` is a no-op alias.
+
+Post-fold arcs (detail in [CHANGELOG.md](CHANGELOG.md); shipped log in
+[docs/development/roadmap.md](docs/development/roadmap.md)):
+
+- **1.1.x** — allocator-as-first-arg migration (`_a` variants end-to-end).
+- **1.2.x** — profile-driven hot-path allocator review + OOM-guard audit.
+- **1.3.x** — TLS: session-resumption cache, 0-RTT, cred-strip-aware keying.
+- **1.4.x** — closeout: session-cache TTL/eviction; native TLS made the
+  default + the repeated-request SIGSEGV root-fixed (Cyrius 6.1.19);
+  high-level cert-pinning / mTLS threading; backend-aware policy
+  enforcement; native-as-no-flag-default flip (Cyrius 6.1.21); and the
+  epoll-cooperative server (`sandhi_server_run_async`, `max_conns`).
 
 ## Quick start
 
@@ -70,18 +78,19 @@ syscall(60, exit_code);
 | `src/http/stream.cyr` | Streaming HTTP + WHATWG SSE parser |
 | `src/http/h2/*` | Full HTTP/2 stack: frames (RFC 7540), HPACK + Huffman (RFC 7541), connection lifecycle, request/response, dispatch |
 | `src/rpc/*` | JSON-RPC dialects: W3C WebDriver, Appium extensions, MCP-over-HTTP + SSE — transport only per [ADR 0001](docs/adr/0001-sandhi-is-a-composer-not-a-reimplementer.md) |
-| `src/discovery/*` | Service discovery: chain composition, daimon-backed resolver, mDNS surface (lookup stubbed pending multicast primitives in stdlib) |
-| `src/tls_policy/*` | Cert pinning (SPKI, constant-time compare), mTLS, trust store, ALPN advertise list. Fail-closed on stubbed enforcement (see [issues](docs/issues/)) |
-| `src/server/mod.cyr` | HTTP/1.1 server — `sandhi_server_*` canonical names; `http_*` aliases retire at fold |
+| `src/discovery/*` | Service discovery: chain composition, daimon-backed resolver, mDNS surface (multicast lookup pending stdlib primitives; QU-bit unicast works) |
+| `src/tls_policy/*` | Cert pinning (SPKI, constant-time compare), mTLS, trust store, ALPN, backend selection. Enforcement is live + **backend-aware** (1.4.7): trust/mTLS libssl-only, SPKI-pin backend-agnostic; high-level threading via `sandhi_http_options_tls_policy` (1.4.6); fail-closed |
+| `src/tls_policy/session_cache.cyr` | TLS 1.3/1.2 client session-resumption cache — TTL + max-size LRU eviction, cred-strip-aware keying (1.3.1–1.4.0) |
+| `src/server/mod.cyr` | HTTP/1.1 server — sync `sandhi_server_run` / `_run_opts` + epoll-cooperative `sandhi_server_run_async` (`max_conns`, 1.4.9); built-in CL+TE / dup-header smuggling guards |
 | `src/net/resolve.cyr` | Native UDP DNS resolver — A + AAAA, randomized TXID + answer-name verification, RFC 1035 |
-| `src/obs/trace.cyr` | Opt-in sakshi spans at HTTP / RPC / DNS boundaries |
+| `src/obs/trace.cyr` · `prof.cyr` | Opt-in sakshi spans at HTTP / RPC / DNS boundaries; opt-in per-request per-phase profiling |
 
 ## Documentation
 
 - **[Getting started](docs/guides/getting-started.md)** — build, smallest GET, response accessors
 - **[Timeouts](docs/guides/timeouts.md)** — connect_ms / read_ms / write_ms / total_ms
 - **[Connection pool](docs/guides/connection-pool.md)** — keep-alive semantics, route isolation
-- **[HTTP/2 (manual)](docs/guides/http2-manual.md)** — explicit opt-in path; auto-selection wire-up pending sandhi-side as of 0.9.2
+- **[HTTP/2 (manual)](docs/guides/http2-manual.md)** — explicit opt-in path; ALPN-driven h2 auto-selection lands via `sandhi_http_request_auto` (0.9.6)
 - **[Redirects + security](docs/guides/redirects-and-security.md)** — cross-origin credential strip, https→http refusal
 - **[TLS policy](docs/guides/tls-policy.md)** — pinning, mTLS, fail-closed semantics
 - **[Server](docs/guides/server.md)** — minimal accept loop, request parsing, smuggling guards
@@ -101,6 +110,7 @@ Architecture notes (invariants / quirks, not decisions):
 - **[001 — HPACK Huffman blob](docs/architecture/001-hpack-huffman-blob.md)** — single string-literal pattern for large lookup tables
 - **[002 — forward-reference glue modules](docs/architecture/002-forward-reference-via-glue-modules.md)** — pattern for crossing build-order boundaries
 - **[003 — libssl-pthread stubbing](docs/architecture/003-libssl-pthread-stubbing.md)** — what's stubbed and why
+- **[004 — native TLS is the default](docs/architecture/004-native-tls-default.md)** — native no-flag default (Cyrius 6.1.21), `-D CYRIUS_TLS_LIBSSL` opt-out
 
 ## Consumers
 
@@ -114,27 +124,39 @@ Each AGNOS crate that sandhi serves has a coordination doc in [`docs/issues/`](d
 - **mela** — marketplace API ([doc](docs/issues/2026-04-24-mela-sandhi-marketplace.md))
 - **vidya** — external-knowledge fetch ([doc](docs/issues/2026-04-24-vidya-sandhi-fetch.md))
 
-## Known blockers
+## Cross-repo dependencies
 
-All upstream blockers cleared as of cyrius v5.6.41 (2026-04-25). Live HTTPS through `sandhi_http_get` round-trips real HTML from `https://example.com/`. ALPN advertise lands too — server-side h2 selection verified at the stdlib hook level.
+Live HTTPS works end-to-end on the native backend (and the deprecated libssl
+opt-out). The remaining items are tracked cyrius-side; sandhi notes the linkage
+in [docs/development/roadmap.md](docs/development/roadmap.md):
 
-Resolved log:
+- **Native TLS-policy enforcement** — SPKI pinning is backend-agnostic and live
+  on native; trust-store / mTLS still reach for libssl `SSL_CTX_*`, so they
+  **fail closed** on native (1.4.7) pending native `SSL_CTX_*` equivalents in
+  cyrius `lib/tls_native.cyr`. The last libssl coupling, and the gate for
+  dropping the libssl opt-out entirely.
+- **Arena-aware `lib/async.cyr`** — the epoll server bounds its own buffers, but
+  async.cyr's runtime/task structs use the no-free global bump (~32 B/conn
+  residual leak); the fix is an upstream `async_new_in(allocator)`.
+- **mDNS multicast primitives** in cyrius `lib/net.cyr` — gates the real
+  `discovery/local.cyr` implementation (QU-bit unicast works today).
 
-- ~~[`libssl-pthread-deadlock`](docs/issues/archive/2026-04-24-libssl-pthread-deadlock.md)~~ — ✅ cyrius v5.6.39. `tls_connect` round-trips real HTTPS bytes.
-- ~~[`stdlib-tls-alpn-hook`](docs/issues/archive/2026-04-24-stdlib-tls-alpn-hook.md)~~ — ✅ cyrius v5.6.40. `tls_connect_with_ctx_hook` + `tls_dlsym` ship the requested Option A.
-- ~~[`cyrius-7arg-frame-tls-connect-segfault`](docs/issues/archive/2026-04-25-cyrius-7arg-frame-tls-connect-segfault.md)~~ — ✅ cyrius v5.6.41. SysV-ABI calling-convention regression resolved. `sandhi_conn_open_fully_timed` is no longer a SIGSEGV trap; live HTTPS through sandhi works end-to-end.
-
-Sandhi-side ALPN runtime + auto-selection wire-up (~80 lines in `src/tls_policy/alpn.cyr` + `src/http/conn.cyr`) is now ungated. Consumer-visible behavior change at wire-up: `sandhi_http_request_auto` will start picking h2 transparently where the server supports it.
+Earlier upstream TLS blockers (libssl-pthread deadlock, ALPN hook, the 7-arg
+SIGSEGV, the repeated-request brk/fdlopen crash) are all resolved — see
+[docs/issues/](docs/issues/) and the CHANGELOG.
 
 ## Build
 
 ```sh
 cyrius deps                                                 # resolve stdlib deps
-cyrius build programs/smoke.cyr build/sandhi-smoke         # smoke link proof
-cyrius test  tests/sandhi.tcyr                              # core (481 assertions)
-cyrius test  tests/h2.tcyr                                  # h2-specific (153 assertions)
-cyrius lint  src/*.cyr src/http/*.cyr                       # static checks
-CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke   # release-parity
+cyrius build programs/smoke.cyr build/sandhi-smoke          # smoke link proof (native, no flag)
+cyrius test  tests/sandhi.tcyr                              # core (440 assertions)
+cyrius test  tests/h2.tcyr                                  # h2-specific (167 assertions)
+cyrius test  tests/alloc.tcyr                               # allocator / arena (343 assertions)
+cyrius test  tests/rpc.tcyr                                 # RPC dialects (42 assertions)
+cyrius lint  src/*.cyr src/**/*.cyr                         # static checks (warn-as-fail in CI)
+CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke              # release-parity (native)
+cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr build/sandhi-smoke-libssl   # deprecated libssl opt-out
 cyrius distlib                                              # → dist/sandhi.cyr
 ```
 

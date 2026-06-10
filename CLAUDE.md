@@ -47,13 +47,14 @@ CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke  # release-parit
 cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr build/sandhi-smoke-libssl  # deprecated libssl opt-in
 ```
 
-> **TLS backend (flag inverted past 1.4.7):** sandhi defaults to the **native**
-> TLS backend with **no flag** — native is compiled in by default and
-> `-D CYRIUS_TLS_LIBSSL` is the explicit opt-in for the deprecated libssl fdlopen
-> bridge (`sandhi_tls_use_libssl()`). This is the inverse of the 1.4.5–1.4.7
-> convention (`-D CYRIUS_TLS_NATIVE` to *get* native). **Depends on the upstream
-> cyrius inverted-default build** — until that lands, a no-flag build still
-> resolves to libssl. See [architecture/004](docs/architecture/004-native-tls-default.md).
+> **TLS backend (native is the no-flag default since cyrius 6.1.21 / sandhi 1.4.9):**
+> sandhi defaults to the **native** TLS backend with **no flag** — native is
+> compiled in by default and `-D CYRIUS_TLS_LIBSSL` is the explicit opt-out to the
+> deprecated libssl fdlopen bridge (`sandhi_tls_use_libssl()`). Legacy
+> `-D CYRIUS_TLS_NATIVE` is a no-op alias. This is the inverse of the 1.4.5–1.4.8
+> convention (`-D CYRIUS_TLS_NATIVE` was required to *get* native; cyrius ≤ 6.1.20
+> was still `#ifdef CYRIUS_TLS_NATIVE`, so a no-flag build then resolved to libssl).
+> See [architecture/004](docs/architecture/004-native-tls-default.md).
 
 ## Architecture
 
