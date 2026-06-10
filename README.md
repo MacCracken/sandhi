@@ -16,8 +16,8 @@ scales.
 
 ## Status
 
-**1.4.9** (2026-06-09) — **post-fold maintenance.** sandhi folded into
-Cyrius stdlib as `lib/sandhi.cyr` at **1.0.0 / Cyrius v5.7.0** ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)).
+**1.4.10** (2026-06-09) — **post-fold maintenance; 1.4.x closeout arc closed.**
+sandhi folded into Cyrius stdlib as `lib/sandhi.cyr` at **1.0.0 / Cyrius v5.7.0** ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)).
 Patches now land here first; `dist/sandhi.cyr` is regenerated each release
 and a small cyrius slot re-folds it. The surface freeze ([ADR 0005](docs/adr/0005-public-surface-freeze-at-0-9-2.md))
 applied only 0.9.2 → 1.0.0; post-fold patches add verbs as consumers ask.
@@ -29,17 +29,22 @@ Pinned to **Cyrius 6.1.21** (`cyrius.cyml`).
 1.4.9). `-D CYRIUS_TLS_LIBSSL` opts out to the deprecated libssl bridge;
 legacy `-D CYRIUS_TLS_NATIVE` is a no-op alias.
 
+The next minor break is **1.5.x**, which opens when **sit adopts sandhi**
+(scope driven by real-workload friction). Remaining work is trigger-gated —
+see [Cross-repo dependencies](#cross-repo-dependencies) + the roadmap.
+
 Post-fold arcs (detail in [CHANGELOG.md](CHANGELOG.md); shipped log in
 [docs/development/roadmap.md](docs/development/roadmap.md)):
 
 - **1.1.x** — allocator-as-first-arg migration (`_a` variants end-to-end).
 - **1.2.x** — profile-driven hot-path allocator review + OOM-guard audit.
 - **1.3.x** — TLS: session-resumption cache, 0-RTT, cred-strip-aware keying.
-- **1.4.x** — closeout: session-cache TTL/eviction; native TLS made the
-  default + the repeated-request SIGSEGV root-fixed (Cyrius 6.1.19);
-  high-level cert-pinning / mTLS threading; backend-aware policy
-  enforcement; native-as-no-flag-default flip (Cyrius 6.1.21); and the
-  epoll-cooperative server (`sandhi_server_run_async`, `max_conns`).
+- **1.4.x** — closeout arc (closed at 1.4.10): session-cache TTL/eviction;
+  native TLS made the default + the repeated-request SIGSEGV root-fixed
+  (Cyrius 6.1.19); high-level cert-pinning / mTLS threading; backend-aware
+  policy enforcement; native-as-no-flag-default flip (Cyrius 6.1.21); the
+  epoll-cooperative server (`sandhi_server_run_async`, `max_conns`); and a
+  P-1/security audit pass (closed an async-server silent-client DoS).
 
 ## Quick start
 
