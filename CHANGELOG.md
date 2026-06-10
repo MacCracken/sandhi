@@ -81,7 +81,13 @@ backend; trust-store `SSL_CTX_*` config on the native backend). Pre-exists
 skip-cleans offline so CI stays green. Tied to the tracked "native
 TLS-policy enforcement" gate for full libssl retirement. The 1.4.6
 high-level gate deliberately exercises only the backend-agnostic SPKI
-path, which is live-safe.
+path, which is live-safe. **Caveat (same root):** because
+`sandhi_tls_policy_enforcement_available()` gates on libssl symbol
+resolution (not backend-aware), the high-level pinning path fails closed —
+and the new gate skip-cleans — on a native build where **libssl is not
+present** (minimal CI runners); it works wherever libssl is installed
+(local dev, most distros). Making SPKI-pin availability backend-aware is
+part of the filed P2.
 
 ### Verified
 

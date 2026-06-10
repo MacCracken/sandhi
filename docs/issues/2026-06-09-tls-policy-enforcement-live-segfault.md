@@ -78,11 +78,19 @@ This is the same surface the roadmap tracks as **"native TLS-policy
 enforcement"** — the gate for full libssl retirement. Two layers:
 
 1. **Make enforcement backend-aware (sandhi, near-term).**
-   `sandhi_tls_policy_enforcement_available()` (and/or the apply hook)
-   should report trust-store / mTLS enforcement as **unavailable on the
-   native backend** until native `SSL_CTX_*` equivalents exist, so a
-   trust-store/mTLS policy **fails closed** (`SANDHI_ERR_TLS`) instead of
-   faulting. SPKI pinning stays available on both backends (it already is).
+   `sandhi_tls_policy_enforcement_available()` checks libssl `SSL_CTX_*`
+   symbol resolution (`tls_dlsym` via `fdlopen`), so it returns 0 whenever
+   libssl is not present on the box — **even on a native build where SPKI
+   pinning is fully backend-agnostic** (`tls_get_peer_spki_der`, 1.4.2).
+   Because `_sandhi_policy_pre_open_a` fail-closes any enforcement-demanding
+   policy when `enforcement_available()==0`, this means **SPKI pinning is
+   currently blocked on a native-without-libssl box** (it works only where
+   libssl happens to be installed — e.g. local dev, most distros — which is
+   why the 1.4.6 gate passes locally but skip-cleans on a minimal CI runner).
+   Fix: split the gate — a backend-aware **pin** availability (true on native
+   without libssl, since `tls_get_peer_spki_der` carries it) vs. **trust-store
+   / mTLS** availability (false on native until the `SSL_CTX_*` equivalents
+   below land, so those policies fail closed instead of faulting).
 2. **Native trust-store / mTLS config (cyrius `lib/tls_native.cyr`).**
    Typed, backend-agnostic verbs for custom trust store + client cert/key
    (the native analogues of `SSL_CTX_load_verify_locations` /
