@@ -4,6 +4,80 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.7] — 2026-06-09
+
+**Backend-aware TLS-policy enforcement — eliminates the live-network
+SIGSEGV.** Fixes `docs/issues/2026-06-09-tls-policy-enforcement-live-segfault.md`:
+the low-level policy openers crashed on a reachable network. No cyrius pin
+change (sandhi-side fix; stays on 6.1.20).
+
+### Fixed — TLS-policy enforcement SIGSEGV on a live network (both backends)
+
+Two distinct faults, both now fail closed instead of crashing:
+- **native + trust-store / mTLS** — `_sandhi_apply_hook` fed the *native*
+  TLS ctx to libssl `SSL_CTX_load_verify_locations` / `_use_certificate_file`
+  / `_use_PrivateKey_file` (resolved via `tls_dlsym`), which faults — those
+  fns only apply to a libssl `SSL_CTX`.
+- **libssl + SPKI pin** — a single libssl pinned open SIGSEGV'd in cyrius's
+  libssl `tls_get_peer_spki_der` extraction (a **cyrius regression** on the
+  deprecated backend — it worked at 1.3.0; localized: `[L-trust]` with a
+  hooked handshake refuses cleanly, only `[L-pin]` faults, in the
+  post-handshake SPKI read).
+
+### Changed — `sandhi_tls_policy_enforcement_available()` is backend-aware (+1 verb)
+
+- `sandhi_tls_policy_enforcement_available()` (trust-store / mTLS) now
+  returns 0 on the **native** backend — there's no libssl `SSL_CTX` to
+  configure, so a trust/mTLS policy **fails closed** (`SANDHI_ERR_TLS`)
+  instead of faulting. (Available again once cyrius ships native
+  `SSL_CTX_*` equivalents — cross-repo dep.)
+- **New** `sandhi_tls_policy_pin_available()` — SPKI pinning is
+  backend-agnostic (`tls_get_peer_spki_der`, 1.4.2), so it's available on
+  native even with **no libssl present** (this is what lets high-level
+  pinning work on a native-only box; the 1.4.6 gate previously skipped
+  there). Excludes the libssl backend pending the cyrius SPKI fix, so
+  libssl pinning fails closed rather than crashing.
+- `_sandhi_policy_pre_open_a` (`src/tls_policy/apply.cyr`) now gates the
+  two enforcement modes separately — trust/mTLS on `enforcement_available()`,
+  pinning on `pin_available()` — and fails closed BEFORE arming the hook, so
+  the faulting paths are never reached. Flows through the low-level
+  `sandhi_conn_open_with_policy` and the 1.4.6 high-level threading alike.
+
+### Changed — live gates
+
+- `programs/_policy_runtime_probe.cyr` reworked + built native
+  (`-D CYRIUS_TLS_NATIVE`, CI updated): per-backend availability report +
+  default-policy / wrong-pin-fail-closed / trust-store-refused, all crash-free
+  on the native default. (Switching backends mid-process after a native
+  handshake destabilizes the deprecated libssl stack — not a real consumer
+  scenario, noted in the probe + issue — so it tests native only; libssl
+  crash-safety verified during development.)
+- `programs/_https_policy_threading_gate.cyr` now gates on `pin_available()`
+  instead of the libssl-coupled `enforcement_available()`, so it runs for
+  real on native (incl. native-without-libssl) rather than skipping.
+
+### Still tracked (cyrius-side, cross-repo)
+
+The SIGSEGV is gone, but full enforcement parity needs cyrius: (a) native
+`SSL_CTX_*` equivalents in `lib/tls_native.cyr` to make native trust-store /
+mTLS *enforce* (not just fail closed); (b) fix the libssl
+`tls_get_peer_spki_der` regression so libssl pinning works again. Both folded
+into the roadmap "native TLS-policy enforcement" gate for libssl retirement.
+
+### Verified
+
+- 992 assertions green (440 + 167 + 343 + 42; unchanged — backend-agnostic
+  unit suites; enforcement-availability is covered by the live gates, not
+  unit-tested since it touches `tls_dlsym`).
+- `programs/_policy_runtime_probe.cyr` (native, live): backend=native,
+  pin_available=1, trust_mtls_available=0; default PASS, wrong-pin
+  fail-closed (err=TLS), trust-store refused — no crash.
+- `programs/_https_policy_threading_gate.cyr` (native, live): ALL GATES PASS.
+- Isolation repro (dev): all four (backend × {pin, trust}) refuse cleanly,
+  exit 0 — was SIGSEGV on libssl-pin and native-trust before.
+- `cyrius lint` 0 warnings / 0 deferrals; `cyrfmt --check` clean.
+- `dist/sandhi.cyr` regenerated at v1.4.7.
+
 ## [1.4.6] — 2026-06-09
 
 **High-level client TLS-policy threading + cyrius pin 6.1.19 → 6.1.20.**

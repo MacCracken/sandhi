@@ -118,18 +118,15 @@ fn main() {
         say("  skip: 1.1.1.1:443 unreachable (no network in 3s)\n");
         return 0;
     }
-    # enforcement_available() checks libssl SSL_CTX_* symbol resolution
-    # (via fdlopen) — it is NOT backend-aware, so on a native build with
-    # no libssl present on the box it returns 0 even though the SPKI-pin
-    # path is backend-agnostic. The high-level pinning path inherits that
-    # gate (`_sandhi_policy_pre_open_a` fail-closes a pinned request when
-    # enforcement_available()==0), so pinning can't be exercised here.
-    # Treat it as a clean SKIP (minimal CI runners hit this), not a FAIL.
-    # Making the gate backend-aware so native SPKI pinning works without
-    # libssl is tracked in
-    # docs/issues/2026-06-09-tls-policy-enforcement-live-segfault.md.
-    if (sandhi_tls_policy_enforcement_available() != 1) {
-        say("  skip: enforcement_available() == 0 (no libssl resolvable in this env)\n");
+    # 1.4.7 — gate on the backend-aware `pin_available()`, not the
+    # libssl-coupled `enforcement_available()`. SPKI pinning is
+    # backend-agnostic, so on a native build it's available even with no
+    # libssl present — the gate runs for real. It reports unavailable only
+    # when TLS is unusable or the active backend is the deprecated libssl
+    # one (whose SPKI read faults upstream — see the issue); skip cleanly
+    # there.
+    if (sandhi_tls_policy_pin_available() != 1) {
+        say("  skip: SPKI-pin enforcement unavailable on this backend/env\n");
         return 0;
     }
 

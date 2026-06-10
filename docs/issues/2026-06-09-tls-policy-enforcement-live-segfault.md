@@ -1,6 +1,20 @@
 # 2026-06-09 — low-level `sandhi_conn_open_with_policy` SIGSEGVs on a LIVE network (TLS-policy enforcement)
 
-**Status:** Open — P2 (latent; offline CI is unaffected).
+> **RESOLVED (SIGSEGV) — sandhi 1.4.7.** Both crashes now fail closed
+> instead of faulting: `sandhi_tls_policy_enforcement_available()` is
+> backend-aware (trust/mTLS → 0 on native), and a new
+> `sandhi_tls_policy_pin_available()` gates SPKI pinning (backend-agnostic;
+> excludes the libssl backend pending the cyrius SPKI fix).
+> `_sandhi_policy_pre_open_a` gates the two modes separately and fails
+> closed before arming the hook, so the faulting paths are never called.
+> Verified live (native gates ALL PASS) + isolation repro (all four
+> backend×mode combos refuse cleanly, exit 0). **Cross-repo follow-ups
+> remain** (native `SSL_CTX_*` equivalents to *enforce* native trust/mTLS;
+> fix the libssl `tls_get_peer_spki_der` regression) — tracked in the
+> roadmap "native TLS-policy enforcement" gate, not blocking.
+
+**Status:** ✅ SIGSEGV resolved 1.4.7 (was Open — P2); enforcement-parity
+follow-ups are cyrius-side cross-repo deps.
 **Severity:** **P2** — only manifests with real network reachability;
 `programs/_policy_runtime_probe.cyr` skip-cleans when offline (the CI
 case), so it has not been failing CI. No consumer hits it today: the

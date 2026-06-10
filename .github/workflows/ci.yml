@@ -194,14 +194,16 @@ jobs:
       - name: Live-network TLS-policy gate
         # 1.3.0: build + run programs/_policy_runtime_probe.cyr.
         # Mirrors cyrius `_tls_live_gate` skip-cleanly cascade —
-        # exits 0 on PASS or clean SKIP (network unreachable / no
-        # libssl), non-zero on real regression (default-policy
+        # exits 0 on PASS or clean SKIP (network unreachable / TLS
+        # unavailable), non-zero on real regression (default-policy
         # handshake fail, wrong-pin not fail-closed, etc.).
-        # Informational gate: failure flags a real TLS-policy
-        # regression but build runners may have no network access,
-        # in which case the gate skip-cleanly exits 0.
+        # 1.4.7: built native (-D CYRIUS_TLS_NATIVE) — the gate now
+        # exercises the default backend, where pinning is enforced via
+        # the backend-agnostic SPKI read and trust/mTLS fails closed
+        # (no SIGSEGV; the pre-1.4.7 live crash). Informational gate:
+        # build runners may have no network, in which case it skips → 0.
         run: |
-          cyrius build programs/_policy_runtime_probe.cyr build/_policy_runtime_probe
+          cyrius build -D CYRIUS_TLS_NATIVE programs/_policy_runtime_probe.cyr build/_policy_runtime_probe
           build/_policy_runtime_probe
 
       - name: Native HTTPS repeated-request gate (P1 regression)
