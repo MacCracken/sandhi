@@ -43,11 +43,13 @@
 # has no native stack compiled in and stays on libssl). See
 # docs/architecture/004-native-tls-default.md.
 #
-# `sandhi_tls_use_libssl()` is the escape hatch for hosts the native
-# stack cannot yet handshake (filed cyrius-side as
-# `2026-06-09-native-tls-handshake-gap-public-servers.md`). It re-exposes
-# the brk/fdlopen crash on repeated requests — bounded use only, until
-# the upstream native-handshake gap closes.
+# `sandhi_tls_use_libssl()` is an explicit backend override. The two
+# upstream gaps that motivated keeping it (native handshake coverage;
+# the brk/fdlopen repeated-request crash) are both fixed in cyrius
+# 6.1.19 (see CHANGELOG [1.4.5] + architecture/004), so the opt-in is
+# now crash-safe and native reaches public hosts. libssl stays
+# deprecated; policy-bearing connections still route through it until
+# native TLS-policy enforcement lands.
 
 # Switch the active backend to native. Returns 0 on success, -1 if the
 # native stack was not compiled in (no `-D CYRIUS_TLS_NATIVE`).
