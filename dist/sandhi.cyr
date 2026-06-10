@@ -2696,38 +2696,23 @@ fn _sandhi_check_spki(tls_ctx, expected_hex): i64 {
     return _sandhi_check_spki_a(default_alloc(), tls_ctx, expected_hex);
 }
 
-# Apply the given policy while opening a connection. `addr` + `port`
-# + `use_tls` + `sni_host` match `sandhi_conn_open`. `policy` may be
-# 0 — equivalent to `sandhi_tls_policy_new_default()`.
-#
-# Returns the conn struct on success, or 0 on failure.
-#
-# 0.9.0 P0 #5 — fail-closed when policy demands enforcement we
-# can't deliver. If the caller built a `_pinned()` / `_mtls()` /
-# `_trust_store()` policy AND `enforcement_available()` is 0, we
-# refuse the connection rather than silently downgrade to the
-# default verify path. Callers wanting "best effort" behavior pass
-# `sandhi_tls_policy_new_default()` explicitly (no enforcement
-# requirements).
-# Open a TLS-policy-driven connection, allocating the per-connection
-# scratch (hook ctx struct + post-handshake SPKI check buffers) from
-# `a`. The conn struct itself is owned by the connection layer (Batch
-# 5 routes that through an Allocator); only the hook ctx + SPKI scratch
-# land in `a` here.
-#
-# Returns the conn struct on success or 0 on failure / OOM.
-# ── Pre/post open helpers (1.4.6) ───────────────────────────────
-# The policy-open splits cleanly into a PRE step (install the
+# --- Pre/post open helpers (1.4.6) ------------------------------
+# Policy enforcement splits cleanly into a PRE step (install the
 # SSL_CTX hook override that layers trust-store / mTLS) and a POST
 # step (clear the override + run the post-handshake SPKI pin check).
-# Splitting them lets the high-level request paths (client.cyr /
-# stream.cyr) bracket THEIR OWN v4/v6 timed opener with policy
-# enforcement — those modules are parsed before this one, so they
-# reach these helpers through the `_sandhi_policy_pre_open_fp` /
-# `_sandhi_policy_post_open_fp` slots (declared in conn.cyr,
-# registered at the bottom of this file). `sandhi_conn_open_with_policy_a`
-# below is itself now just pre → open → post, so there's one
-# enforcement implementation.
+# Splitting them lets the high-level request paths bracket THEIR OWN
+# v4/v6 timed opener with policy enforcement — `_sandhi_http_do_impl_a`
+# (client.cyr) and `sandhi_http_stream_opts_a` (stream.cyr) call these
+# helpers directly. That reachability is why `tls_policy/policy` +
+# `fingerprint` + `apply` are ordered ahead of `http/client` +
+# `http/stream` in cyrius.cyml (single-pass; see the manifest comment).
+# `sandhi_conn_open_with_policy_a` below is itself now just pre → open
+# → post, so there's one enforcement implementation.
+#
+# 0.9.0 P0 #5 (fail-closed) lives in `_sandhi_policy_pre_open_a`: if a
+# policy demands enforcement (`_pinned()` / `_mtls()` / `_trust_store()`)
+# AND `enforcement_available()` is 0, we refuse rather than silently
+# downgrade. A NULL / default policy carries no enforcement requirement.
 
 # Install the policy hook override for `policy`. Returns 0 to proceed
 # (override installed when the policy demands enforcement; left clear
