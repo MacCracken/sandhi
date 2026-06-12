@@ -24,6 +24,24 @@ both were carved into **bayan** at cyrius 6.1.25.
 - Verified green on 6.2.1: `cyrius deps` resolves cleanly, full `.tcyr` suite
   42/42, bench 4/4, `dist/sandhi.cyr` regenerated via `cyrius distlib`.
 
+### Fixed
+
+- **CI/release: aarch64 cross-build no longer gates the release.** The 6.2.1
+  pin pulled stdlib `bayan` into `[deps]` (sigil's transitive dep), and
+  `cycc_aarch64` aborts at parse time assembling it — `error: unexpected enum`.
+  Reproducible with zero sandhi code (`deps = [syscalls, alloc, bayan]` + a
+  three-line `main`); the x86_64 build of the identical source is clean, and
+  every installed toolchain 6.0.21–6.2.1 reproduces it. This is an upstream
+  `cycc_aarch64` dep-assembly/parser defect — sandhi can't patch stdlib or the
+  compiler (No-FFI / compose-don't-reimplement). The "Cross-build aarch64
+  (best-effort)" steps in `ci.yml` / `release.yml` now warn and skip the
+  aarch64 artifact on failure instead of failing the job; the Archive step
+  already guards on file presence, so the release ships its authoritative
+  x86_64 binary + source tarball + `dist/sandhi.cyr` unaffected. Filed upstream
+  at `docs/issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md`; documented in
+  [architecture/005](docs/architecture/005-aarch64-bayan-cross-build.md) and
+  tracked as a cross-repo dependency in `docs/development/roadmap.md`.
+
 ## [1.4.10] — 2026-06-09
 
 **Closeout audit (P-1 / security / code-audit pass) — closes the 1.4.x arc.**

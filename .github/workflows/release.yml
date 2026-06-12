@@ -78,10 +78,24 @@ jobs:
       - name: Cross-build aarch64 (best-effort)
         # cc5_aarch64 → cycc_aarch64 rename at cyrius v6.0.0; back-
         # compat symlink ships through v6.0.x. Prefer the new name.
+        #
+        # KNOWN-BROKEN (2026-06-12, cyrius ≤ 6.2.1): cycc_aarch64
+        # aborts with `error: unexpected enum` assembling stdlib
+        # `bayan` (sigil's transitive dep since the 1.4.11 6.2.1
+        # pin). Upstream cycc_aarch64 defect, not sandhi's — the step
+        # stays *genuinely* best-effort: a failure warns and ships
+        # the release without the aarch64 binary (the Archive step
+        # below already guards on file presence). See
+        # docs/issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md.
         run: |
+          rm -f build/sandhi-smoke-aarch64
           if [ -x "$HOME/.cyrius/bin/cycc_aarch64" ] || [ -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
-            CYRIUS_DCE=1 cyrius build --aarch64 programs/smoke.cyr build/sandhi-smoke-aarch64
-            echo "sandhi-smoke-aarch64: $(wc -c < build/sandhi-smoke-aarch64) bytes"
+            if CYRIUS_DCE=1 cyrius build --aarch64 programs/smoke.cyr build/sandhi-smoke-aarch64; then
+              echo "sandhi-smoke-aarch64: $(wc -c < build/sandhi-smoke-aarch64) bytes"
+            else
+              echo "::warning::aarch64 cross-build failed — known upstream cycc_aarch64 'unexpected enum' on stdlib bayan (docs/issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md). Releasing without the aarch64 binary."
+              rm -f build/sandhi-smoke-aarch64
+            fi
           else
             echo "::warning::cycc_aarch64 not in toolchain — aarch64 binary skipped in release"
           fi

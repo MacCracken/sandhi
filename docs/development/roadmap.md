@@ -197,6 +197,23 @@ sandhi's default since 1.4.5. Open items:
   Same leak daimon's `serve_async` already carries; a quality gate for
   long-running high-traffic servers, not a correctness blocker for the
   bounded-lifetime / low-traffic case.
+- **`cycc_aarch64` `unexpected enum` on stdlib `bayan`** *(filed
+  2026-06-12; affects the 1.4.11 aarch64 cross-build)*. The aarch64
+  cross-compiler aborts at parse time assembling the `bayan` dep
+  (sigil's transitive dep since the 6.1.25 carve-out, in sandhi's
+  `[deps]` since the 1.4.11 6.2.1 pin). Reproducible with zero sandhi
+  code (`deps = [syscalls, alloc, bayan]`); x86_64 is clean; every
+  toolchain 6.0.21–6.2.1 reproduces it. Root cause is the aarch64
+  dep-assembly order flipping the parser into init-body mode ahead of
+  bayan's first `enum` — the "top-level init breaks later
+  declarations" quirk on the aarch64 path. sandhi can't patch stdlib
+  or the compiler (No-FFI / compose-don't-reimplement), so CI/release
+  treat the aarch64 binary as truly best-effort (warn + skip on
+  failure); the x86_64 build is the authoritative gate. Filed
+  [`docs/issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md`](../issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md);
+  see [architecture/005](../architecture/005-aarch64-bayan-cross-build.md).
+  A quality-of-distribution gate (one convenience artifact), not a
+  correctness blocker.
 
 When these cyrius-side items land, the corresponding sandhi
 work opens. Until then, the wait is intentional.

@@ -160,7 +160,23 @@ jobs:
         # name first, fall back to the old name for v5.x snapshot
         # installs that might still be on PATH. Skip with a warning
         # if neither is present.
+        #
+        # KNOWN-BROKEN (2026-06-12, cyrius ≤ 6.2.1): cycc_aarch64
+        # aborts with `error: unexpected enum` while assembling the
+        # stdlib `bayan` dependency (sigil's transitive dep, pulled
+        # in at the 1.4.11 6.2.1 pin). The x86_64 build of the
+        # identical source is clean; the minimal repro is a 3-line
+        # program with deps=[syscalls, alloc, bayan] and no sandhi
+        # code at all. This is an upstream cycc_aarch64
+        # dep-assembly/parser defect — sandhi cannot patch stdlib or
+        # the compiler (CLAUDE.md: compose-don't-reimplement,
+        # No-FFI). The step is therefore *genuinely* best-effort: a
+        # compile failure warns and skips the aarch64 artifact rather
+        # than failing CI / gating the x86_64 release. See
+        # docs/issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md
+        # and docs/architecture/005-aarch64-bayan-cross-build.md.
         run: |
+          rm -f build/sandhi-smoke-aarch64
           if [ -x "$HOME/.cyrius/bin/cycc_aarch64" ]; then
             AARCH64_BIN=cycc_aarch64
           elif [ -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
@@ -169,7 +185,11 @@ jobs:
             echo "::warning::cycc_aarch64 (nor cc5_aarch64) shipped with Cyrius $CYRIUS_VERSION — skipping aarch64 cross-build"
             exit 0
           fi
-          CYRIUS_DCE=1 cyrius build --aarch64 programs/smoke.cyr build/sandhi-smoke-aarch64
+          if ! CYRIUS_DCE=1 cyrius build --aarch64 programs/smoke.cyr build/sandhi-smoke-aarch64; then
+            echo "::warning::aarch64 cross-build failed — known upstream cycc_aarch64 'unexpected enum' on stdlib bayan (docs/issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md). Skipping aarch64 artifact; the x86_64 build is authoritative and not gated by this."
+            rm -f build/sandhi-smoke-aarch64
+            exit 0
+          fi
           file build/sandhi-smoke-aarch64 | grep -q "aarch64" || {
             echo "ERROR: aarch64 build is not an aarch64 ELF"; exit 1; }
           echo "sandhi-smoke-aarch64: $(wc -c < build/sandhi-smoke-aarch64) bytes"
