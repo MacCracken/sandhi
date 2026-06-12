@@ -4,6 +4,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.11] — 2026-06-12
+
+**cyrius pin `6.1.21` → `6.2.1` (ecosystem-wide stdlib pin sweep).** Building
+against the 6.2.1 snapshot surfaced two stdlib modules that no longer exist:
+both were carved into **bayan** at cyrius 6.1.25.
+
+### Changed
+
+- **cyrius pin → 6.2.1.**
+- **`[deps]`: dropped `json`, replaced `bigint` + `base64` with `bayan`.**
+  - `json` was dead weight — sandhi rolls its own JSON-RPC codec in
+    `src/rpc/json.cyr` (all `sandhi_json_*`-namespaced, no collision with the
+    stdlib module it never called).
+  - `bigint` + `base64` are sigil's transitive crypto deps (u256_* arithmetic
+    for the SPKI-pin digest path, base64). Both now live in `bayan`, which
+    re-exports the legacy `u256_*` / `base64_*` names via its compat aliases.
+    `bayan` is ordered before `sigil` so those symbols resolve first.
+- Verified green on 6.2.1: `cyrius deps` resolves cleanly, full `.tcyr` suite
+  42/42, bench 4/4, `dist/sandhi.cyr` regenerated via `cyrius distlib`.
+
 ## [1.4.10] — 2026-06-09
 
 **Closeout audit (P-1 / security / code-audit pass) — closes the 1.4.x arc.**

@@ -5,7 +5,7 @@ description = "Service-boundary layer for AGNOS — shared HTTP/TCP/TLS + servic
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sandhi"
 language = "cyrius"
-cyrius = "6.1.21"
+cyrius = "6.2.1"
 
 # sandhi (सन्धि — junction, connection, joining) is the service-boundary
 # layer for AGNOS. Named 2026-04-24 after extensive search confirmed the
@@ -145,8 +145,11 @@ stdlib = [
     "mmap",
     "dynlib",
     "fdlopen",
-    # bigint / freelist: transitive requirements of sigil.
-    "bigint",
+    # bayan / freelist: transitive requirements of sigil. bayan replaces the
+    # standalone `bigint` + `base64` stdlib modules carved into it @6.1.25 — it
+    # provides sigil's u256_* / base64_* via its compat aliases. Must precede
+    # "sigil" below so those symbols are defined before sigil references them.
+    "bayan",
     "freelist",
     "net",
     "http",
@@ -155,8 +158,10 @@ stdlib = [
     # window (see docs/development/roadmap.md M1 / M6).
     "tls",
     "ws",
-    "json",
-    "base64",
+    # stdlib `json` + `base64` dropped at the 6.2.1 pin: both carved into bayan
+    # @6.1.25, so 6.2.x ships no lib/json.cyr / lib/base64.cyr. sandhi uses its
+    # OWN src/rpc/json.cyr (JSON-RPC) so it never needed stdlib-json; base64 now
+    # comes from the `bayan` entry above (compat alias).
     "sakshi",
     "sigil",
     # ct / keccak / thread_local: sigil's transitive crypto deps
