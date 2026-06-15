@@ -810,14 +810,21 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
     # bails before the cooperative accept loop. The fcntl is compiled out so
     # the bundle links; revisit when agnos exposes a ring-3 listen surface.
 
-    # Per-batch arena: max_conns × (recv buffer + arg struct) + slack.
-    # Backing memory is allocated once and reused across batches via
-    # reset_via — so the large recv buffers don't accumulate.
+    # Per-batch arena: max_conns × (recv buffer + arg struct + task struct)
+    # + slack for the runtime struct. Backing memory is allocated once and
+    # reused across batches via reset_via — so nothing accumulates.
+    # 1.5.3 (Batch A2): the per-conn `+64` covers the 32-byte arg AND the
+    # 32-byte async task struct, and the `+4096` slack covers the 40-byte
+    # runtime — because the runtime is now created with `async_new_in(arena)`
+    # (cyrius v6.1.22), so the rt + every `async_spawn` task come from this
+    # arena instead of the no-free global bump. reset_via(arena) per batch
+    # therefore reclaims them too → zero residual leak (was ~32 B/conn +
+    # 40 B/batch on the global bump). RSS stays flat over a sustained stream.
     var per_conn  = HSV_REQ_BUF_SIZE + 64;
     var arena = arena_allocator(max_conns * per_conn + 4096);
     if (arena == 0) { sock_close(sfd); return 1; }
 
-    var rt = async_new();
+    var rt = async_new_in(arena);
     if (rt == 0) { sock_close(sfd); return 1; }
     var batch = 0;
     while (1 == 1) {
@@ -849,9 +856,9 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
 
         if (batch > 0) {
             async_run(rt);          # drains the batch; closes rt's epfd
-            reset_via(arena);       # reclaim this batch's buffers + args
+            reset_via(arena);       # reclaim this batch's buffers + args + rt + tasks
             batch = 0;
-            rt = async_new();       # fresh runtime for the next batch
+            rt = async_new_in(arena);   # fresh arena-backed runtime for the next batch
             if (rt == 0) { sock_close(sfd); return 1; }
         } else {
             async_await_readable(sfd);   # empty queue — block until a conn

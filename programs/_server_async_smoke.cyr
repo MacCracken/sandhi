@@ -90,12 +90,19 @@ fn main() {
     var silent = sandhi_conn_open(INADDR_LOOPBACK(), port, 0, "");
     async_sleep_ms(200);
 
-    # Then drive two sequential real requests (exercises the batch-drain →
-    # arena-reset → next-batch path). Both must succeed despite the silent
-    # connection holding a handler slot until it times out.
+    # Then drive a long stream of sequential real requests (exercises the
+    # batch-drain → arena-reset → next-batch path REPEATEDLY). Each sequential
+    # connection is its own batch, so each one cycles async_run → reset_via →
+    # async_new_in(arena) — the 1.5.3 (Batch A2) arena-backed-runtime path.
+    # All must succeed despite the silent connection holding a handler slot
+    # until it times out. 16 cycles robustly exercises the per-batch runtime
+    # recreate; with the pre-1.5.3 `async_new()` each cycle leaked the rt +
+    # task structs into the no-free global bump — now they ride the
+    # reset-per-batch arena, so the loop is allocation-flat.
+    var want = 16;
     var ok = 0;
     var i = 0;
-    while (i < 2) {
+    while (i < want) {
         var conn = sandhi_conn_open(INADDR_LOOPBACK(), port, 0, "");
         if (conn != 0) {
             var req = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -116,8 +123,8 @@ fn main() {
     sys_kill(pid, 9);
     syscall(61, pid, 0, 0, 0);   # wait4 — reap the child
 
-    say("requests OK (with a silent connection held open): "); fmt_int(ok); say(" / 2\n");
-    if (ok == 2) { say("PASS\n"); return 0; }
+    say("requests OK (with a silent connection held open): "); fmt_int(ok); say(" / "); fmt_int(want); say("\n");
+    if (ok == want) { say("PASS\n"); return 0; }
     say("FAIL\n");
     return 1;
 }

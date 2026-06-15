@@ -4,6 +4,69 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.3] — 2026-06-15
+
+**1.5.x Batch A2 — async-server arena-aware runtime (residual leak eliminated).**
+No cyrius pin change (stays 6.2.6). No public-surface change. Plus two doc
+corrections from a verification pass that re-checked the "still upstream-blocked"
+claims against the actually-installed cyrius 6.2.6.
+
+### Fixed — `sandhi_server_run_async` no longer leaks the runtime + task structs
+
+The 1.4.9 epoll-cooperative server bounded its per-connection recv buffers + arg
+structs in a reset-per-batch arena, but created the async runtime with
+`async_new()` — so the runtime struct (40 B) and every `async_spawn` task struct
+(32 B/conn) came from the no-free global bump. Because `async_run` closes the
+runtime's epfd (single-use), the batched accept loop recreates the runtime each
+batch, leaking ~32 B/conn + 40 B/batch forever (a quality gate for long-running
+high-traffic servers; bounded-lifetime use was unaffected).
+
+**This was tracked as "gated on cyrius shipping `async_new_in(allocator)`" — but
+that primitive had already LANDED upstream in cyrius v6.1.22** (verified at
+`lib/async.cyr:47`; the claim was stale, same pattern as the aarch64 fix and the
+agnos `sys_getrandom` surface). So this is pure sandhi-side adoption, not new
+upstream work: `sandhi_server_run_async` now creates the runtime with
+`async_new_in(arena)` at both the initial and per-batch-recreate sites, so the rt
++ tasks come from the existing reset-per-batch arena and `reset_via(arena)`
+reclaims them along with the buffers/args → **zero residual leak, RSS flat over a
+sustained request stream**. The arena was already sized for this (the per-conn
+`+64` covers arg 32 B + task 32 B; the `+4096` slack covers the rt). No new dep
+(`async` already declared); no API change.
+
+- `programs/_server_async_smoke.cyr` strengthened from 2 to **16** sequential
+  requests — each is its own batch, so the run cycles
+  `async_run → reset_via → async_new_in(arena)` 16 times, robustly exercising the
+  arena-backed recreate path (16/16 pass, with the silent-client DoS regression
+  still held). An RSS-sampling probe was deliberately NOT added: the leak is
+  sub-page-per-batch (~296 B), so a runtime RSS assertion would need thousands of
+  iterations to signal and would be flaky; the fix is leak-free by construction
+  (arena-backed + `reset_via` reclaims; arena pre-sized) and the 16-cycle smoke
+  guards the recreate path.
+
+### Docs — corrections from the upstream-claims verification pass
+
+- **A2 reclassified**: `lib/async.cyr` `async_new_in(allocator)` is no longer an
+  open cross-repo dependency — it landed at cyrius v6.1.22 and is adopted here.
+  The roadmap / state.md cross-repo-deps entries are updated; the upstream
+  cyrius filing `2026-06-09-async-runtime-no-free-task-leak.md` is satisfied.
+- **AGNOS full-build blocker re-characterized**: the `cyrius build --agnos`
+  failure previously attributed to a "`lib/mmap.cyr` `CLONE_VM` stub" is actually
+  in **`lib/thread.cyr`** — its thread-spawn `clone(2)` flags
+  (`CLONE_VM | CLONE_FS | …`, `thread.cyr:199`) are emitted unconditionally inside
+  `#ifndef CYRIUS_TARGET_WIN`, and the agnos syscall table defines no `clone`
+  constants. The `mmap.cyr:184` error position is a single-pass include-offset
+  artifact (`thread.cyr` includes `mmap.cyr`). A `thread_agnos.cyr` peer exists in
+  the toolchain but is neither wired into `thread.cyr`'s target dispatch (only WIN
+  is) nor vendored. Filed as a precise cyrius-side coordination doc
+  ([`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](docs/issues/2026-06-15-cyrius-thread-agnos-clone-dispatch.md));
+  the agnos issue + roadmap + state.md are corrected to point at `thread.cyr`.
+
+### Verified
+
+- 992 assertions green (440 + 167 + 343 + 42); `_server_async_smoke` 16/16 PASS
+  (silent-client regression held); lint 0/0; `cyrius fmt --check` clean; aarch64
+  cross-build green; `dist/sandhi.cyr` regenerated at v1.5.3.
+
 ## [1.5.2] — 2026-06-15
 
 **1.5.x Batch C2 — AGNOS DNS-entropy gap (sit-adoption-driven follow-up to C1).**
