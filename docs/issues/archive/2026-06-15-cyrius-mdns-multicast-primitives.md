@@ -1,15 +1,17 @@
 # 2026-06-15 — cyrius `lib/net.cyr` lacks IPv4 multicast primitives (gates sandhi mDNS multicast)
 
-**Status**: ⚠️ **Open — partially landed; the primitives are NOT sufficient.**
-cyrius 6.2.7 shipped the join/option primitives specified below
-(`net_join_multicast` / `net_drop_multicast` / `net_set_multicast_ttl` / `_loop`
-/ `_if` / `sock_reuseport` + per-target `IP_MULTICAST_*` / `SO_REUSEPORT` /
-`IPPROTO_IP` constants + the 8-byte `ip_mreq`; the source cites this filing). A
-sandhi 1.5.4 QM-resolver adoption was written **and reverted after an adversarial
-review found a blocker** (see "The missing piece" below). sandhi additionally
-needs cyrius to add **unconnected `sock_sendto` / `sock_recvfrom`** to
-`lib/net.cyr` (or to use a two-socket send/recv split), plus a loopback
-live-multicast test, before a QM resolver can actually receive answers.
+**Status**: ✅ **RESOLVED — cyrius 6.2.7 (primitives) + sandhi 1.5.5 (adoption).**
+6.2.7 shipped the join/option primitives specified below (`net_join_multicast` /
+`net_drop_multicast` / `net_set_multicast_ttl` / `_loop` / `_if` / `sock_reuseport`
++ per-target `IP_MULTICAST_*` / `SO_REUSEPORT` / `IPPROTO_IP` constants + the
+8-byte `ip_mreq`; the source cites this filing). The 1.5.4 connect()-source-filter
+blocker (below) was resolved at **sandhi 1.5.5 via "The missing piece" option 2 —
+a two-socket send/recv split** (send on a connected socket, receive on a separate
+*unconnected* bound+joined socket), so the requested upstream `sock_sendto` /
+`sock_recvfrom` are **not needed** for A3. Verified with a live loopback
+multicast round-trip test. **The companion QU concern remains open** (the
+pre-existing unicast resolver shares the connect()-filter shape; needs a
+live-network check). Archived for the A3 multicast item.
 
 ## The missing piece (found in the 1.5.4 review — corrects this filing)
 
@@ -184,3 +186,13 @@ the last untracked upstream item in sandhi's Batch A.
   a loopback live test. The 1.5.4 adoption was **reverted**; this filing was
   un-archived and corrected. Status downgraded RESOLVED → partially-landed. The
   same connect()-filter concern was noted in the pre-existing QU resolver.
+- **2026-06-15 (1.5.5)** — **RESOLVED.** Adopted the QM resolver via option 2
+  (two-socket split): RX = unconnected `SO_REUSEPORT` + bound 5353 +
+  `net_join_multicast`; TX = connected, send-only. `sock_recv`/`sys_read` on the
+  unconnected RX delivers the answer (no connect() source-filter). No upstream
+  `sock_sendto`/`sock_recvfrom` needed. **Verified live**: a loopback round-trip
+  test (`discovery/local/mc_qm`) opens the real `_sandhi_local_mc_rx_open` on an
+  isolated group/port over `lo`, sends a synthetic answer, and confirms
+  `_sandhi_local_mc_recv_match` receives + parses it (fires live on the dev box;
+  skips cleanly without multicast). +3 verbs. Re-archived. The QU-resolver
+  live-check stays open as the companion concern.

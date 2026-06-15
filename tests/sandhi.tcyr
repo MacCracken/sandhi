@@ -1492,6 +1492,91 @@ fn test_discovery_local_resolver_smoke() {
     return 0;
 }
 
+# Send a synthetic A-record answer (a.com → 10.0.0.1, ID=0) to `grp:port` via a
+# loopback-IF multicast sender (loopback enabled). Used by the QM live test.
+fn _test_mc_send_synth_answer(grp, port, iface): i64 {
+    var pkt[64];
+    memset(&pkt, 0, 64);
+    store8(&pkt + 2, 0x84);   # QR=1, AA=1, RCODE=0
+    store8(&pkt + 5, 1);  store8(&pkt + 7, 1);   # QDCOUNT=1, ANCOUNT=1
+    store8(&pkt + 12, 1); store8(&pkt + 13, 97);      # "a"
+    store8(&pkt + 14, 3); store8(&pkt + 15, 99); store8(&pkt + 16, 111); store8(&pkt + 17, 109);  # "com"
+    store8(&pkt + 18, 0); store8(&pkt + 20, 1); store8(&pkt + 22, 1);   # term / QTYPE=A / QCLASS=IN
+    store8(&pkt + 23, 0xC0); store8(&pkt + 24, 0x0C);  # answer name ptr → offset 12
+    store8(&pkt + 26, 1); store8(&pkt + 28, 1); store8(&pkt + 32, 60); store8(&pkt + 34, 4);
+    store8(&pkt + 35, 10); store8(&pkt + 36, 0); store8(&pkt + 37, 0); store8(&pkt + 38, 1);  # 10.0.0.1
+    var tx_r = udp_socket();
+    if (is_err_result(tx_r) == 1) { return 0 - 1; }
+    var tx = payload(tx_r);
+    net_set_multicast_if(tx, iface);
+    net_set_multicast_loop(tx, 1);
+    sock_connect(tx, grp, port);
+    sock_send(tx, &pkt, 39);
+    sock_close(tx);
+    return 0;
+}
+
+fn test_discovery_local_mc_qm() {
+    # 1.5.5 (Batch A3): multicast (QM) mDNS resolver, two-socket send/recv over
+    # the cyrius 6.2.7 net multicast primitives. Wire-level checks + a LIVE
+    # loopback receive round-trip (the regression guard for the 1.5.4
+    # connect()-source-filter bug, which made the resolver never receive).
+
+    # --- wire-level (deterministic) ---
+    var qname = _sandhi_local_qname_a(default_alloc(), "x");   # "x.local"
+    assert_neq(qname, 0, "mc: qname built");
+    var qbuf[64];
+    var qmlen = _sandhi_local_build_query_cls(0, qname, &qbuf, 0x00);
+    assert_neq(qmlen, 0 - 1, "mc: QM query built");
+    assert_eq(load8(&qbuf + qmlen - 2), 0x00, "mc: QM QCLASS hi = 0x00 (no QU bit)");
+    assert_eq(load8(&qbuf + 0), 0x00, "mc: QM ID = 0");
+    var ubuf[64];
+    var ulen = _sandhi_local_build_query(0x1234, qname, &ubuf);
+    assert_eq(load8(&ubuf + ulen - 2), 0x80, "mc: QU QCLASS hi = 0x80 (preserved)");
+    assert_eq(load8(&ubuf + 0), 0x12, "mc: QU ID preserved");
+
+    var r = sandhi_discovery_local_mc_resolver();
+    assert_neq(r, 0, "mc: resolver non-null");
+    assert_eq(sandhi_discovery_local_mc_available(), 1, "mc: available on test host");
+
+    # --- LIVE loopback receive round-trip (control-calibrated regression gate) ---
+    # Open TWO unconnected join sockets on the loopback interface, on isolated
+    # admin-scoped group + distinct non-mDNS ports:
+    #   - `ctrl`  — a plain control socket (proves the ENV delivers loopback
+    #               multicast at all),
+    #   - `rx`    — the RESOLVER's real `_sandhi_local_mc_rx_open`.
+    # Then: if the control receives the looped answer, the env works, so the
+    # resolver's rx MUST receive it too — a HARD assert (this is what catches a
+    # reintroduced connect()-on-RX regression: the control would still receive,
+    # but a connect()ed rx would not). If the control does NOT receive, the env
+    # simply lacks loopback multicast → skip cleanly.
+    var grp = 239 | (255 << 8) | (0 << 16) | (99 << 24);   # 239.255.0.99 (no real traffic)
+    var lo  = 127 | (1 << 24);                             # 127.0.0.1
+    var ctrl = _sandhi_local_mc_rx_open(grp, 15354, lo);
+    var rx   = _sandhi_local_mc_rx_open(grp, 15353, lo);
+    if ((ctrl < 0) || (rx < 0)) {
+        if (ctrl >= 0) { net_drop_multicast(ctrl, grp, lo); sock_close(ctrl); }
+        if (rx >= 0)   { net_drop_multicast(rx, grp, lo); sock_close(rx); }
+        assert_eq(1, 1, "mc: multicast setsockopt unavailable — live recv skipped");
+        return 0;
+    }
+    # Each port gets its own looped answer (multicast is delivered by group+port).
+    _test_mc_send_synth_answer(grp, 15354, lo);
+    var ctrl_ip = _sandhi_local_mc_recv_match(default_alloc(), ctrl, 0);
+    _test_mc_send_synth_answer(grp, 15353, lo);
+    var rx_ip = _sandhi_local_mc_recv_match(default_alloc(), rx, 0);
+    net_drop_multicast(ctrl, grp, lo); sock_close(ctrl);
+    net_drop_multicast(rx, grp, lo); sock_close(rx);
+    if (ctrl_ip != 0) {
+        # Env delivers loopback multicast → the resolver's unconnected rx MUST
+        # have received the looped answer. A connect()-on-rx regression fails here.
+        assert_eq(rx_ip, 0x0100000A, "mc: resolver rx_open receives looped multicast (control confirms env)");
+    } else {
+        assert_eq(1, 1, "mc: env does not deliver loopback multicast — live recv skipped");
+    }
+    return 0;
+}
+
 fn test_discovery_register_rejects_bad_inputs() {
     assert_eq(sandhi_discovery_register(0, "n", "h", 80), SANDHI_ERR_INTERNAL, "register: null base_url");
     assert_eq(sandhi_discovery_register("http://x", 0, "h", 80), SANDHI_ERR_INTERNAL, "register: null name");
@@ -2164,6 +2249,9 @@ fn main() {
 
     test_group("discovery/local/resolver");
     test_discovery_local_resolver_smoke();
+
+    test_group("discovery/local/mc_qm");
+    test_discovery_local_mc_qm();
 
     test_group("discovery/register/bad_input");
     test_discovery_register_rejects_bad_inputs();

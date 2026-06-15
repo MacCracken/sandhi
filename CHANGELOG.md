@@ -4,6 +4,76 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.5] — 2026-06-15
+
+**Batch A3 — opt-in multicast (QM) mDNS resolver, done right (two-socket split +
+a live loopback test).** No cyrius pin change (stays 6.2.7). This redoes the 1.5.4
+A3 attempt that was reverted for a connect()-source-filter blocker — this time the
+receive path is **verified live**, not assumed. **+3 public verbs**; +9 test
+assertions (1001 total, was 992).
+
+### Added — multicast (QM) resolver (`src/discovery/local.cyr`)
+
+For mDNS responders that ignore the QU bit and multicast their answer to
+224.0.0.251:5353, sandhi joins the group and listens. The 1.5.4 attempt used one
+`connect()`ed socket for both send and receive — but Linux's connect()
+source-filter then drops every answer (responders send from their own unicast IP,
+not the group). **Fix: a two-socket split** that composes the cyrius 6.2.7
+primitives without needing the `sock_sendto`/`sock_recvfrom` this filing had
+requested:
+
+- **RX socket** — UNCONNECTED, `SO_REUSEPORT` + bound to 5353 + `net_join_multicast`.
+  `sock_recv` (`sys_read`) on an unconnected bound socket delivers the next
+  datagram from **any** source, so it sees the multicast answer.
+- **TX socket** — connected to the group, used only to send the plain-IN ID=0
+  query (`sys_write` needs a connected socket).
+- Recv-loop matches by answer-name (the shared parser, `expected_id=0`), bounded
+  by an `SO_RCVTIMEO` deadline + a hard attempt cap; drops membership + closes
+  both sockets on every exit path.
+
+- **+3 public verbs**: `sandhi_discovery_local_mc_resolver_a` /
+  `sandhi_discovery_local_mc_resolver` / `sandhi_discovery_local_mc_available`.
+  **Opt-in** — the unicast QU resolver stays the default fast path, unchanged
+  (the builder was refactored to `_sandhi_local_build_query_cls(…, qclass_hi)`
+  with QU as the back-compat wrapper). On **AGNOS** the net multicast helpers
+  return -1, so `_sandhi_local_mc_rx_open` fails → the resolver degrades to a clean
+  miss (`sandhi_discovery_local_mc_available()` → 0).
+- **The rx_open + recv-loop are factored as `_sandhi_local_mc_rx_open(group, port,
+  iface)` + `_sandhi_local_mc_recv_match(a, fd, expected_id)`** so the live test
+  drives the exact resolver receive code.
+
+### Tested — a control-calibrated LIVE loopback multicast gate (the missing 1.5.4 test)
+
+`tests/sandhi.tcyr` `discovery/local/mc_qm` is a **hard regression gate**, not just
+a positive probe (per the review of the first cut). It opens two unconnected join
+sockets over the loopback interface on an isolated admin-scoped group
+(239.255.0.99): a plain **control** socket (proves the env delivers loopback
+multicast at all) and the resolver's **real** `_sandhi_local_mc_rx_open`. A
+loopback-IF sender multicasts a synthetic A-record answer to each port; then — **if
+the control receives, the resolver's rx MUST receive too, else the test fails
+RED** (a connect()-on-rx regression filters the rx answer while the control still
+gets it). It skips cleanly only where the control also fails (no loopback multicast
+in the env). **Verified both directions**: green + firing live on the dev box, and
+goes red under a negative control that re-injects the 1.5.4 connect()-on-rx bug.
+Plus wire-level checks (QM plain-IN QCLASS + ID=0, QU builder unchanged).
+
+### Resolved
+
+The mDNS-multicast filing
+[`docs/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md)
+is resolved + archived: 6.2.7 shipped the join/option primitives; the connected-
+socket insufficiency is worked around sandhi-side with the two-socket split
+(filing option 2), so the requested upstream `sock_sendto`/`sock_recvfrom` are
+no longer needed for A3. *(The pre-existing **QU** resolver still uses one
+connected socket — its receive correctness against real responders is unverified;
+flagged for a live-network check, tracked in the filing.)*
+
+### Verified
+
+1001 assertions green (449 + 167 + 343 + 42); `_server_async_smoke` 16/16;
+`cyrius lint` 0/0; `cyrius fmt --check` clean; aarch64 + agnos builds green
+(agnos resolver degrades to QU); `dist/sandhi.cyr` regenerated at v1.5.5.
+
 ## [1.5.4] — 2026-06-15
 
 **cyrius pin `6.2.6` → `6.2.7` — the AGNOS build cascade is resolved (cyrius
@@ -55,7 +125,7 @@ from their own unicast IP, not the group). The join/`SO_REUSEPORT`/TTL primitive
 are real but inert with a connected receive socket. A working QM resolver also
 needs unconnected `sock_sendto` / `sock_recvfrom` in `net.cyr` (not present), or a
 two-socket send/recv split — plus a loopback live-multicast test. The mDNS filing
-[`docs/issues/2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/issues/2026-06-15-cyrius-mdns-multicast-primitives.md)
+[`docs/issues/2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md)
 is un-archived and corrected with the full requirement; Batch A3 stays open. (The
 review also noted the pre-existing **QU** resolver has the same connect()-filter
 shape — its "works against most responders" claim is unverified and needs a live
@@ -147,7 +217,7 @@ sustained request stream**. The arena was already sized for this (the per-conn
   paste-ready cyrius-side coordination doc with the exact constants / struct /
   preferred `net_join_multicast` helper sandhi needs for QM-mode + RFC 6763
   browsing (the QU-bit unicast resolver ships today and needs none of it):
-  [`2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/issues/2026-06-15-cyrius-mdns-multicast-primitives.md).
+  [`2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md).
   Closes the last untracked upstream item in sandhi's Batch A.
 
 ### Verified

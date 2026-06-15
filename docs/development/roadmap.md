@@ -19,7 +19,7 @@ that picks up the change. The public surface is no longer
 frozen (ADR 0005's freeze applied "between 0.9.2 and 1.0.0";
 post-fold patches are explicitly allowed per the 1.1.0 ship).
 
-## Shipped (M0 through 1.5.4)
+## Shipped (M0 through 1.5.5)
 
 Compressed log — one line per release. CHANGELOG carries the
 details, state.md the current snapshot.
@@ -78,8 +78,9 @@ details, state.md the current snapshot.
 - **1.4.9** — epoll-cooperative server; `max_conns` enforced + cyrius pin 6.1.20 → **6.1.21** (TLS flag flip completed). Closes the daimon ask: **+1 verb** `sandhi_server_run_async` over `lib/async.cyr` (worker shape decided (b) epoll-cooperative; handler stays cooperative). Batched accept up to `max_conns`/cycle → spawn handler task per conn → `async_run` → reset per-batch arena. Per-handler recv buffers (no-interleave invariant). New deps `async` + `atomic`. Sync `run`/`run_opts` unchanged. Filed cyrius cross-repo leak `2026-06-09-async-runtime-no-free-task-leak.md` (async.cyr no-free rt/task structs). **cyrius 6.1.21** inverted `lib/tls.cyr` (native = no-flag default; `-D CYRIUS_TLS_LIBSSL` opts out; legacy `-D CYRIUS_TLS_NATIVE` = no-op alias) + re-folded sandhi 1.4.5→1.4.8 — so CI/release dropped the 1.4.8 interim `-D CYRIUS_TLS_NATIVE` (libssl proof now `-D CYRIUS_TLS_LIBSSL`). Verified via forked `_server_async_smoke.cyr` (2/2 200) + 3-way polarity. 992 assertions green (unchanged).
 - **1.4.10** — closeout audit (P-1 / security / code-audit pass); **closes the 1.4.x arc** (no pin change; stays 6.1.21). **P1 fixed**: async server DoS — `_sandhi_server_async_handler` did an infinite `async_await_readable` (epoll_wait −1) before recv, so a silent client hung the whole cooperative loop; dropped the await (recv under SO_RCVTIMEO), floored `idle_ms` > 0; silent-client regression added to the smoke. **P2 fixed**: `async_new()` null-check (server); `body_sb` + `chunk_state` null-checks (stream SSE/chunked path). **Audit-confirmed**: 1.4.7 native-fail-closed property HOLDS (full `tls_dlsym`/`SSL_CTX_*` gate coverage; key-without-cert safe); 1.4.5–1.4.9 verbs documented + covered; +2 standalone docstrings. 992 assertions green (unchanged).
 - **1.4.11** — cyrius pin 6.1.21 → **6.2.1** (ecosystem-wide stdlib pin sweep). `[deps]` dropped `json` (sandhi rolls its own `src/rpc/json.cyr`) and replaced `bigint` + `base64` with **`bayan`** (the 6.1.25 carve-out re-exporting `u256_*` / `base64_*` for sigil's SPKI-pin digest path; ordered before `sigil`). Surfaced the **aarch64 `bayan` cross-build defect** (`cycc_aarch64` `unexpected enum`); CI/release made the aarch64 step best-effort (warn + skip) so the upstream defect can't gate a release. Filed `2026-06-12-cyrius-aarch64-bayan-enum-parse.md` + architecture/005. No source change; 992 green.
+- **1.5.5** — **Batch A3: opt-in multicast (QM) mDNS resolver — done right** (no pin change, stays 6.2.7). Redoes the 1.5.4 A3 attempt that was reverted for a connect()-source-filter blocker. **Fix: a two-socket split** — RX is an UNCONNECTED `SO_REUSEPORT` + bound 5353 + `net_join_multicast` socket (`sys_read` delivers from any source, so it sees the answer); TX is connected, send-only. Composes 6.2.7's primitives **without** the `sock_sendto`/`sock_recvfrom` the filing had requested. **+3 public verbs** (`sandhi_discovery_local_mc_resolver[_a]` + `_mc_available`); QU stays the default; agnos degrades to QU (helpers → -1). **Verified live** via a control-calibrated hard gate (`discovery/local/mc_qm`): a control socket proves the env delivers loopback multicast, then the resolver's real `_sandhi_local_mc_rx_open` MUST receive too (else RED) — green live + RED under a negative control that re-injects the connect()-on-rx bug. mDNS filing resolved + archived. **1001 assertions green** (449 + 167 + 343 + 42); lint/fmt clean; aarch64 + agnos green. *(Companion: the pre-existing QU resolver shares the connect()-filter shape; its real-responder receive is unverified — flagged for a live-network check.)*
 - **1.5.4** — **cyrius pin 6.2.6 → 6.2.7 — AGNOS build cascade RESOLVED** (zero sandhi source change; no public-surface change). `cyrius build --agnos programs/smoke.cyr` now produces a valid agnos ELF: `thread.cyr` lands via the clean deps re-resolve (was a stale-`./lib` artifact) and `async.cyr`'s `SYS_EPOLL_CREATE1` is fixed in 6.2.7 (serial agnos peer; cyrius cites the cascade filing §2). The agnos-socket-backend-gap + cascade filings archived. **Batch A3 (mDNS multicast) NOT shipped** — 6.2.7 landed the `net_join_multicast` / `sock_reuseport` / `net_set_multicast_ttl` primitives from sandhi's filing, but a QM-resolver adoption was **reverted after an adversarial review found a blocker** (the connected receive socket's source-filter drops mDNS answers; needs unconnected `sock_sendto`/`sock_recvfrom` or a two-socket split + a live test). mDNS filing un-archived + corrected; A3 stays open. **A1 (native `SSL_CTX_*`) re-verified still open on 6.2.7.** Clean deps re-resolve (`rm -rf lib cyrius.lock && cyrius deps`). **992 assertions green** (unchanged); lint/fmt clean; aarch64 + agnos builds green.
-- **1.5.3** — **Batch A2: async-server arena-aware runtime** (residual leak eliminated; no pin change, stays 6.2.6; no public-surface change). `sandhi_server_run_async` created the runtime with `async_new()`, so the rt (40 B) + every `async_spawn` task (32 B/conn) came from the no-free global bump and leaked ~32 B/conn + 40 B/batch across the per-batch recreate (`async_run` closes the epfd → single-use). **Discovered during the upstream-claims verification pass that `async_new_in(allocator)` had ALREADY landed upstream at cyrius v6.1.22** (`lib/async.cyr:47`) — the "gated on cyrius" framing was stale (same pattern as aarch64 / agnos `sys_getrandom`). So this is pure sandhi-side adoption: the runtime is now `async_new_in(arena)` at both sites, so rt + tasks ride the existing reset-per-batch arena and `reset_via` reclaims them → **zero residual leak, RSS flat**. Arena was already sized for it (+64/conn = arg 32 + task 32; +4096 = rt). `_server_async_smoke` strengthened 2 → 16 cycles (16/16 PASS, silent-client DoS regression held) + an `async_spawn`-return guard (arena-backed task alloc now covered by the load-shed path). The verification pass also **corrected the AGNOS full-build picture**: it is a *cascade*, not the "`mmap` stub" / "upstream `thread.cyr` defect" earlier claimed — `thread.cyr`'s agnos dispatch is already fixed in the 6.2.6 toolchain (sandhi's vendored `./lib` is just stale), and refreshing it exposes the next gap (`async.cyr`'s raw `SYS_EPOLL_CREATE1`); part sandhi-side dep-refresh, part upstream stdlib agnos-completeness. Filed accurately at [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](../issues/archive/2026-06-15-cyrius-thread-agnos-clone-dispatch.md). Also filed the one remaining untracked Batch-A item — A3 mDNS multicast primitives — as a paste-ready cyrius coordination doc [`2026-06-15-cyrius-mdns-multicast-primitives.md`](../issues/2026-06-15-cyrius-mdns-multicast-primitives.md). 992 green; lint/fmt clean; aarch64 green.
+- **1.5.3** — **Batch A2: async-server arena-aware runtime** (residual leak eliminated; no pin change, stays 6.2.6; no public-surface change). `sandhi_server_run_async` created the runtime with `async_new()`, so the rt (40 B) + every `async_spawn` task (32 B/conn) came from the no-free global bump and leaked ~32 B/conn + 40 B/batch across the per-batch recreate (`async_run` closes the epfd → single-use). **Discovered during the upstream-claims verification pass that `async_new_in(allocator)` had ALREADY landed upstream at cyrius v6.1.22** (`lib/async.cyr:47`) — the "gated on cyrius" framing was stale (same pattern as aarch64 / agnos `sys_getrandom`). So this is pure sandhi-side adoption: the runtime is now `async_new_in(arena)` at both sites, so rt + tasks ride the existing reset-per-batch arena and `reset_via` reclaims them → **zero residual leak, RSS flat**. Arena was already sized for it (+64/conn = arg 32 + task 32; +4096 = rt). `_server_async_smoke` strengthened 2 → 16 cycles (16/16 PASS, silent-client DoS regression held) + an `async_spawn`-return guard (arena-backed task alloc now covered by the load-shed path). The verification pass also **corrected the AGNOS full-build picture**: it is a *cascade*, not the "`mmap` stub" / "upstream `thread.cyr` defect" earlier claimed — `thread.cyr`'s agnos dispatch is already fixed in the 6.2.6 toolchain (sandhi's vendored `./lib` is just stale), and refreshing it exposes the next gap (`async.cyr`'s raw `SYS_EPOLL_CREATE1`); part sandhi-side dep-refresh, part upstream stdlib agnos-completeness. Filed accurately at [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](../issues/archive/2026-06-15-cyrius-thread-agnos-clone-dispatch.md). Also filed the one remaining untracked Batch-A item — A3 mDNS multicast primitives — as a paste-ready cyrius coordination doc [`2026-06-15-cyrius-mdns-multicast-primitives.md`](../issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md). 992 green; lint/fmt clean; aarch64 green.
 - **1.5.2** — **Batch C2: AGNOS DNS-entropy gap** (sit-adoption-driven C1 follow-up; no pin change, stays 6.2.6; no public-surface change). `_sandhi_resolve_random_u16` (DNS TXID, anti-Kaminsky) seeded entropy from `/dev/urandom` via bare Linux syscall numbers (`open`=2/`read`=0/`close`=3) — integer literals that *compiled* on agnos but meant different syscalls at runtime (and agnos has no `/dev/urandom`), so the TXID degraded to the weak clock fallback there. Replaced with the stdlib `sys_getrandom(buf, len, 0)` syscall-selector primitive (`syscalls` dep, already declared — no new dep, **no `#ifdef`**): portable across Linux/macOS/Windows/AGNOS (#45, agnos 1.45.0), no fs access, strict upgrade on Linux too. Verified: agnos `sys_getrandom` resolves on `--agnos`; Linux runtime yields valid distinct TXIDs; all targets define the symbol; 992 green, lint/fmt clean, aarch64 green. **Completes the sandhi-side AGNOS transport work** (C1+C2); remaining `--agnos` blockers are upstream-only (`mmap` `CLONE_VM` stub + A1 native `SSL_CTX_*`). [`2026-06-14-agnos-socket-backend-gap.md`](../issues/archive/2026-06-14-agnos-socket-backend-gap.md).
 - **1.5.1** — **Batch C1: AGNOS socket-backend gap** (first sit-adoption-driven slot; no pin change, stays 6.2.6). sandhi's HTTP-client bounded nb-connect (`src/http/conn.cyr`) + async-server listen-fd (`src/server/mod.cyr`) dropped to raw Linux socket syscalls (`SYS_FCNTL`/`SYS_SOCKET`/`SYS_CONNECT`/`SYS_SETSOCKOPT`/`SOL_SOCKET`) undefined on the AGNOS target, so `cyrius build --agnos` of a consumer (sit) failed to **compile**. Every site now guarded by `#ifndef CYRIUS_TARGET_AGNOS` with an agnos counterpart (`#ifdef`): nb-connect → blocking `sock_connect` (timeout advisory), SO_*TIMEO → no-op, IPv4-only v6 → fail-closed, listen-fd fcntl compiled out. **Linux/macOS proven byte-identical** (`cmp` pre/post smoke); agnos strip + negative control + 26-site structural sweep verified. 992 assertions green; aarch64 still green. Remaining agnos-build blockers are out of C1 scope and tracked (C2 entropy, upstream `mmap` stub, A1 native `SSL_CTX_*`). [`2026-06-14-agnos-socket-backend-gap.md`](../issues/archive/2026-06-14-agnos-socket-backend-gap.md).
 - **1.5.0** — **opens the 1.5.x arc.** cyrius pin 6.2.1 → **6.2.6**; the aarch64 `bayan` cross-build defect is **fixed upstream** (6.2.6) — `--aarch64 programs/smoke.cyr` produces a valid aarch64 ELF with zero sandhi change, exactly as the filing predicted. CI/release aarch64 step **restored to gating** (1.4.11 warn-skip tolerance removed; only-tolerated skip is the toolchain lacking `cycc_aarch64`). Issue-backlog cleanup: 5 resolved issues archived (the aarch64 defect + the four 1.4.x sandhi-side defects), `docs/issues/README.md` re-tabled, and the two cross-repo coordination docs whose sandhi side is delivered updated (`daimon-server-max-conns` sandhi-side ✅ 1.4.9; `cyrius-native-tls` sit-gate cleared). 992 assertions green (440 + 167 + 343 + 42); lint clean; `dist/sandhi.cyr` regenerated at v1.5.0.
@@ -105,13 +106,12 @@ Each is detailed under "Cross-repo dependencies" below; this is the 1.5.x
 slot framing. Re-pin to the cyrius release that adds the primitive, wire the
 one-line sandhi change, drop the corresponding cross-repo bullet.
 
-> **A1 + A3 remain in Batch A.** A2 shipped at 1.5.3 (`async_new_in` had already
+> **Only A1 is left in Batch A.** A2 shipped at 1.5.3 (`async_new_in` had already
 > landed at cyrius v6.1.22). The **AGNOS build cascade** (under "Cross-repo
-> dependencies" below) cleared at 1.5.4 / cyrius 6.2.7. **A3** is partially
-> unblocked — 6.2.7 shipped the mDNS *join/option* primitives from sandhi's
-> filing, but a 1.5.4 adoption attempt was reverted (the primitives are
-> necessary-but-insufficient; see the A3 entry). A1 remains genuinely
-> cyrius-gated (re-verified still-open on 6.2.7).
+> dependencies") cleared at 1.5.4 / cyrius 6.2.7. **A3 shipped at 1.5.5** —
+> adopted the opt-in QM resolver via a two-socket split + a live loopback test
+> (6.2.7's primitives plus a sandhi-side workaround; no further upstream needed).
+> A1 remains genuinely cyrius-gated (re-verified still-open on 6.2.7).
 
 - **A1 — native TLS-policy enforcement** (`SSL_CTX_*` native equivalents in
   cyrius `lib/tls_native.cyr`). The last libssl coupling: native trust-store /
@@ -123,18 +123,15 @@ one-line sandhi change, drop the corresponding cross-repo bullet.
   verb is `tls_set_verify`; no native trust-store / client-cert / client-key
   wrapper exists, and native CertificateRequest handling is server-side only —
   an HTTP client gets no client-cert path. sandhi correctly stays fail-closed.)*
-- **A3 — mDNS multicast** — *partially unblocked; adoption deferred.* cyrius 6.2.7
-  shipped the join/option primitives (`net_join_multicast` / `_drop` /
-  `net_set_multicast_ttl` / `_loop` / `_if` / `sock_reuseport` + `IP_MULTICAST_*`
-  / `SO_REUSEPORT` / `ip_mreq`) from sandhi's filing — **but they're insufficient**:
-  a 1.5.4 QM-resolver was reverted after review found that `net.cyr`'s
-  connected-socket `sock_send`/`sock_recv` make the receive socket drop mDNS
-  answers (Linux connect() source-filter). Needs unconnected `sock_sendto` /
-  `sock_recvfrom` in `net.cyr` (or a two-socket split) + a loopback live test.
-  Filing un-archived + corrected:
-  [`2026-06-15-cyrius-mdns-multicast-primitives.md`](../issues/2026-06-15-cyrius-mdns-multicast-primitives.md).
-  Quality gate, not a hard blocker (QU is the default — though its own
-  connect()-filter exposure now wants a live check too).
+- **A3 — mDNS multicast — ✅ SHIPPED at 1.5.5.** 6.2.7 shipped the join/option
+  primitives; sandhi adopted the opt-in QM resolver
+  (`sandhi_discovery_local_mc_resolver[_a]` + `_mc_available`) via a **two-socket
+  split** (unconnected RX + connected TX) — a sandhi-side workaround for the
+  connect()-source-filter that sank the 1.5.4 attempt, so no upstream
+  `sock_sendto`/`sock_recvfrom` was needed. Verified live (loopback receive test).
+  QU stays the default; agnos degrades to QU. Filing resolved + archived.
+  **Companion still open**: the pre-existing QU resolver shares the connect()-filter
+  shape — its real-responder receive is unverified and wants a live-network check.
 
 ### Batch B — profile-justified optimization picks (open when prof data justifies)
 
@@ -299,18 +296,16 @@ items:
     pinned open SIGSEGVs in the post-handshake SPKI extraction (worked at
     1.3.0; regressed since). sandhi excludes libssl from `pin_available()`
     until this lands.
-- **mDNS receive primitives: `sock_sendto` / `sock_recvfrom` in `lib/net.cyr`**
-  *(filed 2026-06-15; the A3 follow-on)*. 6.2.7 shipped the multicast
-  join/option primitives, but they're insufficient — `net.cyr`'s connected-socket
-  `sock_send`/`sock_recv` force a `connect()` that source-filters out mDNS answers
-  (a 1.5.4 QM-resolver was reverted on this). A working QM resolver needs
-  unconnected sendto/recvfrom (`sys_sendto`=44 / `sys_recvfrom` already exist;
-  just unwrapped). Filing
-  [`2026-06-15-cyrius-mdns-multicast-primitives.md`](../issues/2026-06-15-cyrius-mdns-multicast-primitives.md).
 When these cyrius-side items land, the corresponding sandhi
 work opens. Until then, the wait is intentional.
 
-**Resolved upstream at 1.5.4 / cyrius 6.2.7** (was a cross-repo dep):
+**Resolved at 1.5.4–1.5.5 / cyrius 6.2.7** (were cross-repo deps):
+- **mDNS multicast** — 6.2.7 shipped the join/option primitives; the
+  connected-socket receive insufficiency was worked around **sandhi-side at 1.5.5**
+  with a two-socket split (so the once-proposed `sock_sendto`/`sock_recvfrom` are
+  not needed). Adopted as the opt-in QM resolver (Batch A3); filing archived.
+  *(The pre-existing QU resolver's connect()-filter live-check is the only mDNS
+  loose end.)*
 - **AGNOS full-build cascade** — `thread.cyr` (stale-`./lib` artifact, cleared by
   the clean re-resolve) + `async.cyr` `SYS_EPOLL_CREATE1` (fixed in 6.2.7, serial
   agnos peer). `cyrius build --agnos` now produces a valid agnos ELF. The cascade

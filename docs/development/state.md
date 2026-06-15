@@ -4,7 +4,9 @@
 
 ## Version
 
-**1.5.4** — 2026-06-15. **cyrius pin `6.2.6` → `6.2.7` — AGNOS build cascade RESOLVED** (zero sandhi source change; no public-surface change). `cyrius build --agnos programs/smoke.cyr` now produces a valid `ELF 64-bit … x86-64` agnos binary — `thread.cyr` lands in the vendored `./lib` via the **clean deps re-resolve** (`rm -rf lib cyrius.lock && cyrius deps`; it was a stale-snapshot artifact already fixed in the 6.2.6 toolchain), and `async.cyr`'s raw `SYS_EPOLL_CREATE1` is fixed in 6.2.7 (routes the epoll runtime to a serial agnos peer; cyrius cites the cascade filing §2). The agnos-socket-backend-gap issue + the cascade filing are archived. **Batch A3 (mDNS multicast) NOT shipped**: 6.2.7 landed the join/option primitives from sandhi's filing, but a QM-resolver adoption was **reverted after an adversarial review** found them insufficient — `net.cyr`'s connected-socket `sock_send`/`sock_recv` force a `connect()` whose Linux source-filter drops mDNS answers. A working resolver also needs unconnected `sock_sendto`/`sock_recvfrom` (or a two-socket split) + a live test; mDNS filing un-archived + corrected, A3 stays open. **A1 (native `SSL_CTX_*`) re-verified still open on 6.2.7** (only `tls_set_verify` exists). **Verified**: **992 assertions green** (440 + 167 + 343 + 42, unchanged); `_server_async_smoke` 16/16; lint 0/0; `cyrius fmt --check` clean; aarch64 + agnos builds green; `dist/sandhi.cyr` regenerated at v1.5.4.
+**1.5.5** — 2026-06-15. **Batch A3 — opt-in multicast (QM) mDNS resolver, done right (no pin change, stays 6.2.7).** Redoes the 1.5.4 A3 attempt that was reverted for a connect()-source-filter blocker (one connected socket → the kernel drops mDNS answers, which come from the responder's IP not the group). **Fix: a two-socket split** — RX is an UNCONNECTED `SO_REUSEPORT` + bound-5353 + `net_join_multicast` socket (`sock_recv`/`sys_read` delivers from any source, so it sees the answer); TX is connected, send-only. Composes cyrius 6.2.7's multicast primitives **without** the `sock_sendto`/`sock_recvfrom` the filing had requested. **+3 public verbs** (`sandhi_discovery_local_mc_resolver_a` / `_mc_resolver` / `_mc_available`); the rx/recv are factored as `_sandhi_local_mc_rx_open(group, port, iface)` + `_sandhi_local_mc_recv_match(a, fd, expected_id)` so the live test drives the real receive code. QU unicast resolver stays the default fast path (builder refactored to `_sandhi_local_build_query_cls(…, qclass_hi)`); on agnos the helpers return -1 → resolver degrades to a clean miss. **Verified live** by a **control-calibrated hard gate** (`discovery/local/mc_qm`): a plain control socket proves the env delivers loopback multicast, and then the resolver's real `_sandhi_local_mc_rx_open` MUST receive the looped synthetic answer too (else RED) — skips only where the control also can't. Confirmed green live + RED under a negative control that re-injects the connect()-on-rx bug. mDNS filing resolved + archived. **Verified**: **1001 assertions green** (449 + 167 + 343 + 42); `_server_async_smoke` 16/16; lint 0/0; `cyrius fmt --check` clean; aarch64 + agnos builds green; `dist/sandhi.cyr` regenerated at v1.5.5. *(Companion still open: the pre-existing QU resolver shares the connect()-filter shape — its real-responder receive is unverified, flagged for a live-network check.)*
+
+_(1.5.4 — 2026-06-15 — cyrius pin `6.2.6 → 6.2.7`; AGNOS build cascade RESOLVED (`cyrius build --agnos` produces a valid agnos ELF — `thread.cyr` via the clean deps re-resolve + `async.cyr` serial agnos peer). A 1.5.4 A3 mDNS attempt was reverted for a connect()-source-filter bug (redone correctly at 1.5.5). Full detail in CHANGELOG [1.5.4] + the Shipped log.)_
 
 _(1.5.3 — 2026-06-15 — Batch A2: async-server arena-aware runtime. `sandhi_server_run_async` adopted `async_new_in(arena)` (the `async_new_in` primitive had already landed at cyrius v6.1.22) → residual ~32 B/conn leak eliminated; + `async_spawn`-return guard. Full detail in CHANGELOG [1.5.3] + the Shipped log.)_
 
@@ -32,7 +34,7 @@ Now in **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is 
 
 ## Source
 
-All milestone surfaces are live: M1 server, M2 HTTP client + DNS, M3 RPC dialects, M3.5 SSE / streaming, M4 discovery, M5 TLS policy. ~12k lines across the modules below (720 fns; 432 public `sandhi_*` — 1.4.6 added `sandhi_http_options_tls_policy` / `_get_tls_policy` + internal `_sandhi_policy_pre_open_a` / `_post_open_a`; 1.4.7 added `sandhi_tls_policy_pin_available`; 1.4.9 added `sandhi_server_run_async` + internal `_sandhi_server_async_handler`). **Per-module line counts are approximate** — refreshed at major refactors; per-release detail lives in CHANGELOG.
+All milestone surfaces are live: M1 server, M2 HTTP client + DNS, M3 RPC dialects, M3.5 SSE / streaming, M4 discovery, M5 TLS policy. ~12k lines across the modules below (~730 fns; 435 public `sandhi_*` — 1.4.6 added `sandhi_http_options_tls_policy` / `_get_tls_policy`; 1.4.7 added `sandhi_tls_policy_pin_available`; 1.4.9 added `sandhi_server_run_async`; 1.5.5 added `sandhi_discovery_local_mc_resolver` / `_mc_resolver_a` / `_mc_available` (+3) for the opt-in QM mDNS resolver). **Per-module line counts are approximate** — refreshed at major refactors; per-release detail lives in CHANGELOG.
 
 | Module | Lines | Status |
 |--------|-------|--------|
@@ -59,7 +61,7 @@ All milestone surfaces are live: M1 server, M2 HTTP client + DNS, M3 RPC dialect
 | `src/discovery/service.cyr` | 75 | **M4 done** — service + resolver type vocabulary |
 | `src/discovery/chain.cyr` | 61 | **M4 done** — fallback sequence of resolvers |
 | `src/discovery/daimon.cyr` | 116 | **M4 done** — HTTP-backed resolver against daimon registry |
-| `src/discovery/local.cyr` | 194 | **M4** — mDNS link-local resolver; unicast (QU-bit) A-record query shipped (0.9.3); a real multicast (QM) path awaits cyrius `sock_sendto`/`sock_recvfrom` — 6.2.7's join/option primitives are necessary-but-insufficient (a 1.5.4 QM-resolver was reverted: connected-socket `connect()` source-filter drops mDNS answers; same exposure flagged in the QU path, needs a live check). |
+| `src/discovery/local.cyr` | ~330 | **M4** — mDNS link-local resolver; unicast (QU-bit) query shipped (0.9.3). **1.5.5**: opt-in multicast (QM) resolver `sandhi_discovery_local_mc_resolver[_a]` + `_mc_available` over cyrius 6.2.7's `net_join_multicast` primitives — **two-socket split** (unconnected RX + connected TX) to dodge the connect()-source-filter that sank the 1.5.4 attempt; verified live (loopback receive test); QU stays default; agnos degrades to QU. *(The pre-existing QU path shares the connect()-filter shape — real-responder receive unverified, flagged for a live check.)* |
 | `src/discovery/register.cyr` | 55 | **M4 done** — publish/withdraw via daimon |
 | `src/discovery/mod.cyr` | 24 | dialect-index module |
 | `src/tls_policy/policy.cyr` | 173 | **M5 done** — policy struct + constructors + combine |
@@ -79,9 +81,9 @@ Build outputs:
 
 ## Tests
 
-**992 assertions green** across four suites (CI runs all four; measured on the 6.2.7 pin at 1.5.4):
+**1001 assertions green** across four suites (CI runs all four; measured on the 6.2.7 pin at 1.5.5):
 
-- `tests/sandhi.tcyr` — **440** — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery / TLS policy + fingerprint / SSE / streaming.
+- `tests/sandhi.tcyr` — **449** — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint / SSE / streaming.
 - `tests/h2.tcyr` — **167** — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
 - `tests/alloc.tcyr` — **343** — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0).
 - `tests/rpc.tcyr` — **42** — JSON builder/extractor, RPC dispatch err-envelope, WebDriver URL helpers, MCP envelope.
@@ -134,7 +136,7 @@ cross-build restored + resolved-issue backlog archived). The pin is **6.2.7**
 (ONE item per slot; each opens when its gate clears) — full detail in
 [`roadmap.md`](roadmap.md):
 
-- **Batch A — cross-repo-gated repairs** (A1 + A3 open; A2 ✅ 1.5.3):
+- **Batch A — cross-repo-gated repairs** (**only A1 left**; A2 ✅ 1.5.3, A3 ✅ 1.5.5):
   - **A1 native TLS-policy enforcement** — native `SSL_CTX_*` (trust-store /
     mTLS) in cyrius `lib/tls_native.cyr`; the last libssl coupling. Until then
     native trust/mTLS **fails closed** (1.4.7); SPKI pinning is already
@@ -143,11 +145,12 @@ cross-build restored + resolved-issue backlog archived). The pin is **6.2.7**
     native trust-store/client-cert verb; native mTLS is server-side-only.)*
   - **A2 async server arena-aware repair — ✅ shipped 1.5.3** (`async_new_in`
     had already landed at cyrius v6.1.22).
-  - **A3 mDNS multicast — partially unblocked, adoption deferred.** 6.2.7 shipped
-    the join/option primitives, but they're insufficient (a 1.5.4 QM resolver was
-    reverted — connected-socket `connect()` source-filter drops mDNS answers);
-    needs cyrius `sock_sendto`/`sock_recvfrom` (or a two-socket split) + a live
-    test. Filing un-archived + corrected.
+  - **A3 mDNS multicast — ✅ shipped 1.5.5.** 6.2.7 shipped the join/option
+    primitives; sandhi adopted the opt-in QM resolver via a **two-socket split**
+    (unconnected RX dodges the connect()-source-filter that sank the 1.5.4
+    attempt) — no upstream `sock_sendto`/`sock_recvfrom` needed; verified live.
+    *(Loose end: the QU resolver's own connect()-filter receive wants a live
+    check.)*
 - **Batch B — profile-justified optimization picks** (parked pending prof
   evidence): HPACK Huffman tie-break, `_sandhi_resp_new` collapse, pool LRU.
 - **Batch C — sit-adoption reshape** — gate **cleared** (native TLS default
