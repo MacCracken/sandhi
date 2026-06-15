@@ -1576,14 +1576,14 @@ fn sandhi_conn_0rtt_status(c): i64 {
 # x86_64 / aarch64 Linux. ms<=0 is a no-op.
 fn _sandhi_conn_set_timeout_ms_a(a, fd, ms, opt): i64 {
     if (ms <= 0) { return 0; }
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     # AGNOS has no SO_RCVTIMEO/SO_SNDTIMEO (SYS_SETSOCKOPT + SOL_SOCKET are
     # undefined on the agnos target). Per-op deadlines are advisory there —
     # agnos `sock_recv` is poll-against-deadline at the caller, mirroring the
     # `dig`/`yo` backend. No-op so the bundle compiles for `--agnos`.
     return 0;
-#endif
-#ifndef CYRIUS_TARGET_AGNOS
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     var tv = alloc_via(a, 16);
     if (tv == 0) { return 0 - 1; }
     var sec = ms / 1000;
@@ -1591,7 +1591,7 @@ fn _sandhi_conn_set_timeout_ms_a(a, fd, ms, opt): i64 {
     store64(tv, sec);
     store64(tv + 8, usec);
     return syscall(SYS_SETSOCKOPT, fd, SOL_SOCKET, opt, tv, 16);
-#endif
+    #endif
 }
 
 fn _sandhi_conn_set_timeout_ms(fd, ms, opt): i64 {
@@ -1625,7 +1625,7 @@ fn _sandhi_conn_set_timeout_ms(fd, ms, opt): i64 {
 #   _SANDHI_CONN_NB_ERR     (-1) — any other failure (fcntl, immediate
 #                                  connect err, SO_ERROR non-zero)
 fn _sandhi_conn_connect_nb_a(a, fd, addr, port, timeout_ms): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     # AGNOS: no fcntl/poll/SO_ERROR surface (SYS_FCNTL is undefined on the
     # agnos target). sock_connect is blocking; the kernel bounds it on
     # LAN/QEMU/localhost. timeout_ms is advisory here — documented
@@ -1633,8 +1633,8 @@ fn _sandhi_conn_connect_nb_a(a, fd, addr, port, timeout_ms): i64 {
     var acr = sock_connect(fd, addr, port);
     if (is_err_result(acr) == 0) { return _SANDHI_CONN_NB_OK; }
     return _SANDHI_CONN_NB_ERR;
-#endif
-#ifndef CYRIUS_TARGET_AGNOS
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     var flags = syscall(SYS_FCNTL, fd, _SANDHI_F_GETFL, 0);
     if (flags < 0) { return _SANDHI_CONN_NB_ERR; }
     syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags | _SANDHI_O_NONBLOCK);
@@ -1686,7 +1686,7 @@ fn _sandhi_conn_connect_nb_a(a, fd, addr, port, timeout_ms): i64 {
     syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
     if (so_err != 0) { return _SANDHI_CONN_NB_ERR; }
     return _SANDHI_CONN_NB_OK;
-#endif
+    #endif
 }
 
 fn _sandhi_conn_connect_nb(fd, addr, port, timeout_ms): i64 {
@@ -1762,15 +1762,15 @@ fn _sandhi_conn_sockaddr_in6(addr16, port): i64 {
 # Returns _SANDHI_CONN_NB_OK / _TIMEOUT / _ERR matching the v4-only
 # variant.
 fn _sandhi_conn_connect_sa_nb_a(a, fd, sa, salen, timeout_ms): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     # AGNOS is IPv4-only today and exposes no raw sockaddr connect
     # (SYS_CONNECT/SYS_FCNTL undefined). The only caller is the v6 open path,
     # which fails closed before reaching here on agnos; return ERR so the
     # bundle compiles without the raw-syscall machinery. Revisit when agnos
     # gains AF_INET6.
     return _SANDHI_CONN_NB_ERR;
-#endif
-#ifndef CYRIUS_TARGET_AGNOS
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     var flags = syscall(SYS_FCNTL, fd, _SANDHI_F_GETFL, 0);
     if (flags < 0) { return _SANDHI_CONN_NB_ERR; }
     syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags | _SANDHI_O_NONBLOCK);
@@ -1815,7 +1815,7 @@ fn _sandhi_conn_connect_sa_nb_a(a, fd, sa, salen, timeout_ms): i64 {
     syscall(SYS_FCNTL, fd, _SANDHI_F_SETFL, flags);
     if (so_err != 0) { return _SANDHI_CONN_NB_ERR; }
     return _SANDHI_CONN_NB_OK;
-#endif
+    #endif
 }
 
 fn _sandhi_conn_connect_sa_nb(fd, sa, salen, timeout_ms): i64 {
@@ -1959,14 +1959,14 @@ fn _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms): i64 {
 # 16-byte network-byte-order AAAA address buffer (e.g. from
 # sandhi_resolve_ipv6).
 fn _sandhi_conn_open_v6_fully_timed_a(a, addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     # AGNOS is IPv4-only today (no AF_INET6 socket surface; SYS_SOCKET /
     # SYS_CONNECT undefined on the agnos target). Fail the v6 path cleanly so
     # the client falls back to the v4 path. Revisit when agnos gains AF_INET6.
     _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
     return 0;
-#endif
-#ifndef CYRIUS_TARGET_AGNOS
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
     if (addr16 == 0) {
         _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
@@ -1996,7 +1996,7 @@ fn _sandhi_conn_open_v6_fully_timed_a(a, addr16, port, use_tls, sni_host, connec
         }
     }
     return _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms);
-#endif
+    #endif
 }
 
 fn _sandhi_conn_open_v6_fully_timed(addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
@@ -2008,13 +2008,13 @@ fn _sandhi_conn_open_v6_fully_timed(addr16, port, use_tls, sni_host, connect_ms,
 # 1.3.2 — v6 variant of the early-data-aware open path.
 fn _sandhi_conn_open_v6_fully_timed_with_early_data_a(a, addr16, port,
 use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     # AGNOS is IPv4-only today (no AF_INET6; SYS_SOCKET / SYS_CONNECT undefined).
     # Fail the v6 early-data path cleanly; the client falls back to v4.
     _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
     return 0;
-#endif
-#ifndef CYRIUS_TARGET_AGNOS
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
     if (addr16 == 0) {
         _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
@@ -2045,7 +2045,7 @@ use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len): i
     }
     return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
     read_ms, write_ms, early_data, early_data_len);
-#endif
+    #endif
 }
 
 fn sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
@@ -12163,10 +12163,10 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
     # Listen fd non-blocking so the accept queue drains cooperatively
     # (EAGAIN ends the drain). Same fcntl constants the client conn path
     # uses (src/http/conn.cyr).
-#ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_AGNOS
     var lflags = syscall(SYS_FCNTL, sfd, _SANDHI_F_GETFL, 0);
     syscall(SYS_FCNTL, sfd, _SANDHI_F_SETFL, lflags | _SANDHI_O_NONBLOCK);
-#endif
+    #endif
     # AGNOS: SYS_FCNTL is undefined and inbound TCP (listen/accept) is agnos
     # Phase B — `sock_listen` above already returns Err on agnos, so this fn
     # bails before the cooperative accept loop. The fcntl is compiled out so

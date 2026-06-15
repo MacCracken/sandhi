@@ -801,10 +801,10 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
     # Listen fd non-blocking so the accept queue drains cooperatively
     # (EAGAIN ends the drain). Same fcntl constants the client conn path
     # uses (src/http/conn.cyr).
-#ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_AGNOS
     var lflags = syscall(SYS_FCNTL, sfd, _SANDHI_F_GETFL, 0);
     syscall(SYS_FCNTL, sfd, _SANDHI_F_SETFL, lflags | _SANDHI_O_NONBLOCK);
-#endif
+    #endif
     # AGNOS: SYS_FCNTL is undefined and inbound TCP (listen/accept) is agnos
     # Phase B — `sock_listen` above already returns Err on agnos, so this fn
     # bails before the cooperative accept loop. The fcntl is compiled out so
