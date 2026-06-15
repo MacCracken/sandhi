@@ -4,6 +4,77 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.4] — 2026-06-15
+
+**cyrius pin `6.2.6` → `6.2.7` — the AGNOS build cascade is resolved (cyrius
+shipped the fix from sandhi's filing).** No public-surface change; no sandhi
+source change (the cascade cleared by the pin + a clean deps re-resolve). A1
+(native `SSL_CTX_*`) re-verified **still open** on 6.2.7. **Batch A3 (mDNS
+multicast) NOT shipped** — 6.2.7 landed the join/option primitives, but an
+adversarial review found them *insufficient* for a working resolver, so the
+adoption was reverted (details below). 992 assertions green (unchanged).
+
+### Changed — cyrius pin → 6.2.7 (clean deps re-resolve)
+
+Bumped the pin and **clean-resolved deps** (`rm -rf lib cyrius.lock && cyrius
+deps`) so the vendored stdlib snapshot actually tracks 6.2.7 — plain `cyrius
+deps` is a no-op against an existing lockfile, which is how the `./lib` snapshot
+silently goes stale after a toolchain bump (see the agnos cascade note below).
+
+### Fixed — AGNOS full-build cascade resolved (no sandhi code change)
+
+`cyrius build --agnos programs/smoke.cyr` now **succeeds**, producing a valid
+`ELF 64-bit … x86-64` agnos binary (1.4 MB) — the cascade documented at 1.5.3 is
+cleared entirely by the 6.2.7 pin + clean re-resolve:
+
+- **`thread.cyr`** — the agnos clone-dispatch fix (already in the 6.2.6 toolchain)
+  now lands in the vendored `./lib` via the clean re-resolve (it was only ever a
+  stale-snapshot artifact, never an upstream defect).
+- **`async.cyr`** — 6.2.7 routes the epoll runtime to a serial/blocking agnos
+  peer (`#ifdef CYRIUS_TARGET_AGNOS`), exactly as `thread.cyr → thread_agnos.cyr`,
+  resolving the raw `SYS_EPOLL_CREATE1` gap (cyrius cites
+  `2026-06-15-cyrius-thread-agnos-clone-dispatch.md` §2 in the source). With
+  thread + async cleared, the full sandhi bundle compiles for agnos.
+
+This is the **compile** cascade; agnos runtime behavior (server serial-peer
+semantics, native TLS) is a separate concern verified consumer-side (sit). The
+agnos transport issue (C1 socket 1.5.1 + C2 entropy 1.5.2 + this cascade) and the
+cascade filing are archived.
+
+### Reverted — Batch A3 mDNS multicast adoption (primitives landed, but insufficient)
+
+cyrius 6.2.7 shipped the IPv4 multicast primitives sandhi filed at 1.5.3
+(`net_join_multicast` / `net_drop_multicast` / `net_set_multicast_ttl` / `_loop`
+/ `_if` / `sock_reuseport` + per-target constants + `ip_mreq` — the source cites
+sandhi's filing). A QM (multicast) resolver was written to compose them, then
+**reverted after an adversarial review found a blocker**: `lib/net.cyr`'s
+`sock_send` / `sock_recv` require a *connected* socket, so the resolver had to
+`sock_connect` to the group — and on Linux **`connect()` on a UDP socket installs
+a source-address filter**, so the socket drops every mDNS answer (responders send
+from their own unicast IP, not the group). The join/`SO_REUSEPORT`/TTL primitives
+are real but inert with a connected receive socket. A working QM resolver also
+needs unconnected `sock_sendto` / `sock_recvfrom` in `net.cyr` (not present), or a
+two-socket send/recv split — plus a loopback live-multicast test. The mDNS filing
+[`docs/issues/2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/issues/2026-06-15-cyrius-mdns-multicast-primitives.md)
+is un-archived and corrected with the full requirement; Batch A3 stays open. (The
+review also noted the pre-existing **QU** resolver has the same connect()-filter
+shape — its "works against most responders" claim is unverified and needs a live
+check.) Net: **no public-surface change, no `local.cyr` change** in 1.5.4.
+
+### Still open — A1 native `SSL_CTX_*` (re-verified on 6.2.7)
+
+`lib/tls.cyr` still exposes only `tls_set_verify` (mode/callback) — no native
+trust-store / client-cert / client-key wrappers. sandhi's native trust/mTLS
+enforcement stays fail-closed (1.4.7); `2026-05-22-cyrius-native-tls-in-6.0.x.md`
+remains open.
+
+### Verified
+
+992 assertions green (440 + 167 + 343 + 42, unchanged — the A3 tests were reverted
+with the code); `_server_async_smoke` 16/16; `cyrius lint` 0/0; `cyrius fmt
+--check` clean; aarch64 cross-build green; **`cyrius build --agnos` green (valid
+agnos ELF)**; `dist/sandhi.cyr` regenerated at v1.5.4.
+
 ## [1.5.3] — 2026-06-15
 
 **1.5.x Batch A2 — async-server arena-aware runtime (residual leak eliminated).**
@@ -64,7 +135,7 @@ sustained request stream**. The arena was already sized for this (the per-conn
   **cascade** — part **sandhi-side** (refresh the vendored stdlib snapshot) and
   part **upstream** (real stdlib agnos-compile gaps), needing a systematic
   agnos-completeness pass rather than a point fix. The corrected, honest filing is
-  [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](docs/issues/2026-06-15-cyrius-thread-agnos-clone-dispatch.md);
+  [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](docs/issues/archive/2026-06-15-cyrius-thread-agnos-clone-dispatch.md);
   the agnos issue + roadmap + state.md are corrected to match. The x86_64
   authoritative build is byte-identical across the `thread.cyr` refresh, so none
   of this touches sandhi's release artifacts.
@@ -89,7 +160,7 @@ sustained request stream**. The arena was already sized for this (the per-conn
 
 **1.5.x Batch C2 — AGNOS DNS-entropy gap (sit-adoption-driven follow-up to C1).**
 Closes the runtime half of the AGNOS adoption work surfaced in
-[`2026-06-14-agnos-socket-backend-gap.md`](docs/issues/2026-06-14-agnos-socket-backend-gap.md).
+[`2026-06-14-agnos-socket-backend-gap.md`](docs/issues/archive/2026-06-14-agnos-socket-backend-gap.md).
 No cyrius pin change (stays 6.2.6). No public-surface change.
 
 ### Fixed — DNS TXID entropy portable across targets (`src/net/resolve.cyr`)
@@ -139,7 +210,7 @@ not in the gated test suite; noted for a future cleanup.
 ## [1.5.1] — 2026-06-15
 
 **1.5.x Batch C1 — AGNOS socket-backend gap (sit-adoption-driven).** Closes the
-compile half of [`2026-06-14-agnos-socket-backend-gap.md`](docs/issues/2026-06-14-agnos-socket-backend-gap.md):
+compile half of [`2026-06-14-agnos-socket-backend-gap.md`](docs/issues/archive/2026-06-14-agnos-socket-backend-gap.md):
 sandhi's transport layer no longer references raw Linux socket syscalls that the
 AGNOS target leaves undefined, so a consumer (sit) that includes the bundle can
 compile for `--agnos`. No cyrius pin change (stays 6.2.6, the pin 1.5.0 landed —

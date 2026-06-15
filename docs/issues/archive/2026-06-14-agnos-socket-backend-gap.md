@@ -1,7 +1,16 @@
 # sandhi — AGNOS socket-backend gap (raw BSD-socket transport blocks the agnos target)
 
 - **Filed**: 2026-06-14
-- **Status**: ✅ **Sandhi-side complete** — **C1 compile gap closed at 1.5.1**
+- **Status**: ✅ **FULLY RESOLVED at sandhi 1.5.4 / cyrius 6.2.7.** The full
+  `cyrius build --agnos programs/smoke.cyr` now succeeds (valid agnos ELF): C1
+  socket compile (1.5.1) + C2 DNS entropy (1.5.2) were the sandhi-side transport
+  work; the remaining stdlib cascade (`thread.cyr`, `async.cyr`) cleared with the
+  6.2.7 pin + clean deps re-resolve (filing
+  [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](2026-06-15-cyrius-thread-agnos-clone-dispatch.md),
+  archived). Archived. *(Runtime correctness on agnos + the native `SSL_CTX_*`
+  enforcement parity (Batch A1) are separate, still-open concerns — but the agnos
+  **build** is no longer blocked.)* Original detail below.
+  - *(superseded)* ✅ **C1 compile gap closed at 1.5.1**
   (every raw `SYS_*` socket-syscall site in `src/http/conn.cyr` +
   `src/server/mod.cyr` wrapped in `#ifndef CYRIUS_TARGET_AGNOS`, Linux/macOS
   byte-identical) **+ C2 DNS-entropy gap closed at 1.5.2** (`resolve.cyr` TXID

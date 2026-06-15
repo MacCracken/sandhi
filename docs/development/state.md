@@ -4,7 +4,9 @@
 
 ## Version
 
-**1.5.3** — 2026-06-15. **1.5.x Batch A2 — async-server arena-aware runtime (residual leak eliminated; no pin change, stays 6.2.6; no public-surface change).** `sandhi_server_run_async` created the async runtime with `async_new()`, so the rt (40 B) + every `async_spawn` task struct (32 B/conn) came from the no-free global bump and leaked ~32 B/conn + 40 B/batch across the per-batch recreate (`async_run` closes the epfd → single-use). A verification pass over the "still upstream-blocked" claims found the gating primitive **`async_new_in(allocator)` had already landed at cyrius v6.1.22** (`lib/async.cyr:47`) — the "gated on cyrius" status was stale (same pattern as the aarch64 fix + the agnos `sys_getrandom` surface). So this was pure sandhi-side adoption: the runtime is now `async_new_in(arena)` at the initial + per-batch-recreate sites, so rt + tasks ride the existing reset-per-batch arena and `reset_via(arena)` reclaims them → **zero residual leak, RSS flat over a sustained stream**. The arena was already sized for it (+64/conn = arg 32 + task 32; +4096 slack = rt 40). `_server_async_smoke` strengthened 2 → **16** batch-recreate cycles (16/16 PASS, silent-client DoS regression held; no RSS probe — sub-page-per-batch leak → would be flaky; leak-free by construction). **Verified**: **992 assertions green** (440 + 167 + 343 + 42); lint 0/0; `cyrius fmt --check` clean; aarch64 cross-build green; `dist/sandhi.cyr` regenerated at v1.5.3. Added an `async_spawn`-return guard so the arena-backed task alloc is covered by the load-shed path. The verification pass also **corrected the AGNOS full-build picture** (it is a cascade — `thread.cyr`'s agnos dispatch is already fixed in the 6.2.6 toolchain so sandhi's vendored `./lib` is just stale; refreshing it exposes `async.cyr`'s raw `SYS_EPOLL_CREATE1`; part sandhi-side dep-refresh, part upstream stdlib agnos-completeness), filed [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](../issues/2026-06-15-cyrius-thread-agnos-clone-dispatch.md).
+**1.5.4** — 2026-06-15. **cyrius pin `6.2.6` → `6.2.7` — AGNOS build cascade RESOLVED** (zero sandhi source change; no public-surface change). `cyrius build --agnos programs/smoke.cyr` now produces a valid `ELF 64-bit … x86-64` agnos binary — `thread.cyr` lands in the vendored `./lib` via the **clean deps re-resolve** (`rm -rf lib cyrius.lock && cyrius deps`; it was a stale-snapshot artifact already fixed in the 6.2.6 toolchain), and `async.cyr`'s raw `SYS_EPOLL_CREATE1` is fixed in 6.2.7 (routes the epoll runtime to a serial agnos peer; cyrius cites the cascade filing §2). The agnos-socket-backend-gap issue + the cascade filing are archived. **Batch A3 (mDNS multicast) NOT shipped**: 6.2.7 landed the join/option primitives from sandhi's filing, but a QM-resolver adoption was **reverted after an adversarial review** found them insufficient — `net.cyr`'s connected-socket `sock_send`/`sock_recv` force a `connect()` whose Linux source-filter drops mDNS answers. A working resolver also needs unconnected `sock_sendto`/`sock_recvfrom` (or a two-socket split) + a live test; mDNS filing un-archived + corrected, A3 stays open. **A1 (native `SSL_CTX_*`) re-verified still open on 6.2.7** (only `tls_set_verify` exists). **Verified**: **992 assertions green** (440 + 167 + 343 + 42, unchanged); `_server_async_smoke` 16/16; lint 0/0; `cyrius fmt --check` clean; aarch64 + agnos builds green; `dist/sandhi.cyr` regenerated at v1.5.4.
+
+_(1.5.3 — 2026-06-15 — Batch A2: async-server arena-aware runtime. `sandhi_server_run_async` adopted `async_new_in(arena)` (the `async_new_in` primitive had already landed at cyrius v6.1.22) → residual ~32 B/conn leak eliminated; + `async_spawn`-return guard. Full detail in CHANGELOG [1.5.3] + the Shipped log.)_
 
 _(1.5.2 — 2026-06-15 — Batch C2: AGNOS DNS-entropy gap. Swapped the DNS TXID seed from hand-rolled `/dev/urandom` bare-syscall-numbers to the portable stdlib `sys_getrandom` selector primitive. Full detail in CHANGELOG [1.5.2] + the Shipped log.)_
 
@@ -18,7 +20,7 @@ and the Shipped log in [`roadmap.md`](roadmap.md)._
 
 ## Toolchain
 
-- **Cyrius pin**: `6.2.6` (`cyrius.cyml [package].cyrius`). Bump trail: 5.11.4 → 6.0.1 (1.3.5, cycc/cybs binary rename) → 6.0.55 (1.4.1) → 6.0.82 (1.4.2, native-TLS ALPN/SPKI typed verbs) → 6.0.87 (1.4.3) → 6.1.19 (1.4.5, native-TLS-default switch + the two upstream P1 fixes) → 6.1.20 (1.4.6, folds sandhi 1.4.5 + macho-arm Darwin syscalls) → 6.1.21 (1.4.9, inverts `lib/tls.cyr` to native-no-flag-default + re-folds sandhi 1.4.5→1.4.8) → 6.2.1 (1.4.11, stdlib pin sweep: `json` dropped, `bigint`+`base64` → `bayan`) → 6.2.6 (1.5.0, fixes the aarch64 `bayan` cross-build defect).
+- **Cyrius pin**: `6.2.7` (`cyrius.cyml [package].cyrius`). Bump trail: … → 6.2.1 (1.4.11, stdlib pin sweep: `json` dropped, `bigint`+`base64` → `bayan`) → 6.2.6 (1.5.0, fixes the aarch64 `bayan` cross-build defect) → 6.2.7 (1.5.4, ships the mDNS multicast primitives [Batch A3] + the `async.cyr` agnos serial peer that clears the AGNOS build cascade). **Note**: a pin bump needs a *clean* deps re-resolve (`rm -rf lib cyrius.lock && cyrius deps`) to refresh the vendored stdlib — plain `cyrius deps` is a no-op against the existing lockfile, so `./lib` silently goes stale otherwise (this caused the 1.5.3 `thread.cyr` red herring).
 - **aarch64 cross-build — RESOLVED (1.5.0 / cyrius 6.2.6, gating again)**: the `cycc_aarch64` `unexpected enum` abort assembling stdlib `bayan` (a 1.4.11–1.4.x best-effort known-issue; an upstream dep-assembly defect reproduced on every toolchain 6.0.21–6.2.1) is fixed in 6.2.6. The `--aarch64` build produces a valid aarch64 ELF with zero sandhi change, so the CI/release step is **gating** again (best-effort warn-skip removed; only-tolerated skip is the toolchain lacking `cycc_aarch64`). [architecture/005](../architecture/005-aarch64-bayan-cross-build.md); [archived issue](../issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md).
 - **TLS backend**: **native by default — no flag** as of cyrius 6.1.21 / sandhi 1.4.9. `-D CYRIUS_TLS_LIBSSL` opts out to the deprecated libssl-only build (`sandhi_tls_use_libssl()`); legacy `-D CYRIUS_TLS_NATIVE` is a no-op alias. (1.4.5–1.4.8 used the inverse `-D CYRIUS_TLS_NATIVE` opt-in.) See [architecture/004](../architecture/004-native-tls-default.md).
 
@@ -57,7 +59,7 @@ All milestone surfaces are live: M1 server, M2 HTTP client + DNS, M3 RPC dialect
 | `src/discovery/service.cyr` | 75 | **M4 done** — service + resolver type vocabulary |
 | `src/discovery/chain.cyr` | 61 | **M4 done** — fallback sequence of resolvers |
 | `src/discovery/daimon.cyr` | 116 | **M4 done** — HTTP-backed resolver against daimon registry |
-| `src/discovery/local.cyr` | 194 | **M4** — mDNS link-local resolver; unicast (QU-bit) A-record query shipped (0.9.3, works against most responders); multicast membership awaits cyrius `lib/net.cyr` primitives |
+| `src/discovery/local.cyr` | 194 | **M4** — mDNS link-local resolver; unicast (QU-bit) A-record query shipped (0.9.3); a real multicast (QM) path awaits cyrius `sock_sendto`/`sock_recvfrom` — 6.2.7's join/option primitives are necessary-but-insufficient (a 1.5.4 QM-resolver was reverted: connected-socket `connect()` source-filter drops mDNS answers; same exposure flagged in the QU path, needs a live check). |
 | `src/discovery/register.cyr` | 55 | **M4 done** — publish/withdraw via daimon |
 | `src/discovery/mod.cyr` | 24 | dialect-index module |
 | `src/tls_policy/policy.cyr` | 173 | **M5 done** — policy struct + constructors + combine |
@@ -77,7 +79,7 @@ Build outputs:
 
 ## Tests
 
-**992 assertions green** across four suites (CI runs all four; measured on the 6.2.6 pin at 1.5.2):
+**992 assertions green** across four suites (CI runs all four; measured on the 6.2.7 pin at 1.5.4):
 
 - `tests/sandhi.tcyr` — **440** — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery / TLS policy + fingerprint / SSE / streaming.
 - `tests/h2.tcyr` — **167** — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
@@ -127,28 +129,25 @@ No external git deps — pure stdlib composition. The 1.4.11 sweep closed the ol
 ## Next
 
 The **1.5.x arc is open** (opened at 1.5.0 — toolchain 6.2.6 + aarch64
-cross-build restored + resolved-issue backlog archived). The pin is **6.2.6**
-(native no-flag default). Remaining work is organized into provisional batches
+cross-build restored + resolved-issue backlog archived). The pin is **6.2.7**
+(native no-flag default; 1.5.4). Remaining work is organized into provisional batches
 (ONE item per slot; each opens when its gate clears) — full detail in
 [`roadmap.md`](roadmap.md):
 
-- **Batch A — cross-repo-gated repairs** (A1 + A3 still cyrius-gated; **A2 ✅
-  shipped 1.5.3**, see below):
+- **Batch A — cross-repo-gated repairs** (A1 + A3 open; A2 ✅ 1.5.3):
   - **A1 native TLS-policy enforcement** — native `SSL_CTX_*` (trust-store /
     mTLS) in cyrius `lib/tls_native.cyr`; the last libssl coupling. Until then
     native trust/mTLS **fails closed** (1.4.7); SPKI pinning is already
     backend-agnostic. Drops `sandhi_tls_use_libssl()` when it lands.
-    *(Re-verified still-blocking on 6.2.6: only `tls_set_verify` exists; no native
-    trust-store/client-cert verb; native mTLS is server-side-only.)*
-  - **A2 async server arena-aware repair — ✅ shipped 1.5.3.** The gating
-    primitive `async_new_in(allocator)` had already landed at cyrius v6.1.22
-    (the "gated" status was stale); adopted it in `sandhi_server_run_async` →
-    residual ~32 B/conn leak eliminated.
-  - **A3 mDNS multicast primitives** in cyrius `lib/net.cyr` — gates the real
-    `discovery/local.cyr` (quality gate; QU-bit unicast works today).
-    *(Re-verified still-blocking on 6.2.6: the five constants + `ip_mreq` + a
-    join helper exist nowhere in `net.cyr`. Now has a paste-ready upstream
-    filing: [`2026-06-15-cyrius-mdns-multicast-primitives.md`](../issues/2026-06-15-cyrius-mdns-multicast-primitives.md).)*
+    *(Re-verified still-blocking on **6.2.7**: only `tls_set_verify` exists; no
+    native trust-store/client-cert verb; native mTLS is server-side-only.)*
+  - **A2 async server arena-aware repair — ✅ shipped 1.5.3** (`async_new_in`
+    had already landed at cyrius v6.1.22).
+  - **A3 mDNS multicast — partially unblocked, adoption deferred.** 6.2.7 shipped
+    the join/option primitives, but they're insufficient (a 1.5.4 QM resolver was
+    reverted — connected-socket `connect()` source-filter drops mDNS answers);
+    needs cyrius `sock_sendto`/`sock_recvfrom` (or a two-socket split) + a live
+    test. Filing un-archived + corrected.
 - **Batch B — profile-justified optimization picks** (parked pending prof
   evidence): HPACK Huffman tie-break, `_sandhi_resp_new` collapse, pool LRU.
 - **Batch C — sit-adoption reshape** — gate **cleared** (native TLS default
@@ -158,13 +157,12 @@ cross-build restored + resolved-issue backlog archived). The pin is **6.2.6**
   DNS-entropy ✅ 1.5.2** (`resolve.cyr` TXID switched to the portable
   `sys_getrandom` selector primitive) **together complete the sandhi-side AGNOS
   transport surface.** Further Batch C items fill from what sit surfaces, not
-  pre-baked (memory [`project_sit_adoption_drives_roadmap`]). A full `--agnos`
-  build is a **cascade** of stdlib agnos-compile gaps (filed
-  [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](../issues/2026-06-15-cyrius-thread-agnos-clone-dispatch.md)):
-  part sandhi-side (vendored `./lib` carries a stale `thread.cyr` — already fixed
-  in the 6.2.6 toolchain; refresh needed), part upstream (`async.cyr`'s raw
-  `SYS_EPOLL_CREATE1` is the next gap; more layers unenumerated) + native
-  `SSL_CTX_*` (Batch A1). None gates sandhi's authoritative x86_64 artifacts.
+  pre-baked (memory [`project_sit_adoption_drives_roadmap`]). The full `--agnos`
+  **build cascade is RESOLVED at 1.5.4 / cyrius 6.2.7** (`thread.cyr` via the
+  clean re-resolve + `async.cyr` serial agnos peer) — `cyrius build --agnos`
+  produces a valid agnos ELF; the cascade filing + the agnos-socket-backend-gap
+  issue are archived. Remaining agnos work is runtime correctness (consumer-side,
+  sit) + native `SSL_CTX_*` enforcement (Batch A1) — neither blocks the build.
 - **Background watches** — `tests/sandhi.tcyr` cap-drift; consumer coordination
   docs (sandhi side shipped; the daimon `serve_async` collapse is sandhi-side ✅
   at 1.4.9, residual daimon-side).

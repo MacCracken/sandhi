@@ -1,8 +1,47 @@
 # 2026-06-15 — cyrius `lib/net.cyr` lacks IPv4 multicast primitives (gates sandhi mDNS multicast)
 
-**Status**: Open — filed upstream (cyrius `lib/net.cyr`). Quality-of-
-implementation gate, **not a hard blocker**: sandhi's `discovery/local.cyr`
-ships a working QU-bit unicast mDNS resolver today that needs none of these.
+**Status**: ⚠️ **Open — partially landed; the primitives are NOT sufficient.**
+cyrius 6.2.7 shipped the join/option primitives specified below
+(`net_join_multicast` / `net_drop_multicast` / `net_set_multicast_ttl` / `_loop`
+/ `_if` / `sock_reuseport` + per-target `IP_MULTICAST_*` / `SO_REUSEPORT` /
+`IPPROTO_IP` constants + the 8-byte `ip_mreq`; the source cites this filing). A
+sandhi 1.5.4 QM-resolver adoption was written **and reverted after an adversarial
+review found a blocker** (see "The missing piece" below). sandhi additionally
+needs cyrius to add **unconnected `sock_sendto` / `sock_recvfrom`** to
+`lib/net.cyr` (or to use a two-socket send/recv split), plus a loopback
+live-multicast test, before a QM resolver can actually receive answers.
+
+## The missing piece (found in the 1.5.4 review — corrects this filing)
+
+`lib/net.cyr`'s `sock_send` / `sock_recv` bottom out at `sys_write` / `sys_read`,
+which **require a connected socket**. So sending to the mDNS group forces a
+`sock_connect(fd, group, 5353)` — and on Linux, **`connect()` on a UDP socket
+installs a source-address filter**: the socket then only delivers datagrams whose
+*source* is the connected peer (224.0.0.251:5353). An mDNS responder sends its
+answer **from its own unicast IP** (e.g. 192.168.1.42:5353), never from the group
+address, so a connected socket **drops every real answer** before `recv` sees it.
+The `join` / `SO_REUSEPORT` / TTL primitives are real but inert if the receiving
+socket is connected.
+
+**Two ways to fix (both must be validated with a live/loopback test):**
+1. **(preferred) cyrius adds `sock_sendto` + `sock_recvfrom` to `lib/net.cyr`**
+   (`sys_sendto`=44 is already used in `lib/sakshi.cyr`; `sys_recvfrom` is in
+   `syscalls_linux_common.cyr:412` — just unwrapped). Then sandhi sends the query
+   unconnected and receives unfiltered. Cleanest; agnos returns -1.
+2. **Two-socket split (sandhi-side, no new cyrius verb):** send on a *connected*
+   socket A (`sock_connect` + `sock_send`), receive on a *separate unconnected*
+   socket B bound to 5353 + `SO_REUSEPORT` + group-joined (`sock_recv` = `sys_read`
+   works on an unconnected bound socket). More complex.
+
+## Pre-existing exposure in the QU resolver (separate, older — needs a live check)
+
+The shipped unicast (QU) resolver `_sandhi_local_query_a` (`src/discovery/local.cyr`,
+since 0.9.3) has the **same** shape — it `sock_connect`s to 224.0.0.251:5353 then
+`sock_recv`s, expecting the QU unicast answer on that fd. The same connect()
+source-filter would drop a unicast answer arriving from the responder's IP. Its
+"works against most responders" claim is **unverified** (no live test — unit
+tests use synthetic packets; the smoke only checks a no-responder miss). Needs a
+live-network check; if confirmed, the QU path needs the same unconnected-recv fix.
 **Filed**: sandhi side, against the cyrius repo.
 **Side**: Upstream (cyrius stdlib `lib/net.cyr` + per-target `SockOpt` enum).
 **Sandhi-side surface**: None. Per ADR 0001 / CLAUDE.md ("compose, don't
@@ -135,3 +174,13 @@ the last untracked upstream item in sandhi's Batch A.
   upstream-claims verification pass confirmed the primitives are still absent
   and flagged this as the one Batch-A item lacking a proper cyrius-side
   coordination doc.
+- **2026-06-15 (1.5.4)** — cyrius 6.2.7 shipped the join/option primitives from
+  this filing. sandhi 1.5.4 attempted a QM-resolver adoption, but an adversarial
+  code review caught a **blocker**: the resolver `sock_connect`ed the UDP socket
+  to the group and `sock_recv`ed, so Linux's connect() source-filter dropped
+  every answer (responders send from their own IP, not the group). The
+  primitives are **necessary but not sufficient** — a working QM resolver also
+  needs unconnected `sock_sendto` / `sock_recvfrom` (or a two-socket split) +
+  a loopback live test. The 1.5.4 adoption was **reverted**; this filing was
+  un-archived and corrected. Status downgraded RESOLVED → partially-landed. The
+  same connect()-filter concern was noted in the pre-existing QU resolver.

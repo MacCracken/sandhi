@@ -9,12 +9,16 @@
 > gap (`lib/async.cyr`'s raw `SYS_EPOLL_CREATE1`), so a full `--agnos` build is
 > a **cascade**, not a single issue. This file is rewritten to reflect that.
 
-**Status**: Open — **upstream cyrius** (stdlib agnos-completeness). The real
-first blocker is `lib/async.cyr`'s raw `SYS_EPOLL_CREATE1` (§2); a stale local
-`./lib` can surface a `thread.cyr` `CLONE_VM` error first but that is already
-fixed in the 6.2.6 toolchain and clears on a clean `cyrius deps` (§1 — not real
-work). Affects only a full `cyrius build --agnos` of a sandhi consumer; x86_64 /
-macOS / Windows unaffected and authoritative.
+**Status**: ✅ **RESOLVED — cyrius 6.2.7 + sandhi 1.5.4.** Both cascade layers are
+cleared: §1 `thread.cyr` lands in the vendored `./lib` via a clean re-resolve
+(it was a stale-snapshot artifact, fixed in the 6.2.6 toolchain), and §2
+`async.cyr`'s raw `SYS_EPOLL_CREATE1` is fixed in **6.2.7** (it routes the epoll
+runtime to a serial/blocking agnos peer — cyrius cites this filing §2 in the
+`async.cyr` source). With both cleared, `cyrius build --agnos programs/smoke.cyr`
+**succeeds**, producing a valid agnos ELF — verified at sandhi 1.5.4 (6.2.7 pin +
+clean deps re-resolve). Archived. (Runtime behavior on agnos — server serial-peer
+semantics, native TLS — is a separate consumer-side concern; this filing was the
+*compile* cascade.)
 **Filed**: sandhi side, against the cyrius repo.
 **Sandhi-side surface**: per ADR 0001 / CLAUDE.md "No FFI", sandhi neither
 forks stdlib modules nor defines syscall numbers. The only sandhi-side touch is
