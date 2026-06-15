@@ -1,12 +1,15 @@
 # 2026-05-22 — `lib/tls.cyr` native-TLS transport for the cyrius v6.0.x arc
 
-**Status**: Open — substantially landed. Native transport
-operational; sandhi runs over `tls_set_backend` since 1.4.2, with
-the post-handshake ALPN-read + SPKI-pin `tls_dlsym` callers retired
-onto typed wrappers. Remaining before close: typed wrappers for the
-pre-handshake `SSL_CTX_*` mTLS / trust-store `tls_dlsym` sites.
-**Filed**: sandhi side, against cyrius repo. Sit adoption of
-sandhi is gated on this landing.
+**Status**: **CLOSED — landed at cyrius 6.2.8 / sandhi 1.6.0.** 6.2.8 shipped the
+typed pre-handshake trust-store + mTLS ctx verbs (`tls_ctx_load_verify_locations`
+/ `_use_certificate_file` / `_use_private_key_file`); sandhi 1.6.0 migrated
+`src/tls_policy/apply.cyr` off the last `tls_dlsym("SSL_CTX_*")` sites onto them,
+so native now enforces trust-store + mTLS (Batch A1). Native transport had been
+operational since 1.4.2 (`tls_set_backend`) with the post-handshake ALPN-read +
+SPKI-pin already on typed wrappers; this closes the pre-handshake half. Native is
+now functionally complete for TLS policy. Archive on the next docs sweep.
+**Filed**: sandhi side, against cyrius repo. Sit adoption of sandhi is no longer
+gated on this (the named prerequisite has landed).
 **Side**: Upstream (cyrius stdlib).
 **Sandhi-side surface**: None. Per ADR 0001 and CLAUDE.md
 ("No FFI"), sandhi's hook-surface contract is unchanged across
@@ -233,3 +236,17 @@ own.
   in [roadmap.md](../development/roadmap.md) ("Native TLS-policy
   enforcement"); this doc stays open until it lands, but it no longer
   gates downstream adoption.
+- **2026-06-15** — **CLOSED.** cyrius **6.2.8** shipped the typed
+  pre-handshake trust-store + mTLS ctx verbs
+  (`tls_ctx_load_verify_locations` / `_use_certificate_file` /
+  `_use_private_key_file`), backend-aware — native enforces via the
+  `tls_native` trust-store + client-auth machinery, libssl routes to the
+  core `SSL_CTX_*`. Sandhi **1.6.0** migrated `src/tls_policy/apply.cyr`
+  off the last `tls_dlsym("SSL_CTX_*")` callers onto them and flipped
+  `enforcement_available()` backend-aware-true; the `_sandhi_apply_*_fp`
+  dlsym cache is gone. Proven live (`_policy_runtime_probe.cyr`:
+  `trust_mtls_available=1`, bogus-trust-store refused with err=TLS).
+  This was the last libssl coupling for policy enforcement — native is now
+  functionally complete for TLS policy. Residual (libssl
+  `tls_get_peer_spki_der` regression) is moot: native covers pinning and
+  libssl retires at sandhi 2.0. Filing resolved; archive on the next sweep.

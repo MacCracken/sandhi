@@ -75,29 +75,30 @@ caveats were retired by **cyrius 6.1.19** (pinned at 1.4.5):
   (Verified: 6/6 sequential `sandhi_http_get` to example.com on *both*
   backends, no crash.)
 
-The one remaining reason a connection can still imply libssl: **trust-store /
-mTLS** policy enforcement in `tls_policy/apply.cyr` still resolves several
-`SSL_CTX_*` symbols via `tls_dlsym` (libssl-only) and is not yet wired for the
-native backend. SPKI **cert pinning** is backend-agnostic (reads the peer SPKI
-via stdlib `tls_get_peer_spki_der`) and is enforced on native. Plain HTTPS and
-pinned policies run native-default; trust-store / mTLS policies still use libssl.
+As of **1.6.0 / cyrius 6.2.8**, a connection no longer needs libssl at all.
+**Trust-store / mTLS** policy enforcement in `tls_policy/apply.cyr` migrated off
+the `tls_dlsym("SSL_CTX_*")` callers onto the typed, backend-aware verbs 6.2.8
+shipped (`tls_ctx_load_verify_locations` / `_use_certificate_file` /
+`_use_private_key_file`) — native now **enforces** them (Batch A1). SPKI **cert
+pinning** was already backend-agnostic (reads the peer SPKI via stdlib
+`tls_get_peer_spki_der`). So native is functionally complete for TLS policy:
+plain HTTPS, pinned, trust-store, and mTLS policies all run native-default.
 
 ## Exit criteria for full libssl retirement
 
 1. ~~Upstream native-handshake gap closed~~ ✅ cyrius 6.1.19.
-2. Trust-store / mTLS policy enforcement wired for the native backend —
-   **the only remaining blocker** (SPKI pinning already is).
+2. ~~Trust-store / mTLS policy enforcement wired for the native backend~~
+   ✅ cyrius 6.2.8 / sandhi 1.6.0 (typed native trust-store + client-auth ctx
+   verbs; Batch A1). SPKI pinning was already backend-agnostic.
 3. ~~Upstream brk/fdlopen allocator fix~~ ✅ cyrius 6.1.19 (anonymous-mmap
    heap) — the residual libssl opt-in is no longer a process-killer.
 
-Once (2) lands, the libssl opt-in *can* be removed — but the removal itself
-(dropping `sandhi_tls_use_libssl()` + the `-D CYRIUS_TLS_LIBSSL` opt-out) is a
-breaking change, so it's held for the **sandhi 2.0** major, not shipped as a
-patch the moment A1 clears. The
-`-D CYRIUS_TLS_NATIVE` *requirement* is gone: **cyrius 6.1.21 inverted the
-`lib/tls.cyr` default** (native compiled in + selected with no flag;
-`-D CYRIUS_TLS_LIBSSL` opts out; legacy `-D CYRIUS_TLS_NATIVE` is a no-op
-alias), and sandhi 1.4.9 re-pinned to it + dropped the interim flag from
-CI/release. The remaining libssl coupling is native TLS-policy
-*enforcement* (2), not the build default. Tracked in the roadmap cross-repo
-dependencies + the 1.5.x reshape.
+All three technical criteria are met — native has **no remaining functional
+gap**. The libssl opt-in *can* now be removed, but the removal itself (dropping
+`sandhi_tls_use_libssl()` + the `-D CYRIUS_TLS_LIBSSL` opt-out + the libssl
+branches) is a breaking change, so it's held for the **sandhi 2.0** major, not a
+1.6.x patch. The `-D CYRIUS_TLS_NATIVE` *requirement* is long gone: **cyrius
+6.1.21 inverted the `lib/tls.cyr` default** (native compiled in + selected with
+no flag; `-D CYRIUS_TLS_LIBSSL` opts out; legacy `-D CYRIUS_TLS_NATIVE` is a
+no-op alias), and sandhi 1.4.9 re-pinned to it + dropped the interim flag from
+CI/release. The 2.0 retirement is tracked in the roadmap (Batch A).

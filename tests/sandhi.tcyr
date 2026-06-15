@@ -1700,22 +1700,33 @@ fn test_fp_encode_bytes() {
 }
 
 fn test_tls_enforcement_flag() {
-    # Environment-dependent: returns 1 on hosts where libssl is
-    # loadable AND every required libssl/libcrypto symbol resolves
-    # via tls_dlsym (typical dev box, real deployments). Returns 0
-    # in stripped sandboxes where the fdlopen helper or libssl path
-    # is absent (some CI runners). Both are valid runtime states —
+    # `enforcement_available()` must always return a clean 0/1 boolean on
+    # whatever backend is active (never crash / garbage). It is 0 only when
+    # TLS is wholly unusable (e.g. a stripped sandbox on a libssl-only build);
     # the fail-closed gate in apply.cyr handles the 0 case.
-    #
-    # Test asserts the call is well-defined (returns a clean 0/1
-    # boolean rather than crashing or returning garbage). Live wire-
-    # up is verified end-to-end in `programs/_policy_runtime_probe.cyr`
-    # which is a runnable probe, not a unit assertion.
     var ea = sandhi_tls_policy_enforcement_available();
     var ok = 0;
     if (ea == 0) { ok = 1; }
     if (ea == 1) { ok = 1; }
     assert_eq(ok, 1, "tls: enforcement_available returns clean 0/1");
+
+    # A1 (1.6.0 / cyrius 6.2.8): on the NATIVE backend — the no-flag default —
+    # trust-store / mTLS enforcement is available. This was a hard 0 from 1.4.7
+    # (native fed a native ctx to libssl SSL_CTX_*, which faulted, so trust/mTLS
+    # failed closed) until 6.2.8 shipped the typed native trust-store +
+    # client-auth verbs. Native is always usable, so this is deterministic; the
+    # guard only skips the deprecated -D CYRIUS_TLS_LIBSSL build where native
+    # isn't compiled in. Live enforcement is exercised in
+    # programs/_policy_runtime_probe.cyr.
+    var prev = tls_get_backend();
+    if (tls_set_backend(TLS_BACKEND_NATIVE) == 0) {
+        # native compiled in (the no-flag default build)
+        assert_eq(sandhi_tls_policy_enforcement_available(), 1,
+        "tls: native trust/mTLS enforcement available (A1)");
+        assert_eq(sandhi_tls_policy_pin_available(), 1,
+        "tls: native SPKI pinning available");
+    }
+    tls_set_backend(prev);
     return 0;
 }
 

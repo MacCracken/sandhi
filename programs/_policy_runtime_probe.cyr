@@ -11,27 +11,24 @@
 #   2. `regression_network_probe(1.1.1.1, 443, 3000)` — TCP
 #      reachable in 3s (skip if not)
 #
-# 1.4.7 — regression gate for
-# docs/issues/2026-06-09-tls-policy-enforcement-live-segfault.md. The
-# low-level policy openers used to SIGSEGV on a LIVE network: native
-# trust-store fed a native ctx to libssl SSL_CTX_*; libssl pinning hit a
-# cyrius SPKI regression. The fix makes `enforcement_available()`
-# (trust/mTLS, libssl-only) and `pin_available()` (SPKI, backend-agnostic
-# but libssl-excluded pending the cyrius fix) backend-aware, so the
-# pre-open helper fails closed instead of calling the faulting paths.
-# This gate exercises the **native** backend (the no-flag default past
-# 1.4.7; skips only on a libssl-only build): pinning succeeds/fails-closed
-# via the backend-agnostic SPKI read, trust/mTLS fails closed. The
-# deprecated libssl backend's crash-safety was verified separately during
-# development (see the main() note). The high-level threading enforcement
-# has its own gate, _https_policy_threading_gate.cyr.
+# 1.4.7 — born as a regression gate for the (archived) live-network
+# TLS-policy SIGSEGV. 1.6.0 / cyrius 6.2.8 — extended to assert native
+# trust-store ENFORCEMENT now that 6.2.8 shipped the typed native
+# trust-store + client-auth verbs (Batch A1: the last libssl coupling for
+# policy enforcement). This gate exercises the **native** backend (the
+# no-flag default; skips only on a libssl-only build): default policy
+# round-trips, a wrong SPKI pin fails closed via the backend-agnostic SPKI
+# read, and a bogus custom trust store is REFUSED because native now
+# enforces it (the 1.4.7 "trust/mTLS unavailable → pre-open fail-closed" is
+# retired). The high-level threading enforcement has its own gate,
+# _https_policy_threading_gate.cyr.
 #
 # Per-backend gates:
 #   [2] default policy: must succeed (real round-trip).
 #   [3] WRONG SPKI pin: must fail-closed with err=TLS (native: SPKI
-#       mismatch; libssl: pin-unavailable). Never crash.
-#   [4] trust-store(bad CA): must refuse (native: trust unavailable →
-#       fail-closed; libssl: verify-fail), or note system-CA warning.
+#       mismatch). Never crash.
+#   [4] trust-store(bogus CA): native MUST refuse with err=TLS — the custom
+#       CA fails to load, so enforcement aborts the open before handshake.
 #
 # mTLS is NOT exercised here — needs a client-cert server fixture.
 #
@@ -39,8 +36,9 @@
 #   0   — PASS or clean SKIP (no network / TLS unavailable)
 #   2   — default-policy open failed (real handshake regression)
 #   3   — wrong-pin opened (fail-closed broken — security)
-#   4   — wrong-pin err_kind != SANDHI_CONN_OPEN_TLS (wrong
+#   4   — wrong-pin / bogus-trust err_kind != SANDHI_CONN_OPEN_TLS (wrong
 #         classification)
+#   5   — bogus trust-store opened (native enforcement broken — security)
 
 # sigil's SHA-256 (the SPKI-pin digest in src/tls_policy/apply.cyr)
 # pulls thread_local / ct / keccak, which sigil does not declare as
@@ -134,19 +132,26 @@ fn run_policy_gates(ip): i64 {
     }
     say("PASS (err=TLS)\n");
 
-    # [4] trust-store(bad CA) → must refuse, NEVER crash. On native
-    # trust/mTLS is unavailable → fail-closed; on libssl the bogus CA fails
-    # verification. Either way the connection is refused with err=TLS. (A
-    # libssl build that keeps system CAs may still open — note, don't fail.)
-    say("  [4] trust-store(bad CA) refused ... ");
+    # [4] trust-store(bogus CA) → native MUST refuse, NEVER crash. 1.6.0:
+    # native enforces the custom trust store via the typed
+    # tls_ctx_load_verify_locations verb; an unreadable / bogus CA file makes
+    # the pre-handshake hook fail, so the open is aborted with err=TLS
+    # (conn.cyr sets SANDHI_CONN_OPEN_TLS when tls_connect_alloc returns 0).
+    # Opening here would mean native silently ignored the custom trust store —
+    # a security regression.
+    say("  [4] trust-store(bogus CA) refused ... ");
     var c4 = sandhi_conn_open_with_policy(ip, 443, 1, "one.one.one.one",
     sandhi_tls_policy_new_trust_store("/nonexistent/ca.pem"));
     if (c4 != 0) {
-        say("WARN: opened (system CAs still in effect)\n");
+        say("FAIL: opened (custom trust store ignored — SECURITY)\n");
         sandhi_conn_close(c4);
-    } else {
-        say("PASS (refused, last_err="); fmt_int(sandhi_conn_last_open_err()); say(")\n");
+        return 5;
     }
+    if (sandhi_conn_last_open_err() != SANDHI_CONN_OPEN_TLS) {
+        say("FAIL: err_kind != TLS (got "); fmt_int(sandhi_conn_last_open_err()); say(")\n");
+        return 4;
+    }
+    say("PASS (refused, err=TLS)\n");
     return 0;
 }
 
@@ -170,17 +175,13 @@ fn main() {
         return 0;
     }
 
-    # Native backend (the 1.4.5 default). Pinning enforced via the
-    # backend-agnostic SPKI read; trust/mTLS fail-closed (native SSL_CTX_*
-    # not wired yet — issue 2026-06-09-tls-policy-enforcement-live-segfault).
+    # Native backend (the no-flag default). Pinning enforced via the
+    # backend-agnostic SPKI read; trust-store / mTLS enforced via the typed
+    # native trust-store + client-auth verbs (cyrius 6.2.8 / Batch A1).
     #
-    # We test the native backend only. The deprecated libssl backend's
-    # crash-safety (pinning fails closed instead of faulting in cyrius's
-    # libssl SPKI read) was verified during 1.4.7 development; it is NOT
-    # exercised here because switching backends mid-process AFTER a native
-    # handshake destabilizes the deprecated libssl stack (a separate,
-    # not-a-real-consumer-scenario fragility noted in the issue). A
-    # consumer picks one backend per process.
+    # We test the native backend only. A consumer picks one backend per
+    # process; switching mid-process after a native handshake destabilizes
+    # the deprecated libssl stack (a not-a-real-consumer fragility).
     sandhi_tls_use_native();
     var r = run_policy_gates(ip_111);
     if (r != 0) { return r; }

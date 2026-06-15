@@ -4,6 +4,74 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-06-15
+
+**Batch A1 — native TLS-policy enforcement (the last libssl coupling for policy
+enforcement).** cyrius pin **6.2.7 → 6.2.8**, which shipped the typed,
+backend-aware pre-handshake trust-store + mTLS config verbs that sandhi's
+`src/tls_policy/apply.cyr` was the named consumer for. Native now **enforces**
+custom trust stores + mTLS — it failed closed on native from 1.4.7, because the
+enforcing path was libssl-`SSL_CTX_*`-only. +2 assertions (1003 total).
+
+### Changed — tls_policy (`src/tls_policy/apply.cyr`)
+
+- **`_sandhi_apply_hook` migrated off `tls_dlsym("SSL_CTX_*")`** onto the typed,
+  backend-aware stdlib verbs `tls_ctx_load_verify_locations` /
+  `tls_ctx_use_certificate_file` / `tls_ctx_use_private_key_file` (cyrius 6.2.8).
+  Under native they route to the `tls_native` trust-store + client-auth
+  machinery; under libssl, to the core `SSL_CTX_*` symbols. The hook now gets the
+  native ctx under native (vs `SSL_CTX*` under libssl) and the typed verbs
+  dispatch internally — sandhi's surface is unchanged across the swap (No-FFI;
+  ADR 0001).
+- **`sandhi_tls_policy_enforcement_available()` is now backend-aware-true:**
+  returns `tls_available()` — trust/mTLS enforce on **both** backends. The 1.4.7
+  "0 on native → fail-closed" is retired. Native enforcement is real:
+  `_tls_native_alloc` defaults verify-peer + system CA, and `tls_native_connect`
+  is fail-closed (verifies chain-to-root + hostname before `TLS_OK`).
+- `sandhi_tls_policy_pin_available()` unchanged — SPKI pinning was already
+  backend-agnostic + live on native (1.4.2 / 1.4.7); still libssl-excluded
+  pending the cyrius libssl-SPKI fix (orthogonal — native covers pinning).
+
+### Removed — tls_policy
+
+- The `_sandhi_apply_load_verify_fp` / `_use_cert_fp` / `_use_key_fp` fn-pointer
+  cache + the `_sandhi_apply_resolve_fns` lazy-resolve step — the typed verbs
+  resolve the backend internally, so the `tls_dlsym` cache is dead.
+
+### Tests
+
+- `tests/sandhi.tcyr` `test_tls_enforcement_flag` — +2 deterministic assertions:
+  on the native backend, `enforcement_available()` == 1 (the A1 flip) and
+  `pin_available()` == 1. Guarded for the deprecated libssl-only build. (1003
+  total: 451 + 167 + 343 + 42.)
+- `programs/_policy_runtime_probe.cyr` — gate `[4]` hardened from a warn-tolerant
+  note to a **hard native trust-store enforcement assertion**: a bogus custom
+  trust store MUST be refused with err=TLS (exit 5 if it opens — a silently
+  ignored custom CA is a security regression). Verified live: `backend=1
+  pin_available=1 trust_mtls_available=1`; `[2]` default round-trip, `[3]`
+  wrong-pin fail-closed, `[4]` bogus-trust refused → `ALL GATES PASS`.
+
+### Stdlib / cross-repo
+
+- Closes the sandhi side of the long-running native-TLS filing
+  (`docs/issues/2026-05-22-cyrius-native-tls-in-6.0.x.md`, Batch A1): the last
+  libssl coupling for **policy enforcement** is gone. Native is now functionally
+  complete for TLS policy (pinning + trust-store + mTLS); the deprecated
+  `-D CYRIUS_TLS_LIBSSL` opt-out is a pure legacy escape hatch with no remaining
+  functional gap. This unblocks the libssl **retirement** scheduled for sandhi
+  **2.0** (dropping `sandhi_tls_use_libssl()` + the build flag — a breaking
+  change; see the roadmap).
+
+### Known follow-up
+
+- The live gate proves the custom trust store is **enforced** (a bogus CA is
+  refused, not silently ignored) and the default system-CA path round-trips. A
+  *loadable-but-wrong* CA verify-fail proof (swap the trust anchor to a CA that
+  doesn't sign the server → handshake rejects) needs a CA PEM fixture + the
+  cyrius CA-bundle replace-vs-append semantics; flagged as a live check (see
+  roadmap). Chain-verify correctness itself is cyrius's tested responsibility
+  (the CVE-18 fail-closed `tls_native_connect`).
+
 ## [1.5.5] — 2026-06-15
 
 **Batch A3 — opt-in multicast (QM) mDNS resolver, done right (two-socket split +
@@ -1751,13 +1819,13 @@ inject the cached session for client-side resumption.
 The cyrius-side fix is either a staged-connect API
 (`tls_connect_alloc` + `tls_connect_complete`) or a post-`SSL_new`
 hook variant. Filed as
-[`docs/issues/2026-05-09-stdlib-tls-staged-connect.md`](docs/issues/2026-05-09-stdlib-tls-staged-connect.md).
+[`docs/issues/archive/2026-05-09-stdlib-tls-staged-connect.md`](docs/issues/archive/2026-05-09-stdlib-tls-staged-connect.md).
 Sandhi 1.3.1 / 1.3.2 wait on cyrius landing it.
 
 ### Pinned next
 
 - **WAIT** for cyrius staged-connect API
-  (`docs/issues/2026-05-09-stdlib-tls-staged-connect.md`).
+  (`docs/issues/archive/2026-05-09-stdlib-tls-staged-connect.md`).
   Sandhi 1.3.1 / 1.3.2 are blocked at the call-sequence layer
   even though all primitive fns exist.
 - **1.3.1** when unblocked — compose `tls_get_session` /

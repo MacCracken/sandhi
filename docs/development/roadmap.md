@@ -12,7 +12,7 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.2.7** (the 1.5.x arc — see state.md / CHANGELOG).
+is currently **cyrius 6.2.8** (1.6.0 closed Batch A1 — see state.md / CHANGELOG).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -21,28 +21,25 @@ item per slot. Per [`project_sit_adoption_drives_roadmap`] scope is surfaced fro
 real signals, not pre-baked; per the no-silent-scope-outs rule every deferral is
 a named entry here, not a buried mention.
 
-## Batch A — cross-repo-gated (waiting on a cyrius primitive)
+## Batch A — libssl retirement (sandhi 2.0 — breaking)
 
-- **A1 — native TLS-policy enforcement (the last libssl coupling).** Native
-  trust-store / mTLS currently **fails closed** (since 1.4.7) because the
-  enforcing path is libssl-only. Two cyrius-side items unblock it — and clear
-  the prerequisite for **retiring libssl at sandhi 2.0** (dropping the
-  `sandhi_tls_use_libssl()` escape hatch + the `-D CYRIUS_TLS_LIBSSL` opt-out is
-  a breaking change → the 2.0 major, not an automatic patch the moment A1 lands):
-  - **Native `SSL_CTX_*` equivalents** in `lib/tls_native.cyr` (custom trust
-    store + client cert/key) so native trust/mTLS *enforces* rather than fails
-    closed (mirrors the 1.4.2 ALPN/SPKI rewire). *Re-verified still-open on
-    cyrius 6.2.7: the only verify-related public verb is `tls_set_verify`; no
-    native trust-store / client-cert / client-key wrapper exists, and native
-    CertificateRequest handling is server-side only (an HTTP client gets no
-    client-cert path).*
-  - **Fix the libssl `tls_get_peer_spki_der` regression** — a single libssl
-    pinned open SIGSEGVs in post-handshake SPKI extraction (worked at 1.3.0;
-    regressed since). sandhi excludes libssl from `pin_available()` until fixed.
-  Tracked at
+A1 (native trust-store / mTLS enforcement) **shipped at 1.6.0** over cyrius
+6.2.8: native now enforces pinning + trust-store + mTLS via the typed
+backend-aware ctx verbs, so the deprecated libssl backend has **no remaining
+functional gap**. What's left is the breaking removal itself, held for the
+**2.0** major (dropping a public verb + a build flag is not a patch):
+
+- **Retire the libssl opt-out (2.0).** Drop `sandhi_tls_use_libssl()` (public
+  verb) + the `-D CYRIUS_TLS_LIBSSL` build flag + the libssl branches in
+  `src/tls_policy/*` and `src/http/conn.cyr`. Breaking → the 2.0 major, not a
+  1.6.x patch. The prerequisite (A1) is now met; this is a scheduling decision,
+  not a blocked item. See `project_libssl_retirement_at_2_0` (memory).
+- **libssl `tls_get_peer_spki_der` regression — now moot, low priority.** sandhi
+  still excludes libssl from `pin_available()` (a single libssl pinned open
+  SIGSEGV'd in post-handshake SPKI extraction). Native covers pinning and libssl
+  retires at 2.0, so this gates nothing; only revisit if a libssl build is kept
+  alive past 2.0 (unlikely). Tracked at
   [`2026-05-22-cyrius-native-tls-in-6.0.x.md`](../issues/2026-05-22-cyrius-native-tls-in-6.0.x.md).
-  (SPKI *pinning* itself is already backend-agnostic + live on native since
-  1.4.2 / 1.4.7; only the trust-store/mTLS *enforcement* is gated.)
 
 ## Batch B — profile-justified optimization picks (parked; need prof evidence)
 
@@ -76,6 +73,14 @@ Currently open:
   **unverified** (unit tests use synthetic packets; the smoke only checks a
   no-responder miss). Run a live-network check; if it confirms the resolver never
   receives, apply the 1.5.5 two-socket fix (unconnected RX) to the QU path too.
+- **Native custom-trust-store verify-fail proof (needs a CA fixture).** The 1.6.0
+  live gate (`_policy_runtime_probe.cyr` `[4]`) proves a *bogus* custom trust
+  store is enforced (unreadable CA → open refused with err=TLS, not silently
+  ignored). It does **not** yet prove a *loadable-but-wrong* CA causes a handshake
+  verify-fail (swap the trust anchor to a CA that doesn't sign the server → must
+  reject). That needs a CA PEM fixture + the cyrius `tls_native` CA-bundle
+  replace-vs-append semantics. Chain-verify correctness itself is cyrius's (the
+  CVE-18 fail-closed `tls_native_connect`); this is sandhi's wiring-proof gap.
 
 ## Wait-for-second-consumer-ask
 

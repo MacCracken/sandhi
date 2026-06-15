@@ -21,8 +21,8 @@ at 1.0.0 / Cyrius v5.7.0 ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5
 Patches land here first; `dist/sandhi.cyr` is regenerated each release and a
 small cyrius slot re-folds it.
 
-Current: **1.5.5**, pinned to **Cyrius 6.2.7**. **1001 test assertions green**
-(449 sandhi + 167 h2 + 343 alloc + 42 rpc). Builds clean for x86_64, aarch64,
+Current: **1.6.0**, pinned to **Cyrius 6.2.8**. **1003 test assertions green**
+(451 sandhi + 167 h2 + 343 alloc + 42 rpc). Builds clean for x86_64, aarch64,
 and the **AGNOS** target.
 
 **TLS backend: native by default, no flag** (since Cyrius 6.1.21). `-D
@@ -69,7 +69,7 @@ syscall(60, exit_code);
 | `src/http/h2/*` | Full HTTP/2 stack: frames (RFC 7540), HPACK + Huffman (RFC 7541), connection lifecycle, request/response, dispatch |
 | `src/rpc/*` | JSON-RPC dialects: W3C WebDriver, Appium extensions, MCP-over-HTTP + SSE — transport only per [ADR 0001](docs/adr/0001-sandhi-is-a-composer-not-a-reimplementer.md) |
 | `src/discovery/*` | Service discovery: chain composition, daimon-backed resolver, mDNS — QU-bit unicast (default) + opt-in multicast (QM) resolver `sandhi_discovery_local_mc_resolver` (1.5.5, over Cyrius 6.2.7 multicast primitives) |
-| `src/tls_policy/*` | Cert pinning (SPKI, constant-time compare), mTLS, trust store, ALPN, backend selection. Enforcement is live + **backend-aware** (1.4.7): trust/mTLS libssl-only, SPKI-pin backend-agnostic; high-level threading via `sandhi_http_options_tls_policy` (1.4.6); fail-closed |
+| `src/tls_policy/*` | Cert pinning (SPKI, constant-time compare), mTLS, trust store, ALPN, backend selection. Enforcement is live + **native on every mode** (1.6.0 / Batch A1): pinning + trust-store + mTLS all enforce on the native default backend; high-level threading via `sandhi_http_options_tls_policy` (1.4.6); fail-closed |
 | `src/tls_policy/session_cache.cyr` | TLS 1.3/1.2 client session-resumption cache — TTL + max-size LRU eviction, cred-strip-aware keying (1.3.1–1.4.0) |
 | `src/server/mod.cyr` | HTTP/1.1 server — sync `sandhi_server_run` / `_run_opts` + epoll-cooperative `sandhi_server_run_async` (`max_conns`, 1.4.9); built-in CL+TE / dup-header smuggling guards |
 | `src/net/resolve.cyr` | Native UDP DNS resolver — A + AAAA, randomized TXID + answer-name verification, RFC 1035 |
@@ -117,15 +117,17 @@ Each AGNOS crate that sandhi serves has a coordination doc in [`docs/issues/`](d
 
 ## Cross-repo dependencies
 
-Live HTTPS works end-to-end on the native backend. One item remains open
-cyrius-side (tracked in the [roadmap](docs/development/roadmap.md)):
+Live HTTPS — including pinned, custom-trust-store, and mTLS policies — works
+end-to-end on the native backend. The last cyrius-side dependency closed at
+**1.6.0 / Cyrius 6.2.8**:
 
-- **Native TLS-policy enforcement** — SPKI pinning is backend-agnostic and live
-  on native; trust-store / mTLS still reach for libssl `SSL_CTX_*`, so they
-  **fail closed** on native pending native `SSL_CTX_*` equivalents in cyrius
-  `lib/tls_native.cyr`. The last libssl coupling — the prerequisite for retiring
-  libssl entirely (dropping `sandhi_tls_use_libssl()` + `-D CYRIUS_TLS_LIBSSL`),
-  a breaking change held for **sandhi 2.0**.
+- **Native TLS-policy enforcement** — ✅ landed. 6.2.8 shipped the typed native
+  trust-store + client-auth ctx verbs, so trust-store / mTLS now **enforce** on
+  native (fail-closed since 1.4.7); SPKI pinning was already backend-agnostic.
+  Native has no remaining functional gap, so the deprecated libssl opt-out
+  (`sandhi_tls_use_libssl()` + `-D CYRIUS_TLS_LIBSSL`) is now a pure legacy
+  escape hatch — its removal is a breaking change held for **sandhi 2.0** (see
+  the [roadmap](docs/development/roadmap.md)).
 
 ## Build
 
