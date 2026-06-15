@@ -4,6 +4,56 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-06-14
+
+**cyrius pin `6.2.1` → `6.2.6`; the aarch64 `bayan` cross-build defect is fixed
+upstream — aarch64 is a gating artifact again.** Opens the **1.5.x arc** as a
+toolchain + cross-repo-issue cleanup pass (the resolved-defect backlog is
+archived and the remaining open items are batched into the arc; see
+`docs/development/roadmap.md`).
+
+### Fixed
+
+- **aarch64 cross-build resolved (cyrius 6.2.6).** The `cycc_aarch64`
+  `error: unexpected enum` abort while assembling stdlib `bayan` (filed
+  2026-06-12, reproduced on every toolchain 6.0.21–6.2.1) no longer occurs on
+  6.2.6: `CYRIUS_DCE=1 cyrius build --aarch64 programs/smoke.cyr
+  build/sandhi-smoke-aarch64` produces a valid `ELF 64-bit … ARM aarch64`
+  binary. Zero sandhi-side change — the fix is purely in the upstream
+  `cycc_aarch64` dependency-assembly path, as the filing predicted. Issue
+  archived (`docs/issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md`);
+  [architecture/005](docs/architecture/005-aarch64-bayan-cross-build.md) updated
+  to record the resolution.
+
+### Changed
+
+- **cyrius pin → 6.2.6.** Mechanical bump from 6.2.1; no source change. Full
+  `.tcyr` suite green (440 + 167 + 343 + 42 = 992), `cyrius lint` 0 warnings /
+  0 deferrals, `dist/sandhi.cyr` regenerated via `cyrius distlib`.
+- **CI/release: aarch64 cross-build restored to a gating step.** With the
+  upstream defect resolved, the "Cross-build aarch64" steps in `ci.yml` /
+  `release.yml` drop the 1.4.11 best-effort warn-and-skip-on-failure tolerance
+  and once again fail the job if the build fails (the "skip cleanly when
+  `cycc_aarch64` is absent from the toolchain" guard is retained). The release
+  ships the aarch64 convenience binary alongside the authoritative x86_64
+  binary + source tarball + `dist/sandhi.cyr` again.
+
+### Docs — issue backlog cleanup
+
+- Archived five resolved issues to `docs/issues/archive/`: the aarch64
+  cross-build defect (resolved here) plus the four sandhi-side defects closed
+  across the 1.4.x arc — HTTP close-path drains-until-EOF (1.4.1), repeated
+  HTTPS-request SIGSEGV (1.4.5), high-level client TLS-policy threading (1.4.6),
+  and low-level TLS-policy-enforcement live SIGSEGV (1.4.7). `docs/issues/README.md`
+  moved their rows from the active tables to the Archived table.
+- Updated the two cross-repo coordination docs whose **sandhi side** is now
+  delivered: `2026-05-10-daimon-server-max-conns.md` (sandhi-side enforcement
+  shipped at 1.4.9 via `sandhi_server_run_async`; daimon-side collapse now
+  unblocked) and `2026-05-22-cyrius-native-tls-in-6.0.x.md` (native transport
+  operational + default since 1.4.5 / cyrius 6.1.21 — the sit-adoption gate is
+  cleared; the residual pre-handshake `SSL_CTX_*` native enforcement stays
+  tracked as a cross-repo dependency in the roadmap).
+
 ## [1.4.11] — 2026-06-12
 
 **cyrius pin `6.1.21` → `6.2.1` (ecosystem-wide stdlib pin sweep).** Building

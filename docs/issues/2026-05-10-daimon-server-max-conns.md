@@ -1,6 +1,14 @@
 # 2026-05-10 — Daimon `serve_async` collapse blocked on `sandhi_server_options_max_conns` enforcement (cross-repo coordination)
 
-**Status:** Open upstream (sandhi-side enforcement work)
+**Status:** ✅ **Sandhi-side resolved at 1.4.9** — `sandhi_server_run_async`
+ships the epoll-cooperative enforcement (approach (2) below): batched
+accept bounded by `max_conns`, a handler task per connection over
+`lib/async.cyr`, per-handler recv buffers (no-interleave invariant), and a
+reset-per-batch arena. 1.4.10 hardened it (dropped the infinite
+`async_await_readable`; floored `idle_ms` > 0). **Residual is daimon-side**:
+collapse `serve_async`'s duplicated accept loop + smuggling checks onto
+`sandhi_server_run_async`. Sandhi has nothing left to wire — kept here as the
+canonical daimon-side coordination record until daimon schedules the collapse.
 **Severity:** **Low** — no security impact; pure refactor / dedup blocker on daimon's side
 **Reporter:** daimon (AGNOS agent orchestrator, v1.2.0+ — work-loop review during the 1.2.2 ship)
 **Sandhi version at time of report:** **1.3.3** (bundled at cyrius 5.10.34 as `lib/sandhi.cyr`)

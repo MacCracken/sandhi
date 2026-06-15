@@ -1,9 +1,23 @@
-# 005 — aarch64 cross-build is best-effort: upstream `cycc_aarch64` chokes on stdlib `bayan` (1.4.11)
+# 005 — aarch64 cross-build: upstream `cycc_aarch64` choked on stdlib `bayan` (1.4.11–1.4.x; resolved 1.5.0)
 
-The CI / release **"Cross-build aarch64 (best-effort)"** step does not
-gate a sandhi release. As of **1.4.11** it cannot succeed on any
-installed cyrius toolchain, because `cycc_aarch64` aborts with
-`error: unexpected enum` while assembling the stdlib `bayan`
+> **RESOLVED at sandhi 1.5.0 / cyrius 6.2.6 (2026-06-14).** The
+> `cycc_aarch64` `error: unexpected enum` abort is fixed upstream in
+> 6.2.6. `CYRIUS_DCE=1 cyrius build --aarch64 programs/smoke.cyr
+> build/sandhi-smoke-aarch64` now produces a valid `ELF 64-bit … ARM
+> aarch64` binary with zero sandhi-side change — exactly as the filing
+> predicted (a purely cyrius-side dep-assembly fix). The CI / release
+> "Cross-build aarch64" step is a **gating step** again (the 1.4.11
+> warn-and-skip-on-failure tolerance is removed; the only tolerated skip
+> is the toolchain genuinely lacking `cycc_aarch64`). The history below is
+> retained for the record. Issue archived at
+> [`docs/issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md`](../issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md).
+
+## History (1.4.11 — best-effort window)
+
+The CI / release **"Cross-build aarch64 (best-effort)"** step did not
+gate a sandhi release. As of **1.4.11** it could not succeed on any
+installed cyrius toolchain **6.0.21–6.2.1**, because `cycc_aarch64`
+aborted with `error: unexpected enum` while assembling the stdlib `bayan`
 dependency.
 
 ## What happens
@@ -49,6 +63,7 @@ on failure instead of failing the job; the Archive step already
 guards on file presence. When cyrius fixes `cycc_aarch64`, the step
 resumes emitting the artifact with no sandhi-side change.
 
-Tracked as a cross-repo dependency in
-[`docs/development/roadmap.md`](../development/roadmap.md) and filed at
-[`docs/issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md`](../issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md).
+Originally tracked as a cross-repo dependency in
+[`docs/development/roadmap.md`](../development/roadmap.md); filed (now archived,
+resolved at 1.5.0) at
+[`docs/issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md`](../issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md).

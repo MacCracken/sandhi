@@ -17,7 +17,7 @@
 > sandhi also default-switched to the **native** backend (no libssl/glibc loaded).
 > **Verified at 6.1.19:** native AND libssl `sandhi_http_get` ×6 to example.com
 > both → 6/6 status 200, no crash. See
-> [architecture/004](../architecture/004-native-tls-default.md).
+> [architecture/004](../../architecture/004-native-tls-default.md).
 
 **Status:** RESOLVED — sandhi 1.4.5 (native default) + cyrius 6.1.19 (both upstream root fixes). Verified crash-free on both backends.
 **Severity:** **P1 / Critical** — crashes the process; blocks any consumer making

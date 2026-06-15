@@ -19,7 +19,7 @@ that picks up the change. The public surface is no longer
 frozen (ADR 0005's freeze applied "between 0.9.2 and 1.0.0";
 post-fold patches are explicitly allowed per the 1.1.0 ship).
 
-## Shipped (M0 through 1.4.10)
+## Shipped (M0 through 1.5.0)
 
 Compressed log — one line per release. CHANGELOG carries the
 details, state.md the current snapshot.
@@ -77,19 +77,116 @@ details, state.md the current snapshot.
 - **1.4.8** — TLS backend flag-polarity flip (target convention) + interim green CI (no cyrius bump; stays 6.1.20). Docs/build-convention change: target is native-as-no-flag-default with `-D CYRIUS_TLS_LIBSSL` opt-in (inverse of the 1.4.5–1.4.7 `-D CYRIUS_TLS_NATIVE`), applied across CLAUDE.md / architecture/004 / gate-program comments / `src/tls_policy/mod.cyr` header. The target needs an upstream cyrius change not in 6.1.20 (`lib/tls.cyr` is still `#ifdef CYRIUS_TLS_NATIVE`), so CI/release keep `-D CYRIUS_TLS_NATIVE` on the native steps (interim banner) and build the libssl proof no-flag — keeping CI green and actually exercising native (native smoke 1.37 MB vs 562 KB libssl; 3 native gates PASS). Filed cyrius issue `2026-06-09-invert-tls-backend-default-native-no-flag.md` to complete the flip. 992 assertions green (unchanged).
 - **1.4.9** — epoll-cooperative server; `max_conns` enforced + cyrius pin 6.1.20 → **6.1.21** (TLS flag flip completed). Closes the daimon ask: **+1 verb** `sandhi_server_run_async` over `lib/async.cyr` (worker shape decided (b) epoll-cooperative; handler stays cooperative). Batched accept up to `max_conns`/cycle → spawn handler task per conn → `async_run` → reset per-batch arena. Per-handler recv buffers (no-interleave invariant). New deps `async` + `atomic`. Sync `run`/`run_opts` unchanged. Filed cyrius cross-repo leak `2026-06-09-async-runtime-no-free-task-leak.md` (async.cyr no-free rt/task structs). **cyrius 6.1.21** inverted `lib/tls.cyr` (native = no-flag default; `-D CYRIUS_TLS_LIBSSL` opts out; legacy `-D CYRIUS_TLS_NATIVE` = no-op alias) + re-folded sandhi 1.4.5→1.4.8 — so CI/release dropped the 1.4.8 interim `-D CYRIUS_TLS_NATIVE` (libssl proof now `-D CYRIUS_TLS_LIBSSL`). Verified via forked `_server_async_smoke.cyr` (2/2 200) + 3-way polarity. 992 assertions green (unchanged).
 - **1.4.10** — closeout audit (P-1 / security / code-audit pass); **closes the 1.4.x arc** (no pin change; stays 6.1.21). **P1 fixed**: async server DoS — `_sandhi_server_async_handler` did an infinite `async_await_readable` (epoll_wait −1) before recv, so a silent client hung the whole cooperative loop; dropped the await (recv under SO_RCVTIMEO), floored `idle_ms` > 0; silent-client regression added to the smoke. **P2 fixed**: `async_new()` null-check (server); `body_sb` + `chunk_state` null-checks (stream SSE/chunked path). **Audit-confirmed**: 1.4.7 native-fail-closed property HOLDS (full `tls_dlsym`/`SSL_CTX_*` gate coverage; key-without-cert safe); 1.4.5–1.4.9 verbs documented + covered; +2 standalone docstrings. 992 assertions green (unchanged).
+- **1.4.11** — cyrius pin 6.1.21 → **6.2.1** (ecosystem-wide stdlib pin sweep). `[deps]` dropped `json` (sandhi rolls its own `src/rpc/json.cyr`) and replaced `bigint` + `base64` with **`bayan`** (the 6.1.25 carve-out re-exporting `u256_*` / `base64_*` for sigil's SPKI-pin digest path; ordered before `sigil`). Surfaced the **aarch64 `bayan` cross-build defect** (`cycc_aarch64` `unexpected enum`); CI/release made the aarch64 step best-effort (warn + skip) so the upstream defect can't gate a release. Filed `2026-06-12-cyrius-aarch64-bayan-enum-parse.md` + architecture/005. No source change; 992 green.
+- **1.5.0** — **opens the 1.5.x arc.** cyrius pin 6.2.1 → **6.2.6**; the aarch64 `bayan` cross-build defect is **fixed upstream** (6.2.6) — `--aarch64 programs/smoke.cyr` produces a valid aarch64 ELF with zero sandhi change, exactly as the filing predicted. CI/release aarch64 step **restored to gating** (1.4.11 warn-skip tolerance removed; only-tolerated skip is the toolchain lacking `cycc_aarch64`). Issue-backlog cleanup: 5 resolved issues archived (the aarch64 defect + the four 1.4.x sandhi-side defects), `docs/issues/README.md` re-tabled, and the two cross-repo coordination docs whose sandhi side is delivered updated (`daimon-server-max-conns` sandhi-side ✅ 1.4.9; `cyrius-native-tls` sit-gate cleared). 992 assertions green (440 + 167 + 343 + 42); lint clean; `dist/sandhi.cyr` regenerated at v1.5.0.
 
-## What's next
+## What's next — the 1.5.x arc
 
-The **1.4.x closeout arc is closed** (ended at 1.4.10 — the P-1/security
-audit pass). Nothing here is a committed dated slot anymore: the
-remaining items are either gated on a cyrius-side primitive, parked
-pending profile evidence, or background watches. The next *minor* break
-is **1.5.x**, which opens when **sit adopts sandhi** (real-workload
-friction drives the scope — don't pre-bake; see "Post-arc" below).
+The **1.5.x arc** opened at **1.5.0** as a *toolchain-currency +
+cross-repo-cleanup + sit-adoption-reshape* arc. 1.5.0 restored the aarch64
+cross-build (cyrius 6.2.6) and drained the resolved-issue backlog into
+`docs/issues/archive/`. What remains is organized into batches below.
 
-### Remaining work (un-gated → small patches; gated → wait)
+**Pacing note (unchanged philosophy):** the batches are *provisional
+groupings*, not committed dated slots. Cross-repo-gated items open when the
+cyrius primitive lands; optimization items open when profile evidence
+justifies them; the sit-adoption reshape opens when sit integrates. ONE item
+per slot. This honors both [`project_sit_adoption_drives_roadmap`] (don't
+pre-bake speculative scope) and the no-silent-scope-outs rule (every deferred
+item is a numbered/named entry, not a buried mention).
 
-#### Follow-up — async server: switch to arena-aware runtime (gated on cyrius)
+### Batch A — cross-repo-gated repairs (open when the cyrius primitive lands)
+
+Each is detailed under "Cross-repo dependencies" below; this is the 1.5.x
+slot framing. Re-pin to the cyrius release that adds the primitive, wire the
+one-line sandhi change, drop the corresponding cross-repo bullet.
+
+- **A1 — native TLS-policy enforcement** (`SSL_CTX_*` native equivalents in
+  cyrius `lib/tls_native.cyr`). The last libssl coupling: native trust-store /
+  mTLS currently **fails closed** (1.4.7); the native equivalents let it
+  *enforce*. Lands the cyrius libssl-SPKI fix alongside, then
+  `sandhi_tls_use_libssl()` can be dropped entirely. Closes the residual of
+  [`2026-05-22-cyrius-native-tls-in-6.0.x.md`](../issues/2026-05-22-cyrius-native-tls-in-6.0.x.md).
+- **A2 — async server arena-aware runtime** (`async_new_in(allocator)`).
+  Eliminates `sandhi_server_run_async`'s residual ~32 B/conn rt+task leak by
+  sourcing the runtime from the existing reset-per-batch arena. Re-pin, swap
+  `async_new()` → `async_new_in(arena)`, add an RSS-flat assertion to the
+  smoke gate. Gated on the cyrius filing
+  `2026-06-09-async-runtime-no-free-task-leak.md`.
+- **A3 — mDNS multicast primitives** in cyrius `lib/net.cyr`
+  (`IP_ADD_MEMBERSHIP` / `IP_MULTICAST_TTL` / `_LOOP` / `SO_REUSEPORT` /
+  `IP_MULTICAST_IF`). Opens the real `discovery/local.cyr` multicast path; the
+  0.9.3 QU-bit unicast works against most responders today, so this is a
+  quality-of-implementation slot, not a hard blocker.
+
+### Batch B — profile-justified optimization picks (open when prof data justifies)
+
+The 1.2.5 prof captures (`sandhi_prof_*`) are the gate. No pre-committed
+ordering; each ships in its own slot when measurement — not speculation —
+justifies it.
+
+- **B1 — HPACK Huffman tie-break for short tokens.** Encoder picks Huffman
+  only when *strictly* shorter; a tie-breaker favoring Huffman keeps the
+  dynamic table more compact for short cookies / opaque tokens.
+- **B2 — `_sandhi_resp_new` allocation collapse.** Fuse the separate header
+  storage / body buffer / Str-header allocations into one with internal offset
+  slicing — if the call shape measures hot enough.
+- **B3 — connection-pool LRU eviction.** Pool evicts on idle-timeout only;
+  add an LRU policy behind an option flag (default keeps current semantics
+  until profile shows benefit).
+
+### Batch C — sit-adoption reshape (gate cleared; first item surfaced)
+
+The native-TLS prerequisite that sit named is **landed** (native default since
+cyrius 6.1.21; sit-adoption gate cleared per
+[`2026-05-22-cyrius-native-tls-in-6.0.x.md`](../issues/2026-05-22-cyrius-native-tls-in-6.0.x.md)),
+and sit's adoption on AGNOS has now surfaced its first concrete friction — so
+this batch is no longer empty. Per [`project_sit_adoption_drives_roadmap`] the
+batch is filled *by what sit surfaces*, not pre-baked; the item below is real
+sit-driven friction, not speculation.
+
+- **C1 — AGNOS socket-backend gap** *(filed 2026-06-14; the standout 1.5.x
+  candidate — bounded, un-gated, prerequisite pin now satisfied)*. sandhi's
+  HTTP-client timeout-bounded non-blocking connect (`src/http/conn.cyr`) and the
+  async server's non-blocking listen fd (`src/server/mod.cyr`) drop to raw Linux
+  socket syscalls (`SYS_SOCKET` / `SYS_CONNECT` / `SYS_FCNTL` / `SYS_POLL` /
+  `SYS_GETSOCKOPT` / `SYS_SETSOCKOPT`) that the AGNOS target doesn't define, so
+  `cyrius build --agnos` of any sandhi consumer (sit) fails to **compile**. The
+  TLS seam + DNS + mDNS are already portable. The bounded fix is one
+  `_sandhi_connect_bounded_a` transport seam — Linux impl = current machinery,
+  agnos impl = blocking `sock_connect` (timeout advisory, mirroring the existing
+  `connect_ms == 0` path), v6 fails cleanly (agnos is IPv4-only today), server
+  listen-fd `O_NONBLOCK` skipped. **The cyrius ≥6.2.6 pin it needs landed at
+  1.5.0**, so this is un-gated and ready to slot (a near-term 1.5.1 candidate).
+  Blocks sit on agnos directly, owl + whirl transitively. Detail:
+  [`2026-06-14-agnos-socket-backend-gap.md`](../issues/2026-06-14-agnos-socket-backend-gap.md).
+
+### Background watches (not arc slots)
+
+- **`tests/sandhi.tcyr` cap-drift** — if a slot pushes sandhi.tcyr against the
+  per-program fixup-cap (architecture/001), carve out another `tests/<name>.tcyr`
+  in the same slot (mirroring the 1.2.8 sandhi → rpc split). Don't let it block
+  the ship.
+- **Consumer coordination docs** ([`docs/issues/`](../issues/README.md)) —
+  yantra / hoosh+ifran / ark / mela / vidya / daimon (registry + MCP client).
+  sandhi's side is shipped; these open when each consumer schedules adoption.
+  The daimon `serve_async` collapse
+  ([`2026-05-10-daimon-server-max-conns.md`](../issues/2026-05-10-daimon-server-max-conns.md))
+  is sandhi-side ✅ (1.4.9) — residual is daimon-side only.
+
+## Detail — cross-repo dependencies & deferred items
+
+This section is the **backing detail** for the 1.5.x batches above — the
+exact repair steps, cross-repo linkages, and wait-for-trigger items. The
+1.4.x closeout arc closed at 1.4.10; the 1.5.x arc opened at 1.5.0
+(toolchain 6.2.6 + aarch64 restored). Nothing here is a committed dated
+slot: items are gated on a cyrius-side primitive (Batch A), parked pending
+profile evidence (Batch B), or surface from a trigger (Batch C / consumer
+asks). ONE item per slot when its gate clears.
+
+### Batch-A / Batch-B detail (the gated + parked work)
+
+#### A2 — async server: switch to arena-aware runtime (gated on cyrius)
 
 **Opens when cyrius lands the arena-aware async runtime** filed at
 [`2026-06-09-async-runtime-no-free-task-leak.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-06-09-async-runtime-no-free-task-leak.md)
@@ -114,7 +211,7 @@ Until then the residual leak is documented + bounded (fine for
 bounded-lifetime / low-traffic; a quality gate for high-traffic). Tracked
 as a cross-repo dependency below.
 
-#### Profile-justified optimization picks (parked → carry to 1.5.x)
+#### B1–B3 — profile-justified optimization picks (parked)
 
 The 1.2.5 prof captures (`sandhi_prof_*`) are ready to
 measure against; candidates with no profile evidence stay
@@ -161,15 +258,22 @@ brk×glibc-malloc contention + native cert-chain ordering, both **6.1.19** —
 and the **inverted TLS-backend default** (native compiled-in + selected
 no-flag, **6.1.21**, which also re-folded sandhi 1.4.5→1.4.8). The native
 TLS transport itself landed across the cyrius 6.0.x arc and has been
-sandhi's default since 1.4.5. Open items:
+sandhi's default since 1.4.5. The **aarch64 `cycc_aarch64` `unexpected
+enum` on stdlib `bayan`** (filed 2026-06-12, affected the 1.4.11–1.4.x
+cross-build) was **fixed upstream in 6.2.6** and picked up at 1.5.0 — the
+`--aarch64` build produces a valid aarch64 ELF with zero sandhi change and
+the CI/release step is gating again ([archived
+issue](../issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md);
+[architecture/005](../architecture/005-aarch64-bayan-cross-build.md)). Open
+items:
 
 - **Native TLS-policy enforcement (trust-store / mTLS)** — the last libssl
   coupling in sandhi's TLS surface. SPKI pinning is backend-agnostic (typed
   `tls_get_peer_spki_der`, 1.4.2) and live on native; 1.4.7 made enforcement
   backend-aware so the prior live SIGSEGVs are gone — native trust/mTLS now
   **fails closed** instead of feeding a native ctx to libssl `SSL_CTX_*`
-  (sandhi-side P2
-  [`2026-06-09-tls-policy-enforcement-live-segfault.md`](../issues/2026-06-09-tls-policy-enforcement-live-segfault.md)).
+  (sandhi-side P2, resolved 1.4.7 + archived
+  [`2026-06-09-tls-policy-enforcement-live-segfault.md`](../issues/archive/2026-06-09-tls-policy-enforcement-live-segfault.md)).
   Two cyrius-side items reach full parity (and let `sandhi_tls_use_libssl()`
   be dropped entirely):
   - **Native `SSL_CTX_*` equivalents** in `lib/tls_native.cyr` (custom trust
@@ -197,24 +301,6 @@ sandhi's default since 1.4.5. Open items:
   Same leak daimon's `serve_async` already carries; a quality gate for
   long-running high-traffic servers, not a correctness blocker for the
   bounded-lifetime / low-traffic case.
-- **`cycc_aarch64` `unexpected enum` on stdlib `bayan`** *(filed
-  2026-06-12; affects the 1.4.11 aarch64 cross-build)*. The aarch64
-  cross-compiler aborts at parse time assembling the `bayan` dep
-  (sigil's transitive dep since the 6.1.25 carve-out, in sandhi's
-  `[deps]` since the 1.4.11 6.2.1 pin). Reproducible with zero sandhi
-  code (`deps = [syscalls, alloc, bayan]`); x86_64 is clean; every
-  toolchain 6.0.21–6.2.1 reproduces it. Root cause is the aarch64
-  dep-assembly order flipping the parser into init-body mode ahead of
-  bayan's first `enum` — the "top-level init breaks later
-  declarations" quirk on the aarch64 path. sandhi can't patch stdlib
-  or the compiler (No-FFI / compose-don't-reimplement), so CI/release
-  treat the aarch64 binary as truly best-effort (warn + skip on
-  failure); the x86_64 build is the authoritative gate. Filed
-  [`docs/issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md`](../issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md);
-  see [architecture/005](../architecture/005-aarch64-bayan-cross-build.md).
-  A quality-of-distribution gate (one convenience artifact), not a
-  correctness blocker.
-
 When these cyrius-side items land, the corresponding sandhi
 work opens. Until then, the wait is intentional.
 
@@ -224,15 +310,15 @@ work opens. Until then, the wait is intentional.
 Cyrius-side prerequisites moved to "Cross-repo dependencies"
 above so the cross-repo coupling stays explicit.*
 
-**Wait-for-sit-adoption (1.5.x reshape trigger)**:
+**Wait-for-sit-adoption (Batch C)**:
 
-The 1.4.x closeout arc is the last pre-sit-adoption work.
-When sit picks up sandhi (after cyrius lands native TLS),
-real-workload friction surfaces concrete asks that drive
-1.5.x scope. Speculatively pre-baking 1.5.x slots is exactly
-what the memory [`project_sit_adoption_drives_roadmap`]
-warns against. Until sit adopts, this bucket is empty by
-design.
+The native-TLS prerequisite sit named has **landed** (native default since
+cyrius 6.1.21; sit-adoption gate cleared). When sit picks up sandhi for
+remote clone/push/pull, real-workload friction surfaces concrete asks —
+that is **Batch C** above. Speculatively pre-baking those slots is exactly
+what the memory [`project_sit_adoption_drives_roadmap`] warns against, so
+the batch stays empty by design until sit integrates; it is the named
+landing zone, not a pre-filled slot list.
 
 **Wait-for-second-consumer-ask**:
 
@@ -347,9 +433,16 @@ its job is keeping the post-v1 patch window honest. The shape:
   high-level cert-pinning/mTLS threading, the epoll server, and
   the P-1/security audit pass. Per-release detail in the Shipped
   log above + CHANGELOG.
-- **1.5.x** — sit-driven reshape, when sit adopts
-  post-native-TLS (cyrius native landed at 6.1.21). Don't
-  pre-bake — surface scope from real-workload friction.
+- **1.5.x** — toolchain-currency + cross-repo-cleanup +
+  sit-adoption-reshape arc (**opened at 1.5.0**: cyrius 6.2.6,
+  aarch64 cross-build restored, resolved-issue backlog archived).
+  Organized into batches: **A** cross-repo-gated repairs (native
+  `SSL_CTX_*` enforcement, async arena-aware runtime, mDNS
+  multicast), **B** profile-justified optimization picks, **C** the
+  sit-driven reshape (gate cleared; first item surfaced — the AGNOS
+  socket-backend gap, a near-term 1.5.1 candidate; otherwise filled by
+  what sit surfaces, not pre-baked). ONE item per slot; each batch opens
+  when its gate clears.
 
 Beyond the arcs, items wait for their unblock signal —
 consumer ask, profile evidence, stdlib prerequisite, or

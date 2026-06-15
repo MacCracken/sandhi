@@ -4,16 +4,16 @@
 
 ## Version
 
-**1.4.10** — 2026-06-09. **Closeout audit (P-1 / security / code-audit pass) — closes the 1.4.x arc.** Full-codebase sweep, heaviest on the least-audited 1.4.6–1.4.9 surfaces; findings fixed in-slot (no pin change; stays 6.1.21). **P1 fixed — async server DoS**: `_sandhi_server_async_handler` (1.4.9) did `async_await_readable(cfd)` before recv, but `lib/async.cyr`'s await is `epoll_wait(..., -1)` (**infinite**) — a client that connects and sends nothing hung the whole cooperative loop. Fix: drop the await (run-to-completion gives no concurrency from it anyway), recv directly under SO_RCVTIMEO, and **floor `idle_ms` > 0** in `sandhi_server_run_async` (a cooperative loop must bound every recv). Silent-client regression added to `programs/_server_async_smoke.cyr`. **P2 fixed — unguarded allocs**: `async_new()` result null-checked at both sites (`server/mod.cyr`); `body_sb` + `chunk_state` null-checked in the SSE/chunked read loop (`stream.cyr` — the path 1.4.6 policy threading feeds into; missed by the 1.2.6–1.2.8 OOM audits). **Audit-confirmed sound (no change)**: the 1.4.7 native-fail-closed property HOLDS (every `tls_dlsym` `SSL_CTX_*` callsite is gated by `enforcement_available()` = 0 on native before `_sandhi_apply_hook` arms; key-without-cert edge safe); all eight 1.4.5–1.4.9 public verbs have docstrings + coverage. **Docs**: docstrings added to `sandhi_hpack_encode_literal_indexed_name` + `sandhi_discovery_chain_as_resolver`; bare default-alloc wrappers rely on their `_a` twin's docstring (codebase convention, not a gap). **992 assertions green** (unchanged). `cyrius lint` 0 warnings / 0 deferrals; `cyrfmt --check` clean. `dist/sandhi.cyr` regenerated at v1.4.10. **Closes the 1.4.x arc — next release shapes against sit adoption (1.5.x).**
+**1.5.0** — 2026-06-14. **Opens the 1.5.x arc: cyrius pin `6.2.1` → `6.2.6`; the aarch64 `bayan` cross-build defect is fixed upstream.** The `cycc_aarch64` `error: unexpected enum` abort while assembling stdlib `bayan` (filed 2026-06-12, reproduced on every toolchain 6.0.21–6.2.1) **no longer occurs on 6.2.6** — `CYRIUS_DCE=1 cyrius build --aarch64 programs/smoke.cyr build/sandhi-smoke-aarch64` produces a valid `ELF 64-bit … ARM aarch64` binary with **zero sandhi-side change** (a purely cyrius-side dep-assembly fix, exactly as the filing predicted). The CI / release **aarch64 step is restored to gating** (the 1.4.11 best-effort warn-and-skip-on-failure tolerance is removed; the only tolerated skip is a toolchain genuinely lacking `cycc_aarch64`). **Issue-backlog cleanup**: 5 resolved issues archived to `docs/issues/archive/` (the aarch64 defect + the four sandhi-side defects closed across the 1.4.x arc — close-path 1.4.1, repeated-HTTPS SIGSEGV 1.4.5, client TLS-policy threading 1.4.6, low-level enforcement SIGSEGV 1.4.7); `docs/issues/README.md` re-tabled; the two cross-repo coordination docs whose sandhi side is delivered updated (`daimon-server-max-conns` sandhi-side ✅ 1.4.9 via `sandhi_server_run_async`; `cyrius-native-tls` sit-adoption gate cleared — native default since 6.1.21). **992 assertions green** (440 + 167 + 343 + 42). `cyrius lint` 0 warnings / 0 deferrals. `dist/sandhi.cyr` regenerated at v1.5.0. No source change beyond the pin + auto-generated `version_str.cyr`.
 
 _Current release only — this file is the live snapshot. Full per-release
-history (1.4.9 ← … ← 0.1.0): [`../../CHANGELOG.md`](../../CHANGELOG.md)
+history (1.4.11 ← … ← 0.1.0): [`../../CHANGELOG.md`](../../CHANGELOG.md)
 and the Shipped log in [`roadmap.md`](roadmap.md)._
 
 ## Toolchain
 
-- **Cyrius pin**: `6.2.1` (`cyrius.cyml [package].cyrius`). Bump trail: 5.11.4 → 6.0.1 (1.3.5, cycc/cybs binary rename) → 6.0.55 (1.4.1) → 6.0.82 (1.4.2, native-TLS ALPN/SPKI typed verbs) → 6.0.87 (1.4.3) → 6.1.19 (1.4.5, native-TLS-default switch + the two upstream P1 fixes) → 6.1.20 (1.4.6, folds sandhi 1.4.5 + macho-arm Darwin syscalls) → 6.1.21 (1.4.9, inverts `lib/tls.cyr` to native-no-flag-default + re-folds sandhi 1.4.5→1.4.8) → 6.2.1 (1.4.11, stdlib pin sweep: `json` dropped, `bigint`+`base64` → `bayan`).
-- **Known issue — aarch64 cross-build (best-effort, non-gating)**: since 1.4.11, `cycc_aarch64` aborts with `unexpected enum` assembling stdlib `bayan` (sigil's transitive dep). Upstream `cycc_aarch64` dep-assembly defect — reproducible with zero sandhi code, affects every toolchain 6.0.21–6.2.1, x86_64 unaffected. CI/release warn + skip the aarch64 artifact instead of failing. Cross-repo dep in [roadmap.md](roadmap.md); [architecture/005](../architecture/005-aarch64-bayan-cross-build.md); [issue](../issues/2026-06-12-cyrius-aarch64-bayan-enum-parse.md).
+- **Cyrius pin**: `6.2.6` (`cyrius.cyml [package].cyrius`). Bump trail: 5.11.4 → 6.0.1 (1.3.5, cycc/cybs binary rename) → 6.0.55 (1.4.1) → 6.0.82 (1.4.2, native-TLS ALPN/SPKI typed verbs) → 6.0.87 (1.4.3) → 6.1.19 (1.4.5, native-TLS-default switch + the two upstream P1 fixes) → 6.1.20 (1.4.6, folds sandhi 1.4.5 + macho-arm Darwin syscalls) → 6.1.21 (1.4.9, inverts `lib/tls.cyr` to native-no-flag-default + re-folds sandhi 1.4.5→1.4.8) → 6.2.1 (1.4.11, stdlib pin sweep: `json` dropped, `bigint`+`base64` → `bayan`) → 6.2.6 (1.5.0, fixes the aarch64 `bayan` cross-build defect).
+- **aarch64 cross-build — RESOLVED (1.5.0 / cyrius 6.2.6, gating again)**: the `cycc_aarch64` `unexpected enum` abort assembling stdlib `bayan` (a 1.4.11–1.4.x best-effort known-issue; an upstream dep-assembly defect reproduced on every toolchain 6.0.21–6.2.1) is fixed in 6.2.6. The `--aarch64` build produces a valid aarch64 ELF with zero sandhi change, so the CI/release step is **gating** again (best-effort warn-skip removed; only-tolerated skip is the toolchain lacking `cycc_aarch64`). [architecture/005](../architecture/005-aarch64-bayan-cross-build.md); [archived issue](../issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md).
 - **TLS backend**: **native by default — no flag** as of cyrius 6.1.21 / sandhi 1.4.9. `-D CYRIUS_TLS_LIBSSL` opts out to the deprecated libssl-only build (`sandhi_tls_use_libssl()`); legacy `-D CYRIUS_TLS_NATIVE` is a no-op alias. (1.4.5–1.4.8 used the inverse `-D CYRIUS_TLS_NATIVE` opt-in.) See [architecture/004](../architecture/004-native-tls-default.md).
 
 ## Fold-into-stdlib status
@@ -71,11 +71,11 @@ Build outputs:
 
 ## Tests
 
-**979 assertions green** across four suites (CI runs all four):
+**992 assertions green** across four suites (CI runs all four; measured on the 6.2.6 pin at 1.5.0):
 
 - `tests/sandhi.tcyr` — **440** — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery / TLS policy + fingerprint / SSE / streaming.
 - `tests/h2.tcyr` — **167** — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
-- `tests/alloc.tcyr` — **330** — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0).
+- `tests/alloc.tcyr` — **343** — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0).
 - `tests/rpc.tcyr` — **42** — JSON builder/extractor, RPC dispatch err-envelope, WebDriver URL helpers, MCP envelope.
 
 Beyond unit tests: `programs/_policy_runtime_probe.cyr` is a live-network TLS-policy gate (CI step; skip-cleanly offline). **1.4.5** adds `programs/_https_native_loop_gate.cyr` — the P1 regression gate (N≥4 sequential native `sandhi_http_get` must not crash; built `-D CYRIUS_TLS_NATIVE`; targets 1.1.1.1; skip-cleanly offline) + `programs/_backend_probe.cyr` (backend-selection smoke). Per-program fixup-cap pressure (architecture/001) keeps some coverage in standalone `programs/_*_probe.cyr`.
@@ -86,13 +86,13 @@ Backend-agnostic note: the four `.tcyr` suites are unit tests (parsing / headers
 
 Declared in `cyrius.cyml` (all Cyrius stdlib):
 
-- **Core**: `syscalls`, `alloc`, `fmt`, `io`, `fs`, `str`, `string`, `vec`, `args`, `hashmap`, `process`, `thread`, `fnptr`, `chrono`, `tagged`, `assert`
-- **Network primitives** (the layer sandhi composes): `net`, `http`, `tls`, `ws`, `json`. `http_server` dropped at M1 (content lives in `src/server/mod.cyr`).
-- **TLS / libssl-bridge transitive**: `mmap`, `dynlib`, `fdlopen`, `bigint`, `freelist`
-- **Crypto** — `sigil` plus its undeclared transitive deps (added 1.4.3): `sigil`, `ct`, `keccak`, `thread_local`
+- **Core**: `syscalls`, `alloc`, `fmt`, `io`, `fs`, `str`, `string`, `vec`, `args`, `hashmap`, `process`, `thread`, `fnptr`, `async`, `atomic`, `chrono`, `tagged`, `assert`
+- **Network primitives** (the layer sandhi composes): `net`, `http`, `tls`, `ws`. `http_server` dropped at M1 (content lives in `src/server/mod.cyr`); stdlib `json` dropped at the 1.4.11 6.2.1 pin (sandhi uses its own `src/rpc/json.cyr`).
+- **TLS / libssl-bridge transitive**: `mmap`, `dynlib`, `fdlopen`, `freelist`
+- **Crypto** — `sigil` plus its undeclared transitive deps (`ct` / `keccak` / `thread_local` added 1.4.3) and **`bayan`** (the 6.1.25 carve-out replacing standalone `bigint` + `base64`; re-exports `u256_*` / `base64_*` via compat aliases; declared at the 1.4.11 6.2.1 pin, ordered before `sigil`): `bayan`, `sigil`, `ct`, `keccak`, `thread_local`
 - **Infrastructure**: `sakshi` (tracing), `regression` (live-network test probe, 1.3.0)
 
-No external git deps — pure stdlib composition. **Known dep gap**: `src/rpc/appium.cyr` references `base64` but it isn't declared in `[deps]` (resolves transitively today; same class as the 1.4.3 sigil gap — declare it if a build ever surfaces an undefined `base64_*`).
+No external git deps — pure stdlib composition. The 1.4.11 sweep closed the old `base64` dep gap — `src/rpc/appium.cyr`'s `base64_*` now resolves through the `bayan` compat aliases.
 
 ## Consumers
 
@@ -120,22 +120,31 @@ No external git deps — pure stdlib composition. **Known dep gap**: `src/rpc/ap
 
 ## Next
 
-The **1.4.x closeout arc is closed** (1.4.10). All releases through 1.4.10 are
-shipped; the pin is **6.1.21** (native no-flag default). There is no committed
-next slot — the next minor break is **1.5.x**, gated on **sit adoption**
-(real-workload friction drives the scope; don't pre-bake — memory
-[`project_sit_adoption_drives_roadmap`]).
+The **1.5.x arc is open** (opened at 1.5.0 — toolchain 6.2.6 + aarch64
+cross-build restored + resolved-issue backlog archived). The pin is **6.2.6**
+(native no-flag default). Remaining work is organized into provisional batches
+(ONE item per slot; each opens when its gate clears) — full detail in
+[`roadmap.md`](roadmap.md):
 
-Remaining work is all trigger-gated — full detail in [`roadmap.md`](roadmap.md):
-
-- **async server arena-aware repair** — opens when cyrius ships
-  `async_new_in(allocator)` (filed `2026-06-09-async-runtime-no-free-task-leak.md`);
-  eliminates `sandhi_server_run_async`'s residual ~32 B/conn runtime/task leak.
-- **native TLS-policy enforcement** — native `SSL_CTX_*` (trust-store / mTLS) in
-  cyrius `lib/tls_native.cyr`; the last libssl coupling. Until then native
-  trust/mTLS **fails closed** (1.4.7); SPKI pinning is already backend-agnostic.
-- **mDNS multicast primitives** in cyrius `lib/net.cyr` — gates the real
-  `discovery/local.cyr` (quality gate; QU-bit unicast works today).
-- **profile-justified optimization picks** (HPACK Huffman tie-break,
-  `_sandhi_resp_new` collapse, pool LRU) — parked pending prof evidence.
-- **`tests/sandhi.tcyr` cap-drift** — background watch.
+- **Batch A — cross-repo-gated repairs** (open when the cyrius primitive lands):
+  - **A1 native TLS-policy enforcement** — native `SSL_CTX_*` (trust-store /
+    mTLS) in cyrius `lib/tls_native.cyr`; the last libssl coupling. Until then
+    native trust/mTLS **fails closed** (1.4.7); SPKI pinning is already
+    backend-agnostic. Drops `sandhi_tls_use_libssl()` when it lands.
+  - **A2 async server arena-aware repair** — opens when cyrius ships
+    `async_new_in(allocator)` (filed `2026-06-09-async-runtime-no-free-task-leak.md`);
+    eliminates `sandhi_server_run_async`'s residual ~32 B/conn runtime/task leak.
+  - **A3 mDNS multicast primitives** in cyrius `lib/net.cyr` — gates the real
+    `discovery/local.cyr` (quality gate; QU-bit unicast works today).
+- **Batch B — profile-justified optimization picks** (parked pending prof
+  evidence): HPACK Huffman tie-break, `_sandhi_resp_new` collapse, pool LRU.
+- **Batch C — sit-adoption reshape** — gate **cleared** (native TLS default
+  since 6.1.21); **first item surfaced**: **C1 AGNOS socket-backend gap** (filed
+  2026-06-14) — sandhi's raw-Linux-syscall connect/listen machinery
+  (`src/http/conn.cyr`, `src/server/mod.cyr`) doesn't compile for `--agnos`,
+  blocking sit on AGNOS. Bounded transport-seam fix; un-gated (needs the ≥6.2.6
+  pin, now satisfied) → near-term 1.5.1 candidate. Otherwise filled by what sit
+  surfaces, not pre-baked (memory [`project_sit_adoption_drives_roadmap`]).
+- **Background watches** — `tests/sandhi.tcyr` cap-drift; consumer coordination
+  docs (sandhi side shipped; the daimon `serve_async` collapse is sandhi-side ✅
+  at 1.4.9, residual daimon-side).

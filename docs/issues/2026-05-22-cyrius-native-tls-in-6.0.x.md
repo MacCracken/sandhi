@@ -220,3 +220,16 @@ own.
   still green. Remaining before close: typed wrappers for the
   pre-handshake `SSL_CTX_*` mTLS / trust-store dlsym sites — then
   the sit-adoption gate can fire.
+- **2026-06-14** — **sit-adoption gate cleared.** Native TLS has been
+  the no-flag default since cyrius **6.1.21** / sandhi 1.4.9 (the
+  `lib/tls.cyr` polarity flip), and 1.4.7 made TLS-policy enforcement
+  backend-aware (native trust/mTLS fails closed rather than faulting).
+  The native transport — the core of this filing and the explicit sit
+  prerequisite — is fully operational; sit's adoption is no longer
+  blocked on cyrius TLS. Sandhi 1.5.0 pins **6.2.6**. The one item still
+  open against this filing is the **residual** part: typed native
+  `SSL_CTX_*` equivalents so native trust-store / mTLS *enforce* (not
+  just fail closed). That residual is tracked as a cross-repo dependency
+  in [roadmap.md](../development/roadmap.md) ("Native TLS-policy
+  enforcement"); this doc stays open until it lands, but it no longer
+  gates downstream adoption.

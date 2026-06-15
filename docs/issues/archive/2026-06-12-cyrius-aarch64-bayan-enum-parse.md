@@ -1,7 +1,16 @@
 # 2026-06-12 — `cycc_aarch64` aborts with `unexpected enum` assembling stdlib `bayan`
 
-**Status**: Open — filed upstream. Blocks only the aarch64
-*cross-build* artifact; x86_64 is unaffected and authoritative.
+**Status**: ✅ **Resolved upstream in cyrius 6.2.6** (picked up at sandhi
+1.5.0, 2026-06-14). `CYRIUS_DCE=1 cyrius build --aarch64
+programs/smoke.cyr build/sandhi-smoke-aarch64` now produces a valid
+`ELF 64-bit … ARM aarch64` binary — the `unexpected enum` abort is gone
+with **zero sandhi-side change**, exactly as the filing predicted (a
+purely cyrius-side `cycc_aarch64` dep-assembly fix). The CI / release
+aarch64 step was restored to a gating step at 1.5.0. See CHANGELOG
+[1.5.0] and [architecture/005](../../architecture/005-aarch64-bayan-cross-build.md).
+*(History below retained for the record; original status: Open — filed
+upstream, blocked only the aarch64 cross-build artifact, x86_64
+unaffected and authoritative.)*
 **Filed**: sandhi side, against cyrius repo.
 **Side**: Upstream (cyrius `cycc_aarch64` — the aarch64 cross-compiler).
 **Sandhi-side surface**: None. sandhi composes stdlib `bayan` (it
