@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-06-15
+
+**macOS non-blocking-connect fix — compose the Darwin-correct stdlib transport
+primitives.** cyrius pin **6.2.8 → 6.2.9**. The IPv4 non-blocking-connect path
+and the per-operation socket timeout in `src/http/conn.cyr` hardcoded **Linux**
+socket constants (`O_NONBLOCK=0x800`, `EINPROGRESS=115`, `SO_RCVTIMEO=20`/
+`SO_SNDTIMEO=21`, 64-bit `tv_usec`), so any `sandhi_http_*` call with
+`connect_ms > 0` failed with a spurious `SANDHI_ERR_CONNECT` on aarch64 macOS —
+even against a listening localhost server (yantra's iOS Appium `POST /session`
+repro). The fix re-points both helpers at the stdlib primitives that already
+carry the platform-branched Darwin values + agnos fallback, retiring sandhi's
+duplicate of the machinery (ADR 0001 — compose, don't reimplement). Linux + AGNOS
+behaviour unchanged. Closes the IPv4 + per-op-timeout halves of
+[`docs/issues/2026-06-06-macos-nonblocking-connect.md`](docs/issues/2026-06-06-macos-nonblocking-connect.md).
+
+### Fixed — http/conn (`src/http/conn.cyr`)
+
+- **`_sandhi_conn_connect_nb_a` now delegates to stdlib `net_connect_nb`** instead
+  of running its own fcntl/poll/getsockopt dance against Linux-only flag/opt
+  values. stdlib carries the Darwin-branched `_NET_O_NONBLOCK` / `_NET_EINPROGRESS`
+  / `SockOpt` (verified on arm64 macOS) and the agnos blocking-connect fallback.
+  The stdlib sentinels (`_NET_CONN_NB_OK`/`_TIMEOUT`/`_ERR` = 0/-2/-1) match
+  sandhi's `_SANDHI_CONN_NB_*` one-for-one, so the open path's failure
+  classification is unchanged.
+- **`_sandhi_conn_set_timeout_ms_a` now delegates to stdlib
+  `sock_set_recv_timeout` / `sock_set_send_timeout`** (chosen by the `opt`
+  selector). stdlib owns the per-target `SO_*TIMEO` opt value (Linux 20/21 vs
+  Darwin `0x1006`/`0x1005`) and the Darwin `struct timeval` `tv_usec`-is-32-bit
+  quirk a 64-bit write would have overrun. The helper is now arena-independent
+  (`a` retained only for caller-signature stability).
+
+### Changed — http/conn
+
+- The sandhi-local `_SANDHI_O_NONBLOCK` / `_SANDHI_EINPROGRESS` / `_SANDHI_SO_ERROR`
+  / poll/getsockopt constants now have just two direct consumers — the internal
+  IPv6 sockaddr nb-connect (`_sandhi_conn_connect_sa_nb_a`) and the server
+  accept-loop listen socket — both still Linux-only. Comment block updated to flag
+  that those two sites are **not** Darwin-ported (the SYSXLAT backend translates
+  the syscall numbers but not these flag/opt values); filed as a roadmap follow-on
+  ("IPv6 nb-connect + server listen socket not Darwin-ported").
+
+### Tests
+
+- `tests/alloc.tcyr` `test_alloc_batch5_conn_timeout_arena` — the assertion that
+  pinned the old "timeval allocated into arena `a`" + arena-OOM→-1 behaviour was
+  repurposed to assert the helper is now **arena-independent** (composes the
+  stdlib setters, never touches `a`). Net −1 assertion (alloc suite 343 → 342;
+  **1002 total**: 451 + 167 + 342 + 42). All four suites green.
+
+### Stdlib / cross-repo
+
+- cyrius pin **6.2.8 → 6.2.9** (clean deps re-resolve). `dist/sandhi.cyr`
+  regenerated at v1.6.1.
+
 ## [1.6.0] — 2026-06-15
 
 **Batch A1 — native TLS-policy enforcement (the last libssl coupling for policy

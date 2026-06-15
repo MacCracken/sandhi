@@ -12,7 +12,8 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.2.8** (1.6.0 closed Batch A1 — see state.md / CHANGELOG).
+is currently **cyrius 6.2.9** (1.6.1 ported the v4 nb-connect + per-op timeout to
+Darwin by composing stdlib — see state.md / CHANGELOG).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -73,6 +74,22 @@ Currently open:
   **unverified** (unit tests use synthetic packets; the smoke only checks a
   no-responder miss). Run a live-network check; if it confirms the resolver never
   receives, apply the 1.5.5 two-socket fix (unconnected RX) to the QU path too.
+- **IPv6 nb-connect + server listen socket not Darwin-ported (follow-on to the
+  1.6.1 macOS connect fix).** 1.6.1 ported the IPv4 nb-connect + per-op timeout to
+  Darwin by composing stdlib (`net_connect_nb` / `sock_set_*_timeout`). Two raw-
+  syscall sites in `src/http/conn.cyr` / `src/server/mod.cyr` still build the
+  fcntl/poll/getsockopt dance against Linux-only flag/opt VALUES
+  (`_SANDHI_O_NONBLOCK=0x800`, `_SANDHI_EINPROGRESS=115`, `_SANDHI_SO_ERROR=4`):
+  (1) `_sandhi_conn_connect_sa_nb_a` (the internal IPv6 sockaddr nb-connect), and
+  (2) the server accept-loop's non-blocking listen socket. On macOS the SYSXLAT
+  backend translates the syscall numbers but NOT these values, so both misbehave
+  on Darwin — and the v6 path additionally needs the Darwin `AF_INET6=30` +
+  `sin6_len` sockaddr_in6 shape, which stdlib's own `SockDomain`/sockaddr_in6
+  isn't ported to either. The v6 fallout is masked today (v6 connect fails → the
+  client falls back to v4); the server listen path is the sharper gap. Fix when a
+  consumer needs v6 on macOS or runs the sandhi server on Darwin — likely a
+  cross-cutting stdlib `net.cyr` v6-on-Darwin pass first. Surfaced by the 1.6.1
+  fix; see [`2026-06-06-macos-nonblocking-connect.md`](../issues/2026-06-06-macos-nonblocking-connect.md).
 - **Native custom-trust-store verify-fail proof (needs a CA fixture).** The 1.6.0
   live gate (`_policy_runtime_probe.cyr` `[4]`) proves a *bogus* custom trust
   store is enforced (unreadable CA → open refused with err=TLS, not silently

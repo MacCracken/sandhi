@@ -408,27 +408,25 @@ fn test_alloc_batch4_resp_oom() {
 # Batch 5 — connection layer
 # ================================================================
 
-# conn.cyr — _set_timeout_ms_a allocates a 16-byte timeval into `a`.
-# We can't easily exercise the open path (needs a real network),
-# but the timeval helper is deterministic.
+# conn.cyr — as of 1.6.1 _set_timeout_ms_a composes the stdlib
+# sock_set_recv_timeout / sock_set_send_timeout setters (Darwin-correct
+# SO_*TIMEO opt + struct timeval) instead of building the timeval itself.
+# stdlib owns that alloc, so the helper is now arena-INDEPENDENT — it never
+# pulls from the passed `a`. This suite audits arena usage, so we assert the
+# arena stays untouched on every path. (`a` is retained only for caller-
+# signature stability.)
 fn test_alloc_batch5_conn_timeout_arena() {
     var a = arena_allocator(2048);
-    # ms <= 0 short-circuits without touching `a`.
+    # ms <= 0 short-circuits returning 0.
     assert_eq(_sandhi_conn_set_timeout_ms_a(a, 0, 0, _SANDHI_SO_RCVTIMEO), 0,
-    "ms<=0 returns 0 without alloc");
-    var used_after_noop = arena_used(allocator_state(a));
-    assert_eq(used_after_noop, 0, "no-op didn't touch arena");
+    "ms<=0 returns 0");
+    assert_eq(arena_used(allocator_state(a)), 0, "no-op didn't touch arena");
 
-    # ms>0 with fd=-1 — alloc happens, syscall fails. We only assert
-    # the alloc landed in `a` (used > 0).
+    # ms>0 with fd=-1 — the underlying setsockopt fails, but the helper no
+    # longer allocates the timeval from `a`; the arena must stay untouched.
     _sandhi_conn_set_timeout_ms_a(a, 0 - 1, 1000, _SANDHI_SO_RCVTIMEO);
-    var used_after_set = arena_used(allocator_state(a));
-    assert_eq(used_after_set > 0, 1, "timeval allocated into arena");
-
-    # OOM. fail_after(0) → alloc fails → returns -1.
-    var failer = fail_after_n_allocs(0);
-    assert_eq(_sandhi_conn_set_timeout_ms_a(failer, 0 - 1, 1000, _SANDHI_SO_RCVTIMEO),
-    0 - 1, "set_timeout_ms_a OOM → -1");
+    assert_eq(arena_used(allocator_state(a)), 0,
+    "set_timeout_ms_a is arena-independent (composes stdlib sock_set_*_timeout)");
     return 0;
 }
 

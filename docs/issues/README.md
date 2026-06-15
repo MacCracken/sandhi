@@ -17,7 +17,6 @@ modernization agent beats routing through sandhi's full repo.
 | [`2026-04-24-daimon-registry-endpoints.md`](2026-04-24-daimon-registry-endpoints.md) | daimon | producer | pre-fold (sandhi calls it) |
 | [`2026-04-24-daimon-sandhi-mcp-client.md`](2026-04-24-daimon-sandhi-mcp-client.md) | daimon | consumer | pre-fold |
 | [`2026-04-24-hoosh-ifran-sandhi-http.md`](2026-04-24-hoosh-ifran-sandhi-http.md) | hoosh + ifran | consumer | pre-fold |
-| [`2026-04-24-sit-sandhi-git-over-http.md`](2026-04-24-sit-sandhi-git-over-http.md) | sit | consumer | gated on sit local-VCS (TLS fix landed, cyrius 6.1.21) |
 | [`2026-04-24-ark-sandhi-registry-ops.md`](2026-04-24-ark-sandhi-registry-ops.md) | ark | consumer | pre-fold |
 | [`2026-04-24-mela-sandhi-marketplace.md`](2026-04-24-mela-sandhi-marketplace.md) | mela | consumer | pre-fold |
 | [`2026-04-24-vidya-sandhi-fetch.md`](2026-04-24-vidya-sandhi-fetch.md) | vidya | consumer | future (low priority) |
@@ -28,14 +27,17 @@ zero ambiguity on what to put on its roadmap.
 
 ## Sandhi-side defects
 
-All sandhi-side defects filed to date are **resolved and archived** — see the
-[Archived](#archived-resolved) table below. The 1.4.x arc closed the HTTP
-close-path drain (1.4.1), the repeated-HTTPS-request SIGSEGV (1.4.5), the
-high-level client TLS-policy threading gap (1.4.6), and the low-level
-TLS-policy-enforcement live SIGSEGV (1.4.7); the AGNOS transport gap closed
-across C1 (1.5.1) / C2 (1.5.2) with the build cascade clearing at 1.5.4 / cyrius
-6.2.7. New sandhi-side defects land here as `YYYY-MM-DD-kebab-case.md` and move
-to `archive/` when closed.
+| Doc | Filed | Status | Summary |
+|-----|-------|--------|---------|
+| [`2026-06-06-macos-nonblocking-connect.md`](2026-06-06-macos-nonblocking-connect.md) | 2026-06-06 | ✅ IPv4 RESOLVED (1.6.1 / cyrius 6.2.9); v6/server follow-on in roadmap | macOS (Mach-O) non-blocking connect + per-op SO_*TIMEO used Linux-only socket constants → spurious `SANDHI_ERR_CONNECT` for any `connect_ms > 0` (yantra iOS Appium repro). **Fixed at 1.6.1** by composing the stdlib Darwin-correct primitives (`net_connect_nb` / `sock_set_*_timeout`), retiring sandhi's duplicate. Two still-Linux-only raw-syscall sites (IPv6 sockaddr nb-connect + server listen socket) are a tracked roadmap follow-on (stdlib's own v6-on-Darwin isn't ported either). |
+
+The 1.4.x arc closed the HTTP close-path drain (1.4.1), the repeated-HTTPS-request
+SIGSEGV (1.4.5), the high-level client TLS-policy threading gap (1.4.6), and the
+low-level TLS-policy-enforcement live SIGSEGV (1.4.7); the AGNOS transport gap
+closed across C1 (1.5.1) / C2 (1.5.2) with the build cascade clearing at 1.5.4 /
+cyrius 6.2.7 — all **resolved and archived** (see the [Archived](#archived-resolved)
+table). New sandhi-side defects land here as `YYYY-MM-DD-kebab-case.md` and move to
+`archive/` when fully closed.
 
 ## Upstream dependencies (sandhi is blocked on stdlib / toolchain)
 
@@ -48,6 +50,7 @@ to `archive/` when closed.
 
 | Doc | Closed at | Summary |
 |-----|-----------|---------|
+| [`archive/2026-04-24-sit-sandhi-git-over-http.md`](archive/2026-04-24-sit-sandhi-git-over-http.md) | moot — 2026-06-15 | Consumer-coordination doc: would sit adopt `sandhi::http` (client) for the git smart-HTTP protocol? **Answered no.** sit shipped remote clone/fetch/push (v1.0.0, 2026-06-13) over its own `/sit/v1/...` REST protocol + a hand-rolled HTTP client (`wire_http.cyr`, 64 KiB→16 MiB dynamic buffer) — no git smart-HTTP, no `sandhi_http_*`. The 256 KB-buffer streaming caveat never triggered from sit. sit *does* consume sandhi's **server** surface (`sandhi_server_*` for `sit serve`, "on hold — keep sandhi") — a live, separate coupling. Client-adoption question closed; no sandhi-side work pending. |
 | [`archive/2026-06-15-cyrius-mdns-multicast-primitives.md`](archive/2026-06-15-cyrius-mdns-multicast-primitives.md) | sandhi 1.5.5 / cyrius 6.2.7 | cyrius `lib/net.cyr` lacked IPv4 multicast primitives (gated QM-mode mDNS). 6.2.7 shipped the join/option set from sandhi's filing; a 1.5.4 QM adoption was **reverted** (connected-socket `connect()` source-filter dropped answers — caught by adversarial review), then **resolved at 1.5.5** via a two-socket split (unconnected RX) — no upstream `sock_sendto`/`sock_recvfrom` needed — and verified with a loopback live receive test. Adopted as the opt-in `sandhi_discovery_local_mc_resolver` (Batch A3). *(Companion QU-resolver connect()-filter live-check still open.)* |
 | [`archive/2026-06-14-agnos-socket-backend-gap.md`](archive/2026-06-14-agnos-socket-backend-gap.md) | sandhi 1.5.4 / cyrius 6.2.7 | AGNOS transport gap. **C1 (1.5.1)** socket-syscall compile (`#ifndef CYRIUS_TARGET_AGNOS` guards in `conn.cyr`/`server`) + **C2 (1.5.2)** DNS entropy (`/dev/urandom` → portable `sys_getrandom`) were the sandhi-side work; the remaining stdlib build cascade cleared at 1.5.4 / cyrius 6.2.7. `cyrius build --agnos` now produces a valid agnos ELF. Surfaced by sit adoption. |
 | [`archive/2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](archive/2026-06-15-cyrius-thread-agnos-clone-dispatch.md) | sandhi 1.5.4 / cyrius 6.2.7 | AGNOS full-build cascade. The "`mmap` `CLONE_VM` stub" / "unfixed upstream `thread.cyr`" framings were corrected (adversarial verification) to: a stale-`./lib` `thread.cyr` (already fixed in the 6.2.6 toolchain) + `async.cyr`'s raw `SYS_EPOLL_CREATE1`. **Resolved**: clean deps re-resolve clears `thread.cyr`; 6.2.7 routes `async.cyr` to a serial agnos peer. `--agnos` build succeeds. |

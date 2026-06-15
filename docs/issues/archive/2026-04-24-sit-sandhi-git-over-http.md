@@ -1,9 +1,15 @@
 # 2026-04-24 — sit adopts `sandhi::http` for git-over-HTTP remote ops
 
-**Status**: Awaiting sit roadmap entry (and the VCS-core work sit remote ops depend on)
+**Status**: **RESOLVED / moot (2026-06-15)** — sit shipped its remote ops without
+adopting `sandhi::http`. The hypothesis this doc captured (sit consumes sandhi's
+HTTP *client* for the git smart-HTTP protocol) was definitively answered **no**:
+sit chose its own `/sit/v1/...` REST wire protocol and a hand-rolled HTTP client.
+This is a closed question, not a blocked or in-progress one. See the 2026-06-15
+log entry for the evidence. (sit *does* consume sandhi's **server** surface
+`sandhi_server_*` for `sit serve` — that relationship is live and unaffected.)
 **Reporter**: sandhi post-M3 coordination sweep
-**Target**: sit's remote-ops milestone (timing tied to sit's local-VCS completion, not sandhi's v5.7.0 fold)
-**Depends on**: sandhi v0.3.0 (shipped) for the HTTP client surface
+**Target**: ~~sit's remote-ops milestone~~ — shipped (sit v1.0.0, 2026-06-13) via a non-sandhi-client path
+**Depends on**: sandhi v0.3.0 (shipped) for the HTTP client surface — never consumed by sit
 
 ## What's assumed vs. actual
 
@@ -60,3 +66,29 @@ var r = sandhi_http_post("https://git.example.com/repo.git/git-upload-pack",
 ## Log
 
 - **2026-04-24** — Filed as part of the sandhi post-M3 coordination sweep. Carries two gating dependencies (sit's own local VCS + stdlib TLS), so expected to land later than other consumer migrations.
+- **2026-06-15** — **RESOLVED / moot.** Reviewed against sit's actual repo state
+  (sit v1.0.0 / v1.0.1, 2026-06-13). Findings:
+  - **sit's remote sync shipped** — clone / fetch / push over
+    `file://` / `http://` / `https://` / `ssh://` (sit CHANGELOG v1.0.0). The
+    gating dependency (sit's local VCS) is done.
+  - **sit did NOT adopt git smart-HTTP, nor sandhi's HTTP client.** It speaks its
+    own `/sit/v1/...` REST protocol (`src/wire_http.cyr` — endpoints
+    `/sit/v1/refs`, `/sit/v1/objects/`, `/sit/v1/want`, `/sit/v1/capabilities`;
+    no `info/refs?service=git-upload-pack` / `git-upload-pack` / `git-receive-pack`
+    anywhere) over a hand-rolled HTTP/1.0 client (`wire_http.cyr`, not
+    `sandhi_http_get` / `_post`). So the migration shapes in this doc were never
+    needed.
+  - **The 256 KB-buffer caveat never triggered from sit.** sit's own client uses a
+    dynamic 64 KiB→16 MiB buffer (`WIRE_HTTP_INITIAL_BUF` / `WIRE_HTTP_MAX_BODY`),
+    so the "sandhi streaming / configurable response buffer" follow-up this doc
+    flagged has **no sit-driven demand** — it stays a wait-for-a-real-ask item, not
+    a sit obligation. (Per `project_sit_adoption_drives_roadmap`: sit surfaced no
+    HTTP-client friction because it isn't a client consumer.)
+  - **sit DOES consume sandhi's server surface** (`sandhi_server_*` in
+    `src/serve.cyr` for `sit serve`) — sit's roadmap marks the sandhi dependency
+    "on hold — keep sandhi" pending an easier cyrius `stdlib`/`lib` consumption
+    path. That server-side relationship is live and orthogonal to this (client-side)
+    doc.
+  - **Action**: archived. The client-adoption question is closed; no sandhi-side
+    work pending. sit's *server*-surface consumption is tracked separately (it's
+    the live sit↔sandhi coupling).
