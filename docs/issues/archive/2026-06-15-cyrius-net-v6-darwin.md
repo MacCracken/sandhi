@@ -1,14 +1,27 @@
 # 2026-06-15 — cyrius `lib/net.cyr` IPv6 surface not Darwin-ported (blocks sandhi's macOS v6 nb-connect + server listen-socket port)
 
-**Status**: Open — **upstream (cyrius `lib/net.cyr`)**. Filed by sandhi while
-closing the IPv4 half of
+**Status**: ✅ **RESOLVED — cyrius 6.2.10 (primitives) + sandhi 1.6.2 (adoption).**
+6.2.10 shipped exactly the surface requested below — per-target `SockDomain.AF_INET6`
+(Linux 10 / Darwin 30), a Darwin-branched `sockaddr_in6(addr16, port)` builder, the
+generic `net_connect_sa_nb(fd, sa, salen, timeout_ms)` + convenience
+`net_connect_nb6(fd, addr16, port, timeout_ms)`, and `sock_set_nonblocking(fd)` /
+`sock_clear_nonblocking(fd, saved)` (the cyrius source cites this filing). sandhi
+1.6.2 adopted them: the IPv6 open paths in `src/http/conn.cyr` now create the
+socket with the per-target `AF_INET6` and compose `sockaddr_in6` +
+`net_connect_sa_nb`; the server accept-loop listen socket in `src/server/mod.cyr`
+composes `sock_set_nonblocking`. sandhi's hand-rolled `_sandhi_conn_sockaddr_in6*`
+/ `_sandhi_conn_connect_sa_nb*` shims and all eight Linux-only raw socket constants
+were deleted. Built + tested green on the 6.2.10 pin; macОS+aarch64+agnos
+cross-builds OK. Archived.
+
+_(History) Filed by sandhi while closing the IPv4 half of
 [`2026-06-06-macos-nonblocking-connect.md`](2026-06-06-macos-nonblocking-connect.md)
-at sandhi 1.6.1 / cyrius 6.2.9. The IPv4 connect path is fixed (sandhi now
-composes the Darwin-correct `net_connect_nb` / `sock_set_*_timeout`); the **IPv6**
-path can't be fixed sandhi-side because stdlib exposes no Darwin-correct v6
-surface to compose. Per ADR 0001 (compose, don't reimplement) and the No-FFI /
-"primitive depth is a stdlib patch" rule, this is a cyrius-side enhancement, not a
-sandhi slot.
+at sandhi 1.6.1 / cyrius 6.2.9. The IPv4 connect path was fixed first (sandhi
+composes `net_connect_nb` / `sock_set_*_timeout`); the **IPv6** path couldn't be
+fixed sandhi-side because stdlib exposed no Darwin-correct v6 surface to compose.
+Per ADR 0001 (compose, don't reimplement) and the No-FFI / "primitive depth is a
+stdlib patch" rule, that was a cyrius-side enhancement, not a sandhi slot — hence
+this upstream filing.
 **Affects**: stdlib `lib/net.cyr` on **aarch64 macOS** (Mach-O). Linux + AGNOS
 unaffected. Downstream: sandhi `src/http/conn.cyr` (`_sandhi_conn_connect_sa_nb_a`,
 `_sandhi_conn_sockaddr_in6_a`) + `src/server/mod.cyr` (the non-blocking listen
@@ -89,3 +102,10 @@ With these, sandhi retires `_sandhi_conn_connect_sa_nb_a` + `_sandhi_conn_sockad
   half of the macOS nb-connect defect. The v6 + listen-socket halves are blocked on
   this stdlib surface; cross-cutting (a `lib/net.cyr` v6-on-Darwin pass), so filed
   upstream rather than worked around sandhi-side (No-FFI / compose-don't-reimplement).
+- **2026-06-15** — ✅ **RESOLVED.** cyrius 6.2.10 shipped all five requested
+  primitives (per-target `AF_INET6`, `sockaddr_in6`, `net_connect_sa_nb`,
+  `net_connect_nb6`, `sock_set_nonblocking`/`_clear`). sandhi 1.6.2 adopted them
+  (`src/http/conn.cyr` v6 paths + `src/server/mod.cyr` listen socket), deleting its
+  hand-rolled v6 shims + 8 Linux-only socket constants. 1002 assertions green on
+  the 6.2.10 pin; lint 0/0; `fmt --check` clean; aarch64+agnos cross-builds OK;
+  `dist/sandhi.cyr` regenerated at v1.6.2. Archived.

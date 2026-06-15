@@ -1,16 +1,16 @@
 # macOS non-blocking connect (+ SO_RCVTIMEO) uses Linux-only constants → spurious `SANDHI_ERR_CONNECT` on Darwin
 
-**Status**: **RESOLVED at sandhi 1.6.1 / cyrius 6.2.9** for the reported IPv4
-connect path. The non-blocking-connect and per-op-timeout helpers in
-`src/http/conn.cyr` were re-pointed at the stdlib Darwin-correct primitives
-(`net_connect_nb` / `sock_set_recv_timeout` / `sock_set_send_timeout`) per the
-"compose, don't reimplement" fix below — retiring sandhi's Linux-hardcoded
-duplicate. A **follow-on remains** for two raw-syscall sites that are still
-Linux-only (the internal IPv6 sockaddr nb-connect + the server accept-loop listen
-socket); tracked as a numbered roadmap entry ("IPv6 nb-connect + server listen
-socket not Darwin-ported"). The agnos analogue of this was closed at sandhi 1.5.1
-(Batch C1, `#ifdef CYRIUS_TARGET_AGNOS` guards). The TLS gaps closed at 1.6.0 are
-unrelated — this is the plain transport (non-TLS connect) path.
+**Status**: ✅ **FULLY RESOLVED** — IPv4 at sandhi 1.6.1 / cyrius 6.2.9, IPv6 +
+server listen socket at sandhi 1.6.2 / cyrius 6.2.10. All sandhi transport paths
+that touched Linux-only socket constants now compose the stdlib Darwin-correct
+primitives (`net_connect_nb` / `net_connect_sa_nb` / `sockaddr_in6` /
+`sock_set_recv_timeout` / `sock_set_send_timeout` / `sock_set_nonblocking`); the
+per-target `AF_INET6` is used for the v6 socket domain. sandhi's hand-rolled
+duplicates + all eight Linux-only raw socket constants are deleted. The v6 half
+required a cyrius `lib/net.cyr` v6-on-Darwin pass first — filed + closed as
+[`2026-06-15-cyrius-net-v6-darwin.md`](2026-06-15-cyrius-net-v6-darwin.md) (cyrius
+6.2.10). The agnos analogue of this was closed at sandhi 1.5.1 (Batch C1). The TLS
+gaps closed at 1.6.0 are unrelated — this is the plain transport (non-TLS) path.
 **Filed**: 2026-06-06 by yantra (downstream consumer); tracked sandhi-side
 2026-06-15 (was only filed against the cyrius repo at
 `cyrius/docs/development/issues/2026-06-06-sandhi-nonblocking-connect-not-darwin-ported.md`).
@@ -84,3 +84,15 @@ option (ADR 0001 "compose, don't reimplement").
   --check` clean; macОS+aarch64+agnos cross-builds OK; `dist/sandhi.cyr`
   regenerated. Follow-on (IPv6 sockaddr nb-connect + server listen socket, both
   still Linux-only) filed as a roadmap entry.
+- **2026-06-15** — ✅ **FULLY RESOLVED at sandhi 1.6.2 / cyrius 6.2.10.** The v6 +
+  listen-socket follow-on landed: cyrius 6.2.10 shipped the v6-on-Darwin
+  primitives (per-target `AF_INET6`, `sockaddr_in6`, `net_connect_sa_nb`,
+  `net_connect_nb6`, `sock_set_nonblocking`/`_clear` — upstream issue
+  `2026-06-15-cyrius-net-v6-darwin.md`). sandhi adopted them: the v6 open paths
+  compose `sockaddr_in6` + `net_connect_sa_nb` and create the socket with the
+  per-target `AF_INET6`; the server listen socket composes `sock_set_nonblocking`.
+  sandhi's `_sandhi_conn_sockaddr_in6*` / `_sandhi_conn_connect_sa_nb*` shims and
+  all eight Linux-only raw socket constants were deleted (conn.cyr 905 → 804
+  lines). 1002 assertions green on the 6.2.10 pin; lint 0/0; `fmt --check` clean;
+  aarch64+agnos cross-builds OK; `dist/sandhi.cyr` regenerated at v1.6.2. No
+  Linux-only socket constant remains anywhere in sandhi. Archived.

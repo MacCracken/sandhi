@@ -4,6 +4,59 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.2] — 2026-06-15
+
+**macOS transport port completed — IPv6 + server listen socket (compose cyrius
+6.2.10's v6-on-Darwin primitives).** cyrius pin **6.2.9 → 6.2.10**. 1.6.1 ported
+the IPv4 connect + per-op timeout to Darwin; this closes the v6 + server-listen
+follow-on. cyrius 6.2.10 shipped the `lib/net.cyr` v6-on-Darwin surface sandhi
+filed for ([`archive/2026-06-15-cyrius-net-v6-darwin.md`](docs/issues/archive/2026-06-15-cyrius-net-v6-darwin.md)),
+so sandhi composes it and **deletes its hand-rolled duplicates + every Linux-only
+raw socket constant** (ADR 0001). No Linux-only socket constant remains anywhere
+in sandhi. Fully closes
+[`archive/2026-06-06-macos-nonblocking-connect.md`](docs/issues/archive/2026-06-06-macos-nonblocking-connect.md).
+
+### Fixed — http/conn (`src/http/conn.cyr`)
+
+- **IPv6 open paths now compose stdlib's Darwin-correct `sockaddr_in6` +
+  `net_connect_sa_nb`** (cyrius 6.2.10) and create the socket with the per-target
+  `AF_INET6` (Linux 10 / Darwin 30) instead of a hardcoded `10`. Previously the v6
+  socket domain, the `sockaddr_in6` (Linux `AF_INET6=10`, no BSD `sin6_len` byte),
+  and the nb-connect dance were all Linux-only → v6 was broken on macOS (masked by
+  v4 fallback). `net_connect_sa_nb`'s `_NET_CONN_NB_*` sentinels alias sandhi's
+  `_SANDHI_CONN_NB_*` one-for-one.
+
+### Fixed — server (`src/server/mod.cyr`)
+
+- **The accept-loop listen socket now composes stdlib `sock_set_nonblocking`**
+  (cyrius 6.2.10) instead of a hardcoded Linux `O_NONBLOCK=0x800` fcntl (Darwin's
+  is `0x0004`). The helper is itself an agnos no-op, so the prior
+  `#ifndef CYRIUS_TARGET_AGNOS` guard is gone.
+
+### Removed — http/conn
+
+- **Deleted the hand-rolled v6 shims** `_sandhi_conn_sockaddr_in6[_a]` /
+  `_sandhi_conn_connect_sa_nb[_a]` (superseded by the stdlib primitives) and **all
+  eight Linux-only raw socket constants** (`_SANDHI_O_NONBLOCK`,
+  `_SANDHI_EINPROGRESS`, `_SANDHI_SO_ERROR`, `_SANDHI_SYS_POLL`,
+  `_SANDHI_SYS_GETSOCKOPT`, `_SANDHI_F_GETFL`, `_SANDHI_F_SETFL`,
+  `_SANDHI_POLLOUT`) — no consumer hand-rolls the dance anymore. `src/http/conn.cyr`
+  905 → 804 lines.
+
+### Tests
+
+- No assertion-count change (**1002**: 451 + 167 + 342 + 42). The v6 / listen
+  paths aren't unit-tested without a live network; the four `.tcyr` suites stay
+  green on the 6.2.10 pin. macОS+aarch64+agnos cross-builds OK; lint 0/0;
+  `fmt --check` clean.
+
+### Stdlib / cross-repo
+
+- cyrius pin **6.2.9 → 6.2.10** (clean deps re-resolve). 6.2.10 shipped the
+  v6-on-Darwin `lib/net.cyr` surface (per-target `AF_INET6`, `sockaddr_in6`,
+  `net_connect_sa_nb`, `net_connect_nb6`, `sock_set_nonblocking`/`_clear`) from
+  sandhi's upstream filing. `dist/sandhi.cyr` regenerated at v1.6.2.
+
 ## [1.6.1] — 2026-06-15
 
 **macOS non-blocking-connect fix — compose the Darwin-correct stdlib transport
@@ -17,7 +70,8 @@ repro). The fix re-points both helpers at the stdlib primitives that already
 carry the platform-branched Darwin values + agnos fallback, retiring sandhi's
 duplicate of the machinery (ADR 0001 — compose, don't reimplement). Linux + AGNOS
 behaviour unchanged. Closes the IPv4 + per-op-timeout halves of
-[`docs/issues/2026-06-06-macos-nonblocking-connect.md`](docs/issues/2026-06-06-macos-nonblocking-connect.md).
+[`docs/issues/archive/2026-06-06-macos-nonblocking-connect.md`](docs/issues/archive/2026-06-06-macos-nonblocking-connect.md)
+(fully resolved at 1.6.2; archived).
 
 ### Fixed — http/conn (`src/http/conn.cyr`)
 

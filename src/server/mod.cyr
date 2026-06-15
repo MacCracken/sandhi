@@ -799,16 +799,13 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
     if (is_err_result(sock_listen(sfd, 16)) == 1) { return 1; }
 
     # Listen fd non-blocking so the accept queue drains cooperatively
-    # (EAGAIN ends the drain). Same fcntl constants the client conn path
-    # uses (src/http/conn.cyr).
-    #ifndef CYRIUS_TARGET_AGNOS
-    var lflags = syscall(SYS_FCNTL, sfd, _SANDHI_F_GETFL, 0);
-    syscall(SYS_FCNTL, sfd, _SANDHI_F_SETFL, lflags | _SANDHI_O_NONBLOCK);
-    #endif
-    # AGNOS: SYS_FCNTL is undefined and inbound TCP (listen/accept) is agnos
-    # Phase B — `sock_listen` above already returns Err on agnos, so this fn
-    # bails before the cooperative accept loop. The fcntl is compiled out so
-    # the bundle links; revisit when agnos exposes a ring-3 listen surface.
+    # (EAGAIN ends the drain). 1.6.2: composes stdlib `sock_set_nonblocking`
+    # (cyrius 6.2.10) instead of the Linux-hardcoded `O_NONBLOCK` fcntl — the
+    # stdlib helper carries the per-target flag value (Darwin O_NONBLOCK=0x0004 vs
+    # Linux 0x800) and is itself an agnos no-op (SYS_FCNTL is undefined there +
+    # inbound TCP is agnos Phase B — `sock_listen` already returns Err above, so
+    # this fn bails before the cooperative accept loop regardless).
+    sock_set_nonblocking(sfd);
 
     # Per-batch arena: max_conns × (recv buffer + arg struct + task struct)
     # + slack for the runtime struct. Backing memory is allocated once and
