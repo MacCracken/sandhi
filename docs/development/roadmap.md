@@ -25,8 +25,10 @@ a named entry here, not a buried mention.
 
 - **A1 — native TLS-policy enforcement (the last libssl coupling).** Native
   trust-store / mTLS currently **fails closed** (since 1.4.7) because the
-  enforcing path is libssl-only. Two cyrius-side items unblock it — and let
-  `sandhi_tls_use_libssl()` be dropped entirely:
+  enforcing path is libssl-only. Two cyrius-side items unblock it — and clear
+  the prerequisite for **retiring libssl at sandhi 2.0** (dropping the
+  `sandhi_tls_use_libssl()` escape hatch + the `-D CYRIUS_TLS_LIBSSL` opt-out is
+  a breaking change → the 2.0 major, not an automatic patch the moment A1 lands):
   - **Native `SSL_CTX_*` equivalents** in `lib/tls_native.cyr` (custom trust
     store + client cert/key) so native trust/mTLS *enforces* rather than fails
     closed (mirrors the 1.4.2 ALPN/SPKI rewire). *Re-verified still-open on

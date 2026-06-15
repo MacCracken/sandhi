@@ -123,8 +123,9 @@ cyrius-side (tracked in the [roadmap](docs/development/roadmap.md)):
 - **Native TLS-policy enforcement** — SPKI pinning is backend-agnostic and live
   on native; trust-store / mTLS still reach for libssl `SSL_CTX_*`, so they
   **fail closed** on native pending native `SSL_CTX_*` equivalents in cyrius
-  `lib/tls_native.cyr`. The last libssl coupling, and the gate for dropping the
-  libssl opt-out entirely.
+  `lib/tls_native.cyr`. The last libssl coupling — the prerequisite for retiring
+  libssl entirely (dropping `sandhi_tls_use_libssl()` + `-D CYRIUS_TLS_LIBSSL`),
+  a breaking change held for **sandhi 2.0**.
 
 ## Build
 

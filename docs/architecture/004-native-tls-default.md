@@ -90,7 +90,10 @@ pinned policies run native-default; trust-store / mTLS policies still use libssl
 3. ~~Upstream brk/fdlopen allocator fix~~ ✅ cyrius 6.1.19 (anonymous-mmap
    heap) — the residual libssl opt-in is no longer a process-killer.
 
-Once (2) lands, the libssl opt-in can be removed entirely. The
+Once (2) lands, the libssl opt-in *can* be removed — but the removal itself
+(dropping `sandhi_tls_use_libssl()` + the `-D CYRIUS_TLS_LIBSSL` opt-out) is a
+breaking change, so it's held for the **sandhi 2.0** major, not shipped as a
+patch the moment A1 clears. The
 `-D CYRIUS_TLS_NATIVE` *requirement* is gone: **cyrius 6.1.21 inverted the
 `lib/tls.cyr` default** (native compiled in + selected with no flag;
 `-D CYRIUS_TLS_LIBSSL` opts out; legacy `-D CYRIUS_TLS_NATIVE` is a no-op

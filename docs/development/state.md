@@ -140,7 +140,9 @@ cross-build restored + resolved-issue backlog archived). The pin is **6.2.7**
   - **A1 native TLS-policy enforcement** — native `SSL_CTX_*` (trust-store /
     mTLS) in cyrius `lib/tls_native.cyr`; the last libssl coupling. Until then
     native trust/mTLS **fails closed** (1.4.7); SPKI pinning is already
-    backend-agnostic. Drops `sandhi_tls_use_libssl()` when it lands.
+    backend-agnostic. A1 is the prerequisite for retiring libssl (dropping
+    `sandhi_tls_use_libssl()` + `-D CYRIUS_TLS_LIBSSL`) — a breaking change held
+    for **sandhi 2.0**, not an automatic drop when A1 lands.
     *(Re-verified still-blocking on **6.2.7**: only `tls_set_verify` exists; no
     native trust-store/client-cert verb; native mTLS is server-side-only.)*
   - **A2 async server arena-aware repair — ✅ shipped 1.5.3** (`async_new_in`
