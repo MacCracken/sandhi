@@ -1,7 +1,15 @@
 # sandhi — AGNOS socket-backend gap (raw BSD-socket transport blocks the agnos target)
 
 - **Filed**: 2026-06-14
-- **Status**: OPEN
+- **Status**: ✅ **Compile gap closed at sandhi 1.5.1** (Batch C1). Every raw
+  `SYS_*` socket-syscall site in `src/http/conn.cyr` + `src/server/mod.cyr` is
+  now wrapped in `#ifndef CYRIUS_TARGET_AGNOS` (agnos counterpart under
+  `#ifdef`), so a consumer that includes the bundle compiles for `--agnos`.
+  Linux/macOS proven byte-identical. **Remaining (NOT C1 scope, tracked):** the
+  `/dev/urandom` DNS-entropy runtime gap in `resolve.cyr` (roadmap C2), the
+  upstream `lib/mmap.cyr` `CLONE_VM` agnos stub, and native `SSL_CTX_*` for the
+  bundle's `fdlopen`/`tls_dlsym` TLS-policy path on agnos (Batch A1). See the Log
+  below + CHANGELOG [1.5.1].
 - **Severity**: blocker (for the AGNOS target only — Linux/macOS hosts unaffected)
 - **Area**: `src/http/conn.cyr` (client connect machinery), `src/server/mod.cyr` (listen-fd nonblock)
 - **Surfaced by**: `sit` adoption on AGNOS — `cyrius build --agnos` of any sandhi consumer fails to resolve raw socket syscall enums.
@@ -122,3 +130,26 @@ adoption on AGNOS. It blocks, in order:
 - Precedent: the chrono agnos gap (`cyrius/docs/development/issues/2026-06-14-chrono-agnos-monotonic-sleep-stale-stubs.md`) — same shape (Linux-stub on the agnos target), fixed in cyrius 6.2.6.
 - AGNOS net-syscall surface: `cyrius/docs/development/proposals/2026-06-14-agnos-net-entropy-clock-syscalls.md` (#45-#57).
 - Working agnos consumers proving the higher-level socket surface: `dig` 0.3.2, `yo` 0.5.4 (`src/platform_agnos.cyr` in each).
+
+## Log
+
+- **2026-06-14** — filed; surfaced by sit adoption on AGNOS. Tracked as 1.5.x
+  Batch C1 (first concrete sit-adoption-driven item). The ≥6.2.6 pin prerequisite
+  landed at sandhi 1.5.0.
+- **2026-06-15** — **compile gap closed at sandhi 1.5.1.** Implemented the
+  transport seam via per-site `#ifdef CYRIUS_TARGET_AGNOS` / `#ifndef` guards
+  (not the single-fn `_sandhi_connect_bounded_a` of the "Recommended fix"
+  sketch — per-site guards keep the Linux body verbatim and gave a provable
+  byte-identical Linux binary, matching the stdlib `chrono`/`net` precedent).
+  Agnos mappings applied exactly as this doc proposed: nb-connect → blocking
+  `sock_connect`; SO_*TIMEO → no-op; v6 → fail-closed (IPv4-only); listen-fd
+  fcntl compiled out. Validation: (1) Linux `programs/smoke.cyr` `cmp`-identical
+  before/after; (2) standalone agnos probe — a guarded `SYS_FCNTL` compiles
+  `--agnos`, an unguarded one reproduces `undefined variable 'SYS_FCNTL'`;
+  (3) structural sweep — all 26 raw-syscall sites guarded, zero unguarded;
+  (4) 992 `.tcyr` assertions + aarch64 cross-build still green. A full
+  `cyrius build --agnos` of sandhi-from-source remains blocked on the upstream
+  `lib/mmap.cyr` `CLONE_VM` stub and the A1 native-`SSL_CTX_*` retirement —
+  neither is C1's scope; both tracked (CHANGELOG [1.5.1] "Known follow-ups",
+  roadmap C2/A1). The `/dev/urandom` DNS-entropy site in `resolve.cyr` compiles
+  on agnos but is a latent runtime gap → roadmap C2.

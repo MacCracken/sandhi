@@ -4,6 +4,65 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-06-15
+
+**1.5.x Batch C1 — AGNOS socket-backend gap (sit-adoption-driven).** Closes the
+compile half of [`2026-06-14-agnos-socket-backend-gap.md`](docs/issues/2026-06-14-agnos-socket-backend-gap.md):
+sandhi's transport layer no longer references raw Linux socket syscalls that the
+AGNOS target leaves undefined, so a consumer (sit) that includes the bundle can
+compile for `--agnos`. No cyrius pin change (stays 6.2.6, the pin 1.5.0 landed —
+the prerequisite for this work).
+
+### Fixed — agnos transport seam (`src/http/conn.cyr`, `src/server/mod.cyr`)
+
+The HTTP client's timeout-bounded non-blocking connect and the async server's
+non-blocking listen fd dropped to raw Linux syscalls (`SYS_FCNTL` / `SYS_SOCKET`
+/ `SYS_CONNECT` / `SYS_SETSOCKOPT` + `SOL_SOCKET`) whose enum constants are
+undefined on AGNOS, so `cyrius build --agnos` of any sandhi consumer failed to
+**compile** (`undefined variable 'SYS_FCNTL'`). Every such site is now wrapped in
+`#ifndef CYRIUS_TARGET_AGNOS` with an agnos counterpart under
+`#ifdef CYRIUS_TARGET_AGNOS` (the stdlib `chrono`/`net` precedent). Per-primitive:
+
+- **Bounded nb-connect** (`_sandhi_conn_connect_nb_a`) → agnos collapses to a
+  blocking `sock_connect` (already portable via `lib/net.cyr`); `timeout_ms` is
+  advisory there, identical to the existing `connect_ms == 0` path.
+- **Per-op SO_RCVTIMEO/SO_SNDTIMEO** (`_sandhi_conn_set_timeout_ms_a`) → no-op on
+  agnos (no `setsockopt` timeout analog; agnos `sock_recv` is
+  poll-against-deadline at the caller, like the `dig`/`yo` backend).
+- **IPv6 raw path** (`_sandhi_conn_connect_sa_nb_a`,
+  `_sandhi_conn_open_v6_fully_timed_a` + its early-data twin) → AGNOS is
+  IPv4-only today; the agnos branch fails closed (`SANDHI_CONN_OPEN_CONNECT`) so
+  the client falls back to v4 without referencing a v6 socket API. Revisit when
+  agnos gains `AF_INET6`.
+- **Server listen-fd `O_NONBLOCK`** (`src/server/mod.cyr`) → fcntl compiled out
+  on agnos; `sock_listen` already returns `Err` there (inbound TCP is agnos
+  Phase B), so the async server bails before the cooperative accept loop.
+
+**Linux/macOS unaffected — proven byte-identical**: the pre-change and
+post-change `programs/smoke.cyr` binaries are `cmp`-identical (the `#ifndef`
+blocks compile to the same code; the directives emit none). 992 assertions green
+(440 + 167 + 343 + 42), lint 0/0, aarch64 cross-build still green,
+`dist/sandhi.cyr` regenerated at v1.5.1. The agnos strip + the negative control
+(unguarded `SYS_FCNTL` reproduces `undefined variable 'SYS_FCNTL'` on `--agnos`,
+guarded compiles clean) were verified with a standalone probe.
+
+### Known follow-ups (tracked, not silently scoped out)
+
+The C1 fix closes the **socket-syscall compile** gap. A full `cyrius build
+--agnos` of a sandhi consumer additionally needs, none of which are C1's scope:
+
+- **DNS TXID entropy** (`src/net/resolve.cyr`) — random TXID still opens
+  `/dev/urandom` via bare Linux syscall numbers (open=2/read=0/close=3). These
+  are integer literals so they **compile** on agnos (not a blocker), but they're
+  a latent runtime gap — agnos sources entropy via a syscall, not `/dev/urandom`.
+  Tracked as roadmap C2 (wait for the agnos entropy-syscall surface to firm up).
+- **Upstream stdlib agnos stubs** — sandhi's from-source build still trips a
+  `lib/mmap.cyr` `CLONE_VM` agnos gap (same Linux-stub class as the cyrius-6.2.6
+  chrono fix); cyrius-side.
+- **Native `SSL_CTX_*` on agnos** (Batch A1) — the bundle's `fdlopen`/`tls_dlsym`
+  TLS-policy path must retire onto native equivalents for agnos (where there is
+  no libssl). Already tracked as the A1 cross-repo dependency.
+
 ## [1.5.0] — 2026-06-14
 
 **cyrius pin `6.2.1` → `6.2.6`; the aarch64 `bayan` cross-build defect is fixed
