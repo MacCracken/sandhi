@@ -63,6 +63,9 @@ option (ADR 0001 "compose, don't reimplement").
 - `cyrius/docs/development/issues/2026-06-06-sandhi-nonblocking-connect-not-darwin-ported.md` — the original cyrius-side filing (full symptom + line refs).
 - sandhi 1.5.1 Batch C1 — the agnos analogue (same Linux-constant gap, guarded).
 - `lib/net.cyr` `SockOpt` (macOS branch) — the Darwin constant values to compose.
+- [`2026-06-15-cyrius-net-v6-darwin.md`](2026-06-15-cyrius-net-v6-darwin.md) — the
+  upstream cyrius issue for the IPv6 + listen-socket follow-on (stdlib has no
+  Darwin v6 surface for sandhi to compose); also tracked in the sandhi roadmap.
 
 ## Log
 

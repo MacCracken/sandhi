@@ -86,10 +86,15 @@ Currently open:
   on Darwin — and the v6 path additionally needs the Darwin `AF_INET6=30` +
   `sin6_len` sockaddr_in6 shape, which stdlib's own `SockDomain`/sockaddr_in6
   isn't ported to either. The v6 fallout is masked today (v6 connect fails → the
-  client falls back to v4); the server listen path is the sharper gap. Fix when a
-  consumer needs v6 on macOS or runs the sandhi server on Darwin — likely a
-  cross-cutting stdlib `net.cyr` v6-on-Darwin pass first. Surfaced by the 1.6.1
-  fix; see [`2026-06-06-macos-nonblocking-connect.md`](../issues/2026-06-06-macos-nonblocking-connect.md).
+  client falls back to v4); the server listen path is the sharper gap.
+  **Blocked on cyrius** — sandhi can't compose a Darwin-correct v6 nb-connect
+  (or a non-blocking listen socket) because stdlib exposes no Darwin v6 surface to
+  compose; that's a `lib/net.cyr` v6-on-Darwin pass, filed upstream as
+  [`2026-06-15-cyrius-net-v6-darwin.md`](../issues/2026-06-15-cyrius-net-v6-darwin.md).
+  When those primitives land, sandhi adopts them (retire `_sandhi_conn_connect_sa_nb_a`
+  / `_sandhi_conn_sockaddr_in6_a` + the server `O_NONBLOCK` fcntl) the same way
+  1.6.1 retired the v4 dance. Surfaced by the 1.6.1 fix; see also
+  [`2026-06-06-macos-nonblocking-connect.md`](../issues/2026-06-06-macos-nonblocking-connect.md).
 - **Native custom-trust-store verify-fail proof (needs a CA fixture).** The 1.6.0
   live gate (`_policy_runtime_probe.cyr` `[4]`) proves a *bogus* custom trust
   store is enforced (unreadable CA → open refused with err=TLS, not silently
