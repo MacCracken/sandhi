@@ -49,17 +49,35 @@ sustained request stream**. The arena was already sized for this (the per-conn
   open cross-repo dependency — it landed at cyrius v6.1.22 and is adopted here.
   The roadmap / state.md cross-repo-deps entries are updated; the upstream
   cyrius filing `2026-06-09-async-runtime-no-free-task-leak.md` is satisfied.
-- **AGNOS full-build blocker re-characterized**: the `cyrius build --agnos`
-  failure previously attributed to a "`lib/mmap.cyr` `CLONE_VM` stub" is actually
-  in **`lib/thread.cyr`** — its thread-spawn `clone(2)` flags
-  (`CLONE_VM | CLONE_FS | …`, `thread.cyr:199`) are emitted unconditionally inside
-  `#ifndef CYRIUS_TARGET_WIN`, and the agnos syscall table defines no `clone`
-  constants. The `mmap.cyr:184` error position is a single-pass include-offset
-  artifact (`thread.cyr` includes `mmap.cyr`). A `thread_agnos.cyr` peer exists in
-  the toolchain but is neither wired into `thread.cyr`'s target dispatch (only WIN
-  is) nor vendored. Filed as a precise cyrius-side coordination doc
-  ([`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](docs/issues/2026-06-15-cyrius-thread-agnos-clone-dispatch.md));
-  the agnos issue + roadmap + state.md are corrected to point at `thread.cyr`.
+- **AGNOS full-build blocker re-characterized — twice, ending accurate.** The
+  `cyrius build --agnos` failure was first attributed to a "`lib/mmap.cyr`
+  `CLONE_VM` stub"; an adversarial verification pass then proved **both that and
+  an interim "unfixed upstream `thread.cyr` defect" framing wrong**. The true
+  picture: (1) the `mmap.cyr:184` error is a single-pass include-offset artifact —
+  the token is `thread.cyr:199`; (2) `thread.cyr`'s AGNOS dispatch is **already
+  fixed in the cyrius 6.2.6 toolchain** (it routes agnos to a `thread_agnos.cyr`
+  peer) — the failure is sandhi's **stale vendored `./lib` snapshot** (a pre-fix
+  `thread.cyr`, no `thread_agnos.cyr`); and (3) refreshing `thread.cyr` clears
+  `CLONE_VM` and exposes the **next** gap (`lib/async.cyr`'s raw
+  `SYS_EPOLL_CREATE1`, which agnos doesn't define — it has `SYS_EPOLL_CREATE` +
+  the portable `sys_epoll_create` wrapper). So the agnos full-build is a
+  **cascade** — part **sandhi-side** (refresh the vendored stdlib snapshot) and
+  part **upstream** (real stdlib agnos-compile gaps), needing a systematic
+  agnos-completeness pass rather than a point fix. The corrected, honest filing is
+  [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](docs/issues/2026-06-15-cyrius-thread-agnos-clone-dispatch.md);
+  the agnos issue + roadmap + state.md are corrected to match. The x86_64
+  authoritative build is byte-identical across the `thread.cyr` refresh, so none
+  of this touches sandhi's release artifacts.
+- **A3 (mDNS multicast) now has a proper upstream filing.** The verification
+  pass confirmed cyrius `lib/net.cyr` still ships no IPv4 multicast primitives
+  (no `IP_ADD_MEMBERSHIP` / `IP_MULTICAST_TTL` / `_LOOP` / `_IF` / `SO_REUSEPORT`,
+  no `ip_mreq` struct, no join helper — only generic `sys_setsockopt`), and that
+  it was the one Batch-A item tracked only as an inline roadmap bullet. Filed a
+  paste-ready cyrius-side coordination doc with the exact constants / struct /
+  preferred `net_join_multicast` helper sandhi needs for QM-mode + RFC 6763
+  browsing (the QU-bit unicast resolver ships today and needs none of it):
+  [`2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/issues/2026-06-15-cyrius-mdns-multicast-primitives.md).
+  Closes the last untracked upstream item in sandhi's Batch A.
 
 ### Verified
 

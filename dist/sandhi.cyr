@@ -12216,8 +12216,19 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
                     store64(arg + SANDHI_ASYNC_ARG_FP,  handler_fp);
                     store64(arg + SANDHI_ASYNC_ARG_CTX, ctx);
                     store64(arg + SANDHI_ASYNC_ARG_BUF, buf);
-                    async_spawn(rt, &_sandhi_server_async_handler, arg);
-                    batch = batch + 1;
+                    # async_spawn now draws the task struct from `arena` too
+                    # (1.5.3). Guard its alloc like arg/buf: on exhaustion the
+                    # task is unlinked + the handler that closes cfd never runs,
+                    # so close cfd here and shed. The per-conn budget (arg 32 +
+                    # buf + task 32 = HSV_REQ_BUF_SIZE + 64) leaves no slack, so
+                    # this completes the load-shed path for the arena-backed task.
+                    var task = async_spawn(rt, &_sandhi_server_async_handler, arg);
+                    if (task == 0) {
+                        sock_close(cfd);
+                        accepting = 0;
+                    } else {
+                        batch = batch + 1;
+                    }
                 }
             }
             if (batch >= max_conns) { accepting = 0; }

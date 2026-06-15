@@ -8,12 +8,12 @@
   switched from hand-rolled `/dev/urandom` bare-syscall-numbers to the portable
   stdlib `sys_getrandom` selector primitive — AGNOS #45 / Linux / macOS /
   Windows; no `#ifdef`, no new dep). **Remaining for a full `cyrius build
-  --agnos` (NONE are sandhi's scope, all tracked):** the upstream
-  **`lib/thread.cyr` agnos clone-dispatch gap** (`CLONE_VM` unconditional, no
-  agnos peer wired — the `mmap.cyr:184` error is an include-offset artifact;
-  filed [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](2026-06-15-cyrius-thread-agnos-clone-dispatch.md)),
-  and native `SSL_CTX_*` for the bundle's `fdlopen`/`tls_dlsym` TLS-policy path
-  on agnos (Batch A1). See the Log below + CHANGELOG [1.5.1] / [1.5.2] / [1.5.3].
+  --agnos` (none are sandhi's *transport* scope; tracked):** a **cascade** of
+  stdlib agnos-compile gaps — part sandhi-side (vendored `./lib` carries a stale
+  `thread.cyr`, already fixed in the 6.2.6 toolchain → refresh needed), part
+  upstream (`async.cyr`'s raw `SYS_EPOLL_CREATE1`, more layers unenumerated),
+  filed [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](2026-06-15-cyrius-thread-agnos-clone-dispatch.md) —
+  plus native `SSL_CTX_*` (Batch A1). See the Log below + CHANGELOG [1.5.3].
 - **Severity**: blocker (for the AGNOS target only — Linux/macOS hosts unaffected)
 - **Area**: `src/http/conn.cyr` (client connect machinery), `src/server/mod.cyr` (listen-fd nonblock)
 - **Surfaced by**: `sit` adoption on AGNOS — `cyrius build --agnos` of any sandhi consumer fails to resolve raw socket syscall enums.
@@ -178,15 +178,19 @@ adoption on AGNOS. It blocks, in order:
   natural tool to live-test DNS changes, worth a one-line fix in a future slot.
 - **2026-06-15 (correction, sandhi 1.5.3)** — the earlier log entries above
   attribute the remaining full-`--agnos` build failure to a "`lib/mmap.cyr`
-  `CLONE_VM` stub". A verification pass against cyrius 6.2.6 **root-caused it
-  precisely: the defect is in `lib/thread.cyr`**, whose thread-spawn `clone(2)`
-  flags (`CLONE_VM | …`, `thread.cyr:199`) are emitted unconditionally inside
-  `#ifndef CYRIUS_TARGET_WIN` while the agnos syscall table defines no `clone`
-  constants. The `mmap.cyr:184` error position is a single-pass include-offset
-  artifact (`thread.cyr` includes `mmap.cyr`); `mmap.cyr` itself has no
-  `CLONE_VM`. A `thread_agnos.cyr` peer exists in the toolchain but is unwired.
-  Filed precisely upstream at
+  `CLONE_VM` stub". An **adversarial verification pass** corrected this in two
+  steps. First it located the real token at `thread.cyr:199` (the `mmap.cyr:184`
+  position is an include-offset artifact). Then — crucially — it proved
+  `thread.cyr` is **already fixed in the cyrius 6.2.6 toolchain** (which routes
+  agnos to a `thread_agnos.cyr` peer); the failure is sandhi's **stale vendored
+  `./lib` snapshot** (a pre-fix `thread.cyr`, no `thread_agnos.cyr`), not an
+  upstream defect. Refreshing `thread.cyr` clears `CLONE_VM` and exposes the
+  **next** gap: `async.cyr`'s raw `SYS_EPOLL_CREATE1` (agnos has `SYS_EPOLL_CREATE`
+  + the portable `sys_epoll_create` wrapper, not the `1` variant). So a full
+  `--agnos` build is a **cascade**: part **sandhi-side** (refresh the vendored
+  stdlib snapshot) + part **upstream** (real stdlib agnos-compile gaps, async
+  next, more unenumerated), plus native `SSL_CTX_*` (Batch A1). Filed accurately
+  (rewritten) at
   [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](2026-06-15-cyrius-thread-agnos-clone-dispatch.md).
-  So the two remaining `--agnos` blockers (both upstream, both filed) are: that
-  `thread.cyr` dispatch gap, and the native `SSL_CTX_*` enforcement (Batch A1,
-  re-verified still-open on 6.2.6).
+  The x86_64 authoritative build is byte-identical across the `thread.cyr`
+  refresh, so none of this touches sandhi's release artifacts.

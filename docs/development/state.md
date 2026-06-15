@@ -4,7 +4,7 @@
 
 ## Version
 
-**1.5.3** — 2026-06-15. **1.5.x Batch A2 — async-server arena-aware runtime (residual leak eliminated; no pin change, stays 6.2.6; no public-surface change).** `sandhi_server_run_async` created the async runtime with `async_new()`, so the rt (40 B) + every `async_spawn` task struct (32 B/conn) came from the no-free global bump and leaked ~32 B/conn + 40 B/batch across the per-batch recreate (`async_run` closes the epfd → single-use). A verification pass over the "still upstream-blocked" claims found the gating primitive **`async_new_in(allocator)` had already landed at cyrius v6.1.22** (`lib/async.cyr:47`) — the "gated on cyrius" status was stale (same pattern as the aarch64 fix + the agnos `sys_getrandom` surface). So this was pure sandhi-side adoption: the runtime is now `async_new_in(arena)` at the initial + per-batch-recreate sites, so rt + tasks ride the existing reset-per-batch arena and `reset_via(arena)` reclaims them → **zero residual leak, RSS flat over a sustained stream**. The arena was already sized for it (+64/conn = arg 32 + task 32; +4096 slack = rt 40). `_server_async_smoke` strengthened 2 → **16** batch-recreate cycles (16/16 PASS, silent-client DoS regression held; no RSS probe — sub-page-per-batch leak → would be flaky; leak-free by construction). **Verified**: **992 assertions green** (440 + 167 + 343 + 42); lint 0/0; `cyrius fmt --check` clean; aarch64 cross-build green; `dist/sandhi.cyr` regenerated at v1.5.3. Also corrected the AGNOS full-build blocker: it is **`lib/thread.cyr`** (`CLONE_VM` clone flags unconditional, no agnos dispatch — `mmap.cyr:184` was an include-offset artifact), filed [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](../issues/2026-06-15-cyrius-thread-agnos-clone-dispatch.md).
+**1.5.3** — 2026-06-15. **1.5.x Batch A2 — async-server arena-aware runtime (residual leak eliminated; no pin change, stays 6.2.6; no public-surface change).** `sandhi_server_run_async` created the async runtime with `async_new()`, so the rt (40 B) + every `async_spawn` task struct (32 B/conn) came from the no-free global bump and leaked ~32 B/conn + 40 B/batch across the per-batch recreate (`async_run` closes the epfd → single-use). A verification pass over the "still upstream-blocked" claims found the gating primitive **`async_new_in(allocator)` had already landed at cyrius v6.1.22** (`lib/async.cyr:47`) — the "gated on cyrius" status was stale (same pattern as the aarch64 fix + the agnos `sys_getrandom` surface). So this was pure sandhi-side adoption: the runtime is now `async_new_in(arena)` at the initial + per-batch-recreate sites, so rt + tasks ride the existing reset-per-batch arena and `reset_via(arena)` reclaims them → **zero residual leak, RSS flat over a sustained stream**. The arena was already sized for it (+64/conn = arg 32 + task 32; +4096 slack = rt 40). `_server_async_smoke` strengthened 2 → **16** batch-recreate cycles (16/16 PASS, silent-client DoS regression held; no RSS probe — sub-page-per-batch leak → would be flaky; leak-free by construction). **Verified**: **992 assertions green** (440 + 167 + 343 + 42); lint 0/0; `cyrius fmt --check` clean; aarch64 cross-build green; `dist/sandhi.cyr` regenerated at v1.5.3. Added an `async_spawn`-return guard so the arena-backed task alloc is covered by the load-shed path. The verification pass also **corrected the AGNOS full-build picture** (it is a cascade — `thread.cyr`'s agnos dispatch is already fixed in the 6.2.6 toolchain so sandhi's vendored `./lib` is just stale; refreshing it exposes `async.cyr`'s raw `SYS_EPOLL_CREATE1`; part sandhi-side dep-refresh, part upstream stdlib agnos-completeness), filed [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](../issues/2026-06-15-cyrius-thread-agnos-clone-dispatch.md).
 
 _(1.5.2 — 2026-06-15 — Batch C2: AGNOS DNS-entropy gap. Swapped the DNS TXID seed from hand-rolled `/dev/urandom` bare-syscall-numbers to the portable stdlib `sys_getrandom` selector primitive. Full detail in CHANGELOG [1.5.2] + the Shipped log.)_
 
@@ -147,7 +147,8 @@ cross-build restored + resolved-issue backlog archived). The pin is **6.2.6**
   - **A3 mDNS multicast primitives** in cyrius `lib/net.cyr` — gates the real
     `discovery/local.cyr` (quality gate; QU-bit unicast works today).
     *(Re-verified still-blocking on 6.2.6: the five constants + `ip_mreq` + a
-    join helper exist nowhere in `net.cyr`.)*
+    join helper exist nowhere in `net.cyr`. Now has a paste-ready upstream
+    filing: [`2026-06-15-cyrius-mdns-multicast-primitives.md`](../issues/2026-06-15-cyrius-mdns-multicast-primitives.md).)*
 - **Batch B — profile-justified optimization picks** (parked pending prof
   evidence): HPACK Huffman tie-break, `_sandhi_resp_new` collapse, pool LRU.
 - **Batch C — sit-adoption reshape** — gate **cleared** (native TLS default
@@ -158,11 +159,12 @@ cross-build restored + resolved-issue backlog archived). The pin is **6.2.6**
   `sys_getrandom` selector primitive) **together complete the sandhi-side AGNOS
   transport surface.** Further Batch C items fill from what sit surfaces, not
   pre-baked (memory [`project_sit_adoption_drives_roadmap`]). A full `--agnos`
-  build still needs two upstream cyrius items, both outside sandhi's scope and
-  filed: the **`lib/thread.cyr` agnos clone-dispatch gap** (`CLONE_VM`
-  unconditional, no agnos peer wired — supersedes the earlier "`mmap` stub"
-  framing; [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](../issues/2026-06-15-cyrius-thread-agnos-clone-dispatch.md))
-  and native `SSL_CTX_*` (Batch A1).
+  build is a **cascade** of stdlib agnos-compile gaps (filed
+  [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](../issues/2026-06-15-cyrius-thread-agnos-clone-dispatch.md)):
+  part sandhi-side (vendored `./lib` carries a stale `thread.cyr` — already fixed
+  in the 6.2.6 toolchain; refresh needed), part upstream (`async.cyr`'s raw
+  `SYS_EPOLL_CREATE1` is the next gap; more layers unenumerated) + native
+  `SSL_CTX_*` (Batch A1). None gates sandhi's authoritative x86_64 artifacts.
 - **Background watches** — `tests/sandhi.tcyr` cap-drift; consumer coordination
   docs (sandhi side shipped; the daimon `serve_async` collapse is sandhi-side ✅
   at 1.4.9, residual daimon-side).
