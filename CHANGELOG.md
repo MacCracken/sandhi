@@ -4,6 +4,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.2] — 2026-06-15
+
+**1.5.x Batch C2 — AGNOS DNS-entropy gap (sit-adoption-driven follow-up to C1).**
+Closes the runtime half of the AGNOS adoption work surfaced in
+[`2026-06-14-agnos-socket-backend-gap.md`](docs/issues/2026-06-14-agnos-socket-backend-gap.md).
+No cyrius pin change (stays 6.2.6). No public-surface change.
+
+### Fixed — DNS TXID entropy portable across targets (`src/net/resolve.cyr`)
+
+`_sandhi_resolve_random_u16` (the per-query DNS transaction-ID source that closes
+the Kaminsky cache-poisoning window) seeded its 2 random bytes by opening
+`/dev/urandom` via **bare Linux syscall numbers** (`open`=2 / `read`=0 /
+`close`=3). Those are integer literals so they *compiled* on AGNOS (which is why
+C1 didn't catch this), but at runtime the numbers mean different syscalls on the
+agnos ABI and agnos has no `/dev/urandom` — so the TXID would fall through to the
+weak clock-based fallback (or worse) on agnos, leaving DNS spoofable.
+
+Replaced the hand-rolled `/dev/urandom` open/read/close with the stdlib
+`sys_getrandom(buf, len, 0)` syscall-selector primitive (`syscalls` dep, already
+declared — no new dependency). It is portable across **every** sandhi target via
+the per-target selector — Linux `getrandom(2)`, **AGNOS #45** (kernel CSPRNG,
+landed agnos 1.45.0), and the macOS / Windows peers (macOS routes through
+`syscalls_linux_common.cyr` on both arches) — needs no filesystem access (works
+under chroot / landlock / early boot), and is a strict upgrade over the old path
+on Linux too. The portable clock-nanos fallback is unchanged. This is the
+canonical "compose the stdlib primitive, don't hand-roll" move (CLAUDE.md), so it
+needed **no `#ifdef`** — one portable call replaces the Linux-only block.
+
+### Verified
+
+- **AGNOS**: `sys_getrandom` resolves clean on `cyrius build --agnos` (standalone
+  probe mirroring sandhi's exact call shape; `#45` links, no undefined symbol).
+- **Linux runtime**: two successive `_sandhi_resolve_random_u16`-shape reads
+  return valid in-range, distinct u16s (real CSPRNG, not the fallback).
+- **All targets covered**: `sys_getrandom` is defined for Linux x86_64/aarch64,
+  macOS x86_64/arm64, AGNOS, and Windows in the vendored syscall selector — the
+  build emits no `undefined function 'sys_getrandom'`.
+- 992 assertions green (440 + 167 + 343 + 42); lint 0/0; `cyrius fmt --check`
+  clean; aarch64 cross-build green; `dist/sandhi.cyr` regenerated at v1.5.2.
+
+### Status of AGNOS adoption (issue follow-ups)
+
+With C1 (1.5.1, socket-syscall compile) + C2 (this release, DNS entropy), the
+**sandhi-side** AGNOS transport work is complete. A full `cyrius build --agnos`
+of a consumer still needs two items outside sandhi's scope, both tracked: the
+upstream `lib/mmap.cyr` `CLONE_VM` agnos stub, and native `SSL_CTX_*` for the
+bundle's `fdlopen`/`tls_dlsym` TLS-policy path (Batch A1). Separately, the ad-hoc
+`programs/dns-probe.cyr` has a pre-existing stale include list (references
+`SANDHI_PROF_PHASE_*` without including `obs/prof.cyr`) — not a C2 regression and
+not in the gated test suite; noted for a future cleanup.
+
 ## [1.5.1] — 2026-06-15
 
 **1.5.x Batch C1 — AGNOS socket-backend gap (sit-adoption-driven).** Closes the

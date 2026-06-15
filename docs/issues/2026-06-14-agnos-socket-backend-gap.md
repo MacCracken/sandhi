@@ -1,15 +1,17 @@
 # sandhi — AGNOS socket-backend gap (raw BSD-socket transport blocks the agnos target)
 
 - **Filed**: 2026-06-14
-- **Status**: ✅ **Compile gap closed at sandhi 1.5.1** (Batch C1). Every raw
-  `SYS_*` socket-syscall site in `src/http/conn.cyr` + `src/server/mod.cyr` is
-  now wrapped in `#ifndef CYRIUS_TARGET_AGNOS` (agnos counterpart under
-  `#ifdef`), so a consumer that includes the bundle compiles for `--agnos`.
-  Linux/macOS proven byte-identical. **Remaining (NOT C1 scope, tracked):** the
-  `/dev/urandom` DNS-entropy runtime gap in `resolve.cyr` (roadmap C2), the
-  upstream `lib/mmap.cyr` `CLONE_VM` agnos stub, and native `SSL_CTX_*` for the
-  bundle's `fdlopen`/`tls_dlsym` TLS-policy path on agnos (Batch A1). See the Log
-  below + CHANGELOG [1.5.1].
+- **Status**: ✅ **Sandhi-side complete** — **C1 compile gap closed at 1.5.1**
+  (every raw `SYS_*` socket-syscall site in `src/http/conn.cyr` +
+  `src/server/mod.cyr` wrapped in `#ifndef CYRIUS_TARGET_AGNOS`, Linux/macOS
+  byte-identical) **+ C2 DNS-entropy gap closed at 1.5.2** (`resolve.cyr` TXID
+  switched from hand-rolled `/dev/urandom` bare-syscall-numbers to the portable
+  stdlib `sys_getrandom` selector primitive — AGNOS #45 / Linux / macOS /
+  Windows; no `#ifdef`, no new dep). **Remaining for a full `cyrius build
+  --agnos` (NONE are sandhi's scope, all tracked):** the upstream `lib/mmap.cyr`
+  `CLONE_VM` agnos stub, and native `SSL_CTX_*` for the bundle's
+  `fdlopen`/`tls_dlsym` TLS-policy path on agnos (Batch A1). See the Log below +
+  CHANGELOG [1.5.1] / [1.5.2].
 - **Severity**: blocker (for the AGNOS target only — Linux/macOS hosts unaffected)
 - **Area**: `src/http/conn.cyr` (client connect machinery), `src/server/mod.cyr` (listen-fd nonblock)
 - **Surfaced by**: `sit` adoption on AGNOS — `cyrius build --agnos` of any sandhi consumer fails to resolve raw socket syscall enums.
@@ -153,3 +155,22 @@ adoption on AGNOS. It blocks, in order:
   neither is C1's scope; both tracked (CHANGELOG [1.5.1] "Known follow-ups",
   roadmap C2/A1). The `/dev/urandom` DNS-entropy site in `resolve.cyr` compiles
   on agnos but is a latent runtime gap → roadmap C2.
+- **2026-06-15** — **C2 (DNS entropy) closed at sandhi 1.5.2.** The
+  `_sandhi_resolve_random_u16` TXID seed was hand-rolled `/dev/urandom`
+  open/read/close via bare Linux syscall numbers (`open`=2/`read`=0/`close`=3) —
+  literals that compiled on agnos but resolved to the wrong syscalls at runtime
+  (agnos has no `/dev/urandom`), degrading the TXID to the weak clock fallback.
+  Fixed by composing the stdlib `sys_getrandom(buf, len, 0)` syscall-selector
+  primitive (from the already-declared `syscalls` dep) — the agnos entropy
+  syscall **#45** had landed (agnos 1.45.0 / the 6.2.6 toolchain), so the gate
+  this was waiting on was already clear. **No `#ifdef` needed** (unlike C1): the
+  selector is portable across Linux/macOS/Windows/AGNOS, so one call replaces the
+  Linux-only block — the canonical "compose the stdlib primitive" move. Validated:
+  agnos `sys_getrandom` resolves on `--agnos`; Linux runtime returns valid
+  distinct TXIDs; every target defines the symbol (macOS via
+  `syscalls_linux_common.cyr`); 992 `.tcyr` green; lint/fmt clean; aarch64 green.
+  **With C1 + C2 the sandhi-side AGNOS transport work is complete** — the only
+  remaining `--agnos` blockers are upstream (`mmap` `CLONE_VM` stub) and Batch A1
+  (native `SSL_CTX_*`). Aside (pre-existing, not C2): `programs/dns-probe.cyr`
+  has a stale include list (`SANDHI_PROF_PHASE_*` without `obs/prof.cyr`) — the
+  natural tool to live-test DNS changes, worth a one-line fix in a future slot.

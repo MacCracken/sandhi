@@ -19,7 +19,7 @@ that picks up the change. The public surface is no longer
 frozen (ADR 0005's freeze applied "between 0.9.2 and 1.0.0";
 post-fold patches are explicitly allowed per the 1.1.0 ship).
 
-## Shipped (M0 through 1.5.1)
+## Shipped (M0 through 1.5.2)
 
 Compressed log — one line per release. CHANGELOG carries the
 details, state.md the current snapshot.
@@ -78,6 +78,7 @@ details, state.md the current snapshot.
 - **1.4.9** — epoll-cooperative server; `max_conns` enforced + cyrius pin 6.1.20 → **6.1.21** (TLS flag flip completed). Closes the daimon ask: **+1 verb** `sandhi_server_run_async` over `lib/async.cyr` (worker shape decided (b) epoll-cooperative; handler stays cooperative). Batched accept up to `max_conns`/cycle → spawn handler task per conn → `async_run` → reset per-batch arena. Per-handler recv buffers (no-interleave invariant). New deps `async` + `atomic`. Sync `run`/`run_opts` unchanged. Filed cyrius cross-repo leak `2026-06-09-async-runtime-no-free-task-leak.md` (async.cyr no-free rt/task structs). **cyrius 6.1.21** inverted `lib/tls.cyr` (native = no-flag default; `-D CYRIUS_TLS_LIBSSL` opts out; legacy `-D CYRIUS_TLS_NATIVE` = no-op alias) + re-folded sandhi 1.4.5→1.4.8 — so CI/release dropped the 1.4.8 interim `-D CYRIUS_TLS_NATIVE` (libssl proof now `-D CYRIUS_TLS_LIBSSL`). Verified via forked `_server_async_smoke.cyr` (2/2 200) + 3-way polarity. 992 assertions green (unchanged).
 - **1.4.10** — closeout audit (P-1 / security / code-audit pass); **closes the 1.4.x arc** (no pin change; stays 6.1.21). **P1 fixed**: async server DoS — `_sandhi_server_async_handler` did an infinite `async_await_readable` (epoll_wait −1) before recv, so a silent client hung the whole cooperative loop; dropped the await (recv under SO_RCVTIMEO), floored `idle_ms` > 0; silent-client regression added to the smoke. **P2 fixed**: `async_new()` null-check (server); `body_sb` + `chunk_state` null-checks (stream SSE/chunked path). **Audit-confirmed**: 1.4.7 native-fail-closed property HOLDS (full `tls_dlsym`/`SSL_CTX_*` gate coverage; key-without-cert safe); 1.4.5–1.4.9 verbs documented + covered; +2 standalone docstrings. 992 assertions green (unchanged).
 - **1.4.11** — cyrius pin 6.1.21 → **6.2.1** (ecosystem-wide stdlib pin sweep). `[deps]` dropped `json` (sandhi rolls its own `src/rpc/json.cyr`) and replaced `bigint` + `base64` with **`bayan`** (the 6.1.25 carve-out re-exporting `u256_*` / `base64_*` for sigil's SPKI-pin digest path; ordered before `sigil`). Surfaced the **aarch64 `bayan` cross-build defect** (`cycc_aarch64` `unexpected enum`); CI/release made the aarch64 step best-effort (warn + skip) so the upstream defect can't gate a release. Filed `2026-06-12-cyrius-aarch64-bayan-enum-parse.md` + architecture/005. No source change; 992 green.
+- **1.5.2** — **Batch C2: AGNOS DNS-entropy gap** (sit-adoption-driven C1 follow-up; no pin change, stays 6.2.6; no public-surface change). `_sandhi_resolve_random_u16` (DNS TXID, anti-Kaminsky) seeded entropy from `/dev/urandom` via bare Linux syscall numbers (`open`=2/`read`=0/`close`=3) — integer literals that *compiled* on agnos but meant different syscalls at runtime (and agnos has no `/dev/urandom`), so the TXID degraded to the weak clock fallback there. Replaced with the stdlib `sys_getrandom(buf, len, 0)` syscall-selector primitive (`syscalls` dep, already declared — no new dep, **no `#ifdef`**): portable across Linux/macOS/Windows/AGNOS (#45, agnos 1.45.0), no fs access, strict upgrade on Linux too. Verified: agnos `sys_getrandom` resolves on `--agnos`; Linux runtime yields valid distinct TXIDs; all targets define the symbol; 992 green, lint/fmt clean, aarch64 green. **Completes the sandhi-side AGNOS transport work** (C1+C2); remaining `--agnos` blockers are upstream-only (`mmap` `CLONE_VM` stub + A1 native `SSL_CTX_*`). [`2026-06-14-agnos-socket-backend-gap.md`](../issues/2026-06-14-agnos-socket-backend-gap.md).
 - **1.5.1** — **Batch C1: AGNOS socket-backend gap** (first sit-adoption-driven slot; no pin change, stays 6.2.6). sandhi's HTTP-client bounded nb-connect (`src/http/conn.cyr`) + async-server listen-fd (`src/server/mod.cyr`) dropped to raw Linux socket syscalls (`SYS_FCNTL`/`SYS_SOCKET`/`SYS_CONNECT`/`SYS_SETSOCKOPT`/`SOL_SOCKET`) undefined on the AGNOS target, so `cyrius build --agnos` of a consumer (sit) failed to **compile**. Every site now guarded by `#ifndef CYRIUS_TARGET_AGNOS` with an agnos counterpart (`#ifdef`): nb-connect → blocking `sock_connect` (timeout advisory), SO_*TIMEO → no-op, IPv4-only v6 → fail-closed, listen-fd fcntl compiled out. **Linux/macOS proven byte-identical** (`cmp` pre/post smoke); agnos strip + negative control + 26-site structural sweep verified. 992 assertions green; aarch64 still green. Remaining agnos-build blockers are out of C1 scope and tracked (C2 entropy, upstream `mmap` stub, A1 native `SSL_CTX_*`). [`2026-06-14-agnos-socket-backend-gap.md`](../issues/2026-06-14-agnos-socket-backend-gap.md).
 - **1.5.0** — **opens the 1.5.x arc.** cyrius pin 6.2.1 → **6.2.6**; the aarch64 `bayan` cross-build defect is **fixed upstream** (6.2.6) — `--aarch64 programs/smoke.cyr` produces a valid aarch64 ELF with zero sandhi change, exactly as the filing predicted. CI/release aarch64 step **restored to gating** (1.4.11 warn-skip tolerance removed; only-tolerated skip is the toolchain lacking `cycc_aarch64`). Issue-backlog cleanup: 5 resolved issues archived (the aarch64 defect + the four 1.4.x sandhi-side defects), `docs/issues/README.md` re-tabled, and the two cross-repo coordination docs whose sandhi side is delivered updated (`daimon-server-max-conns` sandhi-side ✅ 1.4.9; `cyrius-native-tls` sit-gate cleared). 992 assertions green (440 + 167 + 343 + 42); lint clean; `dist/sandhi.cyr` regenerated at v1.5.0.
 
@@ -136,7 +137,7 @@ justifies it.
   add an LRU policy behind an option flag (default keeps current semantics
   until profile shows benefit).
 
-### Batch C — sit-adoption reshape (gate cleared; first item surfaced)
+### Batch C — sit-adoption reshape (gate cleared; C1 + C2 shipped)
 
 The native-TLS prerequisite that sit named is **landed** (native default since
 cyrius 6.1.21; sit-adoption gate cleared per
@@ -157,16 +158,15 @@ sit-driven friction, not speculation.
   fcntl compiled out. Linux/macOS byte-identical. Blocked sit on agnos directly,
   owl + whirl transitively. Detail:
   [`2026-06-14-agnos-socket-backend-gap.md`](../issues/2026-06-14-agnos-socket-backend-gap.md).
-- **C2 — AGNOS DNS-entropy gap** *(surfaced during C1; un-shipped follow-up)*.
-  `src/net/resolve.cyr` seeds the DNS TXID by opening `/dev/urandom` via bare
-  Linux syscall numbers (`open`=2 / `read`=0 / `close`=3). Those are integer
-  literals so they **compile** on agnos (not a C1-class blocker), but agnos
-  sources entropy via a dedicated syscall, not `/dev/urandom` — so the TXID would
-  be non-random (or fail) at runtime on agnos. Opens when the agnos
-  entropy-syscall surface firms up (cyrius proposal
-  `2026-06-14-agnos-net-entropy-clock-syscalls.md` #45–#57); the fix mirrors C1
-  (an `#ifdef CYRIUS_TARGET_AGNOS` branch calling the agnos entropy syscall).
-  Quality/correctness gate for agnos DNS, not a compile blocker.
+- **C2 — AGNOS DNS-entropy gap — ✅ shipped at 1.5.2.** `src/net/resolve.cyr`
+  seeded the DNS TXID by opening `/dev/urandom` via bare Linux syscall numbers
+  (`open`=2 / `read`=0 / `close`=3) — integer literals that **compiled** on agnos
+  (so not a C1-class blocker) but resolved to the wrong syscalls at runtime
+  (agnos has no `/dev/urandom`), degrading the TXID to the weak clock fallback.
+  Fixed by composing the stdlib `sys_getrandom` selector primitive (the agnos
+  entropy syscall #45 had landed by agnos 1.45.0 / the 6.2.6 toolchain) — one
+  portable call, **no `#ifdef`** needed, no new dep. This **completes the
+  sandhi-side AGNOS transport work** (C1 socket compile + C2 DNS entropy).
 
 ### Background watches (not arc slots)
 
@@ -320,12 +320,13 @@ above so the cross-repo coupling stays explicit.*
 **Wait-for-sit-adoption (Batch C)**:
 
 The native-TLS prerequisite sit named has **landed** (native default since
-cyrius 6.1.21; sit-adoption gate cleared). When sit picks up sandhi for
-remote clone/push/pull, real-workload friction surfaces concrete asks —
-that is **Batch C** above. Speculatively pre-baking those slots is exactly
-what the memory [`project_sit_adoption_drives_roadmap`] warns against, so
-the batch stays empty by design until sit integrates; it is the named
-landing zone, not a pre-filled slot list.
+cyrius 6.1.21; sit-adoption gate cleared), and sit's adoption on AGNOS has
+already surfaced + shipped the first two concrete items — **C1** (socket
+compile, 1.5.1) and **C2** (DNS entropy, 1.5.2), which together complete the
+sandhi-side AGNOS transport surface. Further Batch C items fill the same way:
+from real-workload friction sit surfaces, NOT speculatively pre-baked (the
+memory [`project_sit_adoption_drives_roadmap`] discipline). Batch C is the
+named landing zone; it is populated by what sit hits, slot by slot.
 
 **Wait-for-second-consumer-ask**:
 
@@ -446,10 +447,10 @@ its job is keeping the post-v1 patch window honest. The shape:
   Organized into batches: **A** cross-repo-gated repairs (native
   `SSL_CTX_*` enforcement, async arena-aware runtime, mDNS
   multicast), **B** profile-justified optimization picks, **C** the
-  sit-driven reshape (gate cleared; **C1 AGNOS socket-backend gap shipped
-  at 1.5.1**, C2 agnos DNS-entropy queued; otherwise filled by what sit
-  surfaces, not pre-baked). ONE item per slot; each batch opens when its
-  gate clears.
+  sit-driven reshape (gate cleared; **C1 AGNOS socket compile (1.5.1) + C2
+  AGNOS DNS-entropy (1.5.2) shipped — sandhi-side AGNOS transport complete**;
+  further items fill from what sit surfaces, not pre-baked). ONE item per
+  slot; each batch opens when its gate clears.
 
 Beyond the arcs, items wait for their unblock signal —
 consumer ask, profile evidence, stdlib prerequisite, or
