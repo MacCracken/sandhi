@@ -38,7 +38,7 @@ other partial path is malformed and decode fails.
 ## Why one literal, not 257 constants
 
 Cyrius's per-program fixup table is capped at 32768 entries
-(investigated in [`docs/proposals/2026-04-24-cyrius-fixup-table-cap.md`](../proposals/2026-04-24-cyrius-fixup-table-cap.md)).
+(investigated in [`docs/proposals/2026-04-24-cyrius-fixup-table-cap.md`](../proposals/done/2026-04-24-cyrius-fixup-table-cap.md)).
 String literals consume fixups. 257 separate literals would
 consume 257 fixups *just for this table*, before the rest of the
 HPACK / h2 / client code gets any. Adding the Huffman table as
@@ -93,7 +93,7 @@ Not needed when:
 ## References
 
 - `src/http/h2/huffman.cyr` — the module this note describes.
-- [`docs/proposals/2026-04-24-cyrius-fixup-table-cap.md`](../proposals/2026-04-24-cyrius-fixup-table-cap.md)
+- [`docs/proposals/2026-04-24-cyrius-fixup-table-cap.md`](../proposals/done/2026-04-24-cyrius-fixup-table-cap.md)
   — the upstream investigation question about the fixup cap.
 - `src/http/h2/hpack.cyr` — `_hpack_static_init_a/b/c/d`, the
   per-*function*-allowance variant of the same shape (four

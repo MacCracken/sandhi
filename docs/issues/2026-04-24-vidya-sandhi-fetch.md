@@ -38,13 +38,13 @@ var body = sandhi_http_body(r);
 
 ## Known caveats
 
-- **HTTPS runtime currently blocked** (`2026-04-24-libssl-pthread-deadlock.md`). External knowledge sources are almost entirely HTTPS now; vidya's live work is therefore gated on the libssl pthread-lock fix.
+- **HTTPS works end-to-end** — the original libssl-pthread / stdlib-TLS-init blocker resolved upstream (cyrius v5.6.39; native TLS is the no-flag default since 6.1.21), so live HTTPS fetches work today (see [`archive/2026-04-24-libssl-pthread-deadlock.md`](archive/2026-04-24-libssl-pthread-deadlock.md)); vidya's only remaining gate is its own future fetch milestone.
 - **Large responses** — same buffer caveat as sit / ark. Full Wikipedia articles etc. may exceed the 256 KB default. Add streaming / configurable buffer when vidya's fetch work opens and actually hits this.
 - **Rate limiting / polite scraping** is vidya's concern, not sandhi's. sandhi ships no built-in rate limiter.
 
 ## Proposed vidya roadmap entry
 
-> **Use `sandhi::http` for external fetch.** Opt into redirect following via `sandhi_http_options_new()`. Pin sandhi via `[deps.sandhi]` during the 5.6.x window; pin retires at the v5.7.0 fold. Reference: `sandhi/docs/issues/2026-04-24-vidya-sandhi-fetch.md`. **Blocked by**: stdlib TLS-init fix before live-HTTPS fetches work. **Priority**: future — pick up when vidya's fetch milestone opens.
+> **Use `sandhi::http` for external fetch.** Opt into redirect following via `sandhi_http_options_new()`. Pin sandhi via `[deps.sandhi]` during the 5.6.x window; pin retires at the v5.7.0 fold. Reference: `sandhi/docs/issues/2026-04-24-vidya-sandhi-fetch.md`. **Priority**: future — pick up when vidya's fetch milestone opens.
 
 ## Log
 

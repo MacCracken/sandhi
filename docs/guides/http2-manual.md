@@ -1,23 +1,22 @@
 # HTTP/2 — manual path
 
-HTTP/2 in sandhi is **opt-in**, manual, and rarely used today. Here's why, and how
-to use it when you have to.
+HTTP/2 auto-selection is **live** — most consumers get h2 automatically. The
+manual path documented here is for fine-grained control.
 
-## Why h2 is opt-in today
+## When to use the manual path
 
-The two upstream TLS blockers that gated auto-selection cleared at cyrius
-v5.6.39 (libssl-pthread, see `docs/issues/archive/2026-04-24-libssl-pthread-deadlock.md`)
-and v5.6.40 (ALPN hook, see `docs/issues/archive/2026-04-24-stdlib-tls-alpn-hook.md`).
-Live HTTPS now works through `sandhi_http_get`. What remains is sandhi-side
-wire-up of the new stdlib hook into `src/tls_policy/alpn.cyr` plus a connection
-struct slot for the negotiated protocol — roughly 80 lines, untracked at 0.9.2
-because the public surface is frozen until the v5.7.0 fold ([ADR 0005](../adr/0005-public-surface-freeze-at-0-9-2.md)).
+ALPN-driven h2 auto-selection is wired (since 0.9.6): on a pooled TLS route,
+`sandhi_http_request_auto` opens advertising `h2,http/1.1`, and when the peer
+negotiates h2 — `sandhi_conn_alpn_is_h2(conn)` returns the real negotiated
+protocol off the conn struct — it runs the preface/SETTINGS exchange and caches
+an h2 connection in the pool; otherwise it uses HTTP/1.1. So you normally don't
+touch the manual path at all.
 
-Until that wire-up lands, `sandhi_conn_alpn_is_h2(conn)` returns 0 for every
-live connection, and auto-selection correctly degrades to HTTP/1.1. The h2 code
-is fully exercised in `tests/h2.tcyr` against synthetic byte streams — frames,
-HPACK, preface/settings exchange, request/response — so the path is ready to
-go live the moment the wire-up lands.
+Reach for it when you've established an h2-speaking connection some other way (an
+h2c upgrade, a test harness with pre-negotiated ALPN, a local h2 proxy) and want
+to drive frames / HPACK directly. The h2 stack is fully exercised in
+`tests/h2.tcyr` (frames, HPACK, preface/SETTINGS, request/response) and fires
+end-to-end over live TLS via the auto path.
 
 ## Manual h2 path
 

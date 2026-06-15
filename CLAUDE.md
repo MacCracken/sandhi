@@ -21,7 +21,7 @@
 
 Be the one place AGNOS consumers go for service-to-service communication — HTTP client + JSON-RPC + WebSocket + TLS policy + service discovery — composed cleanly on top of the thin stdlib primitives.
 
-Stdlib carries the primitives; sandhi carries the patterns. Same relationship sakshi has to tracing, mabda to GPU, sankoch to compression. Scaffolded as a sibling crate; fold-into-stdlib target is the **v5.7.0 clean-break fold** per [ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md) — revised from the original "before v5.6.x closeout" plan once the alias-window tradeoffs got concrete.
+Stdlib carries the primitives; sandhi carries the patterns. Same relationship sakshi has to tracing, mabda to GPU, sankoch to compression. Scaffolded as a sibling crate; **folded into stdlib at the v5.7.0 clean-break fold (sandhi 1.0.0)** per [ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md). Now in **post-fold maintenance** — patches land here first, `dist/sandhi.cyr` regenerates, and a small cyrius slot refreshes `lib/sandhi.cyr`.
 
 ## Current State
 
@@ -88,13 +88,14 @@ Module responsibilities (file list in `state.md`):
 4. Update `CHANGELOG.md` and `docs/development/state.md` if milestone boundary crossed
 5. Version bump only at milestone close
 
-### Fold-into-stdlib preparation
+### Fold-into-stdlib (completed at 1.0.0 / Cyrius v5.7.0)
 
-When the public API stabilizes and consumer pins are all green:
-1. Coordinate with cyrius agent to schedule the fold into a specific v5.6.YY patch
-2. `cyrius distlib` → verify `dist/sandhi.cyr` is self-contained
-3. Consumers switch from `[deps.sandhi]` git-pin to stdlib include
-4. `lib/http_server.cyr` stdlib entry retires (aliases → sandhi::server)
+The fold shipped — a **clean break, no alias window** (ADR 0002): cyrius deleted
+`lib/http_server.cyr` and added `lib/sandhi.cyr` (vendored from `dist/sandhi.cyr`)
+in the same release; consumers `include "lib/sandhi.cyr"` and dropped their
+`[deps.sandhi]` pins. Post-fold, the ongoing process is just: regenerate
+`dist/sandhi.cyr` via `cyrius distlib` each release, and a small cyrius-side slot
+refreshes `lib/sandhi.cyr` from it. (Kept here as the procedure, not pending work.)
 
 ### Closeout Pass (before minor/major bump)
 
@@ -123,7 +124,7 @@ When the public API stabilizes and consumer pins are all green:
 - Do not grow the public surface speculatively — wait for a second consumer asking for the same thing before generalizing.
 - Do not inline volatile state in this file — `docs/development/state.md` is the home for that.
 - Do not bypass `cyrius build` with raw `cycc` invocations.
-- **Public surface frozen at 0.9.2.** No new public verbs land between 0.9.2 and the v5.7.0 fold (1.0.0). The fold ships sandhi into stdlib's `lib/sandhi.cyr` permanently — every name in the public surface at fold-time becomes a permanent stdlib API. Bug fixes and internal refactors are fine; new verbs are not. If a consumer asks for something post-0.9.2, it lands as a 1.0.x stdlib patch after fold, not as 0.9.x.
+- **Public surface — freeze lapsed post-fold.** The 0.9.2 → 1.0.0 surface freeze (ADR 0005) ended at the v5.7.0 fold; the surface is **no longer frozen**. Post-fold, new public verbs land as ordinary patches (e.g. 1.4.6/1.4.7/1.4.9 TLS-policy + server verbs, 1.5.5 mDNS multicast resolver). Keep the surface **small and earned** — every new verb ships permanently into stdlib's `lib/sandhi.cyr`, so wait for a real consumer ask before generalizing, and prefer a sibling crate over ballooning sandhi (the small-surface discipline, not a hard freeze).
 
 ## Cyrius Conventions
 
@@ -146,7 +147,7 @@ When the public API stabilizes and consumer pins are all green:
 - [`docs/architecture/`](docs/architecture/) — non-obvious constraints and quirks
 - [`docs/guides/`](docs/guides/) — task-oriented how-tos
 - [`docs/examples/`](docs/examples/) — runnable examples
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — milestone sequence toward fold-into-stdlib
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — open / remaining post-fold work (shipped history lives in `CHANGELOG.md`)
 - [`docs/development/state.md`](docs/development/state.md) — live state snapshot
 - [`CHANGELOG.md`](CHANGELOG.md) — source of truth for all changes
 

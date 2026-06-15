@@ -38,12 +38,12 @@ var first_price = sandhi_json_get_string(sandhi_http_body(r),
 
 ## Known caveats
 
-- **HTTPS runtime currently blocked** (`2026-04-24-libssl-pthread-deadlock.md`). Real marketplaces are HTTPS. mela builds against the surface today; live round-trips wait for the libssl pthread-lock fix.
+- **HTTPS works end-to-end** — the original libssl-pthread / stdlib-TLS-init blocker resolved upstream (cyrius v5.6.39; native TLS is the no-flag default since 6.1.21), so live HTTPS marketplace round-trips work today (see [`archive/2026-04-24-libssl-pthread-deadlock.md`](archive/2026-04-24-libssl-pthread-deadlock.md)).
 - **JSON array navigation** (`path.N.field`) is not in sandhi today; mela gets string extraction + whole-body navigation. If marketplace shapes demand array traversal often, file as a sandhi follow-up — it's a small addition to `rpc/json.cyr`.
 
 ## Proposed mela roadmap entry
 
-> **Adopt `sandhi::http` + `sandhi::rpc::json` for marketplace API traffic.** Pin sandhi via `[deps.sandhi]` during the 5.6.x window; pin retires at the v5.7.0 fold. Reference: `sandhi/docs/issues/2026-04-24-mela-sandhi-marketplace.md`. **Blocked by**: stdlib TLS-init fix before live-HTTPS marketplace calls work.
+> **Adopt `sandhi::http` + `sandhi::rpc::json` for marketplace API traffic.** Pin sandhi via `[deps.sandhi]` during the 5.6.x window; pin retires at the v5.7.0 fold. Reference: `sandhi/docs/issues/2026-04-24-mela-sandhi-marketplace.md`.
 
 ## Log
 

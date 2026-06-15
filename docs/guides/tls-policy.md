@@ -70,18 +70,20 @@ if (conn == 0) {
 `use_tls = 0` ignores the policy (plain TCP). `use_tls = 1` honors the policy if
 it demands enforcement.
 
-## 0.9.0 fail-closed semantics
+## Fail-closed semantics
 
-Since 0.9.0, sandhi refuses connections when a policy demands enforcement we
-can't deliver today. `sandhi_tls_policy_enforcement_available()` returns `0`
-until sandhi-side wire-up of the stdlib SSL_CTX hook (`tls_connect_with_ctx_hook`,
-shipped at cyrius v5.6.40) lands in `src/tls_policy/apply.cyr`. The two
-upstream blockers this once tracked both cleared 2026-04-25 — see
-`docs/issues/archive/2026-04-24-libssl-pthread-deadlock.md` and
-`docs/issues/archive/2026-04-24-stdlib-tls-alpn-hook.md`.
+When a policy demands enforcement the active TLS backend can't deliver, sandhi
+**refuses** the connection rather than silently downgrading to a policy-unaware
+one. `sandhi_tls_policy_enforcement_available()` is **backend-aware**:
 
-So any of `_new_pinned()`, `_new_mtls()`, `_new_trust_store()` applied via
-`sandhi_conn_open_with_policy()` returns `0` today. Check the classification:
+- **SPKI pinning** (`_new_pinned()`) is backend-agnostic and enforced on the
+  **native** default backend (`sandhi_tls_policy_pin_available()` → 1).
+- **Trust-store / mTLS** (`_new_trust_store()` / `_new_mtls()`) enforce on the
+  **libssl** backend only; on native they **fail closed** until cyrius ships
+  native `SSL_CTX_*` equivalents in `lib/tls_native.cyr`.
+
+When a policy's enforcement is unavailable on the active backend,
+`sandhi_conn_open_with_policy()` returns `0`. Check the classification:
 
 ```
 var conn = sandhi_conn_open_with_policy(addr, port, 1, sni_host, pinned_policy);
@@ -92,18 +94,14 @@ if (conn == 0) {
 }
 ```
 
-Before 0.9.0, enforcement-unavailable silently fell through to the default TLS
-path — a policy-unaware connection. That surface-only-shipped scaffolding mode
-is gone. If you want the old "best effort default" behavior, pass
-`sandhi_tls_policy_new_default()` explicitly — it has no enforcement
-requirements.
+sandhi never silently downgrades an enforcing policy to a policy-unaware
+connection. If you want best-effort default TLS with no enforcement requirement,
+pass `sandhi_tls_policy_new_default()` explicitly.
 
-## Default policy still works
+## Default policy
 
 For plain HTTPS (no pinning, no mTLS, no custom CA), the default policy goes
-through stdlib `tls_connect` untouched. Once libssl-pthread-deadlock clears,
-standard HTTPS starts working; pinning/mtls/trust-store policies remain
-fail-closed until their own enforcement path wires up.
+through stdlib `tls_connect` untouched and works on the native default backend.
 
 ## Constant-time fingerprint compare
 
@@ -121,6 +119,6 @@ compares should always be constant-time on principle.
 - `sandhi_fp_encode_bytes(bytes, nbytes)` — raw digest → lowercase hex.
 - `sandhi_fp_eq(a, b)` — constant-time equality.
 
-Extracting SPKI bytes from a peer cert requires OpenSSL symbols stdlib `tls.cyr`
-does not currently resolve (`X509_get_pubkey`, `i2d_PUBKEY`,
-`SSL_get_peer_certificate`) — that's part of the enforcement-wire-up pass.
+SPKI bytes are read from the peer cert via stdlib `tls_get_peer_spki_der`
+(backend-agnostic since 1.4.2), so SPKI pinning is enforced on the native
+default backend.

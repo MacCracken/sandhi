@@ -89,7 +89,7 @@ map at `SANDHI_POOL_OFF_H2_MAP = 32`.
   - Test-file split (`sandhi.tcyr` / `h2.tcyr`) became necessary
     mid-Bite-2 when HPACK pushed the per-program fixup cap. Fine
     outcome, but an unexpected mid-release detour — see
-    [docs/proposals/2026-04-24-cyrius-fixup-table-cap.md](../proposals/2026-04-24-cyrius-fixup-table-cap.md).
+    [docs/proposals/2026-04-24-cyrius-fixup-table-cap.md](../proposals/done/2026-04-24-cyrius-fixup-table-cap.md).
   - Live h2 talk was gated on the libssl-pthread-deadlock blocker.
     The protocol stack shipped fully tested against synthetic byte
     streams but couldn't exercise against a real peer. The 0.8.0

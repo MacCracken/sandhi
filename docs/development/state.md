@@ -6,19 +6,19 @@
 
 **1.5.5** — 2026-06-15. **Batch A3 — opt-in multicast (QM) mDNS resolver, done right (no pin change, stays 6.2.7).** Redoes the 1.5.4 A3 attempt that was reverted for a connect()-source-filter blocker (one connected socket → the kernel drops mDNS answers, which come from the responder's IP not the group). **Fix: a two-socket split** — RX is an UNCONNECTED `SO_REUSEPORT` + bound-5353 + `net_join_multicast` socket (`sock_recv`/`sys_read` delivers from any source, so it sees the answer); TX is connected, send-only. Composes cyrius 6.2.7's multicast primitives **without** the `sock_sendto`/`sock_recvfrom` the filing had requested. **+3 public verbs** (`sandhi_discovery_local_mc_resolver_a` / `_mc_resolver` / `_mc_available`); the rx/recv are factored as `_sandhi_local_mc_rx_open(group, port, iface)` + `_sandhi_local_mc_recv_match(a, fd, expected_id)` so the live test drives the real receive code. QU unicast resolver stays the default fast path (builder refactored to `_sandhi_local_build_query_cls(…, qclass_hi)`); on agnos the helpers return -1 → resolver degrades to a clean miss. **Verified live** by a **control-calibrated hard gate** (`discovery/local/mc_qm`): a plain control socket proves the env delivers loopback multicast, and then the resolver's real `_sandhi_local_mc_rx_open` MUST receive the looped synthetic answer too (else RED) — skips only where the control also can't. Confirmed green live + RED under a negative control that re-injects the connect()-on-rx bug. mDNS filing resolved + archived. **Verified**: **1001 assertions green** (449 + 167 + 343 + 42); `_server_async_smoke` 16/16; lint 0/0; `cyrius fmt --check` clean; aarch64 + agnos builds green; `dist/sandhi.cyr` regenerated at v1.5.5. *(Companion still open: the pre-existing QU resolver shares the connect()-filter shape — its real-responder receive is unverified, flagged for a live-network check.)*
 
-_(1.5.4 — 2026-06-15 — cyrius pin `6.2.6 → 6.2.7`; AGNOS build cascade RESOLVED (`cyrius build --agnos` produces a valid agnos ELF — `thread.cyr` via the clean deps re-resolve + `async.cyr` serial agnos peer). A 1.5.4 A3 mDNS attempt was reverted for a connect()-source-filter bug (redone correctly at 1.5.5). Full detail in CHANGELOG [1.5.4] + the Shipped log.)_
+_(1.5.4 — 2026-06-15 — cyrius pin `6.2.6 → 6.2.7`; AGNOS build cascade RESOLVED (`cyrius build --agnos` produces a valid agnos ELF — `thread.cyr` via the clean deps re-resolve + `async.cyr` serial agnos peer). A 1.5.4 A3 mDNS attempt was reverted for a connect()-source-filter bug (redone correctly at 1.5.5). Full detail in CHANGELOG [1.5.4].)_
 
-_(1.5.3 — 2026-06-15 — Batch A2: async-server arena-aware runtime. `sandhi_server_run_async` adopted `async_new_in(arena)` (the `async_new_in` primitive had already landed at cyrius v6.1.22) → residual ~32 B/conn leak eliminated; + `async_spawn`-return guard. Full detail in CHANGELOG [1.5.3] + the Shipped log.)_
+_(1.5.3 — 2026-06-15 — Batch A2: async-server arena-aware runtime. `sandhi_server_run_async` adopted `async_new_in(arena)` (the `async_new_in` primitive had already landed at cyrius v6.1.22) → residual ~32 B/conn leak eliminated; + `async_spawn`-return guard. Full detail in CHANGELOG [1.5.3].)_
 
-_(1.5.2 — 2026-06-15 — Batch C2: AGNOS DNS-entropy gap. Swapped the DNS TXID seed from hand-rolled `/dev/urandom` bare-syscall-numbers to the portable stdlib `sys_getrandom` selector primitive. Full detail in CHANGELOG [1.5.2] + the Shipped log.)_
+_(1.5.2 — 2026-06-15 — Batch C2: AGNOS DNS-entropy gap. Swapped the DNS TXID seed from hand-rolled `/dev/urandom` bare-syscall-numbers to the portable stdlib `sys_getrandom` selector primitive. Full detail in CHANGELOG [1.5.2].)_
 
-_(1.5.1 — 2026-06-15 — Batch C1: AGNOS socket-backend gap. Wrapped sandhi's raw socket syscalls (`src/http/conn.cyr`, `src/server/mod.cyr`) in `#ifndef CYRIUS_TARGET_AGNOS` so `cyrius build --agnos` compiles; Linux/macOS proven byte-identical. Full detail in CHANGELOG [1.5.1] + the Shipped log.)_
+_(1.5.1 — 2026-06-15 — Batch C1: AGNOS socket-backend gap. Wrapped sandhi's raw socket syscalls (`src/http/conn.cyr`, `src/server/mod.cyr`) in `#ifndef CYRIUS_TARGET_AGNOS` so `cyrius build --agnos` compiles; Linux/macOS proven byte-identical. Full detail in CHANGELOG [1.5.1].)_
 
-_(1.5.0 — 2026-06-14 — opened the 1.5.x arc: cyrius pin `6.2.1 → 6.2.6` + the aarch64 `bayan` cross-build defect fixed upstream + resolved-issue backlog archived. Full detail in CHANGELOG [1.5.0] + the Shipped log.)_
+_(1.5.0 — 2026-06-14 — opened the 1.5.x arc: cyrius pin `6.2.1 → 6.2.6` + the aarch64 `bayan` cross-build defect fixed upstream + resolved-issue backlog archived. Full detail in CHANGELOG [1.5.0].)_
 
 _Current release only — this file is the live snapshot. Full per-release
-history (1.4.11 ← … ← 0.1.0): [`../../CHANGELOG.md`](../../CHANGELOG.md)
-and the Shipped log in [`roadmap.md`](roadmap.md)._
+history (1.5.5 ← … ← 0.1.0): [`../../CHANGELOG.md`](../../CHANGELOG.md).
+Remaining work: [`roadmap.md`](roadmap.md)._
 
 ## Toolchain
 

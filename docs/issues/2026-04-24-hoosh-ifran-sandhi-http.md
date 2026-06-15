@@ -44,13 +44,13 @@ var reply = sandhi_json_get_string(sandhi_http_body(r),
 
 ## Known caveats
 
-- **HTTPS runtime currently blocked** (`2026-04-24-libssl-pthread-deadlock.md`). Every production LLM provider uses HTTPS. hoosh / ifran can build against the sandhi surface and test against a local plain-HTTP mock (`programs/http-probe.cyr` shape) while the libssl pthread-lock fix lands — the API doesn't change when TLS starts working.
+- **HTTPS works end-to-end** — the original libssl-pthread / stdlib-TLS-init blocker resolved upstream (cyrius v5.6.39; native TLS is the no-flag default since 6.1.21), so live HTTPS to production LLM providers works today (see [`archive/2026-04-24-libssl-pthread-deadlock.md`](archive/2026-04-24-libssl-pthread-deadlock.md)).
 - **JSON array navigation** (`path.0.field`) isn't yet in `sandhi_json_get_string`. Consumers handle arrays either by `get_string` + manual substring scan, or by pre-built array fragments. If a second LLM-provider consumer needs array navigation, we'll add it.
 - **Streaming (SSE)** deferred to sandhi M3.5. Chunked responses decode correctly today; SSE-as-iterator-callbacks awaits a consumer explicitly asking.
 
 ## Proposed roadmap entry (drop into both hoosh and ifran)
 
-> **Adopt `sandhi::http` + `sandhi::rpc::json` for provider-routing HTTP traffic.** Replace any direct `lib/http.cyr` usage (GET-only, HTTP/1.0, no HTTPS) with sandhi's full client surface. Use `sandhi::http::headers` for auth / org / user-agent. Pin sandhi via `[deps.sandhi]` during the 5.6.x window; pin retires at the v5.7.0 fold. Reference: `sandhi/docs/issues/2026-04-24-hoosh-ifran-sandhi-http.md`. **Blocked by**: stdlib TLS-init fix before live-HTTPS round-trips pass.
+> **Adopt `sandhi::http` + `sandhi::rpc::json` for provider-routing HTTP traffic.** Replace any direct `lib/http.cyr` usage (GET-only, HTTP/1.0, no HTTPS) with sandhi's full client surface. Use `sandhi::http::headers` for auth / org / user-agent. Pin sandhi via `[deps.sandhi]` during the 5.6.x window; pin retires at the v5.7.0 fold. Reference: `sandhi/docs/issues/2026-04-24-hoosh-ifran-sandhi-http.md`.
 
 ## Log
 

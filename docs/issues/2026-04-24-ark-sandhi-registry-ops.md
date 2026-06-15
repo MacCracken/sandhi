@@ -43,12 +43,12 @@ var version = sandhi_json_get_string(sandhi_http_body(rr), "latest.version");
 
 ## Known caveats
 
-- **HTTPS runtime currently blocked** (`2026-04-24-libssl-pthread-deadlock.md`). Production registries are HTTPS; ark can build against the sandhi surface while the libssl pthread-lock fix lands. Local-mirror plain-HTTP flows work today.
+- **HTTPS works end-to-end** — the original libssl-pthread / stdlib-TLS-init blocker resolved upstream (cyrius v5.6.39; native TLS is the no-flag default since 6.1.21), so live HTTPS registry round-trips work today (see [`archive/2026-04-24-libssl-pthread-deadlock.md`](archive/2026-04-24-libssl-pthread-deadlock.md)).
 - **Large package payloads** — same buffer-size caveat as sit. Typical package manifests and tarballs under a few MB fit in the 256 KB default; larger payloads would need the sandhi streaming / configurable-buffer enhancement to land first.
 
 ## Proposed ark roadmap entry
 
-> **Adopt `sandhi::http` + `sandhi::rpc::json` for remote registry ops.** Use `sandhi_http_*` for publish / resolve / yank / fetch; JSON marshaling via `sandhi::rpc::json`; auth via `sandhi::http::headers`. Pin sandhi via `[deps.sandhi]` during the 5.6.x window; pin retires at the v5.7.0 fold. Reference: `sandhi/docs/issues/2026-04-24-ark-sandhi-registry-ops.md`. **Blocked by**: stdlib TLS-init fix before live-HTTPS registry round-trips pass.
+> **Adopt `sandhi::http` + `sandhi::rpc::json` for remote registry ops.** Use `sandhi_http_*` for publish / resolve / yank / fetch; JSON marshaling via `sandhi::rpc::json`; auth via `sandhi::http::headers`. Pin sandhi via `[deps.sandhi]` during the 5.6.x window; pin retires at the v5.7.0 fold. Reference: `sandhi/docs/issues/2026-04-24-ark-sandhi-registry-ops.md`.
 
 ## Log
 

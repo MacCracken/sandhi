@@ -75,18 +75,18 @@ caveats were retired by **cyrius 6.1.19** (pinned at 1.4.5):
   (Verified: 6/6 sequential `sandhi_http_get` to example.com on *both*
   backends, no crash.)
 
-The one remaining reason a connection still implies libssl: TLS **policy**
-enforcement (cert pinning / mTLS / trust-store in `tls_policy/apply.cyr`)
-still resolves several `SSL_CTX_*` symbols via `tls_dlsym` (libssl-only)
-and is not yet wired for the native backend. Plain HTTPS (no custom
-policy) is the native-default path; policy-bearing connections still use
-libssl.
+The one remaining reason a connection can still imply libssl: **trust-store /
+mTLS** policy enforcement in `tls_policy/apply.cyr` still resolves several
+`SSL_CTX_*` symbols via `tls_dlsym` (libssl-only) and is not yet wired for the
+native backend. SPKI **cert pinning** is backend-agnostic (reads the peer SPKI
+via stdlib `tls_get_peer_spki_der`) and is enforced on native. Plain HTTPS and
+pinned policies run native-default; trust-store / mTLS policies still use libssl.
 
 ## Exit criteria for full libssl retirement
 
 1. ~~Upstream native-handshake gap closed~~ ✅ cyrius 6.1.19.
-2. TLS policy enforcement (pinning / mTLS / trust-store) wired for the
-   native backend — **the only remaining blocker.**
+2. Trust-store / mTLS policy enforcement wired for the native backend —
+   **the only remaining blocker** (SPKI pinning already is).
 3. ~~Upstream brk/fdlopen allocator fix~~ ✅ cyrius 6.1.19 (anonymous-mmap
    heap) — the residual libssl opt-in is no longer a process-killer.
 
