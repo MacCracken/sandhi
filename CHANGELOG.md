@@ -4,6 +4,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.3] — 2026-06-15
+
+**WebDriver / Appium / MCP RPC can now carry a TLS policy — endpoint-keyed
+default policy registry.** cyrius pin **6.2.10 → 6.2.11**. Closes
+[`2026-06-15-yantra-sandhi-wd-rpc-no-tls-policy.md`](docs/issues/archive/2026-06-15-yantra-sandhi-wd-rpc-no-tls-policy.md)
+(filed by yantra M8). sandhi exposed a rich TLS-policy API attachable to an HTTP
+request via `sandhi_http_options_tls_policy`, but the RPC convenience verbs
+(`sandhi_wd_*` / `sandhi_ap_*` / `sandhi_rpc_mcp_*`) took only a `base_url` and
+built their request internally with no options — so a consumer driving a *remote*
+WebDriver grid / Appium cloud over HTTPS could pin only the session-create POST it
+issued itself; every subsequent per-action call fell back to default trust. A
+half-pinned session is not a pinned session.
+
+Resolution is **option (2)** from the issue — a single place to set the policy per
+endpoint, so consumers can't accidentally leave one verb unpinned, with **no new
+`_opts` verb per dialect call** (which would have ballooned the public surface
+against the small-surface discipline).
+
+### Added — rpc/dispatch (`src/rpc/dispatch.cyr`)
+
+- **Endpoint-keyed default TLS policy registry** (+4 public verbs):
+  - `sandhi_rpc_set_default_tls_policy(base_url, policy)` — register / replace the
+    default policy for an endpoint (policy `0` clears). Returns `SANDHI_OK`, or
+    `SANDHI_ERR_INTERNAL` on OOM / table-full (cap 16 endpoints).
+  - `sandhi_rpc_clear_default_tls_policy(base_url)` — remove one (exact key).
+  - `sandhi_rpc_get_default_tls_policy(base_url)` — exact-match inspect getter.
+  - `sandhi_rpc_clear_all_default_tls_policy()` — drop all (test / teardown).
+- Per-call resolution is **longest-prefix match** with a path boundary (so
+  `host:444` does not falsely match `host:4444/…`). Every RPC call whose URL falls
+  under a registered `base_url` opens through the policy — pin / mTLS / trust-store
+  enforced, conn **not** pooled — identical semantics to
+  `sandhi_http_options_tls_policy`. Plain-HTTP URLs are resolved scheme-agnostically
+  but the HTTP layer ignores a policy on non-TLS, so the localhost-`127.0.0.1`
+  backends stay unaffected.
+- `_sandhi_rpc_http_send` reworked into `_sandhi_rpc_http_send_a(a, …)` — resolves
+  the endpoint policy and threads it through `_sandhi_http_dispatch_a` via an
+  options struct (the per-method `sandhi_http_*` verbs are thin wrappers over that
+  dispatch, so all methods get the opts path uniformly). With no policy resolved,
+  `opts == 0` → byte-identical to the pre-1.6.3 bare `sandhi_http_*` calls.
+- Registry storage is a lazily-allocated fixed-capacity table in `default_alloc()`
+  (policies + dup'd base-URL keys outlive any per-request arena — mirrors the
+  session-cache's allocator choice).
+
+### Changed — rpc/mcp (`src/rpc/mcp.cyr`)
+
+- `sandhi_rpc_mcp_stream_a` carries the resolved endpoint policy onto the long-lived
+  SSE channel too (via `sandhi_http_stream_opts_a`), so a pinned MCP endpoint stays
+  pinned for its notification stream, not just its unary calls.
+
+### Tests
+
+- `tests/rpc.tcyr` **42 → 63** (+21): registry set/get/replace, longest-prefix
+  resolution, the host-boundary false-match guard, scheme-agnostic resolution,
+  clear / clear-all / nested-survives-sibling-clear, and the 16-endpoint cap +
+  replace-at-cap path. Suite total **1002 → 1023**.
+
+### Toolchain
+
+- Cyrius pin **6.2.10 → 6.2.11** (clean deps re-resolve). No new cyrius primitive
+  required — the fix composes the existing `sandhi_http_options_tls_policy` /
+  `_sandhi_http_dispatch_a` / `sandhi_http_stream_opts_a` surface.
+
 ## [1.6.2] — 2026-06-15
 
 **macOS transport port completed — IPv6 + server listen socket (compose cyrius

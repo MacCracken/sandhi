@@ -70,6 +70,49 @@ if (conn == 0) {
 `use_tls = 0` ignores the policy (plain TCP). `use_tls = 1` honors the policy if
 it demands enforcement.
 
+## Applying to a high-level HTTP request
+
+Attach the policy to an options struct; the request opens through it (HTTPS only —
+a policy on a plain-HTTP URL is ignored). Policy-bound connections are single-use
+(not pooled).
+
+```
+var opts = sandhi_http_options_new();
+sandhi_http_options_tls_policy(opts, pinned_policy);
+var r = sandhi_http_get_opts(url, 0, opts);
+```
+
+## Applying to RPC (WebDriver / Appium / MCP)
+
+The RPC convenience verbs (`sandhi_wd_*`, `sandhi_ap_*`, `sandhi_rpc_mcp_*`) take
+only a `base_url` — they have no per-call options argument. To pin a *remote*
+grid / cloud endpoint, register a **default policy keyed by the endpoint base URL**
+once; every subsequent RPC call whose URL falls under that base inherits it
+(longest-prefix match, path-boundary-aware). This guarantees no per-action call is
+left unpinned.
+
+```
+# Register once (e.g. after verifying a sigil-signed pin descriptor).
+sandhi_rpc_set_default_tls_policy("https://grid.example/wd/hub", pinned_policy);
+
+# Every per-action call now opens through `pinned_policy`:
+var sess = sandhi_wd_new_session("https://grid.example/wd/hub", caps_json);
+var sid  = sandhi_wd_extract_session_id(sess);
+sandhi_wd_navigate_to("https://grid.example/wd/hub", sid, "https://target.example");
+sandhi_wd_find_element("https://grid.example/wd/hub", sid, "css selector", "#go");
+# … all pinned, including sandhi_rpc_mcp_stream's SSE channel.
+
+sandhi_rpc_clear_default_tls_policy("https://grid.example/wd/hub");  # when done
+```
+
+Same enforcement semantics as a request-attached policy: pin / mTLS / trust-store
+enforced, conn not pooled, fail-closed if enforcement is unavailable. Plain-HTTP
+endpoints (e.g. `http://127.0.0.1:4444` local drivers) are unaffected — the HTTP
+layer ignores a policy when there is no TLS to enforce. Registry getters:
+`sandhi_rpc_get_default_tls_policy(base_url)` (exact match) and
+`sandhi_rpc_clear_all_default_tls_policy()`. Up to 16 distinct endpoints; `set`
+returns `SANDHI_ERR_INTERNAL` when full.
+
 ## Fail-closed semantics
 
 When a policy demands enforcement the active TLS backend can't deliver, sandhi

@@ -151,6 +151,17 @@ fn sandhi_rpc_mcp_stream_a(a, endpoint_url, method_name, params_json, cb, ctx): 
     if (headers == 0) { return _sandhi_stream_result_a(a, 0, 0, SANDHI_ERR_INTERNAL, 0); }
     sandhi_headers_set_a(a, headers, "Content-Type", "application/json");
     sandhi_headers_set_a(a, headers, "Accept", "text/event-stream");
+    # 1.6.3: carry the endpoint-keyed default TLS policy (if any) onto
+    # the long-lived SSE stream too, so a pinned MCP endpoint stays
+    # pinned for its notification channel — not just its unary calls.
+    var policy = _sandhi_rpc_resolve_policy(endpoint_url);
+    if (policy != 0) {
+        var opts = sandhi_http_options_new_a(a);
+        if (opts != 0) {
+            sandhi_http_options_tls_policy(opts, policy);
+            return sandhi_http_stream_opts_a(a, endpoint_url, "POST", headers, body, body_len, cb, ctx, opts);
+        }
+    }
     return sandhi_http_stream_a(a, endpoint_url, "POST", headers, body, body_len, cb, ctx);
 }
 

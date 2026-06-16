@@ -216,6 +216,88 @@ fn test_mcp_id_is_monotonic() {
     return 0;
 }
 
+# ----------------------------------------------------------------
+# Endpoint-keyed default TLS policy (1.6.3) — the dispatch-layer
+# registry that lets sandhi_wd_* / sandhi_ap_* / sandhi_rpc_mcp_*
+# carry a pin/mTLS/trust policy without an _opts variant per verb.
+# Policies are opaque to the registry, so these tests use non-zero
+# sentinel handles rather than real sandhi_tls_policy structs.
+# ----------------------------------------------------------------
+fn test_rpc_default_tls_policy() {
+    sandhi_rpc_clear_all_default_tls_policy();
+    var pa = 4096;
+    var pb = 8192;
+    var pc = 12288;
+
+    assert_eq(_sandhi_rpc_resolve_policy("https://grid.example/session/x"), 0, "rpc/tls: empty registry resolves 0");
+
+    assert_eq(sandhi_rpc_set_default_tls_policy("https://grid.example", pa), SANDHI_OK, "rpc/tls: set ok");
+    assert_eq(sandhi_rpc_get_default_tls_policy("https://grid.example"), pa, "rpc/tls: exact get");
+    assert_eq(_sandhi_rpc_resolve_policy("https://grid.example/session/abc/url"), pa, "rpc/tls: per-action prefix resolve");
+
+    # Boundary: a longer host sharing a prefix must NOT match.
+    assert_eq(_sandhi_rpc_resolve_policy("https://grid.exampleX/session"), 0, "rpc/tls: boundary no false match");
+
+    # Replace updates in place (no new slot).
+    assert_eq(sandhi_rpc_set_default_tls_policy("https://grid.example", pb), SANDHI_OK, "rpc/tls: replace ok");
+    assert_eq(sandhi_rpc_get_default_tls_policy("https://grid.example"), pb, "rpc/tls: replace value");
+
+    # Longest-prefix wins; a non-nested path falls back to the shorter.
+    assert_eq(sandhi_rpc_set_default_tls_policy("https://grid.example/wd/hub", pc), SANDHI_OK, "rpc/tls: set nested");
+    assert_eq(_sandhi_rpc_resolve_policy("https://grid.example/wd/hub/session/x"), pc, "rpc/tls: longest-prefix wins");
+    assert_eq(_sandhi_rpc_resolve_policy("https://grid.example/other/x"), pb, "rpc/tls: shorter prefix for non-nested path");
+
+    # Resolution is scheme-agnostic (the HTTP layer ignores policy on
+    # plain HTTP — resolution still returns it).
+    assert_eq(sandhi_rpc_set_default_tls_policy("http://127.0.0.1:4444", pa), SANDHI_OK, "rpc/tls: set localhost");
+    assert_eq(_sandhi_rpc_resolve_policy("http://127.0.0.1:4444/session/x"), pa, "rpc/tls: localhost resolves");
+
+    # Clear one; nested sibling survives.
+    assert_eq(sandhi_rpc_clear_default_tls_policy("https://grid.example"), SANDHI_OK, "rpc/tls: clear ok");
+    assert_eq(sandhi_rpc_get_default_tls_policy("https://grid.example"), 0, "rpc/tls: cleared gone");
+    assert_eq(_sandhi_rpc_resolve_policy("https://grid.example/wd/hub/session/x"), pc, "rpc/tls: nested survives sibling clear");
+
+    # Clearing a missing endpoint errs.
+    assert_eq(sandhi_rpc_clear_default_tls_policy("https://nope.example"), SANDHI_ERR_INTERNAL, "rpc/tls: clear missing errs");
+
+    sandhi_rpc_clear_all_default_tls_policy();
+    assert_eq(_sandhi_rpc_resolve_policy("https://grid.example/wd/hub/session/x"), 0, "rpc/tls: clear-all empties");
+    return 0;
+}
+
+fn test_rpc_default_tls_policy_cap() {
+    sandhi_rpc_clear_all_default_tls_policy();
+    var buf[32];
+    var pfx = "https://h";
+    var pn = strlen(pfx);
+    var all_ok = 1;
+    var i = 0;
+    while (i < 16) {
+        memcpy(&buf, pfx, pn);
+        store8(&buf + pn, 65 + i);
+        store8(&buf + pn + 1, 0);
+        if (sandhi_rpc_set_default_tls_policy(&buf, 4096 + i) != SANDHI_OK) { all_ok = 0; }
+        i = i + 1;
+    }
+    assert_eq(all_ok, 1, "rpc/tls: 16 slots fill ok");
+
+    # 17th distinct endpoint -> table full.
+    memcpy(&buf, pfx, pn);
+    store8(&buf + pn, 65 + 16);
+    store8(&buf + pn + 1, 0);
+    assert_eq(sandhi_rpc_set_default_tls_policy(&buf, 9999), SANDHI_ERR_INTERNAL, "rpc/tls: table full errs");
+
+    # Replacing an existing endpoint still works at cap.
+    memcpy(&buf, pfx, pn);
+    store8(&buf + pn, 65);
+    store8(&buf + pn + 1, 0);
+    assert_eq(sandhi_rpc_set_default_tls_policy(&buf, 7777), SANDHI_OK, "rpc/tls: replace at cap ok");
+    assert_eq(sandhi_rpc_get_default_tls_policy(&buf), 7777, "rpc/tls: replace at cap value");
+
+    sandhi_rpc_clear_all_default_tls_policy();
+    return 0;
+}
+
 # ================================================================
 # Runner
 # ================================================================
@@ -264,6 +346,11 @@ fn main() {
     test_mcp_envelope_with_params();
     test_group("rpc/mcp/id_monotonic");
     test_mcp_id_is_monotonic();
+
+    test_group("rpc/tls/default_policy");
+    test_rpc_default_tls_policy();
+    test_group("rpc/tls/default_policy_cap");
+    test_rpc_default_tls_policy_cap();
 
     return assert_summary();
 }
