@@ -5,7 +5,7 @@ description = "Service-boundary layer for AGNOS — shared HTTP/TCP/TLS + servic
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sandhi"
 language = "cyrius"
-cyrius = "6.2.11"
+cyrius = "6.2.18"
 
 # sandhi (सन्धि — junction, connection, joining) is the service-boundary
 # layer for AGNOS. Named 2026-04-24 after extensive search confirmed the
@@ -89,6 +89,11 @@ modules = [
     "src/http/retry.cyr",
     "src/http/sse.cyr",
     "src/http/stream.cyr",
+    # download.cyr ordered after stream.cyr (reuses its buffer + chunked
+    # decoder helpers) and after client.cyr (reuses the redirect-follow
+    # security helpers). Binary body-sink streaming — the non-SSE
+    # counterpart to stream.cyr.
+    "src/http/download.cyr",
     "src/tls_policy/alpn.cyr",
     "src/tls_policy/mod.cyr",
     "src/rpc/json.cyr",

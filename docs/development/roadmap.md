@@ -12,8 +12,9 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.2.10** (1.6.1 + 1.6.2 completed the macOS transport port —
-v4 then v6/server — by composing stdlib; see state.md / CHANGELOG).
+is currently **cyrius 6.2.18** (1.6.3 added the endpoint-keyed RPC TLS-policy
+registry; 1.6.4 added the binary streaming download path + bumped the pin to
+latest — both pure composition, see state.md / CHANGELOG).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -118,6 +119,17 @@ the file it would touch.
 - **Client connection-pool thread-safety (per-pool mutex)** — the pool is
   single-threaded; multi-threaded clients would need a per-pool mutex. No
   consumer needs concurrent dispatch yet (`src/http/pool.cyr`).
+- **Streaming download to an fd / body-sink — SHIPPED 1.6.4** (`src/http/download.cyr`).
+  takumi's source-download ask (takumi `docs/adr/0006-source-download.md`) was
+  the trigger — a direct consumer need, so it shipped rather than waiting for a
+  *second* asker. `sandhi_http_download(url, fd, opts)` + the general
+  `sandhi_http_download_sink(url, cb, ctx, opts)` stream a binary body without
+  ever fully buffering it (resident memory bounded; the 128 MiB cap lifts),
+  composing the buffered path's redirect-follow + chunked/close decode. See
+  CHANGELOG [1.6.4]. *(Loose end for a future slot: a live-network gate proving a
+  large redirected download round-trips to disk — the 1.6.4 coverage is unit-level
+  + the shared decoders' existing suites; a `programs/_download_probe.cyr` against
+  a real tarball mirror would close it, mirroring `_https_native_loop_gate.cyr`.)*
 
 ## Wait-for-stdlib-prerequisite
 

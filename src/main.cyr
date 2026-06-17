@@ -36,6 +36,15 @@
 #   sandhi::http::stream    — streaming HTTP + WHATWG SSE parser +
 #                             incremental chunked decode + callback-per-
 #                             event dispatch.
+#   sandhi::http::download  — binary streaming download to an fd or
+#                             byte-sink (`sandhi_http_download` /
+#                             `_download_sink`). Reuses the redirect-
+#                             follow + chunked/close decode of the
+#                             buffered path but never buffers the whole
+#                             body — resident memory is bounded
+#                             regardless of artifact size. The non-SSE
+#                             counterpart to stream (carries binary
+#                             blobs the SSE path can't).
 #   sandhi::rpc             — JSON-RPC dialects (W3C WebDriver wire,
 #                             Appium extensions, MCP-over-HTTP + SSE).
 #                             Transport only per ADR 0001 — protocol

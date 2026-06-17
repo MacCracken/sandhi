@@ -19,6 +19,7 @@ include "src/http/pool.cyr"
 include "src/http/retry.cyr"
 include "src/http/sse.cyr"
 include "src/http/stream.cyr"
+include "src/http/download.cyr"
 include "src/rpc/json.cyr"
 include "src/rpc/dispatch.cyr"
 include "src/rpc/webdriver.cyr"
@@ -1901,6 +1902,87 @@ fn test_stream_chunked_decode_roundtrip() {
     return 0;
 }
 
+# ================================================================
+# download (binary body-sink streaming) — non-network unit coverage
+# ================================================================
+
+fn test_download_result() {
+    var r = _sandhi_dl_result_a(default_alloc(), 206, 4096, SANDHI_OK, 0);
+    assert_eq(sandhi_download_status(r), 206, "dl: status accessor");
+    assert_eq(sandhi_download_bytes(r), 4096, "dl: bytes accessor");
+    assert_eq(sandhi_download_err(r), SANDHI_OK, "dl: err accessor");
+    assert_eq(sandhi_download_stopped(r), 0, "dl: stopped accessor");
+    return 0;
+}
+
+# The fd-write sink loops over partial writes and returns 1 to continue,
+# (0 - 1) on a write error. Round-trip bytes through a real temp file.
+fn test_download_fd_sink() {
+    var path = "/tmp/sandhi_dl_sink_test.bin";
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    assert(fd >= 0, "dl: temp file opens");
+    var payload = "abcdefghij";
+    var v = _sandhi_dl_fd_sink(fd, payload, 10);
+    assert_eq(v, 1, "dl: fd-sink returns continue");
+    file_close(fd);
+
+    var buf = alloc(64);
+    var n = file_read_all(path, buf, 64);
+    assert_eq(n, 10, "dl: 10 bytes landed on disk");
+    store8(buf + 10, 0);
+    assert_streq(buf, "abcdefghij", "dl: fd-sink wrote exact bytes");
+
+    # A write to a bad fd surfaces as the (0 - 1) abort signal.
+    var bad = _sandhi_dl_fd_sink(0 - 1, payload, 10);
+    assert_eq(bad, 0 - 1, "dl: fd-sink reports write error");
+    return 0;
+}
+
+# Build a synthetic hop and exercise the redirect-target resolver: a 302
+# with a Location resolves to the next URL; a 200 is terminal; follow=0
+# is terminal; an https→http downgrade returns the cur_url sentinel; out
+# of hops is terminal.
+fn _test_dl_make_hop(status, location): i64 {
+    var a = default_alloc();
+    var hop = alloc_via(a, _SANDHI_DL_HOP_SIZE);
+    store64(hop + SANDHI_DL_HOP_STATUS, status);
+    var h = sandhi_headers_new_a(a);
+    if (location != 0) { sandhi_headers_set_a(a, h, "Location", location); }
+    store64(hop + SANDHI_DL_HOP_HEADERS, h);
+    return hop;
+}
+
+fn test_download_redirect_target() {
+    var a = default_alloc();
+    var cur = "http://a.example/x";
+
+    # 302 → absolute Location on a different authority resolves.
+    var hop302 = _test_dl_make_hop(302, "http://b.example/y");
+    var nxt = _sandhi_dl_redirect_target_a(a, hop302, cur, 1, 0, 10);
+    assert(nxt != 0, "dl: 302 yields a target");
+    assert(nxt != cur, "dl: 302 target is not the downgrade sentinel");
+
+    # 200 is terminal (no follow).
+    var hop200 = _test_dl_make_hop(200, 0);
+    assert_eq(_sandhi_dl_redirect_target_a(a, hop200, cur, 1, 0, 10), 0, "dl: 200 terminal");
+
+    # follow disabled → terminal even on a 302.
+    assert_eq(_sandhi_dl_redirect_target_a(a, hop302, cur, 0, 0, 10), 0, "dl: follow=0 terminal");
+
+    # Out of hops → terminal.
+    assert_eq(_sandhi_dl_redirect_target_a(a, hop302, cur, 1, 10, 10), 0, "dl: hops exhausted terminal");
+
+    # 302 with no Location → terminal.
+    var hopNoLoc = _test_dl_make_hop(302, 0);
+    assert_eq(_sandhi_dl_redirect_target_a(a, hopNoLoc, cur, 1, 0, 10), 0, "dl: 302 without Location terminal");
+
+    # https→http downgrade returns the cur_url sentinel (caller → ERR_TLS).
+    var curs = "https://a.example/x";
+    var hopDown = _test_dl_make_hop(302, "http://a.example/y");
+    assert_eq(_sandhi_dl_redirect_target_a(a, hopDown, curs, 1, 0, 10), curs, "dl: downgrade returns sentinel");
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -2356,6 +2438,15 @@ fn main() {
 
     test_group("stream/chunked_roundtrip");
     test_stream_chunked_decode_roundtrip();
+
+    test_group("download/result");
+    test_download_result();
+
+    test_group("download/fd_sink");
+    test_download_fd_sink();
+
+    test_group("download/redirect_target");
+    test_download_redirect_target();
 
     return assert_summary();
 }

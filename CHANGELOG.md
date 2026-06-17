@@ -4,6 +4,62 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.4] — 2026-06-17
+
+**Binary streaming download — `sandhi_http_download` / `_download_sink`.** cyrius
+pin **6.2.11 → 6.2.18**. First consumer: **takumi** source download (takumi
+`docs/adr/0006-source-download.md`). Promotes the parked *Streaming GET to an fd /
+body-sink* roadmap item (was held under wait-for-second-consumer; a direct
+consumer ask is the trigger).
+
+The buffered client (`sandhi_http_get_opts`) allocates the whole response body up
+front — so takumi capped source tarballs at 128 MiB in-memory to avoid exhausting
+the bump allocator. The only incremental path, `sandhi_http_stream*`, force-feeds
+every decoded chunk through the **SSE** parser, so it can carry only
+`text/event-stream` — not a binary artifact. takumi needed a *third* shape:
+stream a binary body to disk without ever holding it in memory.
+
+### Added — http/download (`src/http/download.cyr`, new module)
+
+- **`sandhi_http_download_sink(url, cb, ctx, opts)`** (+ `_a` arena variant) — the
+  primitive: streams the response body to a caller byte-sink
+  `cb(ctx, buf, len) -> int` (return `1` continue, `0` clean early-stop, `<0`
+  abort-with-error). The body is **never fully buffered** — decoded bytes are
+  flushed to the sink each pass and the fixed-size work buffers reset, so resident
+  memory is bounded regardless of artifact size (the 128 MiB cap lifts).
+- **`sandhi_http_download(url, fd, opts)`** (+ `_a` variant) — convenience wrapper
+  that writes straight to an open fd via an internal partial-write-looping sink.
+  takumi's call is `sandhi_http_download(url, tarball_fd, opts)`.
+- **Result struct** (`SANDHI_DOWNLOAD_RESULT_SIZE`, 32 B) + accessors
+  `sandhi_download_status` / `_bytes` / `_err` / `_stopped`.
+- **Reuses, does not fork:** the header drain + chunked decoder + buffer helpers
+  from `stream.cyr`, and the security-aware redirect-follow helpers from
+  `client.cyr` (https→http downgrade refused → `SANDHI_ERR_TLS`;
+  Authorization / Cookie / Proxy-Authorization stripped across authorities).
+  Honors the same timeout matrix + TLS-policy fields as the buffered client.
+- **Download-appropriate framing:** only a **2xx** final response streams to the
+  sink; any other final status (a 4xx, or an unfollowable 3xx) returns its code
+  with `err_kind = REMOTE` and writes **nothing** — a download never splatters an
+  error page into the destination. Chunked bodies decode incrementally; plain
+  bodies honor `Content-Length` as an early stop (so a keep-alive server that
+  ignores `Connection: close` can't hang) and otherwise read to EOF.
+
+### Changed — toolchain
+
+- cyrius pin **6.2.11 → 6.2.18** (clean deps re-resolve). No new cyrius primitive
+  needed — the download path is pure composition of the existing conn / stream /
+  client / tls-policy surface. All four `.tcyr` suites green on the new pin before
+  the feature landed.
+
+### Tests
+
+- `tests/sandhi.tcyr` **451 → 467** (+16): download-result accessors; the fd-write
+  sink round-tripped through a real temp file + its write-error signal; and the
+  redirect-target resolver across 302-follows / 200-terminal / follow-disabled /
+  hops-exhausted / no-Location / https→http-downgrade-sentinel cases. (The shared
+  chunked decoder + redirect-follow security semantics already carry dedicated
+  coverage in the stream + client suites.) Suite totals **1023 → 1039**.
+
 ## [1.6.3] — 2026-06-15
 
 **WebDriver / Appium / MCP RPC can now carry a TLS policy — endpoint-keyed
