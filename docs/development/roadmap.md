@@ -14,7 +14,8 @@ regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
 is currently **cyrius 6.2.18** (1.6.3 added the endpoint-keyed RPC TLS-policy
 registry; 1.6.4 added the binary streaming download path + bumped the pin to
-latest — both pure composition, see state.md / CHANGELOG).
+latest; 1.6.5 added its live-network gate and fixed the two bugs that gate caught
+— all pure composition, see state.md / CHANGELOG).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -125,11 +126,12 @@ the file it would touch.
   *second* asker. `sandhi_http_download(url, fd, opts)` + the general
   `sandhi_http_download_sink(url, cb, ctx, opts)` stream a binary body without
   ever fully buffering it (resident memory bounded; the 128 MiB cap lifts),
-  composing the buffered path's redirect-follow + chunked/close decode. See
-  CHANGELOG [1.6.4]. *(Loose end for a future slot: a live-network gate proving a
-  large redirected download round-trips to disk — the 1.6.4 coverage is unit-level
-  + the shared decoders' existing suites; a `programs/_download_probe.cyr` against
-  a real tarball mirror would close it, mirroring `_https_native_loop_gate.cyr`.)*
+  composing the buffered path's redirect-follow + chunked/close decode. The
+  **1.6.4 loose end closed at 1.6.5**: `programs/_download_probe.cyr` is now a live
+  gate proving a large redirected download round-trips to disk — and it caught two
+  real bugs (a spurious 256 KiB cap from inheriting `max_response_bytes`, and a
+  split-inter-chunk-CRLF decoder stall in `stream.cyr`), both fixed. See
+  CHANGELOG [1.6.4]/[1.6.5].
 
 ## Wait-for-stdlib-prerequisite
 

@@ -167,6 +167,17 @@ fn _sandhi_chunk_parse_size(sb): i64 {
     var size = 0;
     var seen_digit = 0;
     var i = 0;
+    # Skip a leading CRLF/LF left over from the previous chunk's trailing
+    # terminator when it arrives split across a buffer refill. The inline
+    # eat in _sandhi_stream_decode_chunked_into only fires when BOTH
+    # terminator bytes are already buffered; if the recv boundary lands
+    # mid-CRLF, the bytes linger at the head of the next size line. Without
+    # this skip the scan finds no hex digit, returns -1 ("need more")
+    # forever, and the buffer grows until it overflows (surfaced as a
+    # spurious PROTOCOL error on large chunked bodies). The skipped bytes
+    # are folded into the returned consumed-offset, so the caller drains
+    # them too.
+    while (i < n && (load8(p + i) == 13 || load8(p + i) == 10)) { i = i + 1; }
     var scanning = 1;
     while (scanning == 1 && i < n) {
         var c = load8(p + i);

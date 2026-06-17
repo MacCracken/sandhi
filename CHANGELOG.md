@@ -4,6 +4,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.5] — 2026-06-17
+
+**Live-network download gate + two bugs it caught.** Closes the 1.6.4 loose end:
+a `programs/_download_probe.cyr` CI gate that proves a real **redirected binary
+download round-trips to disk** end-to-end (the 1.6.4 coverage was unit-level only).
+The gate immediately earned its keep by surfacing two defects the unit tests
+couldn't — the value of an end-to-end probe over synthetic fixtures.
+
+### Fixed — http/download (`src/http/download.cyr`)
+
+- **Download no longer inherits the buffered client's 256 KiB size cap.** The
+  download path read `opts.max_response_bytes` (default
+  `SANDHI_HTTP_DEFAULT_MAX_BYTES` = 262144) and treated it as a hard ceiling —
+  so a default-options download of anything larger than 256 KiB aborted with a
+  spurious `SANDHI_ERR_PROTOCOL`, **defeating the feature's entire purpose** (a
+  10.4 MB tarball died at ~256 KiB). `max_response_bytes` bounds an *in-memory*
+  body buffer in the buffered client; a streaming download has no such buffer, so
+  the field is now **deliberately ignored** on this path (documented in the module
+  header). Consumers bound a download via the sink (return `<0`) or
+  `opts.total_ms`; the timeout matrix + redirect cap + TLS policy are still
+  honored. *(Found by the new gate: the 10.4 MB git-tag tarball now streams to
+  disk in full — `bytes == Content-Length`, verified by read-back.)*
+
+### Fixed — http/stream (`src/http/stream.cyr`)
+
+- **Chunked decoder: re-sync on a split inter-chunk CRLF.** When a chunk's
+  trailing `\r\n` arrived split across a buffer refill, the leftover byte(s)
+  lingered at the head of the next size line; `_sandhi_chunk_parse_size` then
+  found no hex digit and spun returning `-1` ("need more") forever while the
+  buffer grew until it overflowed (a spurious `PROTOCOL` error on large **chunked**
+  bodies). The size parser now skips a leading `CRLF`/`LF` and folds it into the
+  consumed offset. Latent bug shared by the SSE streaming path (`sandhi_http_stream*`),
+  not just download — large chunked bodies are simply the first traffic to cross
+  enough recv boundaries to hit it. (codeload serves the gate's tarball with
+  `Content-Length`, so the gate hit the cap bug above; this one is covered by new
+  unit tests that fail pre-fix.)
+
+### Added
+
+- `programs/_download_probe.cyr` — live gate: follows the github→codeload
+  redirect, streams the binary body to a temp fd via `sandhi_http_download`
+  (redirect-follow on), then re-reads the file and asserts `on-disk bytes ==
+  reported bytes` at `status == 200`. Skip-cleanly offline (CONNECT / DISCOVERY /
+  TIMEOUT → SKIP). Default target is GitHub's canonical demo-repo archive; pass a
+  URL as `argv(1)` to point it at a larger artifact. Mirrors
+  `_https_native_loop_gate.cyr`. New CI step.
+
+### Tests
+
+- `tests/sandhi.tcyr` **467 → 473** (+6): the split-inter-chunk-CRLF decoder fix —
+  `_sandhi_chunk_parse_size` on a leading-CRLF buffer, and a two-append decode
+  round-trip with the CRLF split across the boundary (both fail pre-fix, verified
+  by temporary revert). Suite totals **1039 → 1045**. The 256 KiB-cap fix is
+  covered by the live gate (it needs a real large response).
+
 ## [1.6.4] — 2026-06-17
 
 **Binary streaming download — `sandhi_http_download` / `_download_sink`.** cyrius

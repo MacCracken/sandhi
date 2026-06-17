@@ -1,0 +1,140 @@
+# Live-network gate: a real REDIRECTED binary download must round-trip
+# to disk via sandhi_http_download (1.6.4). Closes the 1.6.4 loose end —
+# the unit suite covers the result struct / fd-sink / redirect-target
+# resolver, but nothing proved the end-to-end wiring (redirect-follow +
+# chunked/close decode + write-to-fd) against a live server.
+#
+# Default target is GitHub's canonical demo-repo archive, which always
+# 302-redirects github.com -> codeload.github.com (a cross-authority
+# https->https hop, so it exercises the redirect-follow path), and whose
+# body is a binary gzip tarball the SSE stream path could not carry.
+# Pass a URL as argv(1) to point it at a larger artifact.
+#
+# Skip-cleanly when offline: a CONNECT / DISCOVERY / TIMEOUT err_kind
+# means the runner can't reach the host, so the gate SKIPs (exit 0)
+# rather than failing — mirrors _https_native_loop_gate.cyr.
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
+include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/http/download.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m, n) { syscall(1, 1, m, n); return 0; }
+fn sayc(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+# Read `path` back off disk in a loop, returning the total byte count
+# (proves the body actually landed, not just that the sink was called).
+fn _probe_disk_bytes(path): i64 {
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd < 0) { return 0 - 1; }
+    var scratch = alloc(65536);
+    var total = 0;
+    var going = 1;
+    while (going == 1) {
+        var n = file_read(fd, scratch, 65536);
+        if (n <= 0) { going = 0; }
+        else { total = total + n; }
+    }
+    file_close(fd);
+    return total;
+}
+
+fn main() {
+    alloc_init();
+    args_init();
+    var url = "https://github.com/octocat/Hello-World/archive/refs/heads/master.tar.gz";
+    if (argc() >= 2) { url = argv(1); }
+
+    sayc("backend: "); fmt_int(sandhi_tls_backend()); sayc("\n");
+    sayc("target: "); sayc(url); sayc("\n");
+
+    var opts = sandhi_http_options_new();
+    sandhi_http_options_follow_redirects(opts, 1);
+    sandhi_http_options_max_hops(opts, 5);
+    sandhi_http_options_connect_ms(opts, 5000);
+    sandhi_http_options_total_ms(opts, 30000);
+
+    var path = "/tmp/sandhi_download_probe.bin";
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (fd < 0) {
+        sayc("SKIP: cannot open temp file\n");
+        return 0;
+    }
+    var r = sandhi_http_download(url, fd, opts);
+    file_close(fd);
+
+    var status = sandhi_download_status(r);
+    var bytes = sandhi_download_bytes(r);
+    var err = sandhi_download_err(r);
+
+    # Offline runner — skip cleanly.
+    if (err == SANDHI_ERR_CONNECT || err == SANDHI_ERR_DISCOVERY || err == SANDHI_ERR_TIMEOUT) {
+        sayc("SKIP: target unreachable (offline): err="); fmt_int(err); sayc("\n");
+        return 0;
+    }
+
+    if (err != SANDHI_OK) {
+        sayc("FAIL: download err="); fmt_int(err); sayc("\n");
+        return 1;
+    }
+    if (status != 200) {
+        sayc("FAIL: final status="); fmt_int(status); sayc(" (expected 200 after redirect)\n");
+        return 1;
+    }
+    if (bytes <= 0) {
+        sayc("FAIL: zero bytes written\n");
+        return 1;
+    }
+
+    # The body must actually be on disk: re-read and match the count.
+    var disk = _probe_disk_bytes(path);
+    if (disk != bytes) {
+        sayc("FAIL: on-disk bytes="); fmt_int(disk);
+        sayc(" != reported bytes="); fmt_int(bytes); sayc("\n");
+        return 1;
+    }
+
+    sayc("PASS redirected binary download: status=200 bytes="); fmt_int(bytes);
+    sayc(" (round-tripped to disk)\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

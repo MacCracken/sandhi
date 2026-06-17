@@ -1902,6 +1902,43 @@ fn test_stream_chunked_decode_roundtrip() {
     return 0;
 }
 
+# A trailing inter-chunk CRLF that arrived split across a buffer refill
+# lingers at the head of the next size line; the parser must skip it and
+# still read the size, folding the CRLF into the consumed offset. (1.6.5
+# decoder robustness fix — without it the scan finds no digit and spins
+# returning -1 until the buffer overflows.)
+fn test_stream_chunk_parse_leading_crlf() {
+    var sb = _sandhi_sb_new(64);
+    var line = "\r\na\r\n";   # leftover CRLF + size 'a' (=10) + CRLF
+    _sandhi_sb_append(sb, line, strlen(line));
+    var sz = _sandhi_chunk_parse_size(sb);
+    assert_neq(sz, 0 - 1, "chunk: leading-CRLF size parses");
+    assert_eq(sz & 0xFFFFFFFF, 10, "chunk: size 'a'=10 past leading CRLF");
+    assert_eq((sz >> 32) & 0xFFFFFFFF, 5, "chunk: consumed leading CRLF + 'a\\r\\n' (5)");
+    return 0;
+}
+
+# Decode a two-chunk body where the CRLF after the FIRST chunk is split
+# across two appends ("...hello\r" then "\n6\r\n..."). Must decode the
+# full "hello world" across the boundary, not stall. Fails pre-1.6.5.
+fn test_stream_chunked_split_crlf_roundtrip() {
+    var in_sb = _sandhi_sb_new(256);
+    var out_sb = _sandhi_sb_new(256);
+    var state = _sandhi_chunk_state_new();
+    var p1 = "5\r\nhello\r";              # first chunk + only the CR of its CRLF
+    _sandhi_sb_append(in_sb, p1, strlen(p1));
+    _sandhi_stream_decode_chunked_into(in_sb, state, out_sb);
+    var p2 = "\n6\r\n world\r\n0\r\n\r\n";  # the LF + second chunk + terminal
+    _sandhi_sb_append(in_sb, p2, strlen(p2));
+    _sandhi_stream_decode_chunked_into(in_sb, state, out_sb);
+    assert_eq(_sandhi_chunk_done(state), 1, "chunk(split): terminal seen");
+    assert_eq(_sandhi_sb_len(out_sb), 11, "chunk(split): 11 bytes decoded");
+    var pp = _sandhi_sb_ptr(out_sb);
+    store8(pp + 11, 0);
+    assert_streq(pp, "hello world", "chunk(split): decoded across CRLF boundary");
+    return 0;
+}
+
 # ================================================================
 # download (binary body-sink streaming) — non-network unit coverage
 # ================================================================
@@ -2438,6 +2475,12 @@ fn main() {
 
     test_group("stream/chunked_roundtrip");
     test_stream_chunked_decode_roundtrip();
+
+    test_group("stream/chunk_parse_leading_crlf");
+    test_stream_chunk_parse_leading_crlf();
+
+    test_group("stream/chunked_split_crlf");
+    test_stream_chunked_split_crlf_roundtrip();
 
     test_group("download/result");
     test_download_result();
