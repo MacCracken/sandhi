@@ -21,8 +21,8 @@ at 1.0.0 / Cyrius v5.7.0 ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5
 Patches land here first; `dist/sandhi.cyr` is regenerated each release and a
 small cyrius slot re-folds it.
 
-Current: **1.6.0**, pinned to **Cyrius 6.2.8**. **1003 test assertions green**
-(451 sandhi + 167 h2 + 343 alloc + 42 rpc). Builds clean for x86_64, aarch64,
+Current: **1.6.5**, pinned to **Cyrius 6.2.18**. **1045 test assertions green**
+(473 sandhi + 167 h2 + 342 alloc + 63 rpc). Builds clean for x86_64, aarch64,
 and the **AGNOS** target.
 
 **TLS backend: native by default, no flag** (since Cyrius 6.1.21). `-D
@@ -66,6 +66,7 @@ syscall(60, exit_code);
 | `src/http/pool.cyr` | Connection pool — HTTP/1.1 keep-alive + HTTP/2 multiplex from the same struct |
 | `src/http/retry.cyr` | Retry-with-backoff wrappers for idempotent methods |
 | `src/http/stream.cyr` | Streaming HTTP + WHATWG SSE parser |
+| `src/http/download.cyr` | Binary streaming download to an fd or byte-sink — never buffers the whole body (resident memory bounded regardless of size); the non-SSE counterpart to `stream.cyr`. `sandhi_http_download` / `_download_sink` (1.6.4) |
 | `src/http/h2/*` | Full HTTP/2 stack: frames (RFC 7540), HPACK + Huffman (RFC 7541), connection lifecycle, request/response, dispatch |
 | `src/rpc/*` | JSON-RPC dialects: W3C WebDriver, Appium extensions, MCP-over-HTTP + SSE — transport only per [ADR 0001](docs/adr/0001-sandhi-is-a-composer-not-a-reimplementer.md) |
 | `src/discovery/*` | Service discovery: chain composition, daimon-backed resolver, mDNS — QU-bit unicast (default) + opt-in multicast (QM) resolver `sandhi_discovery_local_mc_resolver` (1.5.5, over Cyrius 6.2.7 multicast primitives) |
@@ -86,7 +87,7 @@ syscall(60, exit_code);
 - **[Server](docs/guides/server.md)** — minimal accept loop, request parsing, smuggling guards
 
 Examples — runnable Cyrius programs in [`docs/examples/`](docs/examples/):
-- [`01-simple-get.cyr`](docs/examples/01-simple-get.cyr) · [`02-post-json.cyr`](docs/examples/02-post-json.cyr) · [`03-server.cyr`](docs/examples/03-server.cyr) · [`04-sse-consumer.cyr`](docs/examples/04-sse-consumer.cyr)
+- [`01-simple-get.cyr`](docs/examples/01-simple-get.cyr) · [`02-post-json.cyr`](docs/examples/02-post-json.cyr) · [`03-server.cyr`](docs/examples/03-server.cyr) · [`04-sse-consumer.cyr`](docs/examples/04-sse-consumer.cyr) · [`05-download.cyr`](docs/examples/05-download.cyr)
 
 ## Architecture & decisions
 
@@ -111,6 +112,7 @@ Each AGNOS crate that sandhi serves has a coordination doc in [`docs/issues/`](d
 - **daimon** — MCP client ([doc](docs/issues/2026-04-24-daimon-sandhi-mcp-client.md)) + producer-side registry ([doc](docs/issues/2026-04-24-daimon-registry-endpoints.md))
 - **hoosh / ifran** — LLM-provider HTTP routing ([doc](docs/issues/2026-04-24-hoosh-ifran-sandhi-http.md))
 - **sit** — git-over-HTTP for remote clone/push/pull ([doc](docs/issues/2026-04-24-sit-sandhi-git-over-http.md))
+- **takumi** — source-tarball download (first consumer of the binary streaming download path, 1.6.4)
 - **ark** — remote registry ops ([doc](docs/issues/2026-04-24-ark-sandhi-registry-ops.md))
 - **mela** — marketplace API ([doc](docs/issues/2026-04-24-mela-sandhi-marketplace.md))
 - **vidya** — external-knowledge fetch ([doc](docs/issues/2026-04-24-vidya-sandhi-fetch.md))
@@ -134,10 +136,10 @@ end-to-end on the native backend. The last cyrius-side dependency closed at
 ```sh
 cyrius deps                                                 # resolve stdlib deps
 cyrius build programs/smoke.cyr build/sandhi-smoke          # smoke link proof (native, no flag)
-cyrius test  tests/sandhi.tcyr                              # core (449 assertions)
+cyrius test  tests/sandhi.tcyr                              # core (473 assertions)
 cyrius test  tests/h2.tcyr                                  # h2-specific (167 assertions)
-cyrius test  tests/alloc.tcyr                               # allocator / arena (343 assertions)
-cyrius test  tests/rpc.tcyr                                 # RPC dialects (42 assertions)
+cyrius test  tests/alloc.tcyr                               # allocator / arena (342 assertions)
+cyrius test  tests/rpc.tcyr                                 # RPC dialects (63 assertions)
 cyrius lint  src/*.cyr src/**/*.cyr                         # static checks (warn-as-fail in CI)
 CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke              # release-parity (native)
 cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr build/sandhi-smoke-libssl   # deprecated libssl opt-out

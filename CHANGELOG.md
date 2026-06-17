@@ -59,6 +59,17 @@ couldn't — the value of an end-to-end probe over synthetic fixtures.
   by temporary revert). Suite totals **1039 → 1045**. The 256 KiB-cap fix is
   covered by the live gate (it needs a real large response).
 
+### Docs
+
+- README refreshed to the current snapshot (1.6.5 / cyrius 6.2.18 / 1045
+  assertions; download module added to the map; takumi listed as the download
+  consumer) — snapshot only, per the README-is-not-a-fix-diary discipline.
+- `docs/examples/01`–`04` had stale include preambles (pre-1.4.6 `tls_policy`
+  ordering, missing `version_str` / `obs/prof` / `session_cache`) that no longer
+  compiled — their "Build:/Run:" instructions were broken. Regenerated all four
+  include blocks from the canonical `cyrius.cyml` module order; **all now build**.
+  Added `docs/examples/05-download.cyr` (download-to-fd, verified end-to-end).
+
 ## [1.6.4] — 2026-06-17
 
 **Binary streaming download — `sandhi_http_download` / `_download_sink`.** cyrius
