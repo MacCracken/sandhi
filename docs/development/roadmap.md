@@ -15,8 +15,10 @@ surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pi
 is currently **cyrius 6.2.19** (1.6.3 added the endpoint-keyed RPC TLS-policy
 registry; 1.6.4 added the binary streaming download path + bumped the pin to
 latest; 1.6.5 added its live-network gate and fixed the two bugs that gate caught;
-1.6.6 fixed the yeo-cy-test SIGPIPE server DoS + bumped the pin to 6.2.19 — all
-pure composition / sandhi-side, see state.md / CHANGELOG).
+1.6.6 fixed the yeo-cy-test SIGPIPE server DoS + bumped the pin to 6.2.19;
+1.6.7 added the SecureYeoman-driven server routing layer + thread-pool serve mode
+(`sandhi_server_run_pooled`) — all pure composition / sandhi-side, see state.md /
+CHANGELOG).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -121,23 +123,6 @@ the file it would touch.
 - **Client connection-pool thread-safety (per-pool mutex)** — the pool is
   single-threaded; multi-threaded clients would need a per-pool mutex. No
   consumer needs concurrent dispatch yet (`src/http/pool.cyr`).
-- **Server-side route table / dispatch** (`src/server/mod.cyr`) — first asker:
-  **yeo-cy-test** (SecureYeoman → Cyrius port probe). `sandhi_server_run`
-  dispatches to a single handler; there is no method+path route table, so every
-  consumer hand-rolls dispatch on top of `sandhi_server_get_method` /
-  `get_path` / `path_segment`. The probe built a small reference:
-  `route_match(req, pattern)` does segment-by-segment matching with `:name`
-  path-param capture (e.g. `/api/notes/:id`), exact literal segments, an
-  equal-segment-count rule (so `/api/notes` and `/api/notes/:id` don't collide),
-  and `req_param` / `req_param_int` accessors (`-1` on non-numeric → clean 400).
-  Lives in [`secureyeoman/yeo-cy-test/src/httpd.cyr`](../../../secureyeoman/yeo-cy-test/src/httpd.cyr)
-  as the shape to lift. This is the "routing … layers on top in later
-  milestones" item already noted in `src/server/mod.cyr`'s header; yeo-cy-test
-  is the consumer making it concrete. Full write-up:
-  [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md)
-  (§ "the HTTP server abstraction exists — it's sandhi"). Waits for a second
-  asker per ADR 0001, unless the SY port adopts sandhi server-side and needs it
-  directly (then it ships like the takumi download case).
 ### From yeo-cy-test (server adoption, 2026-06-17)
 
 yeo-cy-test ported its hand-rolled `httpd.cyr` onto `sandhi_server_*` (recv /
@@ -165,34 +150,33 @@ edges. Full write-up:
   runs a sandhi server on Darwin — or when the stdlib helper below lands (which
   closes it portably in one move). Until then a sandhi server on macOS is still
   SIGPIPE-vulnerable; flagged here so it isn't silently assumed covered.
-- 🔵 **Server-only use still drags the whole client + h2 + hpack + tls surface**
-  (~400 KB static `.bss` of h2/hpack/tls tables that `CYRIUS_DCE=1` can't
-  reclaim — it NOPs code but keeps `.bss`) when a consumer only calls
-  `sandhi_server_*`. Not a new ask — this is the **long-term bundled-libs →
-  individual-packages split**; a plaintext-HTTP server is a concrete consumer
-  that would benefit from a server package that doesn't pull the client/h2/tls
-  tables. Filed here as a data point for that work.
-- **Thread-pool / true-parallel serve mode** (`src/server/mod.cyr`) — first
-  asker: **yeo-cy-test** (SecureYeoman → Cyrius port probe). Both serve loops are
-  single-threaded: `sandhi_server_run` is single-flight (one connection at a
-  time) and `run_async` is cooperative/run-to-completion (SO_RCVTIMEO-bounded,
-  `max_conns` is a per-drain cap, not parallelism). Neither uses more than one
-  core, so a handler doing blocking/CPU-bound work (a DB call, crypto) serializes
-  every other in-flight request behind it. SecureYeoman's backend is axum on a
-  multi-threaded Tokio runtime, so the port needs real parallelism. Wanted: a
-  `sandhi_server_run_pooled(addr, port, handler, ctx, opts)` — a fixed
-  worker-thread pool (sized from `max_conns`) feeding the existing per-request
-  fns, so a slow/blocking handler ties up only its own worker. The per-request
-  fns already take an explicit buffer and allocate via the thread-safe `alloc`,
-  so they're pool-safe as-is; the missing piece is the pooled accept loop + a
-  bounded handoff channel. yeo-cy-test ships exactly this shape as the reference
-  (`thread.cyr` `thread_create` + bounded `chan_*` + per-worker buffer/`Req`) in
-  [`secureyeoman/yeo-cy-test/src/httpd.cyr`](../../../secureyeoman/yeo-cy-test/src/httpd.cyr)
-  (`httpd_serve` / `_httpd_worker`). Verified there: a slow client holding 2/4
-  workers leaves `/api/health` at ~10 ms; 250 concurrent POSTs complete with no
-  errors. Pairs with the route-table request above — together they're "the
-  server side a real service needs." Full write-up:
-  [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md).
+- **Server-side route table / dispatch — ✅ SHIPPED 1.6.7** (`src/server/mod.cyr`).
+  `sandhi_server_route_match` (segment match + `:name` capture, equal-segment-count)
+  + param accessors (`_param_int` → `-1` on non-numeric for a clean 400) + a thin
+  route table (`sandhi_router_new`/`_add`/`_dispatch`, 405/404 fallback) +
+  `sandhi_server_router_handler` (plugs into any serve loop). Lifted from the
+  yeo-cy-test reference. SecureYeoman is the driving consumer, so it shipped
+  directly (like the takumi download) rather than waiting for a second asker. See
+  CHANGELOG [1.6.7].
+- **Thread-pool / true-parallel serve mode — ✅ SHIPPED 1.6.7** (`src/server/mod.cyr`).
+  `sandhi_server_run_pooled` — a fixed `max_conns`-sized worker-thread pool fed by
+  a bounded `chan_*` handoff, so a blocking/CPU-bound handler ties up only its own
+  worker (the true parallelism the single-flight `run` / cooperative `run_async`
+  can't give). Same handler shape + SIGPIPE/SO_RCVTIMEO/smuggling guards; per-worker
+  recv buffer; composes the thread-safe global `alloc`. Verified by the live gate
+  `programs/_server_pool_probe.cyr` (rapid burst + slow-client isolation). Pairs
+  with the route table above as "the server side a real service needs." See
+  CHANGELOG [1.6.7].
+- 🔵 **Server-only use drags the whole client + h2 + hpack + tls `.bss` — CLOSED
+  (won't-fix; not a sandhi item).** A server-only consumer still links ~400 KB of
+  static h2/hpack/tls tables (`CYRIUS_DCE=1` NOPs the code but keeps the `.bss`).
+  This is a **cyrius issue** — the toolchain's bundled-libs packaging + DCE not
+  reclaiming `.bss` — **not** sandhi's: sandhi is one composed library, and which
+  symbols a consumer links is the toolchain's lib-packaging concern. There is no
+  sandhi-side change that fixes it (splitting sandhi into server-only/client-only
+  sub-libs would be sandhi inventing packaging the toolchain owns). Filed against
+  cyrius; closed here so the framing doesn't drift back in as a sandhi slot. (See
+  also *Not sandhi's slot*, below.)
 - 🔵 **Stale `run_async` leak doc comment — ✅ FIXED 1.6.6.** The
   `sandhi_server_run_async` header claimed "leaks ~32 B/connection" via
   `lib/async.cyr` task structs, contradicting the inline 1.5.3 note + the

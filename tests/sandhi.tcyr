@@ -1070,6 +1070,104 @@ fn test_server_options_mutators() {
     return 0;
 }
 
+# ── 1.6.7 routing (sandhi_server_route_match / router_* / dispatch) ──
+var _g_route_calls = 0;
+var _g_route_hit   = 0;
+
+# Route handler (fncall5 shape: ctx, cfd, buf, blen, params). Records the
+# capture so the dispatch test can assert the right route fired.
+fn _t_route_handler(ctx, cfd, buf, blen, params): i64 {
+    _g_route_calls = _g_route_calls + 1;
+    _g_route_hit   = sandhi_route_param_int(params, 0);
+    return 0;
+}
+
+fn test_route_match() {
+    var p[264];
+    sandhi_route_params_init(&p);
+    # exact literal match, no params
+    assert_eq(sandhi_server_route_match("/api/health", "/api/health", &p), 1, "route: exact match");
+    assert_eq(sandhi_route_param_count(&p), 0, "route: exact has 0 params");
+    # :name single capture
+    assert_eq(sandhi_server_route_match("/api/notes/42", "/api/notes/:id", &p), 1, "route: :id matches");
+    assert_eq(sandhi_route_param_count(&p), 1, "route: 1 param captured");
+    assert_eq(sandhi_route_param_int(&p, 0), 42, "route: :id == 42");
+    # multi capture
+    assert_eq(sandhi_server_route_match("/u/7/posts/9", "/u/:uid/posts/:pid", &p), 1, "route: two params");
+    assert_eq(sandhi_route_param_count(&p), 2, "route: 2 params");
+    assert_eq(sandhi_route_param_int(&p, 0), 7, "route: uid 7");
+    assert_eq(sandhi_route_param_int(&p, 1), 9, "route: pid 9");
+    # segment-count mismatch, both directions
+    assert_eq(sandhi_server_route_match("/api/notes", "/api/notes/:id", &p), 0, "route: short path no match");
+    assert_eq(sandhi_server_route_match("/api/notes/42", "/api/notes", &p), 0, "route: long path no match");
+    # literal mismatch
+    assert_eq(sandhi_server_route_match("/api/x", "/api/y", &p), 0, "route: literal mismatch");
+    # non-absolute path
+    assert_eq(sandhi_server_route_match("api/health", "/api/health", &p), 0, "route: path not absolute");
+    # empty :name segment (trailing slash) can't match
+    assert_eq(sandhi_server_route_match("/api/notes/", "/api/notes/:id", &p), 0, "route: empty :id no match");
+    return 0;
+}
+
+fn test_route_params() {
+    var p[264];
+    sandhi_route_params_init(&p);
+    sandhi_server_route_match("/notes/abc", "/notes/:id", &p);
+    assert_eq(sandhi_route_param_int(&p, 0), 0 - 1, "param_int: non-numeric → -1");
+    assert_streq(sandhi_route_param(&p, 0), "abc", "param: string capture");
+    assert_eq(sandhi_route_param_int(&p, 1), 0 - 1, "param_int: oob → -1");
+    assert_streq(sandhi_route_param(&p, 5), "", "param: oob → empty");
+    sandhi_server_route_match("/notes/123", "/notes/:id", &p);
+    assert_eq(sandhi_route_param_int(&p, 0), 123, "param_int: numeric");
+    return 0;
+}
+
+fn test_router_table() {
+    var r = sandhi_router_new_a(default_alloc(), 2, 0);
+    assert_eq(sandhi_router_add(r, "GET", "/a", &_t_route_handler), 1, "router: add 1");
+    assert_eq(sandhi_router_add(r, "POST", "/b", &_t_route_handler), 1, "router: add 2");
+    assert_eq(sandhi_router_add(r, "GET", "/c", &_t_route_handler), 0, "router: cap full → 0");
+    return 0;
+}
+
+fn test_router_dispatch() {
+    var devnull = syscall(2, "/dev/null", 1, 0);   # open O_WRONLY — swallow 404/405 sends
+    var r = sandhi_router_new(0);
+    sandhi_router_add(r, "GET", "/api/notes/:id", &_t_route_handler);
+    sandhi_router_add(r, "POST", "/api/notes", &_t_route_handler);
+    var p[264];
+
+    # matching GET → handler fires with :id captured
+    _g_route_calls = 0;
+    _g_route_hit = 0;
+    sandhi_route_params_init(&p);
+    var req1 = "GET /api/notes/55 HTTP/1.1\r\nHost: x\r\n\r\n";
+    sandhi_router_dispatch(r, 0, devnull, req1, strlen(req1), &p);
+    assert_eq(_g_route_calls, 1, "dispatch: matched route invoked once");
+    assert_eq(_g_route_hit, 55, "dispatch: :id captured == 55");
+
+    # path matches, method doesn't → 405, handler NOT invoked
+    _g_route_calls = 0;
+    var req2 = "DELETE /api/notes/55 HTTP/1.1\r\nHost: x\r\n\r\n";
+    sandhi_router_dispatch(r, 0, devnull, req2, strlen(req2), &p);
+    assert_eq(_g_route_calls, 0, "dispatch: wrong method → 405, not invoked");
+
+    # unknown path → 404, handler NOT invoked
+    _g_route_calls = 0;
+    var req3 = "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n";
+    sandhi_router_dispatch(r, 0, devnull, req3, strlen(req3), &p);
+    assert_eq(_g_route_calls, 0, "dispatch: unknown path → 404, not invoked");
+
+    # query string is stripped before matching (path_only)
+    _g_route_calls = 0;
+    sandhi_route_params_init(&p);
+    var req4 = "GET /api/notes/7?ref=1 HTTP/1.1\r\nHost: x\r\n\r\n";
+    sandhi_router_dispatch(r, 0, devnull, req4, strlen(req4), &p);
+    assert_eq(_g_route_calls, 1, "dispatch: query stripped, route still matches");
+    assert_eq(_g_route_hit, 7, "dispatch: :id == 7 with query");
+    return 0;
+}
+
 fn test_server_sigpipe_guard() {
     # 1.6.6 security fix — installing SIG_IGN for SIGPIPE must succeed.
     # rt_sigaction returns 0 on success; a wrong syscall number or a
@@ -2326,6 +2424,18 @@ fn main() {
 
     test_group("server/sigpipe_guard");
     test_server_sigpipe_guard();
+
+    test_group("server/routing/match");
+    test_route_match();
+
+    test_group("server/routing/params");
+    test_route_params();
+
+    test_group("server/routing/table");
+    test_router_table();
+
+    test_group("server/routing/dispatch");
+    test_router_dispatch();
 
     test_group("net/resolve/label_encode");
     test_resolve_label_encode();

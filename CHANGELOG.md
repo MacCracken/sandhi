@@ -4,6 +4,76 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.7] — 2026-06-17
+
+**The server side a real service needs: route table + thread-pool serve mode.**
+Driven by **SecureYeoman** (via the yeo-cy-test → Cyrius port probe) — its
+axum/Tokio backend needs path-param routing + real multi-core parallelism, so
+both ship now rather than waiting for a second asker (same direct-consumer
+trigger as the 1.6.4 takumi download). The two pair into "the server side a real
+service needs"; both lifted from the probe's reference
+(`secureyeoman/yeo-cy-test/src/httpd.cyr`) into sandhi's idiom. cyrius pin
+unchanged (**6.2.19**) — pure composition of stdlib `thread` / `chan_*` /
+`fnptr` + the existing server accessors; no new primitive.
+
+### Added — server routing (`src/server/mod.cyr`)
+
+- **Method+path route table with `:name` params.** `sandhi_server_route_match`
+  (segment-by-segment match, exact literals + `:name` capture, equal-segment-count
+  so `/api/notes` ≠ `/api/notes/:id`) into a caller-owned param buffer
+  (`sandhi_route_params_init` on a per-request stack buffer — pool-safe, no alloc,
+  no leak); `sandhi_route_param_count` / `_param_int` (non-negative decimal or `-1`
+  for absent/empty/non-numeric → clean 400) / `_param_a` / `_param`. Plus a thin
+  route table — `sandhi_router_new[_a]` / `sandhi_router_add` /
+  `sandhi_router_dispatch` (first pattern+method match wins → `fncall5(fp, ctx,
+  cfd, buf, blen, params)`; pattern-match-but-no-method → 405; none → 404) — and a
+  ready-made `sandhi_server_router_handler` that plugs a router into ANY serve
+  loop (`run` / `run_async` / `run_pooled`) via the standard `fn(ctx, cfd, buf,
+  blen)` handler shape.
+
+### Added — thread-pool server (`src/server/mod.cyr`)
+
+- **`sandhi_server_run_pooled(addr, port, handler_fp, ctx, opts)`** — a fixed pool
+  of `max_conns` worker threads (here `max_conns` is the **worker count**, not a
+  per-drain cap as in `run_async`). The accept loop feeds accepted fds to a
+  bounded channel; workers pull and serve one connection each, so a
+  blocking/CPU-bound handler ties up only its own worker — true multi-core
+  parallelism the single-flight `run` and cooperative `run_async` can't give. Same
+  handler signature as `run` / `run_async` (so existing handlers and
+  `sandhi_server_router_handler` drop straight in), same SIGPIPE guard (1.6.6) +
+  per-connection SO_RCVTIMEO slow-peer bound + CL.TE / dup-header smuggling
+  rejects. Per-worker recv buffer (no interleave); composes the thread-safe global
+  `alloc`.
+
+### Added — tests + live gate
+
+- `tests/sandhi.tcyr` **475 → 503** (+28): `route_match` (exact / single + multi
+  `:name` capture / both-direction segment-count mismatch / literal mismatch /
+  non-absolute / empty `:name`), param accessors (`_param_int` numeric +
+  non-numeric→-1 + oob→-1, `_param` string + oob→""), router table (add + cap-full
+  → 0), and `router_dispatch` (matched route fires with `:id` captured, wrong
+  method → 405 not-invoked, unknown path → 404 not-invoked, query stripped before
+  match). Suite totals **1047 → 1075**.
+- `programs/_server_pool_probe.cyr` — live gate that forks a **pooled + routed**
+  server (4 workers, `GET /notes/:id`) and asserts end to end over loopback: route
+  + `:id` capture (200), query stripped (200), unknown path (404), wrong method
+  (405), an 8-request rapid burst, and **slow-client isolation** (a silent client
+  pins one worker; the other workers still serve 8/8 — the whole point of the pool
+  over the single-flight loop). New CI step.
+
+### Notes
+
+- **Server-only-drags-the-whole-client-surface** (the probe's third 🔵) is
+  **closed as won't-fix on the sandhi side — it's a cyrius issue, not a sandhi
+  one**: the ~400 KB of static h2/hpack/tls `.bss` a server-only consumer links is
+  the toolchain's bundled-libs packaging + DCE-keeps-`.bss` behavior. No
+  sandhi-side change fixes it (splitting sandhi into sub-libs would be sandhi
+  inventing packaging the toolchain owns). Filed against cyrius; closed in our
+  roadmap.
+- New public verbs ship permanently into stdlib's `lib/sandhi.cyr` at the next
+  re-fold; these 12 are earned by a concrete consumer (SecureYeoman) per the
+  small-but-earned-surface discipline.
+
 ## [1.6.6] — 2026-06-17
 
 **SIGPIPE DoS fix from the yeo-cy-test (SecureYeoman → Cyrius) server-adoption

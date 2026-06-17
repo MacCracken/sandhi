@@ -1,0 +1,191 @@
+# programs/_server_pool_probe.cyr — 1.6.7 live gate for the thread-pool
+# server (sandhi_server_run_pooled) + the routing layer (router_* /
+# route_match / params).
+#
+# Forks: child runs a POOLED server (4 worker threads) on 127.0.0.1 with a
+# one-route table `GET /notes/:id` (echoes the captured :id as the body);
+# parent connects (raw, no DNS) and asserts:
+#   1. GET /notes/55       → 200, body "55"            (route + :id capture)
+#   2. GET /notes/55?ref=1 → 200, body "55"            (query stripped)
+#   3. GET /nope           → 404                        (no route)
+#   4. POST /notes/55      → 405                        (path matches, method no)
+#   5. slow-client isolation: hold a SILENT connection open (pins one worker
+#      until SO_RCVTIMEO) and confirm real requests STILL succeed on the other
+#      workers — the whole point of the pool over the single-flight sync loop.
+# Exit 0 PASS / non-zero FAIL. Skip-clean is N/A (pure loopback, no network).
+include "lib/thread_local.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+include "lib/sigil.cyr"
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
+include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/http/download.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+# Route handler (fncall5 shape) — echo the captured :id as the body.
+fn note_handler(ctx, cfd, buf, blen, params): i64 {
+    var id = sandhi_route_param(params, 0);
+    sandhi_server_send_response(cfd, 200, "OK", "text/plain", id, strlen(id), 0);
+    return 0;
+}
+
+# Read the 3-digit status code (bytes 9..11 of "HTTP/1.1 NNN ...").
+fn _status3(rbuf, got): i64 {
+    if (got < 12) { return 0; }
+    return (load8(rbuf + 9) - 48) * 100 + (load8(rbuf + 10) - 48) * 10 + (load8(rbuf + 11) - 48);
+}
+
+# Does the response buffer contain the 2-byte needle "55" in its body region?
+# (Crude substring scan over the whole buffer — good enough for the gate.)
+fn _has_55(rbuf, got): i64 {
+    var i = 0;
+    while (i + 1 < got) {
+        if (load8(rbuf + i) == 53 && load8(rbuf + i + 1) == 53) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# One request/response round-trip; returns the status code (0 on conn failure).
+# If `want55` is 1, requires the body to contain "55" (else returns 0).
+fn _do_req(port, line, want55): i64 {
+    var conn = sandhi_conn_open(INADDR_LOOPBACK(), port, 0, "");
+    if (conn == 0) { return 0 - 1; }          # connect failed
+    sandhi_conn_send_all(conn, line, strlen(line));
+    # Drain the FULL response — a single recv can return just the headers
+    # before the body segment lands. The server sends `Connection: close`, so
+    # loop until EOF (recv <= 0) or the buffer fills.
+    var rbuf[2048];
+    var got = 0;
+    var go = 1;
+    while (go == 1) {
+        var n = sandhi_conn_recv(conn, &rbuf + got, 2047 - got);
+        if (n <= 0) { go = 0; }
+        else {
+            got = got + n;
+            if (got >= 2047) { go = 0; }
+        }
+    }
+    sandhi_conn_close(conn);
+    if (got < 12) { return 0 - 2; }            # no/short response
+    var code = _status3(&rbuf, got);
+    if (want55 == 1 && _has_55(&rbuf, got) == 0) { return 0 - 3; }  # body missing
+    return code;
+}
+
+fn main() {
+    alloc_init();
+    say("=== sandhi pooled+routing server gate ===\n");
+    var port = 18437;
+
+    var pid = sys_fork();
+    if (pid == 0) {
+        # child: pooled server, 4 worker threads, with a route table.
+        var router = sandhi_router_new(0);
+        sandhi_router_add(router, "GET", "/notes/:id", &note_handler);
+        var opts = sandhi_server_options_new();
+        sandhi_server_options_max_conns(opts, 4);   # 4 fixed worker threads
+        sandhi_server_options_idle_ms(opts, 1000);  # slow-peer bound
+        sandhi_server_run_pooled(INADDR_LOOPBACK(), port,
+        &sandhi_server_router_handler, router, opts);
+        syscall(60, 0);
+    }
+
+    async_sleep_ms(400);   # let the child bind + spawn workers
+
+    var fails = 0;
+
+    var c1 = _do_req(port, "GET /notes/55 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 1);
+    say("[1] GET /notes/55      → "); fmt_int(c1); say(" (want 200 + body 55)\n");
+    if (c1 != 200) { fails = fails + 1; }
+
+    var c2 = _do_req(port, "GET /notes/55?ref=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 1);
+    say("[2] GET /notes/55?ref=1 → "); fmt_int(c2); say(" (want 200, query stripped)\n");
+    if (c2 != 200) { fails = fails + 1; }
+
+    var c3 = _do_req(port, "GET /nope HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 0);
+    say("[3] GET /nope          → "); fmt_int(c3); say(" (want 404)\n");
+    if (c3 != 404) { fails = fails + 1; }
+
+    var c4 = _do_req(port, "POST /notes/55 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 0);
+    say("[4] POST /notes/55     → "); fmt_int(c4); say(" (want 405)\n");
+    if (c4 != 405) { fails = fails + 1; }
+
+    # [ctrl] rapid burst with NO silent client — proves basic parallelism.
+    var burst = 0;
+    var k = 0;
+    while (k < 8) {
+        if (_do_req(port, "GET /notes/55 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 1) == 200) {
+            burst = burst + 1;
+        }
+        k = k + 1;
+    }
+    say("[ctrl] rapid burst (no silent): "); fmt_int(burst); say(" / 8 OK\n");
+    if (burst != 8) { fails = fails + 1; }
+
+    # [5] slow-client isolation: a silent connection pins one of the 4 workers
+    # until its recv times out; the other workers must keep serving. On the
+    # single-flight sync server this would block everything.
+    var silent = sandhi_conn_open(INADDR_LOOPBACK(), port, 0, "");
+    var ok = 0;
+    var i = 0;
+    while (i < 8) {
+        if (_do_req(port, "GET /notes/55 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 1) == 200) {
+            ok = ok + 1;
+        }
+        i = i + 1;
+    }
+    if (silent != 0) { sandhi_conn_close(silent); }
+    say("[5] isolation: with a silent client held, "); fmt_int(ok); say(" / 8 real requests OK\n");
+    if (ok != 8) { fails = fails + 1; }
+
+    sys_kill(pid, 9);
+    syscall(61, pid, 0, 0, 0);   # wait4 — reap the child
+
+    if (fails == 0) { say("PASS\n"); return 0; }
+    say("FAIL ("); fmt_int(fails); say(" checks failed)\n");
+    return 1;
+}
+
+var ec = main();
+syscall(60, ec);

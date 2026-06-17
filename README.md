@@ -21,8 +21,8 @@ at 1.0.0 / Cyrius v5.7.0 ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5
 Patches land here first; `dist/sandhi.cyr` is regenerated each release and a
 small cyrius slot re-folds it.
 
-Current: **1.6.6**, pinned to **Cyrius 6.2.19**. **1047 test assertions green**
-(475 sandhi + 167 h2 + 342 alloc + 63 rpc). Builds clean for x86_64, aarch64,
+Current: **1.6.7**, pinned to **Cyrius 6.2.19**. **1075 test assertions green**
+(503 sandhi + 167 h2 + 342 alloc + 63 rpc). Builds clean for x86_64, aarch64,
 and the **AGNOS** target.
 
 **TLS backend: native by default, no flag** (since Cyrius 6.1.21). `-D
@@ -90,7 +90,7 @@ is in [`cyrius.cyml`](cyrius.cyml) `[deps].stdlib`.
 | `src/discovery/*` | Service discovery: chain composition, daimon-backed resolver, mDNS — QU-bit unicast (default) + opt-in multicast (QM) resolver `sandhi_discovery_local_mc_resolver` (1.5.5, over Cyrius 6.2.7 multicast primitives) |
 | `src/tls_policy/*` | Cert pinning (SPKI, constant-time compare), mTLS, trust store, ALPN, backend selection. Enforcement is live + **native on every mode** (1.6.0 / Batch A1): pinning + trust-store + mTLS all enforce on the native default backend; high-level threading via `sandhi_http_options_tls_policy` (1.4.6); fail-closed |
 | `src/tls_policy/session_cache.cyr` | TLS 1.3/1.2 client session-resumption cache — TTL + max-size LRU eviction, cred-strip-aware keying (1.3.1–1.4.0) |
-| `src/server/mod.cyr` | HTTP/1.1 server — sync `sandhi_server_run` / `_run_opts` + epoll-cooperative `sandhi_server_run_async` (`max_conns`, 1.4.9); built-in CL+TE / dup-header smuggling guards |
+| `src/server/mod.cyr` | HTTP/1.1 server — sync `sandhi_server_run` / `_run_opts`, epoll-cooperative `sandhi_server_run_async` (1.4.9), and thread-pool `sandhi_server_run_pooled` (true multi-core parallelism, 1.6.7); method+path **routing** with `:name` params (`sandhi_router_*` / `route_match`, 1.6.7); SIGPIPE-guarded (1.6.6); built-in CL+TE / dup-header smuggling guards |
 | `src/net/resolve.cyr` | Native UDP DNS resolver — A + AAAA, randomized TXID + answer-name verification, RFC 1035 |
 | `src/obs/trace.cyr` · `prof.cyr` | Opt-in sakshi spans at HTTP / RPC / DNS boundaries; opt-in per-request per-phase profiling |
 
