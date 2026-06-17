@@ -120,6 +120,88 @@ the file it would touch.
 - **Client connection-pool thread-safety (per-pool mutex)** — the pool is
   single-threaded; multi-threaded clients would need a per-pool mutex. No
   consumer needs concurrent dispatch yet (`src/http/pool.cyr`).
+- **Server-side route table / dispatch** (`src/server/mod.cyr`) — first asker:
+  **yeo-cy-test** (SecureYeoman → Cyrius port probe). `sandhi_server_run`
+  dispatches to a single handler; there is no method+path route table, so every
+  consumer hand-rolls dispatch on top of `sandhi_server_get_method` /
+  `get_path` / `path_segment`. The probe built a small reference:
+  `route_match(req, pattern)` does segment-by-segment matching with `:name`
+  path-param capture (e.g. `/api/notes/:id`), exact literal segments, an
+  equal-segment-count rule (so `/api/notes` and `/api/notes/:id` don't collide),
+  and `req_param` / `req_param_int` accessors (`-1` on non-numeric → clean 400).
+  Lives in [`secureyeoman/yeo-cy-test/src/httpd.cyr`](../../../secureyeoman/yeo-cy-test/src/httpd.cyr)
+  as the shape to lift. This is the "routing … layers on top in later
+  milestones" item already noted in `src/server/mod.cyr`'s header; yeo-cy-test
+  is the consumer making it concrete. Full write-up:
+  [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md)
+  (§ "the HTTP server abstraction exists — it's sandhi"). Waits for a second
+  asker per ADR 0001, unless the SY port adopts sandhi server-side and needs it
+  directly (then it ships like the takumi download case).
+### From yeo-cy-test (server adoption, 2026-06-17)
+
+yeo-cy-test ported its hand-rolled `httpd.cyr` onto `sandhi_server_*` (recv /
+parse / accessors / framing / smuggling rejects), keeping only a route table +
+worker pool on top. Adoption verified end to end (13-case CRUD, 250 concurrent
+POSTs, smuggling rejects). It surfaced one **security bug** and three rough
+edges. Full write-up:
+[`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md).
+
+- 🔴 **HIGH — the server does not guard SIGPIPE; a client that disconnects
+  mid-response crashes the process** (`src/server/mod.cyr`, `_send_*` →
+  `sock_send`). `sandhi_server_run` / `run_async` send via `net.cyr`'s
+  `sock_send`, which uses neither `MSG_NOSIGNAL` nor a process-level
+  `SIG_IGN(SIGPIPE)`. So a peer that sends a request line then closes (or any
+  disconnect during the response write) raises SIGPIPE → default disposition
+  terminates the whole server. Trivial unauthenticated remote DoS — verified
+  against the probe (signal 13) before it added its own
+  `rt_sigaction(SIGPIPE, SIG_IGN)` workaround. **Fix:** `sandhi_server_run*`
+  should install `SIG_IGN` for SIGPIPE at startup (and/or `net.cyr` `sock_send`
+  pass `MSG_NOSIGNAL`). This is server-side, security-relevant (ADR 0004), and
+  shouldn't wait for a second asker.
+- 🟡 **Document the companion stdlib modules `sandhi` needs.** Libs are opt-in
+  by design (no auto-pull), which is fine — but a consumer adding `"sandhi"`
+  hits undefined `tls` / `async` (`async_spawn`/`run`/…) / `random_bytes` /
+  `fdlopen_*` / `dynlib_*` with no hint that the fix is to also opt into `tls`,
+  `async`, `random`, `fdlopen`, `dynlib`. A "Requires" line in sandhi's
+  README/module header listing those would close it. Same for JSON: `sandhi`
+  uses `bayan` (the `json_v_*` successor), and `bayan` + the older `json` both
+  define `json_v_*` / `_jv_*` / `_jp_*`, so opting into both collides
+  ("duplicate fn, last definition wins") — independent of sandhi. Doc note:
+  "use `bayan`, not `json`, alongside `sandhi`." Pure documentation, no code.
+- 🔵 **Server-only use still drags the whole client + h2 + hpack + tls surface**
+  (~400 KB static `.bss` of h2/hpack/tls tables that `CYRIUS_DCE=1` can't
+  reclaim — it NOPs code but keeps `.bss`) when a consumer only calls
+  `sandhi_server_*`. Not a new ask — this is the **long-term bundled-libs →
+  individual-packages split**; a plaintext-HTTP server is a concrete consumer
+  that would benefit from a server package that doesn't pull the client/h2/tls
+  tables. Filed here as a data point for that work.
+- **Thread-pool / true-parallel serve mode** (`src/server/mod.cyr`) — first
+  asker: **yeo-cy-test** (SecureYeoman → Cyrius port probe). Both serve loops are
+  single-threaded: `sandhi_server_run` is single-flight (one connection at a
+  time) and `run_async` is cooperative/run-to-completion (SO_RCVTIMEO-bounded,
+  `max_conns` is a per-drain cap, not parallelism). Neither uses more than one
+  core, so a handler doing blocking/CPU-bound work (a DB call, crypto) serializes
+  every other in-flight request behind it. SecureYeoman's backend is axum on a
+  multi-threaded Tokio runtime, so the port needs real parallelism. Wanted: a
+  `sandhi_server_run_pooled(addr, port, handler, ctx, opts)` — a fixed
+  worker-thread pool (sized from `max_conns`) feeding the existing per-request
+  fns, so a slow/blocking handler ties up only its own worker. The per-request
+  fns already take an explicit buffer and allocate via the thread-safe `alloc`,
+  so they're pool-safe as-is; the missing piece is the pooled accept loop + a
+  bounded handoff channel. yeo-cy-test ships exactly this shape as the reference
+  (`thread.cyr` `thread_create` + bounded `chan_*` + per-worker buffer/`Req`) in
+  [`secureyeoman/yeo-cy-test/src/httpd.cyr`](../../../secureyeoman/yeo-cy-test/src/httpd.cyr)
+  (`httpd_serve` / `_httpd_worker`). Verified there: a slow client holding 2/4
+  workers leaves `/api/health` at ~10 ms; 250 concurrent POSTs complete with no
+  errors. Pairs with the route-table request above — together they're "the
+  server side a real service needs." Full write-up:
+  [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md).
+- 🔵 **Stale `run_async` leak doc comment.** The header comment on
+  `sandhi_server_run_async` still says it "leaks ~32 B/connection" via
+  `lib/async.cyr` task structs, but the inline 1.5.3 note (and the
+  `async_new_in(arena)` + `reset_via` code) says that was fixed — "zero residual
+  leak, RSS stays flat." The header contradicts the body; drop the stale leak
+  paragraph.
 - **Streaming download to an fd / body-sink — SHIPPED 1.6.4** (`src/http/download.cyr`).
   takumi's source-download ask (takumi `docs/adr/0006-source-download.md`) was
   the trigger — a direct consumer need, so it shipped rather than waiting for a
