@@ -4,6 +4,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.6] — 2026-06-17
+
+**SIGPIPE DoS fix from the yeo-cy-test (SecureYeoman → Cyrius) server-adoption
+probe.** cyrius pin **6.2.18 → 6.2.19**. yeo-cy-test ported its hand-rolled
+`httpd.cyr` onto `sandhi_server_*` and, in doing so, surfaced one HIGH-severity
+security bug plus a couple of doc rough edges. This release fixes them.
+
+### Security — server (`src/server/mod.cyr`)
+
+- 🔴 **HIGH: the HTTP server no longer dies of SIGPIPE when a client disconnects
+  mid-response.** `net.cyr`'s `sock_send` is a bare `sys_write` with no
+  `MSG_NOSIGNAL`, so a peer that sent a request line then closed (or dropped
+  during the response write) raised SIGPIPE — whose **default disposition
+  terminates the process**. A trivial unauthenticated remote DoS against any
+  sandhi server (verified by the probe: signal 13). Both serve loops
+  (`sandhi_server_run` / `_run_opts` and `sandhi_server_run_async`) now install
+  `SIG_IGN` for SIGPIPE once at startup via `_sandhi_server_ignore_sigpipe()`; a
+  send to a dead peer now fails with EPIPE on the `sock_send` (whose return both
+  loops already ignore) instead of killing the process. Server-side and
+  security-relevant (ADR 0004) — shipped without waiting for a second asker.
+  - **Why a raw syscall here** (the one place the server path reaches past a
+    stdlib helper): `sock_send` can't pass `MSG_NOSIGNAL` (no flags arg; forking
+    the primitive is forbidden) and stdlib exposes no signal-disposition helper
+    (no `signal_ignore`; SIGPIPE isn't even in the `Signal` enum). The proper
+    long-term home — a stdlib `signal_ignore` / `sock_send` `MSG_NOSIGNAL` — is
+    filed as a roadmap deferral; this migrates onto it when it lands, exactly as
+    1.6.1/1.6.2 migrated `conn.cyr`'s raw socket syscalls onto `net.cyr` helpers.
+  - **Portability**: `rt_sigaction(SIGPIPE, SIG_IGN)` on Linux (x86_64 syscall
+    13 / aarch64 134; one 32-byte `{sa_handler=SIG_IGN, 0, 0, 0}` struct is
+    correct for both ABIs since every field past `sa_handler` is zero). macOS /
+    Windows: a documented no-op (the macOS ESYSXLAT whitelist doesn't cover
+    `sigaction`, so a raw call would mis-dispatch) — see the new roadmap entry.
+    AGNOS: moot (no signals; `sock_listen` Errs before the loop).
+
+### Docs
+
+- **`sandhi_server_run_async` stale leak comment corrected.** The function header
+  still claimed it "leaks ~32 B/connection" via `lib/async.cyr` task structs,
+  contradicting the inline 1.5.3 note + the `async_new_in(arena)` code that
+  eliminated it. Rewrote the header to match: zero residual leak, RSS flat.
+- **README gains a "Requires (companion stdlib modules)" note.** Cyrius libs are
+  opt-in, so a consumer adding `sandhi` hits undefined `tls_*` / `async_*` /
+  `random_*` / `fdlopen_*` / `dynlib_*` with no hint the fix is an extra dep;
+  and `bayan` (not `json`) is the JSON module (both define `json_v_*`, so opting
+  into both collides). The note lists the companion modules and the bayan-not-json
+  rule. Pure documentation.
+
+### Toolchain
+
+- Cyrius pin **6.2.18 → 6.2.19**. Pure parity bump (no new primitive needed for
+  this release — the SIGPIPE fix is a sandhi-side syscall); clean deps re-resolve
+  (`rm -rf lib cyrius.lock && cyrius deps`), all four `.tcyr` suites green on the
+  new pin.
+
+### Tests
+
+- `tests/sandhi.tcyr` **473 → 475** (+2): `_sandhi_server_ignore_sigpipe()`
+  returns 0 (rt_sigaction success — proves the per-arch syscall number + struct
+  layout are valid) and is idempotent. Suite totals **1045 → 1047**.
+
+### Deferred (named roadmap entries — no silent scope-outs)
+
+- **macOS server SIGPIPE guard** — the fix is Linux-only today; macOS needs the
+  BSD `sigaction` ABI / `SO_NOSIGPIPE` and a macOS box to verify. Filed.
+- **Stdlib `signal_ignore` / `sock_send` `MSG_NOSIGNAL`** — the proper home for
+  the SIGPIPE guard; sandhi's raw syscall migrates onto it when it lands. Filed.
+
 ## [1.6.5] — 2026-06-17
 
 **Live-network download gate + two bugs it caught.** Closes the 1.6.4 loose end:

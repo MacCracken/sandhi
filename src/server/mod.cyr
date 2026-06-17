@@ -638,6 +638,66 @@ fn sandhi_server_options_get_max_conns(opts): i64 {
     return load64(opts + SANDHI_SERVER_OPT_OFF_MAX_CONNS);
 }
 
+# ================================================================
+# SIGPIPE guard (1.6.6) — security fix (yeo-cy-test probe finding)
+# ================================================================
+# `net.cyr`'s `sock_send` is a bare `sys_write` with NO `MSG_NOSIGNAL`,
+# so a peer that closes the connection mid-response makes the kernel
+# raise SIGPIPE — whose DEFAULT disposition terminates the process. That
+# is a trivial unauthenticated remote DoS against any sandhi server: a
+# client that sends a request line then disconnects (or drops during the
+# response write) kills the whole server (verified by the yeo-cy-test
+# probe — signal 13). The server owns the process lifecycle, so it
+# installs `SIG_IGN` for SIGPIPE once at startup; a send to a dead peer
+# then fails with EPIPE on the `sock_send` (whose return both serve loops
+# already ignore) instead of terminating the process.
+#
+# Why a raw syscall here (the one place the server path reaches past a
+# stdlib helper): `sock_send` can't pass MSG_NOSIGNAL (the primitive has
+# no flags arg, and forking it is forbidden — CLAUDE.md) and stdlib
+# exposes no signal-disposition helper (no `signal_ignore`, and SIGPIPE
+# isn't even in the `Signal` enum). The proper long-term home is a stdlib
+# `signal_ignore(signum)` / `sock_send` MSG_NOSIGNAL — filed as a roadmap
+# deferral; when it lands this migrates onto it, exactly as 1.6.1/1.6.2
+# migrated conn.cyr's raw socket syscalls onto `net.cyr` helpers.
+#
+# Portability: `rt_sigaction(SIGPIPE, SIG_IGN)`. SIGPIPE = 13 and
+# SIG_IGN = 1 on every Linux arch; the kernel `struct sigaction` is
+# {sa_handler, sa_flags, [sa_restorer], sa_mask}. A 32-byte buffer zeroed
+# except sa_handler = SIG_IGN is correct for BOTH x86_64 (sa_restorer at
+# +16, sa_mask at +24) and aarch64 (sa_mask at +16, no restorer): every
+# field past sa_handler is 0, so flags = 0 / mask = 0 whichever ABI reads
+# where, and no SA_RESTORER is needed because an ignored signal is never
+# delivered. Only the syscall number differs (x86_64 = 13, aarch64 = 134).
+# macOS/Windows: no raw rt_sigaction (the macOS ESYSXLAT whitelist
+# doesn't cover sigaction, so a raw call would mis-dispatch) — left a
+# no-op pending the stdlib helper (roadmap: macOS SIGPIPE guard). AGNOS:
+# no signals + no inbound TCP server (`sock_listen` Errs before the loop),
+# so moot. Idempotent + cheap; called once per server start (the loops
+# never return), so re-installing on every entry is fine.
+var _SANDHI_SIGPIPE = 13;
+var _SANDHI_SIG_IGN = 1;
+
+fn _sandhi_server_ignore_sigpipe(): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    # alloc (8-byte aligned, unlike a stack buffer on aarch64) — leaked
+    # once at startup, negligible; the server loop never returns.
+    var sa = alloc_via(default_alloc(), 32);
+    if (sa == 0) { return 0; }      # OOM at startup — skip guard, don't crash
+    store64(sa, _SANDHI_SIG_IGN);   # sa_handler = SIG_IGN
+    store64(sa + 8, 0);             # sa_flags = 0 (no SA_RESTORER needed for IGN)
+    store64(sa + 16, 0);            # x86_64 sa_restorer / aarch64 sa_mask
+    store64(sa + 24, 0);            # x86_64 sa_mask
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(13, _SANDHI_SIGPIPE, sa, 0, 8);    # SYS_rt_sigaction = 13
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(134, _SANDHI_SIGPIPE, sa, 0, 8);   # SYS_rt_sigaction = 134
+    #endif
+    #endif
+    return 0;
+}
+
 # Bind addr:port, listen, accept-loop. For each connection:
 #   read full request → call handler_fp(ctx, cfd, buf, bytes) → close cfd.
 #
@@ -654,6 +714,10 @@ fn sandhi_server_run(addr, port, handler_fp, ctx): i64 {
 # to bound slow/idle peers (slowloris guard). max_conns is accepted
 # but not honored today — server stays single-threaded until 0.8.0.
 fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts): i64 {
+    # 1.6.6 security fix: ignore SIGPIPE so a peer that disconnects
+    # mid-response can't kill the process (sock_send is MSG_NOSIGNAL-less).
+    _sandhi_server_ignore_sigpipe();
+
     # _hsv_req_buf is a process-wide singleton shared across every
     # accepted connection — it must outlive any per-request arena, so
     # always allocate from the global bump.
@@ -772,13 +836,18 @@ fn _sandhi_server_async_handler(arg): i64 {
 # Returns 1 on bind/listen/arena failure; never returns on success.
 #
 # Memory: per-connection recv buffers + arg structs come from a single
-# `max_conns`-sized arena, reset each batch — no growth. `lib/async.cyr`'s
-# OWN runtime + task structs use the global bump allocator (which has no
-# free), so each drained batch leaks ~32 B/connection THERE. Eliminating
-# that needs an arena-aware async runtime upstream — filed cyrius-side
-# (docs/issues/2026-06-09-async-runtime-no-free-task-leak.md). The sandhi
-# request buffers (the large allocations) are already bounded here.
+# `max_conns`-sized arena, reset each batch — no growth. As of 1.5.3
+# (cyrius v6.1.22 `async_new_in`) `lib/async.cyr`'s OWN runtime + every
+# `async_spawn` task struct are drawn from that SAME arena too, so the
+# per-batch `reset_via` reclaims them — ZERO residual leak (was ~32 B/conn
+# + ~40 B/batch on the no-free global bump before the fix). RSS stays flat
+# over a sustained connection stream. See the inline 1.5.3 note on the
+# arena sizing below.
 fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
+    # 1.6.6 security fix: ignore SIGPIPE (see sandhi_server_run_opts) — a
+    # disconnecting peer must not be able to terminate the process.
+    _sandhi_server_ignore_sigpipe();
+
     var idle_ms   = sandhi_server_options_get_idle_ms(opts);
     var max_conns = sandhi_server_options_get_max_conns(opts);
     if (max_conns < 1) { max_conns = 1; }

@@ -21,8 +21,8 @@ at 1.0.0 / Cyrius v5.7.0 ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5
 Patches land here first; `dist/sandhi.cyr` is regenerated each release and a
 small cyrius slot re-folds it.
 
-Current: **1.6.5**, pinned to **Cyrius 6.2.18**. **1045 test assertions green**
-(473 sandhi + 167 h2 + 342 alloc + 63 rpc). Builds clean for x86_64, aarch64,
+Current: **1.6.6**, pinned to **Cyrius 6.2.19**. **1047 test assertions green**
+(475 sandhi + 167 h2 + 342 alloc + 63 rpc). Builds clean for x86_64, aarch64,
 and the **AGNOS** target.
 
 **TLS backend: native by default, no flag** (since Cyrius 6.1.21). `-D
@@ -57,6 +57,24 @@ fn main() {
 var exit_code = main();
 syscall(60, exit_code);
 ```
+
+### Requires (companion stdlib modules)
+
+Cyrius libs are opt-in (no auto-pull), so a consumer adding `sandhi` must also
+opt into the modules sandhi composes — otherwise the build fails with undefined
+`tls_*` / `async_*` / `random_*` / `fdlopen_*` / `dynlib_*` symbols and no hint
+that the fix is an extra dep. Pull in at least:
+
+```
+tls, async, random, fdlopen, dynlib   # transport + cooperative server + TLS bridge
+bayan                                  # JSON-RPC + base64 — use bayan, NOT json
+```
+
+**Use `bayan`, not `json`.** sandhi's RPC layer uses `bayan` (the `json_v_*`
+successor). `bayan` and the older `json` both define `json_v_*` / `_jv_*` /
+`_jp_*`, so opting into *both* collides ("duplicate fn, last definition wins")
+independent of sandhi — pick `bayan`. The full dep set sandhi resolves against
+is in [`cyrius.cyml`](cyrius.cyml) `[deps].stdlib`.
 
 ## Module map
 

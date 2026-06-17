@@ -1070,6 +1070,22 @@ fn test_server_options_mutators() {
     return 0;
 }
 
+fn test_server_sigpipe_guard() {
+    # 1.6.6 security fix — installing SIG_IGN for SIGPIPE must succeed.
+    # rt_sigaction returns 0 on success; a wrong syscall number or a
+    # malformed struct sigaction would return a negative errno. A 0 here
+    # proves the per-arch number + the 32-byte {sa_handler=SIG_IGN, 0, 0,
+    # 0} struct + sigsetsize=8 are valid — so a peer that disconnects
+    # mid-response can no longer kill the process via SIGPIPE. (On
+    # non-Linux targets the helper is a no-op that also returns 0.)
+    var rc = _sandhi_server_ignore_sigpipe();
+    assert_eq(rc, 0, "server: ignore SIGPIPE install succeeds");
+    # Idempotent — re-installing the same disposition still succeeds.
+    var rc2 = _sandhi_server_ignore_sigpipe();
+    assert_eq(rc2, 0, "server: ignore SIGPIPE is idempotent");
+    return 0;
+}
+
 fn test_trace_default_disabled() {
     # Default off — calling begin/end is a no-op (depth stays 0).
     assert_eq(sandhi_trace_enabled(), 0, "trace: default disabled");
@@ -2307,6 +2323,9 @@ fn main() {
 
     test_group("server/options/mutators");
     test_server_options_mutators();
+
+    test_group("server/sigpipe_guard");
+    test_server_sigpipe_guard();
 
     test_group("net/resolve/label_encode");
     test_resolve_label_encode();

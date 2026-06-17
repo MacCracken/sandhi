@@ -12,10 +12,11 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.2.18** (1.6.3 added the endpoint-keyed RPC TLS-policy
+is currently **cyrius 6.2.19** (1.6.3 added the endpoint-keyed RPC TLS-policy
 registry; 1.6.4 added the binary streaming download path + bumped the pin to
-latest; 1.6.5 added its live-network gate and fixed the two bugs that gate caught
-— all pure composition, see state.md / CHANGELOG).
+latest; 1.6.5 added its live-network gate and fixed the two bugs that gate caught;
+1.6.6 fixed the yeo-cy-test SIGPIPE server DoS + bumped the pin to 6.2.19 — all
+pure composition / sandhi-side, see state.md / CHANGELOG).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -146,28 +147,24 @@ POSTs, smuggling rejects). It surfaced one **security bug** and three rough
 edges. Full write-up:
 [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md).
 
-- 🔴 **HIGH — the server does not guard SIGPIPE; a client that disconnects
-  mid-response crashes the process** (`src/server/mod.cyr`, `_send_*` →
-  `sock_send`). `sandhi_server_run` / `run_async` send via `net.cyr`'s
-  `sock_send`, which uses neither `MSG_NOSIGNAL` nor a process-level
-  `SIG_IGN(SIGPIPE)`. So a peer that sends a request line then closes (or any
-  disconnect during the response write) raises SIGPIPE → default disposition
-  terminates the whole server. Trivial unauthenticated remote DoS — verified
-  against the probe (signal 13) before it added its own
-  `rt_sigaction(SIGPIPE, SIG_IGN)` workaround. **Fix:** `sandhi_server_run*`
-  should install `SIG_IGN` for SIGPIPE at startup (and/or `net.cyr` `sock_send`
-  pass `MSG_NOSIGNAL`). This is server-side, security-relevant (ADR 0004), and
-  shouldn't wait for a second asker.
-- 🟡 **Document the companion stdlib modules `sandhi` needs.** Libs are opt-in
-  by design (no auto-pull), which is fine — but a consumer adding `"sandhi"`
-  hits undefined `tls` / `async` (`async_spawn`/`run`/…) / `random_bytes` /
-  `fdlopen_*` / `dynlib_*` with no hint that the fix is to also opt into `tls`,
-  `async`, `random`, `fdlopen`, `dynlib`. A "Requires" line in sandhi's
-  README/module header listing those would close it. Same for JSON: `sandhi`
-  uses `bayan` (the `json_v_*` successor), and `bayan` + the older `json` both
-  define `json_v_*` / `_jv_*` / `_jp_*`, so opting into both collides
-  ("duplicate fn, last definition wins") — independent of sandhi. Doc note:
-  "use `bayan`, not `json`, alongside `sandhi`." Pure documentation, no code.
+- 🔴 **HIGH — SIGPIPE server DoS — ✅ FIXED 1.6.6** (`src/server/mod.cyr`). Both
+  serve loops now install `SIG_IGN` for SIGPIPE at startup
+  (`_sandhi_server_ignore_sigpipe`), so a peer that disconnects mid-response can
+  no longer crash the process. Linux only today (the **macOS SIGPIPE guard**
+  follow-on is open below; macOS needs the BSD `sigaction` ABI / `SO_NOSIGPIPE`).
+  See CHANGELOG [1.6.6].
+- 🟡 **Document the companion stdlib modules — ✅ DONE 1.6.6.** README gained a
+  "Requires (companion stdlib modules)" note (`tls` / `async` / `random` /
+  `fdlopen` / `dynlib`, plus the `bayan`-not-`json` rule). Pure documentation.
+- 🟡 **macOS server SIGPIPE guard** (`src/server/mod.cyr`) — the 1.6.6 SIGPIPE
+  fix is Linux-only (`rt_sigaction`, x86_64 13 / aarch64 134). macOS is a
+  documented no-op: the macOS ESYSXLAT whitelist doesn't cover `sigaction`, so a
+  raw call would mis-dispatch. Wiring it needs the BSD `sigaction` ABI (or
+  per-socket `SO_NOSIGPIPE`) **and a macOS box to verify** (ground-first). macOS
+  server support is itself new (1.6.2), so this opens when a consumer actually
+  runs a sandhi server on Darwin — or when the stdlib helper below lands (which
+  closes it portably in one move). Until then a sandhi server on macOS is still
+  SIGPIPE-vulnerable; flagged here so it isn't silently assumed covered.
 - 🔵 **Server-only use still drags the whole client + h2 + hpack + tls surface**
   (~400 KB static `.bss` of h2/hpack/tls tables that `CYRIUS_DCE=1` can't
   reclaim — it NOPs code but keeps `.bss`) when a consumer only calls
@@ -196,12 +193,11 @@ edges. Full write-up:
   errors. Pairs with the route-table request above — together they're "the
   server side a real service needs." Full write-up:
   [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md).
-- 🔵 **Stale `run_async` leak doc comment.** The header comment on
-  `sandhi_server_run_async` still says it "leaks ~32 B/connection" via
-  `lib/async.cyr` task structs, but the inline 1.5.3 note (and the
-  `async_new_in(arena)` + `reset_via` code) says that was fixed — "zero residual
-  leak, RSS stays flat." The header contradicts the body; drop the stale leak
-  paragraph.
+- 🔵 **Stale `run_async` leak doc comment — ✅ FIXED 1.6.6.** The
+  `sandhi_server_run_async` header claimed "leaks ~32 B/connection" via
+  `lib/async.cyr` task structs, contradicting the inline 1.5.3 note + the
+  `async_new_in(arena)` code that eliminated it. Header rewritten to match (zero
+  residual leak, RSS flat). See CHANGELOG [1.6.6].
 - **Streaming download to an fd / body-sink — SHIPPED 1.6.4** (`src/http/download.cyr`).
   takumi's source-download ask (takumi `docs/adr/0006-source-download.md`) was
   the trigger — a direct consumer need, so it shipped rather than waiting for a
@@ -217,6 +213,16 @@ edges. Full write-up:
 
 ## Wait-for-stdlib-prerequisite
 
+- **Portable `signal_ignore` / `sock_send` `MSG_NOSIGNAL`** — the proper home for
+  the 1.6.6 SIGPIPE guard. sandhi installs `SIG_IGN(SIGPIPE)` via a raw
+  `rt_sigaction` because `net.cyr`'s `sock_send` is a flagsless `sys_write` (can't
+  pass `MSG_NOSIGNAL`, and forking it is forbidden) and stdlib exposes no
+  signal-disposition helper (SIGPIPE isn't even in the `Signal` enum). A stdlib
+  `signal_ignore(signum)` (portable across Linux/macOS/agnos) **or** a
+  `MSG_NOSIGNAL`-aware `sock_send` would let sandhi drop the raw syscall — and
+  would close the **macOS SIGPIPE guard** gap above in one move. Mirrors how
+  1.6.1/1.6.2 migrated `conn.cyr`'s raw socket syscalls onto `net.cyr` helpers
+  once they landed. Cyrius-side; revisit when either lands.
 - **Fuzzing harness** — the Cyrius toolchain ships no AFL / libFuzzer equivalent
   (re-verified absent on 6.2.7). Revisit when it does.
 
