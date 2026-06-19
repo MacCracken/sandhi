@@ -1184,6 +1184,94 @@ fn test_server_sigpipe_guard() {
     return 0;
 }
 
+# ── 1.6.8 server-side TLS: options + transport seam + conn routing ──
+# (the TLS handshake / wire path itself is proven by the live gate
+# programs/_server_tls_probe.cyr; these unit checks cover the pure
+# options/seam/dispatch logic that doesn't need a real handshake.)
+
+# Conn route handler (fncall5 shape: ctx, conn, buf, blen, params).
+fn _t_route_handler_c(ctx, conn, buf, blen, params): i64 {
+    _g_route_calls = _g_route_calls + 1;
+    _g_route_hit   = sandhi_route_param_int(params, 0);
+    return 0;
+}
+
+fn test_server_tls_options() {
+    var o = sandhi_server_options_new();
+    assert_eq(o != 0, 1, "tls-opts: new");
+    assert_eq(sandhi_server_options_get_tls(o), 0, "tls-opts: default off");
+    # backlog default + decoupled from worker count (1.6.8 handoff-depth fix)
+    assert_eq(sandhi_server_options_get_backlog(o), 128, "tls-opts: default backlog 128");
+    sandhi_server_options_backlog(o, 512);
+    assert_eq(sandhi_server_options_get_backlog(o), 512, "tls-opts: backlog set");
+    sandhi_server_options_backlog(o, 0);
+    assert_eq(sandhi_server_options_get_backlog(o), 128, "tls-opts: backlog <1 → default");
+    # enabling TLS stores the flag without clobbering idle/max_conns
+    sandhi_server_options_idle_ms(o, 7000);
+    sandhi_server_options_max_conns(o, 9);
+    var cert = "CERTBYTES";
+    var key  = "KEYBYTES";
+    sandhi_server_options_tls(o, cert, strlen(cert), key, strlen(key));
+    assert_eq(sandhi_server_options_get_tls(o), 1, "tls-opts: enabled");
+    assert_eq(sandhi_server_options_get_idle_ms(o), 7000, "tls-opts: idle intact");
+    assert_eq(sandhi_server_options_get_max_conns(o), 9, "tls-opts: max_conns intact");
+    assert_eq(sandhi_server_options_get_tls(0), 0, "tls-opts: null → off");
+    return 0;
+}
+
+fn test_server_conn_seam() {
+    # plaintext conn accessors
+    var c = sandhi_server_conn_plain(7);
+    assert_eq(c != 0, 1, "conn: plain new");
+    assert_eq(sandhi_server_conn_is_tls(c), 0, "conn: plain not tls");
+    assert_eq(sandhi_server_conn_fd(c), 7, "conn: plain fd");
+    assert_eq(sandhi_server_conn_is_tls(0), 0, "conn: null not tls");
+    assert_eq(sandhi_server_conn_fd(0), 0 - 1, "conn: null fd → -1");
+    # conn_write + conn-aware send over a /dev/null plaintext conn succeed
+    var devnull = syscall(2, "/dev/null", 1, 0);
+    var dc = sandhi_server_conn_plain(devnull);
+    assert_eq(sandhi_server_conn_write(dc, "hello", 5) >= 0, 1, "conn: plain write ok");
+    assert_eq(sandhi_server_send_status_c(dc, 404, "Not Found"), 0, "conn: send_status_c ok");
+    assert_eq(sandhi_server_send_response_c(dc, 200, "OK", "text/plain", "hi", 2, 0), 0, "conn: send_response_c ok");
+    return 0;
+}
+
+fn test_server_dispatch_c() {
+    var devnull = syscall(2, "/dev/null", 1, 0);   # swallow the 404/405 sends
+    var dc = sandhi_server_conn_plain(devnull);
+    var r = sandhi_router_new(0);
+    sandhi_router_add(r, "GET", "/api/notes/:id", &_t_route_handler_c);
+    sandhi_router_add(r, "POST", "/api/notes", &_t_route_handler_c);
+    var p[264];
+
+    # matching GET → conn handler fires with :id captured
+    _g_route_calls = 0;
+    _g_route_hit = 0;
+    sandhi_route_params_init(&p);
+    var req1 = "GET /api/notes/88 HTTP/1.1\r\nHost: x\r\n\r\n";
+    sandhi_router_dispatch_c(r, 0, dc, req1, strlen(req1), &p);
+    assert_eq(_g_route_calls, 1, "dispatch_c: matched invoked once");
+    assert_eq(_g_route_hit, 88, "dispatch_c: :id captured == 88");
+
+    # path matches, method doesn't → 405, handler NOT invoked
+    _g_route_calls = 0;
+    var req2 = "DELETE /api/notes/88 HTTP/1.1\r\nHost: x\r\n\r\n";
+    sandhi_router_dispatch_c(r, 0, dc, req2, strlen(req2), &p);
+    assert_eq(_g_route_calls, 0, "dispatch_c: wrong method → 405");
+
+    # unknown path → 404
+    _g_route_calls = 0;
+    var req3 = "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n";
+    sandhi_router_dispatch_c(r, 0, dc, req3, strlen(req3), &p);
+    assert_eq(_g_route_calls, 0, "dispatch_c: unknown path → 404");
+
+    # router_handler_c forwards app_ctx + uses a stack param buffer (pool-safe)
+    _g_route_calls = 0;
+    sandhi_server_router_handler_c(r, dc, req1, strlen(req1));
+    assert_eq(_g_route_calls, 1, "handler_c: routes via stack params");
+    return 0;
+}
+
 fn test_trace_default_disabled() {
     # Default off — calling begin/end is a no-op (depth stays 0).
     assert_eq(sandhi_trace_enabled(), 0, "trace: default disabled");
@@ -2436,6 +2524,15 @@ fn main() {
 
     test_group("server/routing/dispatch");
     test_router_dispatch();
+
+    test_group("server/tls/options");
+    test_server_tls_options();
+
+    test_group("server/tls/conn_seam");
+    test_server_conn_seam();
+
+    test_group("server/tls/dispatch_c");
+    test_server_dispatch_c();
 
     test_group("net/resolve/label_encode");
     test_resolve_label_encode();

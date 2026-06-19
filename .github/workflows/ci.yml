@@ -242,6 +242,19 @@ jobs:
           cyrius build programs/_https_policy_threading_gate.cyr build/_https_policy_threading_gate
           build/_https_policy_threading_gate
 
+      - name: Server-side TLS gate (1.6.8)
+        # 1.6.8: sandhi can now SERVE HTTPS (sandhi_server_run_pooled_tls + the
+        # conn seam + conn-aware routing) on the native TLS stack. Forks a
+        # pooled TLS server (Ed25519 test fixtures in programs/_tls_fixtures/)
+        # and drives it with sandhi's OWN client over real TLS 1.3 handshakes:
+        # a trust-store-anchored burst must 200+body, a default-policy client
+        # must be REJECTED (cert verify not bypassed), and real requests must
+        # still serve while a worker is pinned (pool isolation). Pure loopback
+        # (no network); skips cleanly if TLS is unavailable or fixtures absent.
+        run: |
+          cyrius build programs/_server_tls_probe.cyr build/_server_tls_probe
+          build/_server_tls_probe
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest

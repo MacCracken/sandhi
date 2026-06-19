@@ -4,6 +4,99 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.8] — 2026-06-18
+
+**Server-side TLS — sandhi can now SERVE HTTPS.** Closes the headline
+yeo-cy-test bite ("sandhi has NO server-side TLS"): before 1.6.8 the serve
+loops took only `{idle_ms, max_conns}` and every send path wrote plaintext via
+`sock_send`, so the SecureYeoman probe had to bypass the serve loops entirely
+and hand-roll an `accept → tls_native_accept → read → dispatch → write → close`
+loop. SecureYeoman's entire auth stack (OIDC/PKCE, WebAuthn, tokens, secrets)
+is meaningless over plaintext, so this is the highest-value server capability
+that was missing. It ships on the **native** TLS stack (the default + future;
+the libssl backend retires at 2.0 and never had a server side). cyrius pin
+`6.2.19 → 6.2.22` (parity bump to latest; the feature is pure composition — no
+new cyrius primitive required).
+
+**Architecture (No-FFI intact).** All TLS I/O rides the backend-agnostic
+`lib/tls.cyr` contract — `tls_write` / `tls_read` / `tls_close` on the standard
+24-byte ctx shim `[inner_ctx, 0, fd]`. The one piece that contract does not yet
+expose is a *server handshake* (it has `tls_connect*` but no symmetric
+`tls_accept`), so the handshake bootstrap composes the native server primitives
+(`tls_native_new_server` / `_set_alpn` / `_server_load_creds` / `_accept`) and
+wraps the result in that shim. No FFI, no dlopen — pure native composition. A
+`lib/tls.cyr` `tls_accept` wrapper (symmetric to the client `tls_connect_alloc`
+/ `_complete` that already landed cyrius-side) is filed as a cyrius-side
+follow-up; when it lands, this one bootstrap migrates onto it (exactly as
+1.6.1/1.6.2 migrated `conn.cyr`'s raw socket syscalls onto `net.cyr` helpers).
+
+### Added — server-side TLS (`src/server/mod.cyr`)
+
+- **TLS server options.** `sandhi_server_options_tls(opts, cert, cert_len, key,
+  key_len)` enables HTTPS by storing the server cert chain (leaf-first; **DER**
+  for the native leaf parser) + private key (PEM or DER; **Ed25519 / ECDSA
+  P-256 / P-384** — RSA is unsupported by the native server stack). Buffers are
+  borrowed (must outlive the server). `sandhi_server_options_get_tls`.
+- **Transport seam — `SandhiConn`.** A tiny tagged handle (`{kind, handle,
+  fd}`) so one handler set serves both transports: `sandhi_server_conn_plain[_a]`
+  (wrap a raw fd), `sandhi_server_conn_is_tls`, `sandhi_server_conn_fd`, and the
+  seam `sandhi_server_conn_write(conn, buf, len)` (plaintext → looped `sock_send`;
+  TLS → `tls_write`). `sandhi_server_recv_request_c` reads a full request over
+  either transport.
+- **Conn-aware response framing.** `sandhi_server_send_response_c[_a]` /
+  `sandhi_server_send_status_c[_a]` — the fd-based `send_*` stay byte-identical
+  for the plaintext path; these write through the seam so they work over TLS.
+- **Conn-aware routing** (shares the SAME router table as the 1.6.7 fd path).
+  `sandhi_router_dispatch_c` + `sandhi_server_router_handler_c` (for the `_tls`
+  loops, which deliver a `SandhiConn`) + `sandhi_server_router_handler_cp` (a
+  plaintext adapter that wraps the cfd in a plain conn) — so ONE conn-based
+  route-handler set (`fn(app_ctx, conn, buf, blen, params)`, writing via
+  `send_*_c`) serves both the plaintext loops and the TLS loops.
+- **HTTPS serve loops.** `sandhi_server_run_tls` (single-flight, mirrors
+  `run_opts`) and `sandhi_server_run_pooled_tls` (fixed worker-thread pool — TLS
+  handshakes are CPU-heavy, so the pool is what makes HTTPS scale across cores).
+  Each does its own per-connection handshake; same SIGPIPE / SO_RCVTIMEO /
+  smuggling-reject guards as the plaintext loops. Handler shape `fn(ctx, conn,
+  buf, blen)`.
+- **`+18` public verbs.**
+
+### Fixed — pooled handoff-channel depth (`src/server/mod.cyr`)
+
+- **Accept backlog decoupled from worker count** (yeo-cy-test 🔵). New
+  `sandhi_server_options_backlog` (default 128) sizes BOTH the kernel `listen`
+  backlog AND the pooled handoff channel, instead of `run_pooled` sizing the
+  channel to `max_conns` (the worker count). A burst beyond the worker count now
+  queues up to `backlog` accepted connections instead of shedding to the kernel
+  backlog immediately. Applied to `run_pooled` and `run_pooled_tls`.
+
+### Known limitations (filed, not blocking)
+
+- **Native server ctx is not arena-aware** — `tls_native_new_server` + the
+  per-handshake buffers are bump-allocated with no per-connection free, so RSS
+  grows per accepted TLS connection until an arena-aware native server ctx lands
+  upstream (cyrius-side; roadmap). Correctness of serving is unaffected — the
+  same property the proven probe shipped with.
+- **h2 over TLS not served** — NOT an ALPN gap (native server-side ALPN
+  selection landed at cyrius 6.2.22, so sandhi's `http/1.1` offer is genuinely
+  negotiated). sandhi has no HTTP/2 *server* (its h2 is client-side only) and
+  offers only `http/1.1`; an h2-over-TLS server is a separate, larger sandhi
+  feature, not a cyrius prerequisite.
+- **macOS server SIGPIPE guard** still open (ground-first: needs a macOS box +
+  the stdlib `signal_ignore` helper) — unchanged from 1.6.6.
+
+### Verified
+
+- **1097 assertions green** (sandhi 525 / h2 167 / alloc 342 / rpc 63; sandhi
+  503 → 525: TLS options + backlog decouple, conn-seam accessors + conn-aware
+  send, conn-aware dispatch/handler 200/404/405) on the 6.2.22 pin.
+- New live gate **`programs/_server_tls_probe.cyr`** (wired into CI): forks a
+  pooled TLS server (Ed25519 fixtures) and drives it with sandhi's OWN client
+  over real **TLS 1.3** handshakes — a trust-store-anchored burst 200s with the
+  routed body, a default-policy client is **rejected** (cert verify not
+  bypassed), and real requests still serve while a worker is pinned (pool
+  isolation). Deterministic across repeated runs. DCE build OK; lint 0/0; cyrfmt
+  clean; `dist/sandhi.cyr` regenerated at v1.6.8 (13828 lines).
+
 ## [1.6.7] — 2026-06-17
 
 **The server side a real service needs: route table + thread-pool serve mode.**

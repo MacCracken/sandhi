@@ -12,13 +12,14 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.2.19** (1.6.3 added the endpoint-keyed RPC TLS-policy
-registry; 1.6.4 added the binary streaming download path + bumped the pin to
-latest; 1.6.5 added its live-network gate and fixed the two bugs that gate caught;
-1.6.6 fixed the yeo-cy-test SIGPIPE server DoS + bumped the pin to 6.2.19;
-1.6.7 added the SecureYeoman-driven server routing layer + thread-pool serve mode
-(`sandhi_server_run_pooled`) — all pure composition / sandhi-side, see state.md /
-CHANGELOG).
+is currently **cyrius 6.2.22** (1.6.4 added the binary streaming download path;
+1.6.5 added its live-network gate + the two bugs it caught; 1.6.6 fixed the
+yeo-cy-test SIGPIPE server DoS; 1.6.7 added the SecureYeoman-driven server
+routing layer + thread-pool serve mode; **1.6.8 added server-side TLS**
+(`sandhi_server_run_tls` / `_run_pooled_tls` + the `SandhiConn` transport seam +
+conn-aware routing) — sandhi can now SERVE HTTPS on the native TLS stack — plus
+the pooled handoff-depth fix (`sandhi_server_options_backlog`) and the pin bump
+to 6.2.22 — all pure composition / sandhi-side, see state.md / CHANGELOG).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -167,6 +168,28 @@ edges. Full write-up:
   `programs/_server_pool_probe.cyr` (rapid burst + slow-client isolation). Pairs
   with the route table above as "the server side a real service needs." See
   CHANGELOG [1.6.7].
+- 🔴 **Server-side TLS — ✅ SHIPPED 1.6.8** (`src/server/mod.cyr`). sandhi can now
+  SERVE HTTPS: `sandhi_server_run_tls` (single-flight) + `sandhi_server_run_pooled_tls`
+  (worker pool) read cert/key from `sandhi_server_options_tls`, do a per-connection
+  native handshake, and serve over a `SandhiConn` transport seam (conn-aware send +
+  routing — `sandhi_server_send_*_c` / `sandhi_router_dispatch_c` /
+  `sandhi_server_router_handler_c`). Ships on the **native** stack; all TLS I/O rides
+  the backend-agnostic `tls_write`/`_read`/`_close` contract, only the handshake
+  bootstrap composes the native server primitives. Validated end-to-end by the live
+  gate `programs/_server_tls_probe.cyr` (real TLS 1.3, cert verify enforced, pool
+  isolation). See CHANGELOG [1.6.8]. **Residual is cyrius-side** (filed under
+  *Wait-for-stdlib-prerequisite* below): the `lib/tls.cyr` `tls_accept`
+  server-handshake wrapper, and an arena-aware native server ctx (so
+  per-connection RSS stops growing). *(Native server-side ALPN selection — once a
+  gap here — landed at cyrius 6.2.22, so sandhi's `http/1.1` offer is genuinely
+  negotiated; h2 over TLS still isn't served, but only because sandhi has no h2
+  server, not for an ALPN reason.)*
+- 🔵 **`run_pooled` handoff-channel depth = worker count — ✅ SHIPPED 1.6.8**
+  (`src/server/mod.cyr`). New `sandhi_server_options_backlog` (default 128) sizes the
+  kernel `listen` backlog AND the pooled handoff channel, **decoupled from
+  `max_conns`** (the worker count) — a burst beyond the workers now queues up to
+  `backlog` accepted conns instead of `chan_new(workers)` shedding to the kernel
+  backlog. Applied to `run_pooled` + `run_pooled_tls`. See CHANGELOG [1.6.8].
 - 🔵 **Server-only use drags the whole client + h2 + hpack + tls `.bss` — CLOSED
   (won't-fix; not a sandhi item).** A server-only consumer still links ~400 KB of
   static h2/hpack/tls tables (`CYRIUS_DCE=1` NOPs the code but keeps the `.bss`).
@@ -197,6 +220,25 @@ edges. Full write-up:
 
 ## Wait-for-stdlib-prerequisite
 
+- **`lib/tls.cyr` server-handshake wrapper (`tls_accept` / `tls_new_server`)** —
+  the clean home for 1.6.8's server-TLS handshake bootstrap. The `tls_*` contract
+  exposes the client side (`tls_connect_alloc` / `_complete`) but no symmetric
+  *server* side, so 1.6.8's `_sandhi_server_tls_handshake` composes the native
+  server primitives (`tls_native_new_server` / `_set_alpn` / `_server_load_creds`
+  / `_accept`) directly and wraps the result in the standard `lib/tls.cyr` ctx
+  shim. When cyrius adds a backend-agnostic `tls_accept` (mirroring the client
+  `tls_connect_alloc`/`_complete` that already landed), this one bootstrap
+  migrates onto it — exactly as 1.6.1/1.6.2 migrated `conn.cyr`'s raw socket
+  syscalls onto `net.cyr` helpers. Cyrius-side; sandhi composes around it today.
+  **Filed:** cyrius `docs/development/issues/2026-06-18-lib-tls-cyr-no-server-handshake-wrapper.md`.
+- **Arena-aware native server ctx** — `tls_native_new_server` + the per-handshake
+  buffers are bump-allocated with no per-connection free (`tls_native_close` sends
+  close_notify but doesn't reclaim the ctx), so a sandhi TLS server's RSS grows
+  per accepted connection. sandhi can't fix this without forking the primitive
+  (forbidden); it needs an arena-parameterized native server ctx (or a server-ctx
+  free) upstream. Cyrius-side; until then a long-running sandhi TLS server should
+  budget for per-connection growth (same property the proven probe shipped with).
+  **Filed:** cyrius `docs/development/issues/2026-06-18-tls-native-server-ctx-not-arena-aware.md`.
 - **Portable `signal_ignore` / `sock_send` `MSG_NOSIGNAL`** — the proper home for
   the 1.6.6 SIGPIPE guard. sandhi installs `SIG_IGN(SIGPIPE)` via a raw
   `rt_sigaction` because `net.cyr`'s `sock_send` is a flagsless `sys_write` (can't

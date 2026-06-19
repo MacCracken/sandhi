@@ -1,0 +1,185 @@
+# programs/_server_tls_probe.cyr — 1.6.8 live gate for server-side TLS
+# (sandhi_server_run_pooled_tls + the conn seam + conn-aware routing).
+#
+# Closes the headline yeo-cy-test bite: "sandhi has NO server-side TLS." This
+# proves sandhi can SERVE HTTPS end to end, using sandhi's OWN client to drive
+# it (client + server both sandhi, native TLS stack, no openssl dependency).
+#
+# Forks: child runs a POOLED TLS server (4 worker threads) on 127.0.0.1 with a
+# one-route table `GET /notes/:id` (echoes the captured :id), reading the
+# Ed25519 test cert (DER leaf) + key (PEM) from programs/_tls_fixtures/.
+# Parent (run from the repo root) asserts, over real TLS 1.3 handshakes:
+#   [1] burst of 8 HTTPS GETs with a trust-store policy (cert.pem as the CA)
+#       → all 200 + body "55"   (serving + routing + cert verify SUCCEEDS)
+#   [2] a DEFAULT-policy client (no trust store) → must NOT get 200
+#       (the self-signed cert is rejected — verify is NOT bypassed; mirrors the
+#        probe's "default-CA client rejected" finding)
+#   [3] isolation: hold a SILENT raw-TCP connection open (pins one worker in
+#       tls_native_accept until SO_RCVTIMEO) and confirm real HTTPS requests
+#       STILL succeed on the other workers — concurrent-handshake isolation.
+#
+# Skip-cleanly (exit 0) if TLS is unavailable or the fixtures are missing.
+# Exit 0 = PASS / clean-SKIP; non-zero = FAIL.
+include "lib/thread_local.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+include "lib/sigil.cyr"
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
+include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/http/download.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+var CERT_PATH = "programs/_tls_fixtures/cert.der";   # DER leaf — native server cert
+var KEY_PATH  = "programs/_tls_fixtures/key.pem";    # PEM — Ed25519 key
+var CA_PATH   = "programs/_tls_fixtures/cert.pem";   # PEM — client trust anchor
+
+# Conn route handler (fncall5 shape: ctx, conn, buf, blen, params).
+fn note_handler(ctx, conn, buf, blen, params): i64 {
+    var id = sandhi_route_param(params, 0);
+    sandhi_server_send_response_c(conn, 200, "OK", "text/plain", id, strlen(id), 0);
+    return 0;
+}
+
+# Does the response body contain "55"?
+fn _has_55(body, blen): i64 {
+    var i = 0;
+    while (i + 1 < blen) {
+        if (load8(body + i) == 53 && load8(body + i + 1) == 53) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# One HTTPS GET with the given TLS policy (0 = default/no-trust-store). Returns
+# the status code, or a negative error kind if the request failed (e.g. the
+# handshake's cert verify rejected the server).
+fn _https_get(url, policy): i64 {
+    var opts = sandhi_http_options_new();
+    if (policy != 0) { sandhi_http_options_tls_policy(opts, policy); }
+    var r = sandhi_http_get_opts(url, 0, opts);
+    if (r == 0) { return 0 - 99; }
+    var ek = sandhi_http_err_kind(r);
+    if (ek != SANDHI_OK) { return 0 - ek; }
+    if (_has_55(sandhi_http_body(r), sandhi_http_body_len(r)) == 0) { return 0 - 50; }
+    return sandhi_http_status(r);
+}
+
+fn main() {
+    alloc_init();
+    say("=== sandhi server-side TLS gate ===\n");
+
+    if (tls_available() == 0) { say("SKIP (TLS unavailable)\n"); return 0; }
+
+    # Read the fixtures up front — if any is missing, skip cleanly.
+    var cert = alloc(8192);
+    var key  = alloc(8192);
+    var cert_len = file_read_all(CERT_PATH, cert, 8192);
+    var key_len  = file_read_all(KEY_PATH, key, 8192);
+    if (cert_len <= 0 || key_len <= 0) { say("SKIP (TLS fixtures missing)\n"); return 0; }
+
+    var port = 18443;
+    var pid = sys_fork();
+    if (pid == 0) {
+        # child: pooled TLS server, 4 worker threads, one route.
+        var router = sandhi_router_new(0);
+        sandhi_router_add(router, "GET", "/notes/:id", &note_handler);
+        var opts = sandhi_server_options_new();
+        sandhi_server_options_tls(opts, cert, cert_len, key, key_len);
+        sandhi_server_options_max_conns(opts, 4);    # 4 worker threads
+        sandhi_server_options_idle_ms(opts, 1000);   # slow-peer / silent bound
+        sandhi_server_run_pooled_tls(INADDR_LOOPBACK(), port,
+        &sandhi_server_router_handler_c, router, opts);
+        syscall(60, 0);
+    }
+
+    async_sleep_ms(500);   # let the child bind + spawn workers
+
+    var fails = 0;
+    var url = "https://127.0.0.1:18443/notes/55";
+
+    # A trust-store policy that anchors on our self-signed cert (cert.pem).
+    var trust = sandhi_tls_policy_new_trust_store(CA_PATH);
+
+    # [1] burst of 8 HTTPS GETs — each a full TLS 1.3 handshake — all 200 + body.
+    var ok = 0;
+    var k = 0;
+    while (k < 8) {
+        if (_https_get(url, trust) == 200) { ok = ok + 1; }
+        k = k + 1;
+    }
+    say("[1] HTTPS burst (trusted): "); fmt_int(ok); say(" / 8 → 200+body\n");
+    if (ok != 8) { fails = fails + 1; }
+
+    # [2] default-policy client (no trust store): the self-signed cert MUST be
+    # rejected → anything but 200. A 200 here means verify was bypassed.
+    var rej = _https_get(url, 0);
+    say("[2] HTTPS default policy (untrusted) → "); fmt_int(rej);
+    say(" (want != 200; rejected)\n");
+    if (rej == 200) { fails = fails + 1; }
+
+    # [3] isolation: a silent raw-TCP connection pins one worker in the
+    # handshake read until SO_RCVTIMEO; the other workers must keep serving.
+    var silent = sandhi_conn_open(INADDR_LOOPBACK(), port, 0, "");
+    var ok2 = 0;
+    var i = 0;
+    while (i < 8) {
+        if (_https_get(url, trust) == 200) { ok2 = ok2 + 1; }
+        i = i + 1;
+    }
+    if (silent != 0) { sandhi_conn_close(silent); }
+    say("[3] isolation (silent client held): "); fmt_int(ok2); say(" / 8 → 200\n");
+    # The point is non-serialization: with a worker pinned, real requests still
+    # serve. A serialized server would yield ~0 here; tolerate a rare 1-off
+    # client transient (cold-start handshake hiccup) rather than be CI-flaky.
+    if (ok2 < 7) { fails = fails + 1; }
+
+    sys_kill(pid, 9);
+    syscall(61, pid, 0, 0, 0);   # wait4 — reap the child
+
+    if (fails == 0) { say("PASS\n"); return 0; }
+    say("FAIL ("); fmt_int(fails); say(" checks failed)\n");
+    return 1;
+}
+
+var ec = main();
+syscall(60, ec);
