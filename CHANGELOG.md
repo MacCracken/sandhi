@@ -4,6 +4,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.11] — 2026-06-23
+
+**Native custom-trust-store enforcement proven by VERIFY-fail, not just
+load-fail.** The 1.6.0 live gate proved native enforces a custom trust store by
+*refusing* a bogus one — but via a **load failure** (`[4]` passes
+`/nonexistent/ca.pem`, so the open aborts pre-handshake when the file can't
+load). That left the actual question unproven: does native *verify the server
+chain against the custom anchor*, or could the system trust leak through? This
+adds the stronger proof. **Test-only — no `src/` change, no public surface
+change, no new fixture.**
+
+### Added — `programs/_policy_runtime_probe.cyr`
+
+- **Gate `[5]` — loadable-but-wrong CA → handshake verify-fail.** Sets the custom
+  trust store to `programs/_tls_fixtures/cert.pem` — a real, parseable Ed25519
+  cert (already the `_server_tls_probe` client trust anchor, so proven-loadable)
+  that signs the *local* fixture, **not** one.one.one.one. So the store loads
+  cleanly, and — verified live on cyrius 6.2.37 — the custom store **replaces**
+  the system trust, so the public CA that actually signs one.one.one.one is no
+  longer trusted and the chain verification rejects: the open is refused with
+  `err=TLS`. Opening here would mean native loaded the custom anchor but never
+  verified against it (system store leaked through, or verify skipped) — a
+  security regression `[4]`'s load-fail case cannot catch. New exit code `6`
+  (loadable wrong-CA opened → security). Closes the Batch C native-trust-store
+  verify-fail wiring-proof item.
+
+### Verified
+
+- The gate runs green live against **1.1.1.1 / one.one.one.one:443** on cyrius
+  6.2.37 (`[2]` default round-trip, `[3]` wrong-pin fail-closed, `[4]`
+  bogus-CA load-refuse, **`[5]` loadable-wrong-CA verify-fail** — ALL GATES PASS,
+  exit 0); skip-cleanly offline. **1111 unit assertions unchanged** (this is a
+  standalone live-gate program, not part of the `.tcyr` suites). The
+  replace-vs-append semantics the roadmap flagged are now empirically settled:
+  **replace** (a custom anchor that doesn't sign the server fails the handshake).
+  Pin stays **6.2.37**.
+
 ## [1.6.10] — 2026-06-23
 
 **Server-TLS handshake rides the `lib/tls.cyr` contract (flat RSS).** 1.6.8's

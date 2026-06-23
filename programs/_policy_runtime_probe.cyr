@@ -18,17 +18,24 @@
 # policy enforcement). This gate exercises the **native** backend (the
 # no-flag default; skips only on a libssl-only build): default policy
 # round-trips, a wrong SPKI pin fails closed via the backend-agnostic SPKI
-# read, and a bogus custom trust store is REFUSED because native now
-# enforces it (the 1.4.7 "trust/mTLS unavailable → pre-open fail-closed" is
-# retired). The high-level threading enforcement has its own gate,
-# _https_policy_threading_gate.cyr.
+# read, a bogus (unreadable) custom trust store is REFUSED at load time, and
+# (1.6.11) a loadable-but-wrong custom CA drives a handshake VERIFY-fail —
+# proving native enforces the custom anchor by actually verifying the server
+# chain against it (the custom store replaces the system trust), not just by
+# failing to load a missing file. The high-level threading enforcement has its
+# own gate, _https_policy_threading_gate.cyr.
 #
 # Per-backend gates:
 #   [2] default policy: must succeed (real round-trip).
 #   [3] WRONG SPKI pin: must fail-closed with err=TLS (native: SPKI
 #       mismatch). Never crash.
 #   [4] trust-store(bogus CA): native MUST refuse with err=TLS — the custom
-#       CA fails to load, so enforcement aborts the open before handshake.
+#       CA fails to LOAD, so enforcement aborts the open before handshake.
+#   [5] trust-store(loadable wrong CA): native MUST refuse with err=TLS via a
+#       handshake VERIFY-fail — a real, parseable anchor (cert.pem, which signs
+#       the local fixture, NOT one.one.one.one) loads cleanly but the custom
+#       store replaces the system trust, so the server cert no longer chains.
+#       The stronger proof: enforcement via verify-failure, not load-failure.
 #
 # mTLS is NOT exercised here — needs a client-cert server fixture.
 #
@@ -36,9 +43,10 @@
 #   0   — PASS or clean SKIP (no network / TLS unavailable)
 #   2   — default-policy open failed (real handshake regression)
 #   3   — wrong-pin opened (fail-closed broken — security)
-#   4   — wrong-pin / bogus-trust err_kind != SANDHI_CONN_OPEN_TLS (wrong
-#         classification)
+#   4   — wrong-pin / bogus-trust / wrong-CA err_kind != SANDHI_CONN_OPEN_TLS
+#         (wrong classification)
 #   5   — bogus trust-store opened (native enforcement broken — security)
+#   6   — loadable wrong-CA opened (custom anchor not verified against — security)
 
 # sigil's SHA-256 (the SPKI-pin digest in src/tls_policy/apply.cyr)
 # pulls thread_local / ct / keccak, which sigil does not declare as
@@ -152,6 +160,33 @@ fn run_policy_gates(ip): i64 {
         return 4;
     }
     say("PASS (refused, err=TLS)\n");
+
+    # [5] trust-store(loadable-but-WRONG CA) → native MUST refuse via a handshake
+    # VERIFY-fail. The stronger sibling of [4]: [4] passes a file that can't load
+    # (bogus path), so the open aborts pre-handshake — it proves enforcement only
+    # via load-FAILURE. Here the custom anchor is `programs/_tls_fixtures/cert.pem`
+    # — a real, parseable Ed25519 cert (the _server_tls_probe trusts it as its
+    # client anchor, so it's proven-loadable) that signs the LOCAL fixture, NOT
+    # one.one.one.one. So the trust store loads cleanly AND the custom store
+    # REPLACES the system trust (verified live: 6.2.37 native), so the public CA
+    # that actually signs one.one.one.one is no longer trusted → the chain
+    # verification rejects → open refused with err=TLS. Opening here would mean
+    # native loaded the custom anchor but never verified against it (the system
+    # store leaked through, or verify was skipped) — a security regression the [4]
+    # load-fail case cannot catch.
+    say("  [5] trust-store(loadable wrong CA) verify-fail ... ");
+    var c5 = sandhi_conn_open_with_policy(ip, 443, 1, "one.one.one.one",
+    sandhi_tls_policy_new_trust_store("programs/_tls_fixtures/cert.pem"));
+    if (c5 != 0) {
+        say("FAIL: opened (custom anchor not verified against — SECURITY)\n");
+        sandhi_conn_close(c5);
+        return 6;
+    }
+    if (sandhi_conn_last_open_err() != SANDHI_CONN_OPEN_TLS) {
+        say("FAIL: err_kind != TLS (got "); fmt_int(sandhi_conn_last_open_err()); say(")\n");
+        return 4;
+    }
+    say("PASS (verify-fail, err=TLS)\n");
     return 0;
 }
 

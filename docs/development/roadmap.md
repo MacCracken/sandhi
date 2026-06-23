@@ -18,8 +18,9 @@ surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pi
 is currently **cyrius 6.2.37** (1.6.9 lifted the four buffered-client dispatch
 globals into a per-call request context so concurrent `sandhi_http_*_a` workers
 are thread-safe — the thoth bite; **1.6.10** migrated the server-TLS handshake onto
-6.2.37's `tls_accept_alloc_in` / `_complete` + a flat-RSS per-connection arena —
-both pure sandhi-side, no pin change since 6.2.37).
+6.2.37's `tls_accept_alloc_in` / `_complete` + a flat-RSS per-connection arena;
+**1.6.11** proved native custom-trust-store verify-fail enforcement via a live gate
+— all pure sandhi-side, no pin change since 6.2.37).
 
 **Pacing.** Most items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -40,21 +41,15 @@ versions are the intended *sequence*, not hard commitments; each ships only when
 its suite + gate are green, and the version bump happens at slot close (memory:
 `feedback_no_version_bump_without_permission`).
 
-> **1.6.10 shipped** — server-TLS handshake migrated onto cyrius 6.2.37's
-> `tls_accept_alloc_in` / `tls_accept_complete` + a per-connection arena (flat RSS);
-> closed BOTH filed cyrius-side server-TLS prereqs in one move (the missing
-> `tls_accept` wrapper + the non-arena-aware server ctx). No native-server symbol is
-> reached anymore. See CHANGELOG [1.6.10]. Next up:
+> **Shipped** — **1.6.10**: server-TLS handshake migrated onto cyrius 6.2.37's
+> `tls_accept_alloc_in` / `tls_accept_complete` + a per-connection arena (flat RSS),
+> closing BOTH filed cyrius-side server-TLS prereqs in one move (no native-server
+> symbol reached anymore). **1.6.11**: native custom-trust-store **verify-fail**
+> proof — gate `[5]` in `_policy_runtime_probe.cyr` proves a loadable-but-wrong CA
+> drives a handshake verify-fail (the custom store **replaces** the system trust),
+> the stronger sibling of `[4]`'s load-fail; settled the replace-vs-append question
+> live on 6.2.37. See CHANGELOG [1.6.10] / [1.6.11]. Next up:
 
-- **1.6.11 — native custom-trust-store verify-fail proof**
-  (`programs/_policy_runtime_probe.cyr` + a CA-PEM fixture under
-  `programs/_tls_fixtures/`). The 1.6.0 gate `[4]` proves an *unreadable / bogus*
-  custom trust store is enforced (open refused, err=TLS). It does **not** yet prove
-  a *loadable-but-wrong* CA (a real PEM that doesn't sign the server) drives a
-  handshake **verify-fail**. Add the CA fixture + the probe case (chain-verify
-  correctness itself is cyrius's fail-closed `tls_native_connect`; this is sandhi's
-  wiring-proof gap). Test-only unless it surfaces a real enforcement gap. Closes the
-  Batch C trust-store proof item.
 - **1.6.12 — QU mDNS resolver receive correctness** (`src/discovery/local.cyr`).
   Run the live-network check the default unicast (QU) resolver never got: it
   `sock_connect`s to the mDNS group then `sock_recv`s — the same Linux
@@ -118,8 +113,8 @@ The native-TLS prerequisite sit named has landed (native default since cyrius
 6.1.21), and sit's AGNOS adoption drove the C1/C2 transport work already shipped
 (see CHANGELOG). Further Batch C items fill from real-workload friction sit
 surfaces — NOT speculatively pre-baked ([`project_sit_adoption_drives_roadmap`]).
-Currently open (both are sandhi-capacity — **scheduled as `1.6.11` and `1.6.12`**
-in the near-term plan above):
+Currently open (sandhi-capacity — **scheduled as `1.6.12`** in the near-term plan
+above; the companion trust-store verify-fail proof shipped at 1.6.11):
 
 - **QU mDNS resolver receive correctness (needs a live-network check).** The
   default unicast (QU) resolver in `src/discovery/local.cyr` `sock_connect`s to
@@ -129,14 +124,11 @@ in the near-term plan above):
   **unverified** (unit tests use synthetic packets; the smoke only checks a
   no-responder miss). Run a live-network check; if it confirms the resolver never
   receives, apply the 1.5.5 two-socket fix (unconnected RX) to the QU path too.
-- **Native custom-trust-store verify-fail proof (needs a CA fixture).** The 1.6.0
-  live gate (`_policy_runtime_probe.cyr` `[4]`) proves a *bogus* custom trust
-  store is enforced (unreadable CA → open refused with err=TLS, not silently
-  ignored). It does **not** yet prove a *loadable-but-wrong* CA causes a handshake
-  verify-fail (swap the trust anchor to a CA that doesn't sign the server → must
-  reject). That needs a CA PEM fixture + the cyrius `tls_native` CA-bundle
-  replace-vs-append semantics. Chain-verify correctness itself is cyrius's (the
-  CVE-18 fail-closed `tls_native_connect`); this is sandhi's wiring-proof gap.
+
+> The companion Batch C item — the **native custom-trust-store verify-fail
+> proof** — shipped at **1.6.11** (gate `[5]` in `_policy_runtime_probe.cyr`: a
+> loadable-but-wrong CA drives a handshake verify-fail; the custom store replaces
+> the system trust). See CHANGELOG [1.6.11].
 
 ## Backlog — wait for a second consumer (concrete, sandhi-anchored)
 
