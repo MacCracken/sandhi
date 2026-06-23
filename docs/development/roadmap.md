@@ -19,8 +19,9 @@ is currently **cyrius 6.2.37** (1.6.9 lifted the four buffered-client dispatch
 globals into a per-call request context so concurrent `sandhi_http_*_a` workers
 are thread-safe — the thoth bite; **1.6.10** migrated the server-TLS handshake onto
 6.2.37's `tls_accept_alloc_in` / `_complete` + a flat-RSS per-connection arena;
-**1.6.11** proved native custom-trust-store verify-fail enforcement via a live gate
-— all pure sandhi-side, no pin change since 6.2.37).
+**1.6.11** proved native custom-trust-store verify-fail enforcement via a live gate;
+**1.6.12** fixed the default QU mDNS resolver's connect()-source-filter receive bug
+(two-socket split) — all pure sandhi-side, no pin change since 6.2.37).
 
 **Pacing.** Most items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -43,20 +44,16 @@ its suite + gate are green, and the version bump happens at slot close (memory:
 
 > **Shipped** — **1.6.10**: server-TLS handshake migrated onto cyrius 6.2.37's
 > `tls_accept_alloc_in` / `tls_accept_complete` + a per-connection arena (flat RSS),
-> closing BOTH filed cyrius-side server-TLS prereqs in one move (no native-server
-> symbol reached anymore). **1.6.11**: native custom-trust-store **verify-fail**
-> proof — gate `[5]` in `_policy_runtime_probe.cyr` proves a loadable-but-wrong CA
-> drives a handshake verify-fail (the custom store **replaces** the system trust),
-> the stronger sibling of `[4]`'s load-fail; settled the replace-vs-append question
-> live on 6.2.37. See CHANGELOG [1.6.10] / [1.6.11]. Next up:
+> closing BOTH filed cyrius-side server-TLS prereqs (no native-server symbol reached
+> anymore). **1.6.11**: native custom-trust-store **verify-fail** proof — gate `[5]`
+> proves a loadable-but-wrong CA drives a handshake verify-fail (the custom store
+> replaces the system trust), the stronger sibling of `[4]`'s load-fail. **1.6.12**:
+> the default QU mDNS resolver's connect()-source-filter receive bug fixed via the
+> two-socket split (unconnected group-joined RX + TX bound to 5353 so the unicast
+> reply lands on RX; ID=0), validated by a loopback dispatch gate. See CHANGELOG
+> [1.6.10] / [1.6.11] / [1.6.12]. That closes every concrete sandhi-capacity item in
+> the original plan; what remains is the conditional profile-first arc:
 
-- **1.6.12 — QU mDNS resolver receive correctness** (`src/discovery/local.cyr`).
-  Run the live-network check the default unicast (QU) resolver never got: it
-  `sock_connect`s to the mDNS group then `sock_recv`s — the same Linux
-  connect()-source-filter shape that sank the 1.5.4 QM attempt (the answer arrives
-  from the responder's unicast IP, not the group address). If the check confirms it
-  never receives, apply the proven 1.5.5 two-socket fix (unconnected RX) to the QU
-  path. Closes the Batch C QU-mDNS item.
 - **1.6.13+ (profile-first; conditional)** — Batch B optimizations. Capture the
   `sandhi_prof_*` phase data on a representative workload, then ship whichever of
   B1 / B2 / B3 (see *Batch B* below) the measurement — not speculation — justifies,
@@ -113,22 +110,14 @@ The native-TLS prerequisite sit named has landed (native default since cyrius
 6.1.21), and sit's AGNOS adoption drove the C1/C2 transport work already shipped
 (see CHANGELOG). Further Batch C items fill from real-workload friction sit
 surfaces — NOT speculatively pre-baked ([`project_sit_adoption_drives_roadmap`]).
-Currently open (sandhi-capacity — **scheduled as `1.6.12`** in the near-term plan
-above; the companion trust-store verify-fail proof shipped at 1.6.11):
-
-- **QU mDNS resolver receive correctness (needs a live-network check).** The
-  default unicast (QU) resolver in `src/discovery/local.cyr` `sock_connect`s to
-  the mDNS group then `sock_recv`s — the same Linux connect()-source-filter shape
-  that broke the 1.5.4 QM attempt (an answer arrives from the responder's unicast
-  IP, not the group address). Its "works against most responders" claim is
-  **unverified** (unit tests use synthetic packets; the smoke only checks a
-  no-responder miss). Run a live-network check; if it confirms the resolver never
-  receives, apply the 1.5.5 two-socket fix (unconnected RX) to the QU path too.
-
-> The companion Batch C item — the **native custom-trust-store verify-fail
-> proof** — shipped at **1.6.11** (gate `[5]` in `_policy_runtime_probe.cyr`: a
-> loadable-but-wrong CA drives a handshake verify-fail; the custom store replaces
-> the system trust). See CHANGELOG [1.6.11].
+**Both currently-open Batch C items have shipped**: the native custom-trust-store
+verify-fail proof at **1.6.11** (gate `[5]` in `_policy_runtime_probe.cyr` — a
+loadable-but-wrong CA drives a handshake verify-fail; the custom store replaces the
+system trust), and the QU mDNS resolver receive fix at **1.6.12** (the default
+resolver's connect()-source-filter receive bug — two-socket split with the
+unconnected group-joined RX + TX bound to 5353, validated by a loopback dispatch
+gate). See CHANGELOG [1.6.11] / [1.6.12]. No Batch C item is open now; further items
+fill only from real sit-surfaced friction.
 
 ## Backlog — wait for a second consumer (concrete, sandhi-anchored)
 

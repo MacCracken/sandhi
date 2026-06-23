@@ -4,6 +4,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.12] — 2026-06-23
+
+**Default mDNS resolver now actually receives (QU two-socket fix).** The default
+unicast-response (QU) `.local` resolver `sock_connect`ed to the mDNS group then
+`sock_recv`ed on the *same* socket — so Linux's connect()-source-filter dropped
+every reply (the answer arrives from the responder's own unicast IP, not the
+group: the 1.5.4 bug, never fixed on the QU path). A second latent bug compounded
+it: the query used a random TXID, but mDNS responses carry ID=0 (RFC 6762 §18.1),
+so even a received reply would have been rejected on ID mismatch. The 1.5.5 QM
+fix didn't transfer trivially — a QU reply is unicast to the *querier's source
+port*, not the group — so this needed a tailored two-socket setup. **`src/discovery/local.cyr`
+only; pin stays 6.2.37.**
+
+### Fixed — `src/discovery/local.cyr`
+
+- **Two-socket QU receive.** Factored a shared `_sandhi_local_query_2sock_a(a,
+  name, qclass_hi, tx_port)` helper (the module was reordered so the RX/recv
+  helpers precede the default resolver). RX is **unconnected**, bound to 5353 +
+  `SO_REUSEPORT` + group-joined — it sees the answer from any source. TX is
+  connected to the group (send-only). For QU it binds the TX to **5353** so the
+  responder's unicast reply lands on the RX's port; the connect()-filter on the TX
+  rejects that reply (source ≠ group), so it falls to the unconnected RX. The
+  group-join also catches a multicast answer. Query **ID = 0** now. The opt-in QM
+  resolver (1.5.5) now shares this helper (`qclass_hi=0x00, tx_port=0` — ephemeral
+  TX; byte-identical behaviour, verified by its existing loopback gate).
+- **`sandhi_discovery_local_available()` is AGNOS-aware** (returns 0 on AGNOS).
+  The default resolver now joins the multicast group, so it shares the QM
+  resolver's AGNOS limitation (the net multicast helpers return −1 there → a clean
+  miss); Linux/macOS unchanged (1). No verb signature change.
+
+### Verified
+
+- **1112 assertions green** (sandhi 540 / h2 167 / alloc 342 / rpc 63; sandhi 539
+  → 540: the new `discovery/local/qu_unicast` loopback gate — an unconnected RX
+  bound to a port receives a **unicast** datagram even with a connected TX
+  coexisting on the same port via `SO_REUSEPORT`, the dispatch crux; a regression
+  to a single connect()ed socket drops the reply and fails it). The QM loopback
+  gate + the discovery smoke still pass (no regression from the refactor). Smoke +
+  `CYRIUS_DCE=1` builds OK; `cyrius lint src/discovery/local.cyr` 0/0;
+  `dist/sandhi.cyr` regenerated at v1.6.12. **Live-LAN note**: validation is via
+  the loopback dispatch gate (the same standard 1.5.5 used) + the structural
+  argument — this environment had no mDNS responder reachable (avahi-daemon not
+  running). Closes the Batch C QU-mDNS item.
+
 ## [1.6.11] — 2026-06-23
 
 **Native custom-trust-store enforcement proven by VERIFY-fail, not just
