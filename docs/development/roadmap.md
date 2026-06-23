@@ -6,7 +6,7 @@
 > [`requests/`](requests/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. This file was last
-> swept clean of completed work on **2026-06-23** (at 1.6.9).
+> swept clean of completed work on **2026-06-23** (after 1.6.12).
 
 ## Context (post-fold)
 
@@ -15,57 +15,20 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.2.37** (1.6.9 lifted the four buffered-client dispatch
-globals into a per-call request context so concurrent `sandhi_http_*_a` workers
-are thread-safe — the thoth bite; **1.6.10** migrated the server-TLS handshake onto
-6.2.37's `tls_accept_alloc_in` / `_complete` + a flat-RSS per-connection arena;
-**1.6.11** proved native custom-trust-store verify-fail enforcement via a live gate;
-**1.6.12** fixed the default QU mDNS resolver's connect()-source-filter receive bug
-(two-socket split) — all pure sandhi-side, no pin change since 6.2.37).
+is currently **cyrius 6.2.37**, unchanged since 1.6.9 — the 1.6.9–1.6.12 patches
+(client dispatch thread-safety, the server-TLS handshake migration + flat-RSS, the
+native trust-store verify-fail proof, and the QU mDNS receive fix) were all pure
+sandhi-side on that pin (see CHANGELOG).
 
-**Pacing.** Most items below are *provisional groupings*, not committed dated
+**Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
 evidence justifies it, a second consumer asks, or sit surfaces friction). ONE
 item per slot. Per [`project_sit_adoption_drives_roadmap`] scope is surfaced from
 real signals, not pre-baked; per the no-silent-scope-outs rule every deferral is
 a named entry here (or in [`requests/`](requests/README.md)), not a buried mention.
-The exception is the **near-term patch plan** directly below: those items have **no
-remaining gate** (sandhi can repair them now), so they are sequenced into concrete
-patch releases. Everything under it stays gated.
-
-## Near-term patch plan (sandhi-capacity, no external gate)
-
-The open items sandhi can repair **now** — no cyrius primitive pending, no second
-consumer required, no breaking-change wait. Batched into single-focus patch
-releases (one submodule per patch, per CLAUDE.md), highest value first. The
-versions are the intended *sequence*, not hard commitments; each ships only when
-its suite + gate are green, and the version bump happens at slot close (memory:
-`feedback_no_version_bump_without_permission`).
-
-> **Shipped** — **1.6.10**: server-TLS handshake migrated onto cyrius 6.2.37's
-> `tls_accept_alloc_in` / `tls_accept_complete` + a per-connection arena (flat RSS),
-> closing BOTH filed cyrius-side server-TLS prereqs (no native-server symbol reached
-> anymore). **1.6.11**: native custom-trust-store **verify-fail** proof — gate `[5]`
-> proves a loadable-but-wrong CA drives a handshake verify-fail (the custom store
-> replaces the system trust), the stronger sibling of `[4]`'s load-fail. **1.6.12**:
-> the default QU mDNS resolver's connect()-source-filter receive bug fixed via the
-> two-socket split (unconnected group-joined RX + TX bound to 5353 so the unicast
-> reply lands on RX; ID=0), validated by a loopback dispatch gate. See CHANGELOG
-> [1.6.10] / [1.6.11] / [1.6.12]. That closes every concrete sandhi-capacity item in
-> the original plan; what remains is the conditional profile-first arc:
-
-- **1.6.13+ (profile-first; conditional)** — Batch B optimizations. Capture the
-  `sandhi_prof_*` phase data on a representative workload, then ship whichever of
-  B1 / B2 / B3 (see *Batch B* below) the measurement — not speculation — justifies,
-  one per patch. Opens only if the data warrants it; otherwise these stay parked.
-  (Listed last because the gate here is "go measure first," which is itself in
-  sandhi's capacity but shouldn't block the three concrete patches above.)
-
-> **Not in this plan** (blocked or deferred by design; each named in its own
-> section below): the libssl **2.0** retirement (breaking — a major, not a patch);
-> the `signal_ignore` / `MSG_NOSIGNAL`, macOS-server-SIGPIPE, and fuzzing items
-> (cyrius-gated or need a macOS box — *Wait-for-stdlib-prerequisite*); and the
-> wait-for-second-consumer backlog (policy deferral — needs a second asker).
+The concrete sandhi-capacity patch sequence (1.6.10–1.6.12) shipped; everything
+remaining here is gated (profile evidence, a breaking major, a second consumer, or
+a cyrius primitive).
 
 ## Batch A — libssl retirement (sandhi 2.0 — breaking)
 
@@ -91,8 +54,10 @@ a public verb + a build flag is not a patch):
 
 The 1.2.5 prof captures (`sandhi_prof_*`) are the gate. No pre-committed
 ordering; each ships in its own slot when measurement — not speculation —
-justifies it. **Sequenced as the conditional `1.6.13+` profile-first arc** in the
-near-term plan above (capture the prof data first; ship only what it warrants).
+justifies it. **Parked for later review** (the would-be `1.6.13` "opts" arc): the
+concrete sandhi-capacity items all shipped at 1.6.10–1.6.12, so the next move here
+is to capture prof data on a representative workload first and ship only what it
+warrants — revisit when there's a reason to measure.
 
 - **B1 — HPACK Huffman tie-break for short tokens.** The encoder picks Huffman
   only when *strictly* shorter; a tie-breaker favoring Huffman keeps the dynamic
@@ -106,18 +71,11 @@ near-term plan above (capture the prof data first; ship only what it warrants).
 
 ## Batch C — sit-adoption reshape (filled by what sit surfaces)
 
-The native-TLS prerequisite sit named has landed (native default since cyrius
-6.1.21), and sit's AGNOS adoption drove the C1/C2 transport work already shipped
-(see CHANGELOG). Further Batch C items fill from real-workload friction sit
-surfaces — NOT speculatively pre-baked ([`project_sit_adoption_drives_roadmap`]).
-**Both currently-open Batch C items have shipped**: the native custom-trust-store
-verify-fail proof at **1.6.11** (gate `[5]` in `_policy_runtime_probe.cyr` — a
-loadable-but-wrong CA drives a handshake verify-fail; the custom store replaces the
-system trust), and the QU mDNS resolver receive fix at **1.6.12** (the default
-resolver's connect()-source-filter receive bug — two-socket split with the
-unconnected group-joined RX + TX bound to 5353, validated by a loopback dispatch
-gate). See CHANGELOG [1.6.11] / [1.6.12]. No Batch C item is open now; further items
-fill only from real sit-surfaced friction.
+Gate cleared (native default since cyrius 6.1.21); sit's AGNOS adoption drove the
+C1/C2 transport work plus the 1.6.11 trust-store-verify-fail proof and the 1.6.12
+QU-mDNS receive fix — all shipped (see CHANGELOG). **No Batch C item is open** —
+further items fill only from real-workload friction sit surfaces, NOT speculatively
+pre-baked ([`project_sit_adoption_drives_roadmap`]).
 
 ## Backlog — wait for a second consumer (concrete, sandhi-anchored)
 
