@@ -7,7 +7,7 @@ Smallest possible HTTP GET with sandhi.
 ```bash
 cyrius deps                                               # resolve stdlib deps
 cyrius build programs/smoke.cyr build/sandhi-smoke       # link proof
-cyrius test src/test.cyr                                  # unit tests
+cyrius test tests/sandhi.tcyr                             # unit tests — run each: sandhi / h2 / alloc / rpc .tcyr
 cyrius lint src/*.cyr                                     # static checks
 ```
 

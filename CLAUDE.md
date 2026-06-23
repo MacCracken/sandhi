@@ -41,7 +41,7 @@ Project was scaffolded with `cyrius init sandhi` on 2026-04-24. **Do not manuall
 ```bash
 cyrius deps                                                # resolve stdlib deps
 cyrius build programs/smoke.cyr build/sandhi-smoke        # build (link proof, native TLS — no flag)
-cyrius test src/test.cyr                                   # unit tests (backend-agnostic; no -D needed)
+cyrius test tests/sandhi.tcyr                              # unit tests — run each suite: sandhi / h2 / alloc / rpc .tcyr (backend-agnostic; no -D)
 cyrius lint src/*.cyr                                      # static checks
 CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke  # release-parity build
 cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr build/sandhi-smoke-libssl  # deprecated libssl opt-in
