@@ -149,9 +149,11 @@ refreshes `lib/sandhi.cyr` from it. (Kept here as the procedure, not pending wor
 - [`docs/examples/`](docs/examples/) — runnable examples
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) — open / remaining post-fold work (shipped history lives in `CHANGELOG.md`)
 - [`docs/development/state.md`](docs/development/state.md) — live state snapshot
+- [`docs/development/issues/`](docs/development/issues/README.md) — bugs + cross-repo consumer/producer coordination docs; resolved ones move to `issues/archive/`
+- [`docs/development/requests/`](docs/development/requests/README.md) — speculative enhancement requests that aren't bugs and aren't yet roadmapped (promote to the roadmap when a consumer commits)
 - [`CHANGELOG.md`](CHANGELOG.md) — source of truth for all changes
 
-New quirks and constraints land in `docs/architecture/` as numbered items (`NNN-kebab-case.md`). New decisions land in `docs/adr/` using [`template.md`](docs/adr/template.md). **Never renumber either series.**
+New quirks and constraints land in `docs/architecture/` as numbered items (`NNN-kebab-case.md`). New decisions land in `docs/adr/` using [`template.md`](docs/adr/template.md). New bugs/coordination land in `docs/development/issues/`; new speculative feature asks land in `docs/development/requests/` (both `YYYY-MM-DD-kebab-case.md`, append-only). **Never renumber the `adr/` or `architecture/` series.**
 
 ## CHANGELOG Format
 

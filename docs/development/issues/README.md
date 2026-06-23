@@ -34,21 +34,30 @@ The 1.4.x arc closed the HTTP close-path drain (1.4.1), the repeated-HTTPS-reque
 SIGSEGV (1.4.5), the high-level client TLS-policy threading gap (1.4.6), and the
 low-level TLS-policy-enforcement live SIGSEGV (1.4.7); the AGNOS transport gap
 closed across C1 (1.5.1) / C2 (1.5.2) with the build cascade clearing at 1.5.4 /
-cyrius 6.2.7 — all **resolved and archived** (see the [Archived](#archived-resolved)
-table). New sandhi-side defects land here as `YYYY-MM-DD-kebab-case.md` and move to
-`archive/` when fully closed.
+cyrius 6.2.7; and **1.6.9** closed the thoth client-dispatch thread-safety bite
+(the four buffered-dispatch globals lifted into a per-call request context) — all
+**resolved and archived** (see the [Archived](#archived-resolved) table). New
+sandhi-side defects land here as `YYYY-MM-DD-kebab-case.md` and move to `archive/`
+when fully closed.
 
 ## Upstream dependencies (sandhi is blocked on stdlib / toolchain)
 
-| Doc | Filed | Status | Summary |
-|-----|-------|--------|---------|
-| [`2026-05-22-cyrius-native-tls-in-6.0.x.md`](2026-05-22-cyrius-native-tls-in-6.0.x.md) | 2026-05-22 | ✅ CLOSED (1.6.0 / cyrius 6.2.8) | `lib/tls.cyr` native-TLS swap (off the fdlopen-libssl bridge). Native transport operational + no-flag default since 1.4.2 / cyrius 6.1.21. **Closed at cyrius 6.2.8 / sandhi 1.6.0**: 6.2.8 shipped the typed native trust-store + mTLS ctx verbs (`tls_ctx_load_verify_locations` / `_use_certificate_file` / `_use_private_key_file`); 1.6.0 migrated `apply.cyr` off the last `tls_dlsym("SSL_CTX_*")` callers → native now enforces trust-store + mTLS (Batch A1). Last libssl coupling for policy enforcement gone. Archive on the next sweep. |
-| [`2026-05-10-daimon-server-max-conns.md`](2026-05-10-daimon-server-max-conns.md) | 2026-05-10 | sandhi-side ✅ 1.4.9 | Daimon's `serve_async` → shared-path collapse was blocked on `sandhi_server_options_max_conns` *enforcement*. **Sandhi side shipped at 1.4.9**: `sandhi_server_run_async` (epoll-cooperative, batched accept bounded by `max_conns`, per-handler buffers) — approach (2) from the filing. Residual is daimon-side (collapse its duplicated accept loop onto the shared verb); sandhi has nothing left to wire. |
+All filed upstream dependencies to date are **resolved and archived** — the
+`lib/tls.cyr` native-TLS swap off the fdlopen-libssl bridge (✅ cyrius 6.2.8 /
+sandhi 1.6.0) and the daimon `serve_async` max-conns enforcement (sandhi-side
+✅ 1.4.9) both closed and moved to `archive/` in the 2026-06-23 sweep. New
+upstream blockers land here as `YYYY-MM-DD-kebab-case.md` and move to `archive/`
+when the toolchain ships the fix; sandhi-side enhancements still gated on a
+stdlib primitive are tracked in [`../roadmap.md`](../roadmap.md)
+("Wait-for-stdlib-prerequisite"). See the [Archived](#archived-resolved) table.
 
 ## Archived (resolved)
 
 | Doc | Closed at | Summary |
 |-----|-----------|---------|
+| [`archive/2026-06-23-thoth-http-client-dispatch-globals-not-thread-safe.md`](archive/2026-06-23-thoth-http-client-dispatch-globals-not-thread-safe.md) | sandhi 1.6.9 / cyrius 6.2.37 | thoth (agentic-coding TUI): the buffered HTTP client stashed four pieces of per-request state in module globals (0-RTT opt-in, cred-digest for the session-cache key, pending TLS policy, open-error classification), so N concurrent `sandhi_http_post_a` workers on separate OS threads raced the shared words — the cred-digest race could cross-wire TLS session resumption between differently-credentialed requests. **Resolved** by lifting the four into an arena-allocated per-call request context (`SANDHI_REQCTX_*` + `_sandhi_reqctx_*`) threaded through dispatch → do_impl → conn-open → finalize (+ the policy pre/post-open helpers); `ctx==0` falls back to the module globals so every single-threaded caller is byte-identical. No public surface change. Tests 1097 → 1111. |
+| [`archive/2026-05-22-cyrius-native-tls-in-6.0.x.md`](archive/2026-05-22-cyrius-native-tls-in-6.0.x.md) | cyrius 6.2.8 / sandhi 1.6.0 | Upstream: `lib/tls.cyr` native-TLS swap off the fdlopen-libssl bridge. Native transport operational + no-flag default since 1.4.2 / cyrius 6.1.21; **closed at 6.2.8 / 1.6.0** when cyrius shipped the typed native trust-store + mTLS ctx verbs (`tls_ctx_load_verify_locations` / `_use_certificate_file` / `_use_private_key_file`) and sandhi 1.6.0 migrated `apply.cyr` off the last `tls_dlsym("SSL_CTX_*")` callers (Batch A1) → native enforces trust-store + mTLS. *(Residual libssl `tls_get_peer_spki_der` SPKI regression is moot/low-pri — native covers pinning, libssl retires at 2.0; tracked in the roadmap.)* |
+| [`archive/2026-05-10-daimon-server-max-conns.md`](archive/2026-05-10-daimon-server-max-conns.md) | sandhi-side 1.4.9 | daimon's `serve_async` → shared-path collapse was blocked on `sandhi_server_options_max_conns` enforcement. **Sandhi side shipped at 1.4.9**: `sandhi_server_run_async` (epoll-cooperative, batched accept bounded by `max_conns`, per-handler buffers) — approach (2) from the filing. Residual is daimon-side only (collapse its duplicated accept loop onto the shared verb); sandhi has nothing left to wire. |
 | [`archive/2026-06-15-yantra-sandhi-wd-rpc-no-tls-policy.md`](archive/2026-06-15-yantra-sandhi-wd-rpc-no-tls-policy.md) | sandhi 1.6.3 / cyrius 6.2.11 | yantra M8: the WebDriver/Appium/MCP RPC convenience verbs (`sandhi_wd_*` / `sandhi_ap_*` / `sandhi_rpc_mcp_*`) took only a `base_url` — no options, no TLS policy — so a remote grid driven over HTTPS could pin only the session-create POST; every per-action call fell back to default trust (a half-pinned session). **Resolved** with an endpoint-keyed default TLS policy registry at the shared dispatch layer (option (2) from the filing): `sandhi_rpc_set_default_tls_policy(base_url, policy)` (+ `_clear` / `_get` / `_clear_all`); per-call longest-prefix resolution threads the policy through `_sandhi_http_dispatch_a` (and `sandhi_http_stream_opts_a` for MCP SSE) with `sandhi_http_options_tls_policy` semantics — no per-verb `_opts` churn. Plain-HTTP `127.0.0.1` backends unaffected. Tests 42 → 63. |
 | [`archive/2026-06-06-macos-nonblocking-connect.md`](archive/2026-06-06-macos-nonblocking-connect.md) | sandhi 1.6.1 (IPv4) + 1.6.2 (IPv6/server) / cyrius 6.2.9–6.2.10 | macOS (Mach-O) non-blocking connect + per-op SO_*TIMEO used Linux-only socket constants → spurious `SANDHI_ERR_CONNECT` for any `connect_ms > 0` (yantra iOS Appium repro). **IPv4 + per-op-timeout** fixed at 1.6.1 (compose `net_connect_nb` / `sock_set_*_timeout`); **IPv6 + server listen socket** fixed at 1.6.2 once cyrius 6.2.10 shipped the v6-on-Darwin surface (compose `sockaddr_in6` / `net_connect_sa_nb` / `sock_set_nonblocking` + per-target `AF_INET6`). sandhi's hand-rolled duplicates + all 8 Linux-only socket constants deleted. No Linux-only socket constant remains in sandhi. |
 | [`archive/2026-06-15-cyrius-net-v6-darwin.md`](archive/2026-06-15-cyrius-net-v6-darwin.md) | cyrius 6.2.10 / sandhi 1.6.2 | Upstream: stdlib `lib/net.cyr` IPv6 surface not Darwin-ported (`SockDomain.AF_INET6` unbranched, no `sockaddr_in6` builder, no v6 nb-connect, no `sock_set_nonblocking`) — blocked the v6/server half of the macOS connect fix. Filed by sandhi at 1.6.1; **6.2.10 shipped all five requested primitives** (the cyrius source cites this filing) and **sandhi 1.6.2 adopted them**. |

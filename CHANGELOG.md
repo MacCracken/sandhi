@@ -4,6 +4,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.9] — 2026-06-23
+
+**Client dispatch is thread-safe under concurrent workers (thoth bite).** The
+buffered HTTP client stashed four pieces of per-request state in **module
+globals** — set on entry to a dispatch, read deep in the connect path: the
+0-RTT opt-in (`_sandhi_allow_0rtt`), the credential digest for the session-cache
+key (`_sandhi_cred_digest`), the pending TLS policy (`_sandhi_tls_policy_pending`),
+and the open-error classification (`_sandhi_conn_last_err`). The save→write→call→restore
+idiom is correct for the single-threaded redirect recursion it was built for, but
+two dispatches on separate OS threads race the shared word — surfaced by **thoth**
+(the agentic-coding TUI) designing N concurrent `sandhi_http_post_a` workers over
+`lib/thread.cyr`. The dangerous one is the credential digest: worker A could do its
+TLS session lookup/store under worker B's digest, cross-wiring resumption state
+between differently-credentialed requests. cyrius pin `6.2.22 → 6.2.37` (parity
+bump to latest; the fix is pure sandhi-side composition — no new primitive).
+
+### Fixed — per-call request context (`src/http/conn.cyr`, `src/http/client.cyr`, `src/tls_policy/apply.cyr`)
+
+- **Lifted the four globals into a per-call context** threaded through the
+  buffered dispatch path. `_sandhi_http_dispatch_a` arena-allocates a small
+  32-byte context (`SANDHI_REQCTX_*`), fills the 0-RTT opt-in / cred-digest /
+  TLS policy, and threads a pointer through `_sandhi_http_do_a` →
+  `_sandhi_http_follow_a` → `_sandhi_http_do_impl_a` → the conn-open functions →
+  `_sandhi_conn_finalize_with_early_data_a` (+ the policy `_sandhi_policy_pre_open_a`
+  / `_post_open_a` helpers). The connect path now classifies its open error into
+  that context and `do_impl` reads it back from there, instead of the shared
+  `_sandhi_conn_last_err`. With distinct per-request arenas + fresh connections,
+  concurrent `sandhi_http_*_a` workers are now structurally safe.
+- **`_sandhi_reqctx_*` accessors** (`conn.cyr`) encapsulate the lift: each takes a
+  `ctx` and falls back to the module global when `ctx == 0`, so **every
+  single-threaded caller is byte-identical**. The public conn-open verb
+  `sandhi_conn_open_fully_timed_a` becomes a `ctx=0` wrapper over a new internal
+  `_sandhi_conn_open_fully_timed_ctx_a`; `sandhi_conn_last_open_err()` and the
+  streaming / download / h2-auto / `sandhi_conn_open_with_policy` paths keep
+  reading/writing the globals exactly as before. **No public surface change** —
+  no new public verb, no API break.
+- **Correctness bonus (single-threaded too):** routing the TLS-policy SPKI-mismatch
+  error through the context fixed a latent misclassification — on the ctx path a
+  pinned-cert mismatch in `_sandhi_policy_post_open_a` would otherwise have been
+  reported as `CONNECT` instead of `TLS`.
+
+### Scope / known limits
+
+- The fix covers the **buffered dispatch path** (`sandhi_http_get`/`_post`/… and
+  their `_a` variants) — thoth's exact workload. The **h2-auto path**
+  (`sandhi_http_request_auto_a`) and the **policy hook-override** globals
+  (`_sandhi_tls_hook_override*` / `_sandhi_alpn_advertise_h2`) are only armed on
+  the h2-auto / policied-HTTPS paths, which no consumer drives concurrently;
+  those remain single-threaded (a documented follow-on, not thoth's path). The
+  client connection-**pool** is still single-threaded (pre-existing
+  wait-for-consumer roadmap item).
+
+### Verified
+
+- **1111 assertions green** (sandhi 539 / h2 167 / alloc 342 / rpc 63; sandhi
+  525 → 539: the new `_sandhi_reqctx_*` mechanism — ctx==0 global fallback +
+  per-call isolation, proving a context's open-error / cred-digest don't leak
+  into a sibling context or the module global). Smoke + `CYRIUS_DCE=1` builds OK;
+  `cyrius lint src/*.cyr` 0/0; `dist/sandhi.cyr` regenerated at v1.6.9. Clean deps
+  re-resolve on the new pin (`rm -rf lib cyrius.lock && cyrius deps`); all four
+  suites green on 6.2.37 both before and after the change.
+
 ## [1.6.8] — 2026-06-18
 
 **Server-side TLS — sandhi can now SERVE HTTPS.** Closes the headline
@@ -360,7 +422,7 @@ stream a binary body to disk without ever holding it in memory.
 
 **WebDriver / Appium / MCP RPC can now carry a TLS policy — endpoint-keyed
 default policy registry.** cyrius pin **6.2.10 → 6.2.11**. Closes
-[`2026-06-15-yantra-sandhi-wd-rpc-no-tls-policy.md`](docs/issues/archive/2026-06-15-yantra-sandhi-wd-rpc-no-tls-policy.md)
+[`2026-06-15-yantra-sandhi-wd-rpc-no-tls-policy.md`](docs/development/issues/archive/2026-06-15-yantra-sandhi-wd-rpc-no-tls-policy.md)
 (filed by yantra M8). sandhi exposed a rich TLS-policy API attachable to an HTTP
 request via `sandhi_http_options_tls_policy`, but the RPC convenience verbs
 (`sandhi_wd_*` / `sandhi_ap_*` / `sandhi_rpc_mcp_*`) took only a `base_url` and
@@ -424,11 +486,11 @@ against the small-surface discipline).
 6.2.10's v6-on-Darwin primitives).** cyrius pin **6.2.9 → 6.2.10**. 1.6.1 ported
 the IPv4 connect + per-op timeout to Darwin; this closes the v6 + server-listen
 follow-on. cyrius 6.2.10 shipped the `lib/net.cyr` v6-on-Darwin surface sandhi
-filed for ([`archive/2026-06-15-cyrius-net-v6-darwin.md`](docs/issues/archive/2026-06-15-cyrius-net-v6-darwin.md)),
+filed for ([`archive/2026-06-15-cyrius-net-v6-darwin.md`](docs/development/issues/archive/2026-06-15-cyrius-net-v6-darwin.md)),
 so sandhi composes it and **deletes its hand-rolled duplicates + every Linux-only
 raw socket constant** (ADR 0001). No Linux-only socket constant remains anywhere
 in sandhi. Fully closes
-[`archive/2026-06-06-macos-nonblocking-connect.md`](docs/issues/archive/2026-06-06-macos-nonblocking-connect.md).
+[`archive/2026-06-06-macos-nonblocking-connect.md`](docs/development/issues/archive/2026-06-06-macos-nonblocking-connect.md).
 
 ### Fixed — http/conn (`src/http/conn.cyr`)
 
@@ -484,7 +546,7 @@ repro). The fix re-points both helpers at the stdlib primitives that already
 carry the platform-branched Darwin values + agnos fallback, retiring sandhi's
 duplicate of the machinery (ADR 0001 — compose, don't reimplement). Linux + AGNOS
 behaviour unchanged. Closes the IPv4 + per-op-timeout halves of
-[`docs/issues/archive/2026-06-06-macos-nonblocking-connect.md`](docs/issues/archive/2026-06-06-macos-nonblocking-connect.md)
+[`docs/issues/archive/2026-06-06-macos-nonblocking-connect.md`](docs/development/issues/archive/2026-06-06-macos-nonblocking-connect.md)
 (fully resolved at 1.6.2; archived).
 
 ### Fixed — http/conn (`src/http/conn.cyr`)
@@ -650,7 +712,7 @@ Plus wire-level checks (QM plain-IN QCLASS + ID=0, QU builder unchanged).
 ### Resolved
 
 The mDNS-multicast filing
-[`docs/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md)
+[`docs/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/development/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md)
 is resolved + archived: 6.2.7 shipped the join/option primitives; the connected-
 socket insufficiency is worked around sandhi-side with the two-socket split
 (filing option 2), so the requested upstream `sock_sendto`/`sock_recvfrom` are
@@ -715,7 +777,7 @@ from their own unicast IP, not the group). The join/`SO_REUSEPORT`/TTL primitive
 are real but inert with a connected receive socket. A working QM resolver also
 needs unconnected `sock_sendto` / `sock_recvfrom` in `net.cyr` (not present), or a
 two-socket send/recv split — plus a loopback live-multicast test. The mDNS filing
-[`docs/issues/2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md)
+[`docs/issues/2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/development/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md)
 is un-archived and corrected with the full requirement; Batch A3 stays open. (The
 review also noted the pre-existing **QU** resolver has the same connect()-filter
 shape — its "works against most responders" claim is unverified and needs a live
@@ -795,7 +857,7 @@ sustained request stream**. The arena was already sized for this (the per-conn
   **cascade** — part **sandhi-side** (refresh the vendored stdlib snapshot) and
   part **upstream** (real stdlib agnos-compile gaps), needing a systematic
   agnos-completeness pass rather than a point fix. The corrected, honest filing is
-  [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](docs/issues/archive/2026-06-15-cyrius-thread-agnos-clone-dispatch.md);
+  [`2026-06-15-cyrius-thread-agnos-clone-dispatch.md`](docs/development/issues/archive/2026-06-15-cyrius-thread-agnos-clone-dispatch.md);
   the agnos issue + roadmap + state.md are corrected to match. The x86_64
   authoritative build is byte-identical across the `thread.cyr` refresh, so none
   of this touches sandhi's release artifacts.
@@ -807,7 +869,7 @@ sustained request stream**. The arena was already sized for this (the per-conn
   paste-ready cyrius-side coordination doc with the exact constants / struct /
   preferred `net_join_multicast` helper sandhi needs for QM-mode + RFC 6763
   browsing (the QU-bit unicast resolver ships today and needs none of it):
-  [`2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md).
+  [`2026-06-15-cyrius-mdns-multicast-primitives.md`](docs/development/issues/archive/2026-06-15-cyrius-mdns-multicast-primitives.md).
   Closes the last untracked upstream item in sandhi's Batch A.
 
 ### Verified
@@ -820,7 +882,7 @@ sustained request stream**. The arena was already sized for this (the per-conn
 
 **1.5.x Batch C2 — AGNOS DNS-entropy gap (sit-adoption-driven follow-up to C1).**
 Closes the runtime half of the AGNOS adoption work surfaced in
-[`2026-06-14-agnos-socket-backend-gap.md`](docs/issues/archive/2026-06-14-agnos-socket-backend-gap.md).
+[`2026-06-14-agnos-socket-backend-gap.md`](docs/development/issues/archive/2026-06-14-agnos-socket-backend-gap.md).
 No cyrius pin change (stays 6.2.6). No public-surface change.
 
 ### Fixed — DNS TXID entropy portable across targets (`src/net/resolve.cyr`)
@@ -870,7 +932,7 @@ not in the gated test suite; noted for a future cleanup.
 ## [1.5.1] — 2026-06-15
 
 **1.5.x Batch C1 — AGNOS socket-backend gap (sit-adoption-driven).** Closes the
-compile half of [`2026-06-14-agnos-socket-backend-gap.md`](docs/issues/archive/2026-06-14-agnos-socket-backend-gap.md):
+compile half of [`2026-06-14-agnos-socket-backend-gap.md`](docs/development/issues/archive/2026-06-14-agnos-socket-backend-gap.md):
 sandhi's transport layer no longer references raw Linux socket syscalls that the
 AGNOS target leaves undefined, so a consumer (sit) that includes the bundle can
 compile for `--agnos`. No cyrius pin change (stays 6.2.6, the pin 1.5.0 landed —
@@ -2341,7 +2403,7 @@ inject the cached session for client-side resumption.
 The cyrius-side fix is either a staged-connect API
 (`tls_connect_alloc` + `tls_connect_complete`) or a post-`SSL_new`
 hook variant. Filed as
-[`docs/issues/archive/2026-05-09-stdlib-tls-staged-connect.md`](docs/issues/archive/2026-05-09-stdlib-tls-staged-connect.md).
+[`docs/issues/archive/2026-05-09-stdlib-tls-staged-connect.md`](docs/development/issues/archive/2026-05-09-stdlib-tls-staged-connect.md).
 Sandhi 1.3.1 / 1.3.2 wait on cyrius landing it.
 
 ### Pinned next

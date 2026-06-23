@@ -248,18 +248,20 @@ fn _sandhi_client_build_request_va(a, method, full_path, host_header, user_heade
 # Outer trace wrapper — opt-in span via sandhi_trace_enable(1). Span
 # no-op by default; the inner does all the work either way.
 fn _sandhi_http_do_a(a, method, url, user_headers, body, body_len, max_bytes,
-connect_ms, read_ms, write_ms, total_ms, pool): i64 {
+connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
     sandhi_trace_begin("sandhi.http");
     var r = _sandhi_http_do_impl_a(a, method, url, user_headers, body, body_len,
-    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx);
     sandhi_trace_end();
     return r;
 }
 
+# Bare wrapper — ctx=0 routes the per-request state (0-RTT / cred /
+# policy / open-err) through the module globals (single-threaded).
 fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes,
 connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     return _sandhi_http_do_a(default_alloc(), method, url, user_headers, body, body_len,
-    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
 }
 
 # 1.3.2 — request-method safety check for TLS 1.3 0-RTT. Per
@@ -352,7 +354,7 @@ fn _sandhi_http_clamp_ms(raw_ms, deadline_ms): i64 {
 # buffer. Pool ops keep using the pool's own allocator (per
 # `_sandhi_pool_alloc`) — pool entries outlive any per-request arena.
 fn _sandhi_http_do_impl_a(a, method, url, user_headers, body, body_len, max_bytes,
-connect_ms, read_ms, write_ms, total_ms, pool): i64 {
+connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
     sandhi_prof_reset();
     var u = sandhi_url_parse_a(a, url);
     sandhi_prof_capture(SANDHI_PROF_PHASE_URL_PARSE_END);
@@ -392,7 +394,7 @@ connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     # (a pooled conn was opened under whatever policy created it;
     # policy-bound conns are single-use) and bypasses 0-RTT.
     var has_policy = 0;
-    if (_sandhi_tls_policy_pending != 0 && use_tls == 1) { has_policy = 1; }
+    if (_sandhi_reqctx_tls_policy(ctx) != 0 && use_tls == 1) { has_policy = 1; }
 
     var keep_alive = 0;
     var conn = 0;
@@ -423,7 +425,7 @@ connect_ms, read_ms, write_ms, total_ms, pool): i64 {
         # live in tls_policy/apply.cyr, ordered ahead of client.cyr in
         # cyrius.cyml so they're reachable here.
         if (has_policy == 1) {
-            if (_sandhi_policy_pre_open_a(a, _sandhi_tls_policy_pending) != 0) {
+            if (_sandhi_policy_pre_open_a(a, _sandhi_reqctx_tls_policy(ctx), ctx) != 0) {
                 return _sandhi_resp_err_a(a, SANDHI_ERR_TLS);
             }
         }
@@ -436,7 +438,7 @@ connect_ms, read_ms, write_ms, total_ms, pool): i64 {
         # for finalize to consider 0-RTT.
         var use_0rtt = 0;
         if (has_policy == 0
-        && _sandhi_allow_0rtt == 1
+        && _sandhi_reqctx_allow_0rtt(ctx) == 1
         && use_tls == 1
         && _sandhi_method_is_replay_safe(method) == 1
         && tls_supports_early_data() == 1
@@ -452,18 +454,18 @@ connect_ms, read_ms, write_ms, total_ms, pool): i64 {
         if (addr6 != 0) {
             if (use_0rtt == 1) {
                 conn = _sandhi_conn_open_v6_fully_timed_with_early_data_a(a, addr6,
-                port, use_tls, host, eff_connect, read_ms, write_ms, ed_ptr, ed_len);
+                port, use_tls, host, eff_connect, read_ms, write_ms, ed_ptr, ed_len, ctx);
             } else {
                 conn = _sandhi_conn_open_v6_fully_timed_a(a, addr6, port, use_tls, host,
-                eff_connect, read_ms, write_ms);
+                eff_connect, read_ms, write_ms, ctx);
             }
         } else {
             if (use_0rtt == 1) {
                 conn = _sandhi_conn_open_fully_timed_with_early_data_a(a, addr,
-                port, use_tls, host, eff_connect, read_ms, write_ms, ed_ptr, ed_len);
+                port, use_tls, host, eff_connect, read_ms, write_ms, ed_ptr, ed_len, ctx);
             } else {
-                conn = sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, host,
-                eff_connect, read_ms, write_ms);
+                conn = _sandhi_conn_open_fully_timed_ctx_a(a, addr, port, use_tls, host,
+                eff_connect, read_ms, write_ms, ctx);
             }
         }
         # 1.4.6 — clear the policy hook override + run the post-handshake
@@ -472,11 +474,11 @@ connect_ms, read_ms, write_ms, total_ms, pool): i64 {
         # conn + sets last-err to TLS → the block below maps it to
         # SANDHI_ERR_TLS. Pass-through (no policy) leaves conn untouched.
         if (has_policy == 1) {
-            conn = _sandhi_policy_post_open_a(a, conn, _sandhi_tls_policy_pending);
+            conn = _sandhi_policy_post_open_a(a, conn, _sandhi_reqctx_tls_policy(ctx), ctx);
         }
         if (conn == 0) {
             sandhi_prof_capture(SANDHI_PROF_PHASE_CONN_OPEN_END);
-            var oe = sandhi_conn_last_open_err();
+            var oe = _sandhi_reqctx_err(ctx);
             if (oe == SANDHI_CONN_OPEN_TIMEOUT) { return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT); }
             if (oe == SANDHI_CONN_OPEN_TLS)     { return _sandhi_resp_err_a(a, SANDHI_ERR_TLS); }
             return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT);
@@ -498,7 +500,7 @@ connect_ms, read_ms, write_ms, total_ms, pool): i64 {
 fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
 connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     return _sandhi_http_do_impl_a(default_alloc(), method, url, user_headers, body, body_len,
-    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
 }
 
 # Send request, receive response, close connection. Extracted so the
@@ -1015,7 +1017,7 @@ fn _sandhi_strip_sensitive_headers(src): i64 {
 #     the same; matches RFC 7235 §2.2 spirit even though the spec
 #     doesn't mandate.)
 fn _sandhi_http_follow_a(a, method, url, headers, body, body_len, max_hops,
-max_bytes, connect_ms, read_ms, write_ms, total_ms, pool): i64 {
+max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
     var m = method;
     var u = url;
     var b = body;
@@ -1023,7 +1025,7 @@ max_bytes, connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     var h = headers;
     var hops = 0;
     var r = _sandhi_http_do_a(a, m, u, h, b, bl, max_bytes,
-    connect_ms, read_ms, write_ms, total_ms, pool);
+    connect_ms, read_ms, write_ms, total_ms, pool, ctx);
     while (hops < max_hops) {
         if (_sandhi_is_redirect(sandhi_http_status(r)) == 0) { return r; }
         var loc = sandhi_headers_get(sandhi_http_headers(r), "Location");
@@ -1048,7 +1050,7 @@ max_bytes, connect_ms, read_ms, write_ms, total_ms, pool): i64 {
         u = next;
         hops = hops + 1;
         r = _sandhi_http_do_a(a, m, u, h, b, bl, max_bytes,
-        connect_ms, read_ms, write_ms, total_ms, pool);
+        connect_ms, read_ms, write_ms, total_ms, pool, ctx);
     }
     return r;
 }
@@ -1056,7 +1058,7 @@ max_bytes, connect_ms, read_ms, write_ms, total_ms, pool): i64 {
 fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
 max_bytes, connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     return _sandhi_http_follow_a(default_alloc(), method, url, headers, body, body_len,
-    max_hops, max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+    max_hops, max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
 }
 
 # ================================================================
@@ -1074,51 +1076,37 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts): i64 {
     var connect_ms = sandhi_http_options_get_connect_ms(opts);
     var total_ms = sandhi_http_options_get_total_ms(opts);
     var pool = sandhi_http_options_get_pool(opts);
-    # 1.3.2 — set the 0-RTT opt-in flag (module-level, matches the
-    # `_sandhi_alpn_advertise_h2` pattern). do_impl_a reads it in
-    # the eligibility check. Save + restore around the call so
-    # outer-scope state isn't perturbed (relevant when this is
-    # invoked recursively via redirect-follow).
-    var prior_0rtt = _sandhi_allow_0rtt;
-    _sandhi_allow_0rtt = sandhi_http_options_get_allow_0rtt(opts);
-    # 1.3.3 — set the cred-digest flag for the duration of this
-    # dispatch. Conn finalize reads it when computing the
-    # session-cache key. Save + restore mirrors the 0-RTT pattern
-    # so redirect-follow's cred-strip step (which mutates `headers`
-    # via `_sandhi_strip_sensitive_headers_a` for cross-authority
-    # hops) takes effect on the next hop's digest naturally —
-    # `_sandhi_http_follow_a` recomputes through this dispatch on
-    # each hop only when the user-level dispatch loops, but the
-    # 1.1 follow path stays inside `_sandhi_http_do_a` per hop, so
-    # cred-strip-on-redirect handling for the cache key is tracked as
-    # a wait-for-consumer-ask roadmap item ("per-hop cred-digest
-    # recompute on cross-authority redirect-follow"; see also CHANGELOG
-    # [1.3.3]) — it matters only if a consumer ever sets cred-bearing
-    # headers AND follows redirects across authorities. Today that
-    # combination is rare; flagging the limitation rather than
-    # over-engineering.
-    var prior_cred = _sandhi_cred_digest;
-    _sandhi_cred_digest = _sandhi_compute_cred_digest(headers);
-    # 1.4.6 — pending TLS policy for this dispatch. do_impl_a reads it
-    # at the open site (HTTPS only). Save+restore mirrors the 0-RTT /
-    # cred-digest pattern; the policy applies to every hop of a
-    # redirect-follow within this dispatch (a pinned host that 30x's
-    # cross-authority will fail closed on the next hop's SPKI — the
-    # safe default; per-hop re-pin waits for a consumer ask).
-    var prior_policy = _sandhi_tls_policy_pending;
-    _sandhi_tls_policy_pending = sandhi_http_options_get_tls_policy(opts);
+    # 1.6.9 — per-call request context. Replaces the former module-global
+    # save/restore of the 0-RTT opt-in / cred-digest / pending TLS policy
+    # (and the open-error classification): each rode one process-wide word,
+    # so two dispatches on separate OS threads raced them (thoth's parallel
+    # `sandhi_http_post_a` workers). The context is arena-allocated, so
+    # distinct-arena concurrent dispatches each get their own, and it
+    # threads through do/follow -> do_impl -> conn-open -> finalize (+ the
+    # TLS-policy pre/post-open helpers). The three values are computed
+    # per-call exactly as before; the connect path now writes its open-error
+    # classification into the same context (read back below the open in
+    # do_impl) instead of `_sandhi_conn_last_err`. ONE context is reused for
+    # the whole redirect-follow hop chain, so the cred-digest is still
+    # computed once per top-level dispatch — same semantics as the prior
+    # save/restore (the "per-hop cred-digest recompute on cross-authority
+    # redirect-follow" wait-for-consumer item is unchanged). A 32-byte OOM
+    # is a fatal per-request failure -> INTERNAL.
+    var ctx = alloc_via(a, SANDHI_REQCTX_SIZE);
+    if (ctx == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
+    store64(ctx + SANDHI_REQCTX_OFF_ALLOW_0RTT, sandhi_http_options_get_allow_0rtt(opts));
+    store64(ctx + SANDHI_REQCTX_OFF_CRED_DIGEST, _sandhi_compute_cred_digest(headers));
+    store64(ctx + SANDHI_REQCTX_OFF_TLS_POLICY, sandhi_http_options_get_tls_policy(opts));
+    store64(ctx + SANDHI_REQCTX_OFF_LAST_ERR, SANDHI_CONN_OPEN_OK);
     var r = 0;
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
         r = _sandhi_http_follow_a(a, method, url, headers, body, body_len, hops,
-        max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+        max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx);
     } else {
         r = _sandhi_http_do_a(a, method, url, headers, body, body_len,
-        max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+        max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx);
     }
-    _sandhi_tls_policy_pending = prior_policy;
-    _sandhi_cred_digest = prior_cred;
-    _sandhi_allow_0rtt = prior_0rtt;
     return r;
 }
 

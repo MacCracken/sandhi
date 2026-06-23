@@ -126,7 +126,7 @@ Two hooks that 1.3.0 / 1.3.1 depend on:
    and `tls_connect_complete`, sandhi calls `tls_set_session` if
    a cached session exists. This window must exist in the native
    transport too. (The staged-connect filing
-   [`archive/2026-05-09-stdlib-tls-staged-connect.md`](archive/2026-05-09-stdlib-tls-staged-connect.md)
+   [`archive/2026-05-09-stdlib-tls-staged-connect.md`](2026-05-09-stdlib-tls-staged-connect.md)
    resolved at cyrius v5.10.27 with `tls_connect_alloc` /
    `tls_connect_complete`; the same timing-split must carry
    through the native swap.)
@@ -182,13 +182,13 @@ own.
 
 ## Related
 
-- [`archive/2026-05-09-stdlib-tls-staged-connect.md`](archive/2026-05-09-stdlib-tls-staged-connect.md)
+- [`archive/2026-05-09-stdlib-tls-staged-connect.md`](2026-05-09-stdlib-tls-staged-connect.md)
   — staged-connect API; the timing-window split must carry
   through to the native transport.
-- [`archive/2026-05-10-stdlib-tls-early-data-status.md`](archive/2026-05-10-stdlib-tls-early-data-status.md)
+- [`archive/2026-05-10-stdlib-tls-early-data-status.md`](2026-05-10-stdlib-tls-early-data-status.md)
   — 0-RTT status accessors; the typed wrappers must preserve
   `NOT_SENT` / `ACCEPTED` / `REJECTED` semantics across swap.
-- [`archive/2026-04-24-stdlib-tls-alpn-hook.md`](archive/2026-04-24-stdlib-tls-alpn-hook.md)
+- [`archive/2026-04-24-stdlib-tls-alpn-hook.md`](2026-04-24-stdlib-tls-alpn-hook.md)
   — original hook surface ask; the `hook_fp(hook_ctx, ssl_ctx)`
   timing must hold.
 - sandhi `CLAUDE.md` — "**No FFI.** Sandhi imports stdlib
@@ -233,7 +233,7 @@ own.
   open against this filing is the **residual** part: typed native
   `SSL_CTX_*` equivalents so native trust-store / mTLS *enforce* (not
   just fail closed). That residual is tracked as a cross-repo dependency
-  in [roadmap.md](../development/roadmap.md) ("Native TLS-policy
+  in [roadmap.md](../../roadmap.md) ("Native TLS-policy
   enforcement"); this doc stays open until it lands, but it no longer
   gates downstream adoption.
 - **2026-06-15** — **CLOSED.** cyrius **6.2.8** shipped the typed

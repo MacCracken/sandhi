@@ -124,16 +124,16 @@ Architecture notes (invariants / quirks, not decisions):
 
 ## Consumers
 
-Each AGNOS crate that sandhi serves has a coordination doc in [`docs/issues/`](docs/issues/) — paste-ready roadmap entries for the consumer's modernization pass:
+Each AGNOS crate that sandhi serves has a coordination doc in [`docs/development/issues/`](docs/development/issues/README.md) — paste-ready roadmap entries for the consumer's modernization pass:
 
-- **yantra** — WebDriver + Appium JSON-RPC backends ([doc](docs/issues/2026-04-24-yantra-sandhi-rpc.md))
-- **daimon** — MCP client ([doc](docs/issues/2026-04-24-daimon-sandhi-mcp-client.md)) + producer-side registry ([doc](docs/issues/2026-04-24-daimon-registry-endpoints.md))
-- **hoosh / ifran** — LLM-provider HTTP routing ([doc](docs/issues/2026-04-24-hoosh-ifran-sandhi-http.md))
-- **sit** — git-over-HTTP for remote clone/push/pull ([doc](docs/issues/2026-04-24-sit-sandhi-git-over-http.md))
+- **yantra** — WebDriver + Appium JSON-RPC backends ([doc](docs/development/issues/2026-04-24-yantra-sandhi-rpc.md))
+- **daimon** — MCP client ([doc](docs/development/issues/2026-04-24-daimon-sandhi-mcp-client.md)) + producer-side registry ([doc](docs/development/issues/2026-04-24-daimon-registry-endpoints.md))
+- **hoosh / ifran** — LLM-provider HTTP routing ([doc](docs/development/issues/2026-04-24-hoosh-ifran-sandhi-http.md))
+- **sit** — git-over-HTTP for remote clone/push/pull ([doc](docs/development/issues/archive/2026-04-24-sit-sandhi-git-over-http.md) — answered: sit uses its own wire protocol, sandhi's **server** surface only)
 - **takumi** — source-tarball download (first consumer of the binary streaming download path, 1.6.4)
-- **ark** — remote registry ops ([doc](docs/issues/2026-04-24-ark-sandhi-registry-ops.md))
-- **mela** — marketplace API ([doc](docs/issues/2026-04-24-mela-sandhi-marketplace.md))
-- **vidya** — external-knowledge fetch ([doc](docs/issues/2026-04-24-vidya-sandhi-fetch.md))
+- **ark** — remote registry ops ([doc](docs/development/issues/2026-04-24-ark-sandhi-registry-ops.md))
+- **mela** — marketplace API ([doc](docs/development/issues/2026-04-24-mela-sandhi-marketplace.md))
+- **vidya** — external-knowledge fetch ([doc](docs/development/issues/2026-04-24-vidya-sandhi-fetch.md))
 
 ## Cross-repo dependencies
 

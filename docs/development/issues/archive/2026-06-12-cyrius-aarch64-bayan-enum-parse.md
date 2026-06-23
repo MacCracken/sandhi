@@ -7,7 +7,7 @@ programs/smoke.cyr build/sandhi-smoke-aarch64` now produces a valid
 with **zero sandhi-side change**, exactly as the filing predicted (a
 purely cyrius-side `cycc_aarch64` dep-assembly fix). The CI / release
 aarch64 step was restored to a gating step at 1.5.0. See CHANGELOG
-[1.5.0] and [architecture/005](../../architecture/005-aarch64-bayan-cross-build.md).
+[1.5.0] and [architecture/005](../../../architecture/005-aarch64-bayan-cross-build.md).
 *(History below retained for the record; original status: Open — filed
 upstream, blocked only the aarch64 cross-build artifact, x86_64
 unaffected and authoritative.)*

@@ -55,7 +55,7 @@ var r = sandhi_http_post("https://git.example.com/repo.git/git-upload-pack",
 
 ## Known caveats
 
-- **HTTPS works end-to-end** — the original libssl-pthread / stdlib-TLS-init blocker resolved upstream (cyrius v5.6.39; native TLS is the no-flag default since 6.1.21), so HTTPS git remotes (GitHub, GitLab, self-hosted with TLS) work today (see [`archive/2026-04-24-libssl-pthread-deadlock.md`](archive/2026-04-24-libssl-pthread-deadlock.md)). sit's remote milestone is now gated **only** on sit's local-VCS completion.
+- **HTTPS works end-to-end** — the original libssl-pthread / stdlib-TLS-init blocker resolved upstream (cyrius v5.6.39; native TLS is the no-flag default since 6.1.21), so HTTPS git remotes (GitHub, GitLab, self-hosted with TLS) work today (see [`archive/2026-04-24-libssl-pthread-deadlock.md`](2026-04-24-libssl-pthread-deadlock.md)). sit's remote milestone is now gated **only** on sit's local-VCS completion.
 - **Large packfile responses** — sandhi's HTTP client reads into a 256 KB default buffer (`_SANDHI_HTTP_RESP_BUF_SIZE`). Real packfiles can be MB to GB. sit's remote milestone needs either (a) a larger buffer configurable per-request, or (b) a streaming callback surface. This is a sandhi-side enhancement sit can drive when its milestone opens — file as "sandhi extension: streaming / configurable response buffer" at that point.
 - **SSH remotes** are out of scope. sandhi doesn't speak SSH; sit's SSH transport stays as sit-owned code (or via a separate crate).
 

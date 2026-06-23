@@ -298,14 +298,14 @@ fn sandhi_http_stream_opts_a(a, url, method, user_headers, body, body_len, cb, c
     var has_policy = 0;
     if (policy != 0 && use_tls == 1) { has_policy = 1; }
     if (has_policy == 1) {
-        if (_sandhi_policy_pre_open_a(a, policy) != 0) {
+        if (_sandhi_policy_pre_open_a(a, policy, 0) != 0) {
             return _sandhi_stream_result_a(a, 0, 0, SANDHI_ERR_TLS, 0);
         }
     }
     var conn = sandhi_conn_open_fully_timed_a(a, addr, sandhi_url_port(u), use_tls, sandhi_url_host(u),
     eff_connect, read_ms, write_ms);
     if (has_policy == 1) {
-        conn = _sandhi_policy_post_open_a(a, conn, policy);
+        conn = _sandhi_policy_post_open_a(a, conn, policy, 0);
     }
     if (conn == 0) {
         var oe = sandhi_conn_last_open_err();

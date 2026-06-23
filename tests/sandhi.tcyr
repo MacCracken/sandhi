@@ -908,6 +908,69 @@ fn test_p0_tls_policy_fail_closed() {
 }
 
 # ================================================================
+# 1.6.9 — per-call request context (thoth thread-safety)
+# ================================================================
+# The four dispatch globals (allow_0rtt / cred_digest / tls_policy /
+# conn_last_err) are lifted into a per-call context threaded through the
+# buffered dispatch path. These two tests pin the mechanism: ctx==0 falls
+# back to the module globals (the single-threaded callers' path), and a
+# non-zero context carries its own values isolated from the globals AND
+# from a sibling context — the property that makes concurrent
+# sandhi_http_post_a workers on separate OS threads structurally safe.
+
+fn test_reqctx_ctx0_fallback() {
+    # With ctx==0 the helpers read/write the module globals, so the
+    # public conn verbs + sandhi_conn_last_open_err() are unchanged.
+    var s0 = _sandhi_allow_0rtt;
+    var sc = _sandhi_cred_digest;
+    var sp = _sandhi_tls_policy_pending;
+    var se = _sandhi_conn_last_err;
+    _sandhi_allow_0rtt = 1;
+    _sandhi_cred_digest = 777;
+    _sandhi_tls_policy_pending = 4242;
+    _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+    assert_eq(_sandhi_reqctx_allow_0rtt(0), 1, "ctx0: allow_0rtt reads global");
+    assert_eq(_sandhi_reqctx_cred(0), 777, "ctx0: cred reads global");
+    assert_eq(_sandhi_reqctx_tls_policy(0), 4242, "ctx0: policy reads global");
+    assert_eq(_sandhi_reqctx_err(0), SANDHI_CONN_OPEN_TLS, "ctx0: err reads global");
+    _sandhi_reqctx_set_err(0, SANDHI_CONN_OPEN_TIMEOUT);
+    assert_eq(_sandhi_conn_last_err, SANDHI_CONN_OPEN_TIMEOUT, "ctx0: set_err writes global");
+    # Restore so later tests see pristine globals.
+    _sandhi_allow_0rtt = s0;
+    _sandhi_cred_digest = sc;
+    _sandhi_tls_policy_pending = sp;
+    _sandhi_conn_last_err = se;
+    return 0;
+}
+
+fn test_reqctx_per_call_isolation() {
+    var a = default_alloc();
+    var c1 = alloc_via(a, SANDHI_REQCTX_SIZE);
+    var c2 = alloc_via(a, SANDHI_REQCTX_SIZE);
+    store64(c1 + SANDHI_REQCTX_OFF_ALLOW_0RTT, 1);
+    store64(c1 + SANDHI_REQCTX_OFF_CRED_DIGEST, 0xA1A1);
+    store64(c1 + SANDHI_REQCTX_OFF_TLS_POLICY, 111);
+    store64(c1 + SANDHI_REQCTX_OFF_LAST_ERR, SANDHI_CONN_OPEN_OK);
+    store64(c2 + SANDHI_REQCTX_OFF_ALLOW_0RTT, 0);
+    store64(c2 + SANDHI_REQCTX_OFF_CRED_DIGEST, 0xB2B2);
+    store64(c2 + SANDHI_REQCTX_OFF_TLS_POLICY, 222);
+    store64(c2 + SANDHI_REQCTX_OFF_LAST_ERR, SANDHI_CONN_OPEN_OK);
+    assert_eq(_sandhi_reqctx_allow_0rtt(c1), 1, "c1: allow_0rtt");
+    assert_eq(_sandhi_reqctx_cred(c1), 0xA1A1, "c1: cred");
+    assert_eq(_sandhi_reqctx_tls_policy(c1), 111, "c1: policy");
+    assert_eq(_sandhi_reqctx_allow_0rtt(c2), 0, "c2: allow_0rtt");
+    assert_eq(_sandhi_reqctx_cred(c2), 0xB2B2, "c2: cred");
+    assert_eq(_sandhi_reqctx_tls_policy(c2), 222, "c2: policy");
+    # set_err on c1 must not leak into c2 or the module global.
+    var sg = _sandhi_conn_last_err;
+    _sandhi_reqctx_set_err(c1, SANDHI_CONN_OPEN_TLS);
+    assert_eq(_sandhi_reqctx_err(c1), SANDHI_CONN_OPEN_TLS, "c1: set_err visible in c1");
+    assert_eq(_sandhi_reqctx_err(c2), SANDHI_CONN_OPEN_OK, "c1 set_err does not leak into c2");
+    assert_eq(_sandhi_conn_last_err, sg, "c1 set_err does not touch the global");
+    return 0;
+}
+
+# ================================================================
 # 0.9.1 P1 regressions
 # ================================================================
 
@@ -2387,6 +2450,12 @@ fn main() {
 
     test_group("http/connect_ms/blackhole");
     test_connect_ms_blackhole_returns_timeout();
+
+    test_group("http/reqctx/ctx0_fallback");
+    test_reqctx_ctx0_fallback();
+
+    test_group("http/reqctx/per_call_isolation");
+    test_reqctx_per_call_isolation();
 
     test_group("http/total_ms/blackhole");
     test_total_ms_blackhole_returns_timeout();

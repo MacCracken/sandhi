@@ -5,7 +5,7 @@ Stdlib-only `programs/tls-raw-probe.cyr` now completes a full HTTPS round-trip t
 **Reporter**: sandhi M2 HTTPS re-verification
 **Toolchain pin**: `cyrius = "5.6.41"` (sandhi `cyrius.cyml`) — fix appeared between 5.6.30 and 5.6.39.
 **Host**: Arch Linux x86_64, kernel 6.18.22-1-lts, glibc 2.43+r5, openssl 3.x at `/usr/lib/libssl.so.3`
-**Predecessor**: [`archive/2026-04-24-fdlopen-getaddrinfo-blocked.md`](archive/2026-04-24-fdlopen-getaddrinfo-blocked.md) — closed v5.6.29-1 with both sides fixing their respective bugs; **this is the next-layer blocker that closure revealed**, not a regression of that work.
+**Predecessor**: [`archive/2026-04-24-fdlopen-getaddrinfo-blocked.md`](2026-04-24-fdlopen-getaddrinfo-blocked.md) — closed v5.6.29-1 with both sides fixing their respective bugs; **this is the next-layer blocker that closure revealed**, not a regression of that work.
 
 ## Symptom
 

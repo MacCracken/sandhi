@@ -177,8 +177,9 @@ fn _sandhi_check_spki(tls_ctx, expected_hex): i64 {
 # demands enforcement we can't deliver (enforcement unavailable, or
 # OOM building the hook ctx). The caller MUST pair every 0 return with
 # a later `_sandhi_policy_post_open_a` (even if the open fails) so the
-# override is cleared. Sets `_sandhi_conn_last_err` = TLS on -1.
-fn _sandhi_policy_pre_open_a(a, policy): i64 {
+# override is cleared. Sets the open-error classification to TLS on -1
+# (1.6.9: through `ctx`, or the module global when ctx==0).
+fn _sandhi_policy_pre_open_a(a, policy, ctx): i64 {
     if (policy == 0) { return 0; }
 
     var pinned      = sandhi_tls_policy_pinned_hash(policy);
@@ -201,11 +202,11 @@ fn _sandhi_policy_pre_open_a(a, policy): i64 {
     if (needs_ctx == 0 && needs_pin == 0) { return 0; }
 
     if (needs_ctx == 1 && sandhi_tls_policy_enforcement_available() == 0) {
-        _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
         return 0 - 1;
     }
     if (needs_pin == 1 && sandhi_tls_policy_pin_available() == 0) {
-        _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
         return 0 - 1;
     }
 
@@ -219,7 +220,7 @@ fn _sandhi_policy_pre_open_a(a, policy): i64 {
     }
     var hook_ctx = alloc_via(a, 24);
     if (hook_ctx == 0) {
-        _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
         return 0 - 1;
     }
     store64(hook_ctx,      protos);
@@ -234,8 +235,9 @@ fn _sandhi_policy_pre_open_a(a, policy): i64 {
 # Clear the hook override and run the post-handshake SPKI pin check.
 # `conn` may be 0 (the open failed) — we still clear the override.
 # Returns `conn` on success, or 0 on SPKI mismatch (conn closed,
-# last-err = TLS). A NULL / un-pinned policy passes `conn` through.
-fn _sandhi_policy_post_open_a(a, conn, policy): i64 {
+# open-err = TLS — 1.6.9: through `ctx`, or the module global when
+# ctx==0). A NULL / un-pinned policy passes `conn` through.
+fn _sandhi_policy_post_open_a(a, conn, policy, ctx): i64 {
     _sandhi_tls_hook_override     = 0;
     _sandhi_tls_hook_override_ctx = 0;
     if (conn == 0)   { return 0; }
@@ -246,7 +248,7 @@ fn _sandhi_policy_post_open_a(a, conn, policy): i64 {
         var tls_ctx = sandhi_conn_tls_ctx(conn);
         if (_sandhi_check_spki_a(a, tls_ctx, pinned) == 0) {
             sandhi_conn_close(conn);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+            _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
             return 0;
         }
     }
@@ -262,12 +264,13 @@ fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy): i64
         return sandhi_conn_open(addr, port, 1, sni_host);
     }
 
-    if (_sandhi_policy_pre_open_a(a, policy) != 0) {
-        # _sandhi_conn_last_err already set to TLS (fail-closed / OOM).
+    if (_sandhi_policy_pre_open_a(a, policy, 0) != 0) {
+        # _sandhi_conn_last_err already set to TLS (fail-closed / OOM)
+        # via the ctx==0 global path.
         return 0;
     }
     var conn = sandhi_conn_open(addr, port, 1, sni_host);
-    return _sandhi_policy_post_open_a(a, conn, policy);
+    return _sandhi_policy_post_open_a(a, conn, policy, 0);
 }
 
 fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy): i64 {

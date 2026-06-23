@@ -10,7 +10,7 @@
 > warn-and-skip-on-failure tolerance is removed; the only tolerated skip
 > is the toolchain genuinely lacking `cycc_aarch64`). The history below is
 > retained for the record. Issue archived at
-> [`docs/issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md`](../issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md).
+> [`docs/issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md`](../development/issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md).
 
 ## History (1.4.11 — best-effort window)
 
@@ -66,4 +66,4 @@ resumes emitting the artifact with no sandhi-side change.
 Originally tracked as a cross-repo dependency in
 [`docs/development/roadmap.md`](../development/roadmap.md); filed (now archived,
 resolved at 1.5.0) at
-[`docs/issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md`](../issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md).
+[`docs/issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md`](../development/issues/archive/2026-06-12-cyrius-aarch64-bayan-enum-parse.md).

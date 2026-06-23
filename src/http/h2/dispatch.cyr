@@ -217,8 +217,12 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts):
     var write_ms = sandhi_http_options_get_write_ms(opts);
     var connect_ms = sandhi_http_options_get_connect_ms(opts);
     var total_ms = sandhi_http_options_get_total_ms(opts);
+    # ctx=0 — the auto/h2 path keeps the module-global 0-RTT + cred-digest
+    # save/restore in `sandhi_http_request_auto_a` (single-threaded; thoth
+    # drives the buffered `_sandhi_http_dispatch_a` path, not this one). The
+    # 1.1 fallback reads those globals via do_impl's ctx==0 branch.
     return _sandhi_http_do_a(a, method, url, user_headers, body, body_len,
-    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool);
+    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
 }
 
 fn _sandhi_http_auto_once(method, url, user_headers, body, body_len, opts): i64 {

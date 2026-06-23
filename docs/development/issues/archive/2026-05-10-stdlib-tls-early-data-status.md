@@ -142,7 +142,7 @@ No further sandhi-side ask after this lands.
 
 ## Related
 
-- [`archive/2026-05-09-stdlib-tls-staged-connect.md`](archive/2026-05-09-stdlib-tls-staged-connect.md)
+- [`archive/2026-05-09-stdlib-tls-staged-connect.md`](2026-05-09-stdlib-tls-staged-connect.md)
   — yesterday's staged-connect filing. Same shape: cyrius
   shipped primitives but not the full safety surface;
   resolved at v5.10.27.

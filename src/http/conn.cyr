@@ -78,8 +78,10 @@ var _sandhi_alpn_advertise_h2 = 0;
 # before any conn-open in the request flow; cleared after the
 # request completes. `_sandhi_http_do_impl_a` reads this in its
 # eligibility check (along with method-safety, capability,
-# session-cache hit). Single-threaded client model — same
-# justification as `_sandhi_alpn_advertise_h2`.
+# session-cache hit). 1.6.9: now the ctx==0 FALLBACK — the buffered
+# dispatch threads this value per-call via `_sandhi_reqctx_allow_0rtt`;
+# this global is read only by the h2-auto / bare-wrapper paths (which
+# stay single-threaded). Same justification as `_sandhi_alpn_advertise_h2`.
 var _sandhi_allow_0rtt = 0;
 
 # 1.3.3 — cred-digest threaded through to the session-cache key.
@@ -88,9 +90,11 @@ var _sandhi_allow_0rtt = 0;
 # `_sandhi_cred_digest_a` in client.cyr); 0 when no cred-bearing
 # headers. Read inside `_sandhi_conn_finalize_with_early_data_a`
 # when calling `sandhi_session_cache_lookup` / `_store`. Same
-# module-level-flag rationale as `_sandhi_allow_0rtt` —
-# single-threaded client model, transient per-request state we
-# don't want to thread through 8+ fn signatures.
+# module-level-flag rationale as `_sandhi_allow_0rtt`. 1.6.9: now the
+# ctx==0 FALLBACK — the buffered dispatch threads the cred-digest
+# per-call via `_sandhi_reqctx_cred` so concurrent dispatches don't
+# cross-wire each other's session-cache keys; only the h2-auto / bare
+# paths still read this global (single-threaded).
 var _sandhi_cred_digest = 0;
 
 # Hook override mechanism. When non-zero, sandhi_conn_open_fully_timed
@@ -111,10 +115,11 @@ var _sandhi_tls_hook_override_ctx = 0;  # opaque hook_ctx ptr or 0
 # reachable; those helpers arm/clear the `_sandhi_tls_hook_override`
 # above + run the post-handshake SPKI check). Same module-level-flag
 # rationale as `_sandhi_allow_0rtt` / `_sandhi_cred_digest` —
-# single-threaded client model, transient per-request state we don't
-# thread through 8+ fn signatures. The streaming path reads the
-# policy straight off `opts` instead (it doesn't route through
-# `_sandhi_http_dispatch_a`).
+# transient per-request state. 1.6.9: now the ctx==0 FALLBACK — the
+# buffered dispatch threads the policy per-call via
+# `_sandhi_reqctx_tls_policy`; this global is unused by the dispatch
+# path now (the streaming / download paths read the policy straight off
+# `opts` and never set this global).
 var _sandhi_tls_policy_pending = 0;
 
 # 1.4.2: the ALPN-read libssl binding (SSL_get0_alpn_selected via tls_dlsym +
@@ -245,9 +250,13 @@ var _SANDHI_CONN_NB_TIMEOUT = 0 - 2;
 
 # Classification of the last sandhi_conn_open_* attempt. Module-level
 # because Cyrius doesn't expose tagged-union returns and restructuring
-# the conn-struct shape would break every caller. Single-threaded
-# client today (server is also single-threaded per server/mod.cyr);
-# any multi-threaded client model would need this lifted to a ctx.
+# the conn-struct shape would break every caller. As of 1.6.9 this
+# global is the ctx==0 FALLBACK only: the buffered dispatch path
+# threads a per-call context (the _sandhi_reqctx_* helpers below) so
+# concurrent opens on separate OS threads classify their own errors.
+# The public conn-open verbs + sandhi_conn_last_open_err() + the
+# streaming / download / h2-auto paths still write/read this global
+# (single-threaded-correct). See the thoth thread-safety issue.
 var _sandhi_conn_last_err = 0;
 
 enum SandhiConnOpenErr {
@@ -259,6 +268,71 @@ enum SandhiConnOpenErr {
 
 fn sandhi_conn_last_open_err(): i64 {
     return _sandhi_conn_last_err;
+}
+
+# ================================================================
+# 1.6.9 — per-dispatch request context (client thread-safety)
+# ================================================================
+# Four module globals above (_sandhi_allow_0rtt / _sandhi_cred_digest
+# / _sandhi_tls_policy_pending / _sandhi_conn_last_err) hold transient
+# per-request state the buffered client dispatch sets on entry and
+# reads deep in the connect path. With one process-wide word each, two
+# dispatches on separate OS threads race them — the thoth concurrency
+# bite (N parallel `sandhi_http_post_a` workers over `lib/thread.cyr`).
+# The buffered dispatch path (`_sandhi_http_dispatch_a`) now allocates
+# a small per-call context from the request arena and threads a
+# pointer to it through do/follow -> do_impl -> conn-open -> finalize
+# (+ the policy pre/post-open helpers in tls_policy/apply.cyr), so that
+# path is structurally safe under concurrent dispatch with distinct
+# arenas + fresh connections. A `ctx == 0` argument anywhere below
+# means "no per-call context" — the single-threaded callers that don't
+# thread one (the public conn-open verbs + `sandhi_conn_last_open_err`,
+# the streaming / download / h2-auto paths, `sandhi_conn_open_with_policy`)
+# fall back to the module globals, which stay correct for any
+# single-threaded caller. The hook-override + alpn-advertise globals
+# are NOT lifted here — they are only armed on the policy / h2-auto
+# paths, which thoth does not drive concurrently (a documented
+# follow-on, not part of this bite).
+enum SandhiReqCtxOff {
+    SANDHI_REQCTX_OFF_ALLOW_0RTT  = 0;
+    SANDHI_REQCTX_OFF_CRED_DIGEST = 8;
+    SANDHI_REQCTX_OFF_TLS_POLICY  = 16;
+    SANDHI_REQCTX_OFF_LAST_ERR    = 24;
+}
+
+var SANDHI_REQCTX_SIZE = 32;
+
+# 0-RTT opt-in for this dispatch (ctx==0 -> module global).
+fn _sandhi_reqctx_allow_0rtt(ctx): i64 {
+    if (ctx == 0) { return _sandhi_allow_0rtt; }
+    return load64(ctx + SANDHI_REQCTX_OFF_ALLOW_0RTT);
+}
+
+# Credential digest for the session-cache key (ctx==0 -> module global).
+fn _sandhi_reqctx_cred(ctx): i64 {
+    if (ctx == 0) { return _sandhi_cred_digest; }
+    return load64(ctx + SANDHI_REQCTX_OFF_CRED_DIGEST);
+}
+
+# Pending TLS policy for this dispatch (ctx==0 -> module global).
+fn _sandhi_reqctx_tls_policy(ctx): i64 {
+    if (ctx == 0) { return _sandhi_tls_policy_pending; }
+    return load64(ctx + SANDHI_REQCTX_OFF_TLS_POLICY);
+}
+
+# Read the open-error classification for this dispatch (ctx==0 ->
+# module global, i.e. identical to sandhi_conn_last_open_err()).
+fn _sandhi_reqctx_err(ctx): i64 {
+    if (ctx == 0) { return _sandhi_conn_last_err; }
+    return load64(ctx + SANDHI_REQCTX_OFF_LAST_ERR);
+}
+
+# Write the open-error classification (ctx==0 -> module global, so the
+# public conn verbs + sandhi_conn_last_open_err() keep working).
+fn _sandhi_reqctx_set_err(ctx, e): i64 {
+    if (ctx == 0) { _sandhi_conn_last_err = e; return 0; }
+    store64(ctx + SANDHI_REQCTX_OFF_LAST_ERR, e);
+    return 0;
 }
 
 fn sandhi_conn_kind(c): i64 { return load64(c + SANDHI_CONN_OFF_KIND); }
@@ -399,8 +473,13 @@ fn sandhi_conn_open_timed(addr, port, use_tls, sni_host, read_ms, write_ms): i64
 # (16 bytes for the ALPN hook) and the ALPN-selected cstr also live
 # in `a`. The wire literals themselves are process-wide singletons
 # (see _sandhi_alpn_init_wire).
+#
+# 1.6.9: `ctx` is the per-call request context (or 0 for the legacy
+# module-global path) — the cred-digest for the session-cache key and
+# the open-error classification ride it via the _sandhi_reqctx_*
+# helpers, so concurrent dispatches don't share those words.
 fn _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
-read_ms, write_ms, early_data, early_data_len): i64 {
+read_ms, write_ms, early_data, early_data_len, ctx): i64 {
     if (read_ms > 0)  { _sandhi_conn_set_timeout_ms_a(a, fd, read_ms,  _SANDHI_SO_RCVTIMEO); }
     if (write_ms > 0) { _sandhi_conn_set_timeout_ms_a(a, fd, write_ms, _SANDHI_SO_SNDTIMEO); }
 
@@ -411,7 +490,7 @@ read_ms, write_ms, early_data, early_data_len): i64 {
     if (use_tls == 1) {
         if (tls_available() == 0) {
             sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+            _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
             return 0;
         }
         var hook_fp = 0;
@@ -424,7 +503,7 @@ read_ms, write_ms, early_data, early_data_len): i64 {
             hook_ctx = alloc_via(a, 16);
             if (hook_ctx == 0) {
                 sock_close(fd);
-                _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+                _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
                 return 0;
             }
             if (_sandhi_alpn_advertise_h2 == 1) {
@@ -448,10 +527,10 @@ read_ms, write_ms, early_data, early_data_len): i64 {
         tls_ctx = tls_connect_alloc(fd, sni_host, hook_fp, hook_ctx);
         if (tls_ctx == 0) {
             sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+            _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
             return 0;
         }
-        var cached_sess = sandhi_session_cache_lookup(sni_host, hook_fp, _sandhi_cred_digest);
+        var cached_sess = sandhi_session_cache_lookup(sni_host, hook_fp, _sandhi_reqctx_cred(ctx));
         if (cached_sess != 0) {
             tls_set_session(tls_ctx, cached_sess);
         }
@@ -474,7 +553,7 @@ read_ms, write_ms, early_data, early_data_len): i64 {
         if (tls_connect_complete(tls_ctx) != 1) {
             tls_close(tls_ctx);
             sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+            _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
             return 0;
         }
         # Post-handshake early-data status — drives the
@@ -489,7 +568,7 @@ read_ms, write_ms, early_data, early_data_len): i64 {
         if (sandhi_session_cache_enabled() == 1) {
             var fresh_sess = tls_get_session(tls_ctx);
             if (fresh_sess != 0) {
-                sandhi_session_cache_store(sni_host, hook_fp, _sandhi_cred_digest, fresh_sess);
+                sandhi_session_cache_store(sni_host, hook_fp, _sandhi_reqctx_cred(ctx), fresh_sess);
             }
         }
         alpn_data = _sandhi_alpn_read_selected_a(a, tls_ctx);
@@ -500,7 +579,7 @@ read_ms, write_ms, early_data, early_data_len): i64 {
     if (conn == 0) {
         if (tls_ctx != 0) { tls_close(tls_ctx); }
         sock_close(fd);
-        _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
         return 0;
     }
     store64(conn + SANDHI_CONN_OFF_KIND, kind);
@@ -511,10 +590,11 @@ read_ms, write_ms, early_data, early_data_len): i64 {
     return conn;
 }
 
-# Back-compat wrapper — pre-1.3.2 callers don't pass early-data.
+# Back-compat wrapper — pre-1.3.2 callers don't pass early-data; ctx=0
+# routes cred-digest + open-error through the module globals.
 fn _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms): i64 {
     return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
-    read_ms, write_ms, 0, 0);
+    read_ms, write_ms, 0, 0, 0);
 }
 
 fn _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms): i64 {
@@ -526,23 +606,23 @@ fn _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms): i64 {
 # client tries v6 fallback through this path. `addr16` is a
 # 16-byte network-byte-order AAAA address buffer (e.g. from
 # sandhi_resolve_ipv6).
-fn _sandhi_conn_open_v6_fully_timed_a(a, addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
+fn _sandhi_conn_open_v6_fully_timed_a(a, addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms, ctx): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     # AGNOS is IPv4-only today (no AF_INET6 socket surface; SYS_SOCKET /
     # SYS_CONNECT undefined on the agnos target). Fail the v6 path cleanly so
     # the client falls back to the v4 path. Revisit when agnos gains AF_INET6.
-    _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+    _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
     return 0;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
+    _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_OK);
     if (addr16 == 0) {
-        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
         return 0;
     }
     var fd = syscall(SYS_SOCKET, AF_INET6, 1, 0);  # per-target AF_INET6 (Linux 10 / Darwin 30), SOCK_STREAM
     if (fd < 0) {
-        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
         return 0;
     }
     # 1.6.2: compose stdlib's Darwin-correct sockaddr_in6 builder + generic
@@ -553,50 +633,50 @@ fn _sandhi_conn_open_v6_fully_timed_a(a, addr16, port, use_tls, sni_host, connec
     # alias `_SANDHI_CONN_NB_*` one-for-one.
     var sa = sockaddr_in6(addr16, port);
     if (sa == 0) {
-        sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+        sock_close(fd); _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT); return 0;
     }
     if (connect_ms > 0) {
         var nbr = net_connect_sa_nb(fd, sa, 28, connect_ms);
         if (nbr == _SANDHI_CONN_NB_TIMEOUT) {
-            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_TIMEOUT; return 0;
+            sock_close(fd); _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TIMEOUT); return 0;
         }
         if (nbr != _SANDHI_CONN_NB_OK) {
-            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+            sock_close(fd); _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT); return 0;
         }
     } else {
         var rc = syscall(SYS_CONNECT, fd, sa, 28);
         if (rc < 0) {
-            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+            sock_close(fd); _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT); return 0;
         }
     }
-    return _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms);
+    return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host, read_ms, write_ms, 0, 0, ctx);
     #endif
 }
 
 fn _sandhi_conn_open_v6_fully_timed(addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
     return _sandhi_conn_open_v6_fully_timed_a(
     default_alloc(), addr16, port, use_tls, sni_host,
-    connect_ms, read_ms, write_ms);
+    connect_ms, read_ms, write_ms, 0);
 }
 
 # 1.3.2 — v6 variant of the early-data-aware open path.
 fn _sandhi_conn_open_v6_fully_timed_with_early_data_a(a, addr16, port,
-use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len): i64 {
+use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len, ctx): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     # AGNOS is IPv4-only today (no AF_INET6; SYS_SOCKET / SYS_CONNECT undefined).
     # Fail the v6 early-data path cleanly; the client falls back to v4.
-    _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+    _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
     return 0;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
+    _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_OK);
     if (addr16 == 0) {
-        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
         return 0;
     }
     var fd = syscall(SYS_SOCKET, AF_INET6, 1, 0);  # per-target AF_INET6 (Linux 10 / Darwin 30), SOCK_STREAM
     if (fd < 0) {
-        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
         return 0;
     }
     # 1.6.2: compose stdlib's Darwin-correct sockaddr_in6 builder + generic
@@ -607,33 +687,46 @@ use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len): i
     # alias `_SANDHI_CONN_NB_*` one-for-one.
     var sa = sockaddr_in6(addr16, port);
     if (sa == 0) {
-        sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+        sock_close(fd); _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT); return 0;
     }
     if (connect_ms > 0) {
         var nbr = net_connect_sa_nb(fd, sa, 28, connect_ms);
         if (nbr == _SANDHI_CONN_NB_TIMEOUT) {
-            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_TIMEOUT; return 0;
+            sock_close(fd); _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TIMEOUT); return 0;
         }
         if (nbr != _SANDHI_CONN_NB_OK) {
-            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+            sock_close(fd); _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT); return 0;
         }
     } else {
         var rc = syscall(SYS_CONNECT, fd, sa, 28);
         if (rc < 0) {
-            sock_close(fd); _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT; return 0;
+            sock_close(fd); _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT); return 0;
         }
     }
     return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
-    read_ms, write_ms, early_data, early_data_len);
+    read_ms, write_ms, early_data, early_data_len, ctx);
     #endif
 }
 
+# Public v4 timed open — back-compat wrapper. ctx=0 routes the
+# open-error classification through the module global, so external
+# callers (stream / download / h2-auto + sandhi_conn_last_open_err)
+# are byte-identical to pre-1.6.9.
 fn sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
-    _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
+    return _sandhi_conn_open_fully_timed_ctx_a(a, addr, port, use_tls, sni_host,
+    connect_ms, read_ms, write_ms, 0);
+}
+
+# 1.6.9 — ctx-threading v4 timed open. Internal: the buffered dispatch
+# (`_sandhi_http_do_impl_a`) calls this directly with its per-call
+# context so concurrent opens classify their own errors; the public
+# wrapper above passes ctx=0 (module-global classification).
+fn _sandhi_conn_open_fully_timed_ctx_a(a, addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms, ctx): i64 {
+    _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_OK);
 
     var sfd_r = tcp_socket();
     if (is_err_result(sfd_r) == 1) {
-        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
         return 0;
     }
     var fd = payload(sfd_r);
@@ -642,24 +735,24 @@ fn sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, sni_host, connect_ms, 
         var nbr = _sandhi_conn_connect_nb_a(a, fd, addr, port, connect_ms);
         if (nbr == _SANDHI_CONN_NB_TIMEOUT) {
             sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TIMEOUT;
+            _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TIMEOUT);
             return 0;
         }
         if (nbr != _SANDHI_CONN_NB_OK) {
             sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+            _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
             return 0;
         }
     } else {
         var cr = sock_connect(fd, addr, port);
         if (is_err_result(cr) == 1) {
             sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+            _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
             return 0;
         }
     }
 
-    return _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms);
+    return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host, read_ms, write_ms, 0, 0, ctx);
 }
 
 fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
@@ -677,12 +770,12 @@ fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_
 # check (`tls_session_get_max_early_data >= len`) happens inside
 # finalize against the cached session.
 fn _sandhi_conn_open_fully_timed_with_early_data_a(a, addr, port, use_tls,
-sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len): i64 {
-    _sandhi_conn_last_err = SANDHI_CONN_OPEN_OK;
+sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len, ctx): i64 {
+    _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_OK);
 
     var sfd_r = tcp_socket();
     if (is_err_result(sfd_r) == 1) {
-        _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
         return 0;
     }
     var fd = payload(sfd_r);
@@ -691,25 +784,25 @@ sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len): i64 {
         var nbr = _sandhi_conn_connect_nb_a(a, fd, addr, port, connect_ms);
         if (nbr == _SANDHI_CONN_NB_TIMEOUT) {
             sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_TIMEOUT;
+            _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TIMEOUT);
             return 0;
         }
         if (nbr != _SANDHI_CONN_NB_OK) {
             sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+            _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
             return 0;
         }
     } else {
         var cr = sock_connect(fd, addr, port);
         if (is_err_result(cr) == 1) {
             sock_close(fd);
-            _sandhi_conn_last_err = SANDHI_CONN_OPEN_CONNECT;
+            _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_CONNECT);
             return 0;
         }
     }
 
     return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
-    read_ms, write_ms, early_data, early_data_len);
+    read_ms, write_ms, early_data, early_data_len, ctx);
 }
 
 # Send `len` bytes through the connection. Returns bytes sent, 0 on

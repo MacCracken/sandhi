@@ -61,9 +61,9 @@ Withdraw a previously-registered service.
 
 ## sandhi-side reference
 
-- Resolver: [`src/discovery/daimon.cyr`](../../src/discovery/daimon.cyr) — the URL builder and the JSON parser that reads daimon's responses are the source of truth for the wire shape.
-- Register/deregister: [`src/discovery/register.cyr`](../../src/discovery/register.cyr).
-- Chain integration: [`src/discovery/chain.cyr`](../../src/discovery/chain.cyr) — daimon is designed as one backend among many; outages fall through.
+- Resolver: [`src/discovery/daimon.cyr`](../../../src/discovery/daimon.cyr) — the URL builder and the JSON parser that reads daimon's responses are the source of truth for the wire shape.
+- Register/deregister: [`src/discovery/register.cyr`](../../../src/discovery/register.cyr).
+- Chain integration: [`src/discovery/chain.cyr`](../../../src/discovery/chain.cyr) — daimon is designed as one backend among many; outages fall through.
 
 ## Why now
 
