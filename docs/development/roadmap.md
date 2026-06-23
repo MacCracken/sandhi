@@ -20,34 +20,68 @@ globals into a per-call request context so concurrent `sandhi_http_*_a` workers
 are thread-safe — the thoth bite; pure sandhi-side composition, parity bump to
 latest).
 
-**Pacing.** The items below are *provisional groupings*, not committed dated
+**Pacing.** Most items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
 evidence justifies it, a second consumer asks, or sit surfaces friction). ONE
 item per slot. Per [`project_sit_adoption_drives_roadmap`] scope is surfaced from
 real signals, not pre-baked; per the no-silent-scope-outs rule every deferral is
 a named entry here (or in [`requests/`](requests/README.md)), not a buried mention.
+The exception is the **near-term patch plan** directly below: those items have **no
+remaining gate** (sandhi can repair them now), so they are sequenced into concrete
+patch releases. Everything under it stays gated.
 
-## Ready — stdlib gate cleared (cyrius 6.2.37)
+## Near-term patch plan (sandhi-capacity, no external gate)
 
-Two server-TLS prerequisites sandhi filed cyrius-side **landed in 6.2.37** and are
-now actionable sandhi-side follow-ons (verified present in `~/.cyrius/lib`, not
-just claimed). Neither is shipped yet; each opens as its own slot.
+The open items sandhi can repair **now** — no cyrius primitive pending, no second
+consumer required, no breaking-change wait. Batched into single-focus patch
+releases (one submodule per patch, per CLAUDE.md), highest value first. The
+versions are the intended *sequence*, not hard commitments; each ships only when
+its suite + gate are green, and the version bump happens at slot close (memory:
+`feedback_no_version_bump_without_permission`).
 
-- **Migrate the 1.6.8 server-TLS handshake bootstrap onto `tls_accept`**
-  (`src/server/mod.cyr`). 1.6.8's `_sandhi_server_tls_handshake` composes the
-  native server primitives (`tls_native_new_server` / `_set_alpn` /
-  `_server_load_creds` / `_accept`) directly because `lib/tls.cyr` had no
-  symmetric server handshake. cyrius 6.2.37 shipped `tls_accept` /
-  `tls_accept_alloc` / `tls_accept_complete` (mirroring the client
-  `tls_connect_alloc` / `_complete`), so this one bootstrap migrates onto the
-  backend-agnostic contract — exactly as 1.6.1/1.6.2 migrated `conn.cyr`'s raw
-  socket syscalls onto `net.cyr` helpers once they landed.
-- **Adopt `tls_native_new_server_in` for an arena-aware server ctx**
-  (`src/server/mod.cyr`). The 1.6.8 TLS server's per-connection RSS grows because
-  `tls_native_new_server` bump-allocates with no per-connection free. cyrius
-  6.2.37 shipped `tls_native_new_server_in(a, …)` (arena-parameterized, with a
-  per-connection arena reset documented in `tls_native_ctx.cyr`), so the serve
-  loops can pass a per-connection `arena_allocator(cap)` and reclaim it on close.
+- **1.6.10 — server-TLS handshake → the arena-aware `tls_accept_alloc_in`
+  contract** (`src/server/mod.cyr`). Replace 1.6.8's hand-composed bootstrap
+  (`_sandhi_server_tls_handshake`, which calls the native primitives
+  `tls_native_new_server` / `_set_alpn` / `_server_load_creds` / `_accept`
+  directly) with cyrius 6.2.37's backend-agnostic `tls_accept_alloc_in(a, …)` +
+  `tls_accept_complete`. **One move closes BOTH filed cyrius-side prerequisites**:
+  the missing symmetric server handshake (`tls_accept`) AND the non-arena-aware
+  server ctx — the `_in` variant takes a per-connection `arena_allocator(cap)`
+  (verified: it routes to `_tls_native_accept_alloc_in` on the native backend), so
+  a long-running sandhi TLS server's per-connection RSS stops growing. Same
+  `SandhiConn` transport seam + No-FFI posture; re-verified by the existing CI gate
+  `programs/_server_tls_probe.cyr` (real TLS 1.3 + worker-pool isolation). Mirrors
+  how 1.6.1/1.6.2 migrated `conn.cyr`'s raw syscalls onto `net.cyr` once they
+  landed. (Highest value: closes two real known limitations + two upstream filings
+  at once.)
+- **1.6.11 — native custom-trust-store verify-fail proof**
+  (`programs/_policy_runtime_probe.cyr` + a CA-PEM fixture under
+  `programs/_tls_fixtures/`). The 1.6.0 gate `[4]` proves an *unreadable / bogus*
+  custom trust store is enforced (open refused, err=TLS). It does **not** yet prove
+  a *loadable-but-wrong* CA (a real PEM that doesn't sign the server) drives a
+  handshake **verify-fail**. Add the CA fixture + the probe case (chain-verify
+  correctness itself is cyrius's fail-closed `tls_native_connect`; this is sandhi's
+  wiring-proof gap). Test-only unless it surfaces a real enforcement gap. Closes the
+  Batch C trust-store proof item.
+- **1.6.12 — QU mDNS resolver receive correctness** (`src/discovery/local.cyr`).
+  Run the live-network check the default unicast (QU) resolver never got: it
+  `sock_connect`s to the mDNS group then `sock_recv`s — the same Linux
+  connect()-source-filter shape that sank the 1.5.4 QM attempt (the answer arrives
+  from the responder's unicast IP, not the group address). If the check confirms it
+  never receives, apply the proven 1.5.5 two-socket fix (unconnected RX) to the QU
+  path. Closes the Batch C QU-mDNS item.
+- **1.6.13+ (profile-first; conditional)** — Batch B optimizations. Capture the
+  `sandhi_prof_*` phase data on a representative workload, then ship whichever of
+  B1 / B2 / B3 (see *Batch B* below) the measurement — not speculation — justifies,
+  one per patch. Opens only if the data warrants it; otherwise these stay parked.
+  (Listed last because the gate here is "go measure first," which is itself in
+  sandhi's capacity but shouldn't block the three concrete patches above.)
+
+> **Not in this plan** (blocked or deferred by design; each named in its own
+> section below): the libssl **2.0** retirement (breaking — a major, not a patch);
+> the `signal_ignore` / `MSG_NOSIGNAL`, macOS-server-SIGPIPE, and fuzzing items
+> (cyrius-gated or need a macOS box — *Wait-for-stdlib-prerequisite*); and the
+> wait-for-second-consumer backlog (policy deferral — needs a second asker).
 
 ## Batch A — libssl retirement (sandhi 2.0 — breaking)
 
@@ -73,7 +107,8 @@ a public verb + a build flag is not a patch):
 
 The 1.2.5 prof captures (`sandhi_prof_*`) are the gate. No pre-committed
 ordering; each ships in its own slot when measurement — not speculation —
-justifies it.
+justifies it. **Sequenced as the conditional `1.6.13+` profile-first arc** in the
+near-term plan above (capture the prof data first; ship only what it warrants).
 
 - **B1 — HPACK Huffman tie-break for short tokens.** The encoder picks Huffman
   only when *strictly* shorter; a tie-breaker favoring Huffman keeps the dynamic
@@ -91,7 +126,8 @@ The native-TLS prerequisite sit named has landed (native default since cyrius
 6.1.21), and sit's AGNOS adoption drove the C1/C2 transport work already shipped
 (see CHANGELOG). Further Batch C items fill from real-workload friction sit
 surfaces — NOT speculatively pre-baked ([`project_sit_adoption_drives_roadmap`]).
-Currently open:
+Currently open (both are sandhi-capacity — **scheduled as `1.6.11` and `1.6.12`**
+in the near-term plan above):
 
 - **QU mDNS resolver receive correctness (needs a live-network check).** The
   default unicast (QU) resolver in `src/discovery/local.cyr` `sock_connect`s to
