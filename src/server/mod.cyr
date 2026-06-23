@@ -1396,23 +1396,22 @@ fn sandhi_server_run_pooled(addr, port, handler_fp, ctx, opts): i64 {
 #
 # It ships on the NATIVE TLS stack (the default + future; libssl-server never
 # existed and the libssl backend retires at 2.0). All I/O rides the
-# backend-agnostic lib/tls.cyr contract — tls_write / tls_read / tls_close —
-# operating on the standard 24-byte ctx shim [inner_ctx, 0, fd]. The ONE piece
-# the contract doesn't expose yet is a SERVER handshake (lib/tls.cyr has
-# tls_connect* but no symmetric tls_accept), so the handshake bootstrap below
-# composes the native server primitives (tls_native_new_server / _set_alpn /
-# _server_load_creds / _accept) and wraps the result in that shim. When a
-# lib/tls.cyr `tls_accept` wrapper lands cyrius-side (filed; symmetric to the
-# client tls_connect_alloc/_complete that already landed), this one bootstrap
-# migrates onto it — exactly as 1.6.1/1.6.2 migrated conn.cyr's raw socket
-# syscalls onto net.cyr helpers. No FFI, no dlopen: pure native composition.
+# backend-agnostic lib/tls.cyr contract — tls_write / tls_read / tls_close. As of
+# 1.6.10 the server HANDSHAKE rides it too: cyrius 6.2.37 shipped the symmetric
+# `tls_accept_alloc_in` / `tls_accept_complete` (the server mirror of the client
+# tls_connect_alloc/_complete), so the bootstrap below composes that contract
+# instead of reaching into the native server primitives — exactly as 1.6.1/1.6.2
+# migrated conn.cyr's raw socket syscalls onto net.cyr helpers once they landed.
+# No native-server symbol is reached anymore; ALPN rides the SAME backend-agnostic
+# `_sandhi_alpn_hook` + `tls_set_alpn` the client uses. No FFI, no dlopen: pure
+# contract composition.
 #
-# Memory note (known limitation, filed): the native server ctx + per-handshake
-# buffers are bump-allocated by the native stack with no per-connection free
-# (tls_native_close sends close_notify but does not reclaim the ctx), so RSS
-# grows per accepted TLS connection until an arena-aware native server ctx
-# lands upstream. Same property the proven probe shipped with. Correctness of
-# serving is unaffected; this is a cyrius-side arena gap (roadmap).
+# RSS is flat as of 1.6.10: `tls_accept_alloc_in` takes a per-connection arena
+# (`tls_native_new_server_in` backs the native ctx + the whole handshake/record
+# footprint + the shim from it), so each serve loop / worker resets ONE arena per
+# connection (reset_via) and nothing accumulates. The 1.6.8 limitation —
+# per-connection RSS growth, no per-connection free — is closed; the upstream
+# arena-aware server ctx it was filed against landed at cyrius 6.2.37.
 #
 # ALPN: native server-side ALPN *selection* landed at cyrius 6.2.22, so the
 # http/1.1 ALPN we offer below is genuinely negotiated (not forward-compat). h2
@@ -1433,6 +1432,16 @@ enum SandhiConnOff {
 var SANDHI_CONN_SIZE  = 24;
 var SANDHI_CONN_PLAIN = 0;
 var SANDHI_CONN_TLS   = 1;
+
+# 1.6.10 — per-connection TLS arena cap. One arena per serve loop / worker,
+# reset_via'd per connection so RSS stays flat (the native server ctx + the whole
+# per-handshake footprint + the shim + the SandhiConn all draw from it). Sized to
+# the lib/tls.cyr contract's worst-single-handshake guidance (mTLS-1.3 ≈ 128 KiB);
+# sandhi serves plain server TLS 1.3 (no client-cert verify), so this is a safe
+# upper bound — an undersized cap would only drop a connection (a handshake alloc
+# returns 0), never corrupt. Allocated ONCE per loop/worker, never per connection
+# (arena_free doesn't munmap).
+var SANDHI_SERVER_TLS_ARENA_CAP = 131072;
 
 # Wrap a raw plaintext fd as a SandhiConn (for the plaintext-adapter path so
 # conn-based handlers run over the plaintext serve loops too). Returns 0 on OOM.
@@ -1620,38 +1629,44 @@ fn sandhi_server_router_handler_cp(router, cfd, buf, blen): i64 {
     return sandhi_server_router_handler_c(router, conn, buf, blen);
 }
 
-# ── Native server handshake bootstrap (the only native-server-symbol site) ──
-# Per-connection: new server ctx from the borrowed cert/key, offer http/1.1
-# ALPN (negotiated for real since cyrius 6.2.22), load creds, drive the handshake over
-# `fd`, then wrap the native ctx in the lib/tls.cyr 24-byte shim [nctx, 0, fd]
-# so tls_write/tls_read/tls_close drive all subsequent I/O. Returns the shim
-# (a usable TLS ctx) or 0 on any failure. Does NOT close `fd` on failure — the
-# caller always sock_close's it.
-fn _sandhi_server_tls_handshake(fd, cert, cert_len, key, key_len): i64 {
-    var nctx = tls_native_new_server(cert, cert_len, key, key_len);
-    if (nctx == 0) { return 0; }
-    var alpn[16];                            # set_alpn COPIES — stack buffer ok
-    var p = "http/1.1";
-    var pl = strlen(p);
-    store8(&alpn, pl);
-    var i = 0;
-    while (i < pl) { store8(&alpn + 1 + i, load8(p + i)); i = i + 1; }
-    tls_native_set_alpn(nctx, &alpn, pl + 1);
-    if (tls_native_server_load_creds(nctx) != 0) { return 0; }
-    if (tls_native_accept(nctx, fd) != 0) { tls_native_close(nctx); return 0; }
-    var shim = alloc_via(default_alloc(), 24);
-    if (shim == 0) { tls_native_close(nctx); return 0; }
-    store64(shim, nctx);
-    store64(shim + 8, 0);
-    store64(shim + 16, fd);
+# ── Server handshake bootstrap (1.6.10: composes the lib/tls.cyr contract) ──
+# Per-connection: pack the borrowed DER cert/key into the 4-slot creds struct,
+# offer http/1.1 ALPN via the SAME backend-agnostic `_sandhi_alpn_hook` +
+# `_sandhi_alpn_h11_wire` the client uses (the hook calls `tls_set_alpn`, which
+# dispatches the backend), and drive the handshake over `fd` through cyrius
+# 6.2.37's arena-aware `tls_accept_alloc_in` + `tls_accept_complete` — the
+# symmetric mirror of the client tls_connect_alloc/_complete. Returns the
+# lib-canonical ctx shim (a usable TLS ctx for tls_write/_read/_close) or 0 on
+# any failure. `a` backs the native ctx + the whole per-connection handshake /
+# record footprint + the shim, so the serve loop reset_via(a)s it all per
+# connection → flat RSS. No native-server symbol is reached anymore. The creds
+# struct + hook ctx are read DURING the alloc call (the cert/key buffers it
+# points at are the caller's borrowed option buffers, which outlive the server),
+# so stack buffers suffice. Does NOT close `fd` on failure — the caller always
+# sock_close's it.
+fn _sandhi_server_tls_handshake_a(a, fd, cert, cert_len, key, key_len): i64 {
+    _sandhi_alpn_init_wire();
+    var hook_ctx[16];                        # [protos_ptr@0, protos_len@8]
+    store64(&hook_ctx,     _sandhi_alpn_h11_wire);
+    store64(&hook_ctx + 8, _sandhi_alpn_h11_wire_len);
+    var creds[32];                           # [cert@0, cert_len@8, key@16, key_len@24]
+    store64(&creds,      cert);
+    store64(&creds + 8,  cert_len);
+    store64(&creds + 16, key);
+    store64(&creds + 24, key_len);
+    var shim = tls_accept_alloc_in(a, fd, &creds, &_sandhi_alpn_hook, &hook_ctx);
+    if (shim == 0) { return 0; }
+    if (tls_accept_complete(shim) != 1) { tls_close(shim); return 0; }
     return shim;
 }
 
 # Serve one handshaken TLS conn: recv (conn-aware), smuggling-reject (the same
 # fns the plaintext loops use), dispatch to the handler. `reqbuf` is the
 # caller's recv buffer. Closes nothing — the caller owns shim + fd teardown.
-fn _sandhi_server_tls_serve_one(handler_fp, ctx, shim, fd, reqbuf): i64 {
-    var conn = _sandhi_server_conn_tls_a(default_alloc(), shim, fd);
+# 1.6.10: the SandhiConn rides the caller's per-connection arena `a` (reclaimed
+# by the loop's reset_via with the rest of the connection footprint).
+fn _sandhi_server_tls_serve_one(a, handler_fp, ctx, shim, fd, reqbuf): i64 {
+    var conn = _sandhi_server_conn_tls_a(a, shim, fd);
     if (conn == 0) { return 0; }
     var n = sandhi_server_recv_request_c(conn, reqbuf, HSV_REQ_BUF_SIZE - 1);
     if (n > 0) {
@@ -1693,17 +1708,25 @@ fn sandhi_server_run_tls(addr, port, handler_fp, ctx, opts): i64 {
     if (is_err_result(sock_bind(sfd, addr, port)) == 1) { sock_close(sfd); return 1; }
     if (is_err_result(sock_listen(sfd, backlog)) == 1) { sock_close(sfd); return 1; }
 
+    # 1.6.10 — ONE arena for the loop, reset_via per connection: the native
+    # server ctx + per-handshake footprint + shim + SandhiConn all draw from it,
+    # so RSS stays flat instead of growing per accepted connection (the 1.6.8
+    # limitation, now closed via cyrius 6.2.37's arena-aware tls_accept_alloc_in).
+    var tarena = arena_allocator(SANDHI_SERVER_TLS_ARENA_CAP);
+    if (tarena == 0) { sock_close(sfd); return 1; }
+
     while (1 == 1) {
         var cr = sock_accept(sfd);
         if (is_err_result(cr) == 0) {
             var cfd = payload(cr);
             if (idle_ms > 0) { _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO); }
-            var shim = _sandhi_server_tls_handshake(cfd, cert, cert_len, key, key_len);
+            var shim = _sandhi_server_tls_handshake_a(tarena, cfd, cert, cert_len, key, key_len);
             if (shim != 0) {
-                _sandhi_server_tls_serve_one(handler_fp, ctx, shim, cfd, _hsv_req_buf);
+                _sandhi_server_tls_serve_one(tarena, handler_fp, ctx, shim, cfd, _hsv_req_buf);
                 tls_close(shim);
             }
             sock_close(cfd);
+            reset_via(tarena);              # rewind this connection's footprint → flat RSS
         }
     }
     return 0;
@@ -1742,16 +1765,22 @@ fn _sandhi_server_pool_tls_worker(arg): i64 {
     var key_len  = load64(arg + SANDHI_POOL_TW_KEY_LEN);
     var reqbuf   = alloc_via(default_alloc(), HSV_REQ_BUF_SIZE);
     if (reqbuf == 0) { return 0; }           # OOM — worker exits, pool runs short
+    # 1.6.10 — per-worker arena, reset_via per connection. Worker ctxs are fully
+    # independent, so each owns its own arena → no cross-worker reset race; RSS
+    # stays flat per worker.
+    var tarena = arena_allocator(SANDHI_SERVER_TLS_ARENA_CAP);
+    if (tarena == 0) { return 0; }
     while (1 == 1) {
         var cfd = chan_recv(ch);
         if (cfd == 0) { return 0; }          # channel closed
         if (idle_ms > 0) { _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO); }
-        var shim = _sandhi_server_tls_handshake(cfd, cert, cert_len, key, key_len);
+        var shim = _sandhi_server_tls_handshake_a(tarena, cfd, cert, cert_len, key, key_len);
         if (shim != 0) {
-            _sandhi_server_tls_serve_one(fp, ctx, shim, cfd, reqbuf);
+            _sandhi_server_tls_serve_one(tarena, fp, ctx, shim, cfd, reqbuf);
             tls_close(shim);
         }
         sock_close(cfd);
+        reset_via(tarena);                   # rewind → flat per-worker RSS
     }
     return 0;
 }

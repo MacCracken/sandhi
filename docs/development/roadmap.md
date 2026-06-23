@@ -17,8 +17,9 @@ regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
 is currently **cyrius 6.2.37** (1.6.9 lifted the four buffered-client dispatch
 globals into a per-call request context so concurrent `sandhi_http_*_a` workers
-are thread-safe — the thoth bite; pure sandhi-side composition, parity bump to
-latest).
+are thread-safe — the thoth bite; **1.6.10** migrated the server-TLS handshake onto
+6.2.37's `tls_accept_alloc_in` / `_complete` + a flat-RSS per-connection arena —
+both pure sandhi-side, no pin change since 6.2.37).
 
 **Pacing.** Most items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -39,21 +40,12 @@ versions are the intended *sequence*, not hard commitments; each ships only when
 its suite + gate are green, and the version bump happens at slot close (memory:
 `feedback_no_version_bump_without_permission`).
 
-- **1.6.10 — server-TLS handshake → the arena-aware `tls_accept_alloc_in`
-  contract** (`src/server/mod.cyr`). Replace 1.6.8's hand-composed bootstrap
-  (`_sandhi_server_tls_handshake`, which calls the native primitives
-  `tls_native_new_server` / `_set_alpn` / `_server_load_creds` / `_accept`
-  directly) with cyrius 6.2.37's backend-agnostic `tls_accept_alloc_in(a, …)` +
-  `tls_accept_complete`. **One move closes BOTH filed cyrius-side prerequisites**:
-  the missing symmetric server handshake (`tls_accept`) AND the non-arena-aware
-  server ctx — the `_in` variant takes a per-connection `arena_allocator(cap)`
-  (verified: it routes to `_tls_native_accept_alloc_in` on the native backend), so
-  a long-running sandhi TLS server's per-connection RSS stops growing. Same
-  `SandhiConn` transport seam + No-FFI posture; re-verified by the existing CI gate
-  `programs/_server_tls_probe.cyr` (real TLS 1.3 + worker-pool isolation). Mirrors
-  how 1.6.1/1.6.2 migrated `conn.cyr`'s raw syscalls onto `net.cyr` once they
-  landed. (Highest value: closes two real known limitations + two upstream filings
-  at once.)
+> **1.6.10 shipped** — server-TLS handshake migrated onto cyrius 6.2.37's
+> `tls_accept_alloc_in` / `tls_accept_complete` + a per-connection arena (flat RSS);
+> closed BOTH filed cyrius-side server-TLS prereqs in one move (the missing
+> `tls_accept` wrapper + the non-arena-aware server ctx). No native-server symbol is
+> reached anymore. See CHANGELOG [1.6.10]. Next up:
+
 - **1.6.11 — native custom-trust-store verify-fail proof**
   (`programs/_policy_runtime_probe.cyr` + a CA-PEM fixture under
   `programs/_tls_fixtures/`). The 1.6.0 gate `[4]` proves an *unreadable / bogus*

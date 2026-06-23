@@ -4,6 +4,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.10] — 2026-06-23
+
+**Server-TLS handshake rides the `lib/tls.cyr` contract (flat RSS).** 1.6.8's
+server-TLS handshake bootstrap (`_sandhi_server_tls_handshake`) reached past the
+backend-agnostic contract into the native server primitives
+(`tls_native_new_server` / `_set_alpn` / `_server_load_creds` / `_accept`),
+because `lib/tls.cyr` exposed `tls_connect*` but no symmetric server handshake —
+and the native server ctx was bump-allocated with no per-connection free, so a
+long-running TLS server's RSS grew per accepted connection. Both were filed
+cyrius-side; **both prerequisites landed at cyrius 6.2.37** (already the 1.6.9
+pin), so this patch adopts them. No new pin, no public surface change — a pure
+internal refactor of `src/server/mod.cyr`.
+
+### Changed — `src/server/mod.cyr`
+
+- **Handshake migrated onto `tls_accept_alloc_in` + `tls_accept_complete`** (the
+  symmetric mirror of the client `tls_connect_alloc` / `_complete`). The bootstrap
+  (`_sandhi_server_tls_handshake_a`) now packs the borrowed DER cert/key into the
+  4-slot creds struct and drives the handshake through the contract — **no
+  native-server symbol is reached anymore**. ALPN (`http/1.1`) rides the **same**
+  backend-agnostic `_sandhi_alpn_hook` + `_sandhi_alpn_h11_wire` the client uses
+  (`tls_set_alpn` dispatches the backend), so the server- and client-side ALPN
+  paths are now one mechanism. Closes the filed
+  `2026-06-18-lib-tls-cyr-no-server-handshake-wrapper`.
+- **Flat RSS via a per-connection arena.** `tls_accept_alloc_in(a, …)` backs the
+  native server ctx + the whole per-handshake/record footprint + the shim (and the
+  `SandhiConn`) from a caller arena. Both serve loops (`sandhi_server_run_tls`
+  single-flight + each `sandhi_server_run_pooled_tls` worker) now allocate **one**
+  `arena_allocator(SANDHI_SERVER_TLS_ARENA_CAP)` (128 KiB — the contract's
+  worst-single-handshake guidance; sandhi serves plain server TLS 1.3, no mTLS) and
+  `reset_via` it per connection. Per-connection RSS growth is gone; a pooled server
+  is `workers × 128 KiB` fixed for its TLS arenas. Closes the filed
+  `2026-06-18-tls-native-server-ctx-not-arena-aware`.
+
+### Verified
+
+- **1111 assertions unchanged** (539 / 167 / 342 / 63 — this is a behavior-
+  preserving refactor of a live-socket path the unit suite doesn't exercise; no
+  new unit assertion was warranted). The proof is the existing CI live gate
+  `programs/_server_tls_probe.cyr`, re-run green against the migrated path: a
+  pooled TLS server over real **TLS 1.3** with Ed25519 fixtures — trusted burst
+  **8/8 → 200+body** (ALPN negotiated through the reused hook), untrusted
+  default-policy client **rejected** (cert verify not bypassed), worker-pinned
+  isolation 8/8, all across `reset_via`'d connections. Smoke + `CYRIUS_DCE=1`
+  builds OK; `cyrius lint src/server/mod.cyr` 0/0; `dist/sandhi.cyr` regenerated at
+  v1.6.10. Pin stays **6.2.37**.
+
 ## [1.6.9] — 2026-06-23
 
 **Client dispatch is thread-safe under concurrent workers (thoth bite).** The
