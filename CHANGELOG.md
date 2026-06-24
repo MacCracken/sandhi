@@ -4,6 +4,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.13] — 2026-06-24
+
+**Client connections silently lost their socket fd (server/client `SandhiConnOff`
+symbol collision).** `src/server/mod.cyr` defined an `enum SandhiConnOff` whose
+members reused the exact names of the client conn struct's enum in
+`src/http/conn.cyr` — but with different offsets (`SANDHI_CONN_OFF_FD = 16` server
+vs `8` client). Under cyrius single-pass "last definition wins", every client TU
+resolved `SANDHI_CONN_OFF_FD` to `16`, colliding with the client's own
+`SANDHI_CONN_OFF_TLS_CTX = 16`: `_sandhi_conn_finalize_*` wrote the real fd at
+offset 16, then immediately wrote `tls_ctx` (0) to the same slot, zeroing the fd.
+Result: every client request (`sandhi_http_post` / `sandhi_http_stream`) went to
+**fd 0** instead of the socket — connect succeeded, but the gateway received
+nothing (and in an interactive tty the raw request echoed to the screen). Fix:
+namespace the server struct's offsets to `SANDHI_SRVCONN_OFF_*` (enum renamed
+`SandhiServerConnOff`) so the names no longer collide; the kind values
+(`SANDHI_CONN_PLAIN`/`_TLS`, identical in both) stay shared. **`src/server/mod.cyr`
+only; pin stays 6.2.37.** See `docs/development/issues/2026-06-24-server-conn-off-fd-collision.md`.
+
 ## [1.6.12] — 2026-06-23
 
 **Default mDNS resolver now actually receives (QU two-socket fix).** The default
