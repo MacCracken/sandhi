@@ -42,8 +42,14 @@ when fully closed.
 
 ## Upstream dependencies (sandhi is blocked on stdlib / toolchain)
 
-All filed upstream dependencies to date are **resolved and archived** — the
-`lib/tls.cyr` native-TLS swap off the fdlopen-libssl bridge (✅ cyrius 6.2.8 /
+**Open:**
+
+| Doc | Repo | Severity | Summary |
+|-----|------|----------|---------|
+| [`2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md) | cyrius | low (deprecated path) | 6.3.x's reachable-undefined linker error fails the `-D CYRIUS_TLS_LIBSSL` smoke build — the libssl config leaves 4 of sigil's transitive crypto symbols (`thread_local_init/set/get`, `ct_select`) reachable-but-unlinked. cyrius-side DCE artifact of the libssl `#ifdef`, NOT a sandhi/sigil source defect (native links them all). libssl CI step made non-gating; drops at the 2.0 retirement. |
+
+Otherwise, all filed upstream dependencies to date are **resolved and archived** —
+the `lib/tls.cyr` native-TLS swap off the fdlopen-libssl bridge (✅ cyrius 6.2.8 /
 sandhi 1.6.0) and the daimon `serve_async` max-conns enforcement (sandhi-side
 ✅ 1.4.9) both closed and moved to `archive/` in the 2026-06-23 sweep. New
 upstream blockers land here as `YYYY-MM-DD-kebab-case.md` and move to `archive/`

@@ -66,6 +66,16 @@ a public verb + a build flag is not a patch):
   `src/tls_policy/*` and `src/http/conn.cyr`. Breaking → the 2.0 major, not a
   1.6.x patch. The prerequisite (A1) is met; this is a scheduling decision, not a
   blocked item. See `project_libssl_retirement_at_2_0` (memory).
+- **libssl smoke build is non-gating since cyrius 6.3.5 — drop at 2.0.** The
+  `-D CYRIUS_TLS_LIBSSL` CI link-proof (`ci.yml`) is now `continue-on-error`:
+  6.3.x's linker refuses reachable-undefined fns, and the libssl config leaves 4
+  of sigil's transitive crypto symbols (`thread_local_init/set/get`, `ct_select`)
+  reachable-but-unlinked — a cyrius-side DCE artifact of the libssl `#ifdef`, NOT a
+  sandhi/sigil source defect (native links them all). Filed cyrius-side:
+  [`issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md).
+  Delete the CI step entirely as part of the 2.0 libssl removal below; revisit
+  sooner only if cyrius fixes the DCE reachability (or plumbs `--allow-undef`
+  through `cyrius build`).
 - **libssl `tls_get_peer_spki_der` regression — moot, low priority.** sandhi
   still excludes libssl from `pin_available()` (a single libssl pinned open
   SIGSEGV'd in post-handshake SPKI extraction). Native covers pinning and libssl
