@@ -6,7 +6,7 @@
 > [`requests/`](requests/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. This file was last
-> swept clean of completed work on **2026-06-23** (after 1.6.12).
+> swept clean of completed work on **2026-06-29** (after 1.7.0).
 
 ## Context (post-fold)
 
@@ -15,10 +15,11 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.2.37**, unchanged since 1.6.9 — the 1.6.9–1.6.12 patches
-(client dispatch thread-safety, the server-TLS handshake migration + flat-RSS, the
-native trust-store verify-fail proof, and the QU mDNS receive fix) were all pure
-sandhi-side on that pin (see CHANGELOG).
+is currently **cyrius 6.3.5** (1.7.0 parity bump; was 6.2.37 across 1.6.9–1.6.13).
+The 1.6.9–1.6.13 + 1.7.0 patches (client dispatch thread-safety, the server-TLS
+handshake migration + flat-RSS, the native trust-store verify-fail proof, the QU
+mDNS receive fix, the conn-off fd-collision fix, and the two yeo-cy-test fixes)
+were all pure sandhi-side (see CHANGELOG).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -29,6 +30,28 @@ a named entry here (or in [`requests/`](requests/README.md)), not a buried menti
 The concrete sandhi-capacity patch sequence (1.6.10–1.6.12) shipped; everything
 remaining here is gated (profile evidence, a breaking major, a second consumer, or
 a cyrius primitive).
+
+## Consumer-filed bugs (yeo-cy-test, 2026-06-28) — SHIPPED at 1.7.0
+
+Both sandhi-side bugs surfaced adopting `sandhi_server_run_pooled_tls` + the h2
+client (folded sandhi in cyrius 6.3.x) **shipped at 1.7.0** (see CHANGELOG; issue
+docs archived): the **h2-promote IPv6 arity** one-liner (`dispatch.cyr` now passes
+the 9th `ctx`=0) and the **misleading pooled-TLS concurrency comment** (corrected +
+`max_conns = 1` recommended + the `[4]` concurrent-handshake watch added to
+`_server_tls_probe.cyr`). One residual, gated below.
+
+## Wait-for-upstream (sigil) — promote the concurrent-handshake gate
+
+- **Promote `_server_tls_probe.cyr` `[4]` to gating once sigil is fixed.** The
+  root crash behind the 1.7.0 pooled-TLS doc fix is **sigil's process-global crypto
+  scratch race** (filed cyrius/sigil-side:
+  `2026-06-28-concurrent-tls-handshake-global-scratch-race`) — two simultaneous TLS
+  handshakes race shared scratch → SIGSEGV, so a multi-worker HTTPS pool is unsafe
+  and `sandhi_server_run_pooled_tls` recommends `max_conns = 1`. `[4]` is a
+  **non-gating watch** today (live: 0/16 survive). When sigil lands the fix, all
+  pairs survive → flip `[4]` to gating (one-line change documented in the probe)
+  **and** relax the pooled-TLS comment's `max_conns = 1` guidance. Re-verify
+  against the sigil fix before flipping.
 
 ## Batch A — libssl retirement (sandhi 2.0 — breaking)
 

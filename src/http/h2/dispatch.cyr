@@ -142,8 +142,11 @@ fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool): i64 {
     _sandhi_alpn_advertise_h2 = 1;
     var conn = 0;
     if (addr6 != 0) {
+        # 9th arg is the 1.6.9 per-call request ctx; h2-promote threads none
+        # (no SANDHI_REQCTX_* in scope), so pass 0 — the ctx==0 fallback, exactly
+        # what the IPv4 sibling's public sandhi_conn_open_fully_timed_a defaults to.
         conn = _sandhi_conn_open_v6_fully_timed_a(a, addr6, port, 1, host,
-        connect_ms, read_ms, write_ms);
+        connect_ms, read_ms, write_ms, 0);
     } else {
         conn = sandhi_conn_open_fully_timed_a(a, addr, port, 1, host,
         connect_ms, read_ms, write_ms);

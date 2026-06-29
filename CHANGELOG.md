@@ -4,6 +4,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-06-29
+
+**Two yeo-cy-test (SecureYeoman → Cyrius) consumer-filed bugs + cyrius pin
+`6.2.37 → 6.3.5`.** Both surfaced adopting `sandhi_server_run_pooled_tls` + the h2
+client against folded sandhi in cyrius 6.3.x. The pin bump is a parity move (the
+fixes are pure sandhi-side composition; no new cyrius primitive), but 6.3.x's
+linker now **refuses to emit a binary with reachable-undefined functions** (was a
+NOP'd warning), which surfaced an incomplete include list in `tests/alloc.tcyr`.
+
+### Fixed — `src/http/h2/dispatch.cyr`
+
+- **h2-promote IPv6 conn-open arity.** The h2-promotion IPv6 branch called the
+  9-arg `_sandhi_conn_open_v6_fully_timed_a` with only 8 args — it missed the
+  trailing per-call request `ctx` added in the 1.6.9 thread-safety change (the
+  IPv4 sibling and `client.cyr`'s IPv6 call were updated; this branch was missed).
+  Result: a build warning for every consumer (`expects 9 arguments, got 8` out of
+  the folded `dist/sandhi.cyr`) and, on the IPv6 + h2-promote client path, the 9th
+  slot read as a garbage `ctx`. h2-promote threads no request context, so it now
+  passes `0` (the ctx==0 fallback — identical to what the IPv4 sibling's public
+  `sandhi_conn_open_fully_timed_a` defaults to). Closes
+  `docs/development/issues/2026-06-28-h2-promote-v6-conn-open-arity.md`.
+
+### Fixed — `src/server/mod.cyr` (doc-correctness) + `programs/_server_tls_probe.cyr`
+
+- **Misleading `sandhi_server_run_pooled_tls` concurrency comment.** The header
+  claimed concurrent TLS handshakes were "validated by the live gate" and that
+  "the only shared mutable state is the CAS-locked allocator" — both false. The
+  gate's [1]-[3] checks are *sequential* handshakes plus a *plaintext* isolation
+  socket, so genuinely-simultaneous handshakes were never exercised; and the TLS
+  handshake drives sigil, whose crypto primitives use process-global scratch — so
+  two parallel handshakes race → ECONNRESET/SIGSEGV. The comment invited consumers
+  to set `max_conns > 1` for HTTPS and inherit a crash. Corrected to state
+  concurrent TLS handshakes are **not yet safe**, recommend `max_conns = 1` for the
+  TLS pool, and cross-reference the upstream sigil issue
+  (`2026-06-28-concurrent-tls-handshake-global-scratch-race`). The plaintext pool
+  `sandhi_server_run_pooled` is unaffected (no sigil scratch on its path). Root
+  crash is sigil's; this is the doc/gate-correctness half. Closes
+  `docs/development/issues/2026-06-28-pooled-tls-misleading-concurrency-comment.md`.
+- **Gate now exercises concurrent handshakes (`[4]`, non-gating watch).**
+  `_server_tls_probe.cyr` gained a `[4]` check that forks pairs of clients
+  handshaking at the same instant — the multi-worker pool's core promise. Because
+  the underlying race is an unfixed upstream sigil defect, `[4]` reports a
+  **KNOWN-LIMITATION** and does **not** fail CI (a shortfall is expected today;
+  live run: 0/16 survived, confirming the crash). When sigil is fixed all pairs
+  survive and the watch should be promoted to gating (instructions in the `[4]`
+  block). `[3]` relabelled "accept-loop isolation" since its silent socket is
+  plaintext, not a concurrent TLS handshake.
+
+### Fixed — `tests/alloc.tcyr`
+
+- **Complete the include list for cyrius 6.3.x's stricter linker.** 6.3.x refuses
+  to emit with reachable-undefined functions; the subset suite included the h2
+  dispatch path but not `src/tls_policy/apply.cyr` (policy pre/post-open helpers)
+  or `src/tls_policy/alpn.cyr` (`sandhi_conn_alpn_is_h2`) it references. Added both
+  (mirrors `tests/sandhi.tcyr`); no assertion change (342 still green).
+
+### Toolchain
+
+- **cyrius pin `6.2.37 → 6.3.5`.** Parity bump to latest; clean deps re-resolve
+  (`rm -rf lib cyrius.lock && cyrius deps`), all four suites green (1112
+  assertions: sandhi 540 / h2 167 / alloc 342 / rpc 63), DCE build OK, lint 0/0.
+
 ## [1.6.13] — 2026-06-24
 
 **Client connections silently lost their socket fd (server/client `SandhiConnOff`

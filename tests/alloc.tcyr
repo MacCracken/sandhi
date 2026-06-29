@@ -16,6 +16,14 @@ include "src/tls_policy/session_cache.cyr"
 include "src/http/conn.cyr"
 include "src/tls_policy/policy.cyr"
 include "src/tls_policy/fingerprint.cyr"
+# apply.cyr + alpn.cyr (below) define the policy pre/post-open helpers and
+# sandhi_conn_alpn_is_h2 that the included h2 dispatch path references. They were
+# tolerated as unreachable-NOP warnings before, but cyrius 6.3.x's linker refuses
+# to emit with reachable-undefined fns, so this subset suite must include them
+# (mirrors tests/sandhi.tcyr). Function symbols resolve at link, so the relative
+# include order only matters for top-level decls — both depend only on
+# conn/policy/fingerprint, already above.
+include "src/tls_policy/apply.cyr"
 include "src/http/response.cyr"
 include "src/net/resolve.cyr"
 include "src/http/client.cyr"
@@ -31,6 +39,7 @@ include "src/http/h2/dispatch.cyr"
 include "src/http/sse.cyr"
 include "src/http/stream.cyr"
 include "src/http/retry.cyr"
+include "src/tls_policy/alpn.cyr"
 include "src/server/mod.cyr"
 include "src/rpc/json.cyr"
 include "src/rpc/dispatch.cyr"
