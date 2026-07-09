@@ -4,6 +4,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.2] — 2026-07-09
+
+**Cyrius language pin refreshed `6.3.5` → `6.4.32`.** A maintenance bump keeping
+sandhi's toolchain pin current with the shipping cyrius release (the pin had
+trailed by a full minor). Validated: `cyrius deps` + the native `CYRIUS_DCE=1
+cyrius build programs/smoke.cyr` link proof pass clean against 6.4.32 — only the
+always-tolerated `sys_chdir` / `random_bytes` unreachable-undefs remain on the
+native path; the deprecated `-D CYRIUS_TLS_LIBSSL` backend's reachable-undef
+warnings are unchanged and non-gating (cyrius issue
+`2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x`, retires at sandhi 2.0). No
+source or dist behavior change beyond the version string — the 1.7.1 native-TLS
+record-layer fix ships unchanged.
+
 ## [1.7.1] — 2026-07-09
 
 **Native-backend HTTPS large responses now work (root cause + efficiency
