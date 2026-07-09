@@ -4,6 +4,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-07-09
+
+**Native-backend HTTPS large responses now work (root cause + efficiency
+companion to a cyrius stdlib TLS fix).** Fetching any real-world HTTPS URL over
+the **sovereign native TLS backend** failed for responses whose body arrived in a
+full 16 KB TLS record (i.e. essentially every non-trivial page); small responses
+(e.g. `example.com`) slipped through, so the failure looked host-specific but was
+purely **response-size**-dependent. Root-caused to the stdlib native TLS record
+layer (see below); consumers on the libssl backend were unaffected, which is why
+the bote/daimon web tools masked it behind a libssl fallback.
+
+### Changed — `src/http/pool.cyr`
+
+- **`_sandhi_http_recv_framed` reads in whole-TLS-record steps** (`step` 4096 →
+  16384). This is an **efficiency** change, not a correctness one: the native
+  `tls_read` now delivers partial records and holds any remainder (like libssl
+  always has), so a sub-record `ask` is correct — but a record-sized `ask` lets
+  each `tls_read` return a whole record in one call instead of several
+  hold-buffer slices, cutting recv/decrypt round-trips on large responses. (The
+  prior 4096 step is what first *exposed* the stdlib bug: a full record could not
+  be delivered into a 4 KB ask.)
+
+### Requires — cyrius stdlib TLS fix (folds into the toolchain)
+
+The load-bearing fix is in the **stdlib native TLS module** (`lib/tls_native_*`),
+which sandhi vendors from the toolchain — it is **not** sandhi-owned source, so it
+ships via a cyrius toolchain release, not this crate. Two defects, both fixed:
+
+- **Off-by-one in the record-decrypt output buffer** (`tls_native_read` /
+  `tls_native_record_open`). A maximum-size TLS 1.3 record decrypts to an inner
+  plaintext of `content(2^14) + inner-content-type byte` = **16385** bytes, but
+  the decrypt scratch + `out_max` were sized at `TLS_RECORD_MAX_PLAINTEXT`
+  (16384). Any peer sending a full record tripped `TLS_ERR_BUFFER_FULL`,
+  discarding the decrypted record **after** its AEAD sequence had advanced —
+  wedging the connection. Fixed by sizing the decrypt buffer to
+  `TLS_RECORD_MAX_CIPHERTEXT` (16640) and re-asserting the RFC 8446 §5.4 content
+  limit with an explicit `record_overflow` guard.
+- **`tls_native_read` now delivers partial records.** It buffered "whole record
+  or `TLS_ERR_BUFFER_FULL`", so a caller reading in sub-record chunks (an h2
+  9-byte frame header, the tail of a bounded response buffer, any small ask)
+  still wedged and silently lost the decrypted record. It now delivers up to
+  `maxlen` and **holds the remainder** in the ctx, honoring its documented "up to
+  maxlen" contract for every caller and chunk size.
+
+Verified end-to-end on the native backend against real hosts (anthropic.com,
+secureyeoman.ai, robertmaccracken.com, cyriusb.com — 200 with byte-lengths
+identical to libssl) and via sub-record reads down to a 9-byte ask. Two
+independent adversarial reviews (the first caught an incomplete first cut).
+
 ## [1.7.0] — 2026-06-29
 
 **Two yeo-cy-test (SecureYeoman → Cyrius) consumer-filed bugs + cyrius pin
