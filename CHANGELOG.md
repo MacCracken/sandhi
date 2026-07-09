@@ -4,6 +4,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.3] — 2026-07-09
+
+**Cyrius language pin `6.4.32` → `6.4.33`.** Completes the 1.7.2 pin refresh: 1.7.x's
+native-TLS large-response fix depends on the partial-record `READ_HOLD` hold buffer,
+which shipped in cyrius **6.4.33** (not the 6.4.32 that 1.7.2 pinned) — so a consumer
+building against pristine 6.4.32 stdlib would still hit the original bug. Validated:
+`cyrius deps` + the native `CYRIUS_DCE=1 cyrius build programs/smoke.cyr` link proof
+pass clean against 6.4.33, and the `READ_HOLD` offsets are present in the resolved TLS
+stdlib. No source or dist behavior change beyond the version string.
+
 ## [1.7.2] — 2026-07-09
 
 **Cyrius language pin refreshed `6.3.5` → `6.4.32`.** A maintenance bump keeping
