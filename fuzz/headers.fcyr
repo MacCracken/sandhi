@@ -1,0 +1,128 @@
+# Fuzz: sandhi_headers_parse — wire-format HTTP header-block parser (untrusted
+# response headers). Must not crash on missing colons / no CRLF / lone CR|LF /
+# huge counts / oversized values / embedded NUL / smuggling-shaped input.
+# Stdlib auto-included via cyrius.cyml; sandhi modules below (single-pass order).
+
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+
+fn _fz_fill(n, seed) {
+    var b = alloc(n + 1);
+    var i = 0;
+    var s = seed;
+    while (i < n) {
+        s = (s * 1103515245 + 12345) & 0x7fffffff;
+        var c = s % 256;                 # full byte range incl. CR/LF/NUL/high
+        store8(b + i, c);
+        i = i + 1;
+    }
+    store8(b + n, 0);
+    return b;
+}
+
+fn main() {
+    alloc_init();
+
+    # --- baseline: a valid header block must still parse ---
+    var ok = "Host: example.com\r\nContent-Length: 5\r\nX-A: b\r\n\r\n";
+    if (sandhi_headers_parse(ok, strlen(ok)) == 0) { syscall(60, 10); }
+
+    # --- degenerate / boundary (must not crash; may return 0) ---
+    sandhi_headers_parse("", 0);
+    sandhi_headers_parse("\r\n", 2);
+    sandhi_headers_parse("\r\n\r\n", 4);
+    sandhi_headers_parse("nocolon\r\n\r\n", 11);
+    sandhi_headers_parse(":noname\r\n\r\n", 10);
+    sandhi_headers_parse("X:\r\n\r\n", 6);              # empty value
+    sandhi_headers_parse("X: \r\n\r\n", 7);
+    sandhi_headers_parse("A: b", 4);                    # no terminating CRLF
+    sandhi_headers_parse("A: b\r", 5);                  # lone CR at end
+    sandhi_headers_parse("A: b\n", 5);                  # lone LF
+    sandhi_headers_parse("A:b\rC:d\r\n\r\n", 12);       # bare CR mid-block
+    sandhi_headers_parse("Content-Length: 5\r\nContent-Length: 6\r\n\r\n", 40);  # dup
+
+    # --- oversized single value + oversized name ---
+    var big = _fz_fill(9000, 3);
+    memcpy(big, "X: ", 3);
+    sandhi_headers_parse(big, 9000);
+
+    # --- many headers (count pressure) ---
+    var many = alloc(8192);
+    var mw = 0;
+    var k = 0;
+    while (k < 400) {
+        if (mw + 8 >= 8190) { k = 400; }
+        else {
+            memcpy(many + mw, "Ab: c\r\n", 7); mw = mw + 7;
+            k = k + 1;
+        }
+    }
+    store8(many + mw, 13); mw = mw + 1;
+    store8(many + mw, 10); mw = mw + 1;
+    sandhi_headers_parse(many, mw);
+
+    # --- structured random "K: V\r\n" lines with random bytes in K/V ---
+    var di = 0;
+    while (di < 64) {
+        var blk = alloc(1024);
+        var w = 0;
+        var s = 11 + di;
+        var lines = 1 + (di % 12);
+        var li = 0;
+        while (li < lines) {
+            if (w + 40 >= 1020) { li = lines; }
+            else {
+                s = (s * 1103515245 + 12345) & 0x7fffffff; store8(blk + w, 65 + (s % 40)); w = w + 1;
+                s = (s * 1103515245 + 12345) & 0x7fffffff; store8(blk + w, 65 + (s % 60)); w = w + 1;
+                store8(blk + w, 58); w = w + 1;   # ':'
+                store8(blk + w, 32); w = w + 1;   # ' '
+                var vi = 0;
+                var vlen = s % 20;
+                while (vi < vlen) {
+                    s = (s * 1103515245 + 12345) & 0x7fffffff;
+                    var vc = s % 256; if (vc == 0) { vc = 1; }
+                    store8(blk + w, vc); w = w + 1;
+                    vi = vi + 1;
+                }
+                store8(blk + w, 13); w = w + 1;
+                store8(blk + w, 10); w = w + 1;
+                li = li + 1;
+            }
+        }
+        store8(blk + w, 13); w = w + 1;
+        store8(blk + w, 10); w = w + 1;
+        sandhi_headers_parse(blk, w);
+        di = di + 1;
+    }
+
+    # --- raw random buffers of many sizes ---
+    var sizes[6];
+    store64(&sizes + 0, 1);
+    store64(&sizes + 8, 15);
+    store64(&sizes + 16, 256);
+    store64(&sizes + 24, 4096);
+    store64(&sizes + 32, 8191);
+    store64(&sizes + 40, 16384);
+    var zi = 0;
+    while (zi < 6) {
+        var n = load64(&sizes + zi * 8);
+        var seed = 7 + n;
+        var iter = 0;
+        while (iter < 20) {
+            var buf = _fz_fill(n, seed);
+            sandhi_headers_parse(buf, n);
+            seed = seed + 2654435761;
+            iter = iter + 1;
+        }
+        zi = zi + 1;
+    }
+
+    syscall(1, 1, "headers fuzz: ok\n", 17);
+    syscall(60, 0);
+}
+
+var _ec = main();
+syscall(60, _ec);

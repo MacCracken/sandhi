@@ -1,0 +1,135 @@
+# Fuzz: _sandhi_resolve_parse_response (+ _aaaa) — native DNS response parser
+# (untrusted UDP payload, RFC 1035). Prime attack surface: name-compression
+# pointer loops / OOB pointers, truncated records, huge ANCOUNT, RDLENGTH
+# overflow. Must not crash, OOB-read, or infinite-loop (32-hop guard).
+# Stdlib auto-included via cyrius.cyml; sandhi modules below (single-pass order).
+
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/net/resolve.cyr"
+
+fn _fz_fill(n, seed) {
+    var b = alloc(n + 1);
+    var i = 0;
+    var s = seed;
+    while (i < n) {
+        s = (s * 1103515245 + 12345) & 0x7fffffff;
+        store8(b + i, s % 256);           # full byte range
+        i = i + 1;
+    }
+    store8(b + n, 0);
+    return b;
+}
+
+# A minimal well-formed A response for `id` into buf; returns byte length.
+fn _dns_a_response(buf, id) {
+    store8(buf + 0, (id >> 8) & 0xff); store8(buf + 1, id & 0xff);
+    store8(buf + 2, 0x81); store8(buf + 3, 0x80);     # response + RA/RD
+    store8(buf + 4, 0); store8(buf + 5, 1);           # QDCOUNT=1
+    store8(buf + 6, 0); store8(buf + 7, 1);           # ANCOUNT=1
+    store8(buf + 8, 0); store8(buf + 9, 0);
+    store8(buf + 10, 0); store8(buf + 11, 0);
+    var o = 12;
+    store8(buf + o, 1); o = o + 1; store8(buf + o, 97); o = o + 1;   # "a"
+    store8(buf + o, 0); o = o + 1;                                    # root
+    store8(buf + o, 0); o = o + 1; store8(buf + o, 1); o = o + 1;     # type A
+    store8(buf + o, 0); o = o + 1; store8(buf + o, 1); o = o + 1;     # class IN
+    # answer: name = compression pointer to 12
+    store8(buf + o, 0xc0); o = o + 1; store8(buf + o, 12); o = o + 1;
+    store8(buf + o, 0); o = o + 1; store8(buf + o, 1); o = o + 1;     # type A
+    store8(buf + o, 0); o = o + 1; store8(buf + o, 1); o = o + 1;     # class IN
+    store8(buf + o, 0); store8(buf + o + 1, 0); store8(buf + o + 2, 0); store8(buf + o + 3, 60); o = o + 4;  # TTL
+    store8(buf + o, 0); o = o + 1; store8(buf + o, 4); o = o + 1;     # RDLENGTH=4
+    store8(buf + o, 1); store8(buf + o + 1, 2); store8(buf + o + 2, 3); store8(buf + o + 3, 4); o = o + 4;   # 1.2.3.4
+    return o;
+}
+
+fn main() {
+    alloc_init();
+    var id = 0x1234;
+
+    # --- baseline: a valid A response must parse (non-crash; value not asserted) ---
+    var buf = alloc(512);
+    var n = _dns_a_response(buf, id);
+    _sandhi_resolve_parse_response(buf, n, id);
+    _sandhi_resolve_parse_response(buf, n, 0x9999);   # id mismatch → reject cleanly
+
+    # --- short headers (0..12 bytes) ---
+    var si = 0;
+    while (si <= 12) { _sandhi_resolve_parse_response(buf, si, id); si = si + 1; }
+
+    # --- compression-pointer self-loop (0xC0 0x0C at offset 12 → 12) ---
+    var loopb = alloc(64);
+    memset(loopb, 0, 64);
+    store8(loopb + 0, (id >> 8) & 0xff); store8(loopb + 1, id & 0xff);
+    store8(loopb + 2, 0x81); store8(loopb + 3, 0x80);
+    store8(loopb + 5, 1); store8(loopb + 7, 1);
+    store8(loopb + 12, 0xc0); store8(loopb + 13, 12);
+    store8(loopb + 15, 1); store8(loopb + 17, 1);
+    _sandhi_resolve_parse_response(loopb, 40, id);    # must not infinite-loop
+
+    # --- pointer past end of buffer ---
+    var oob = alloc(40);
+    memcpy(oob, loopb, 40);
+    store8(oob + 13, 200);                             # pointer → offset 200 (> blen)
+    _sandhi_resolve_parse_response(oob, 40, id);
+
+    # --- two-pointer ping-pong (12→14, 14→12) ---
+    var ping = alloc(40);
+    memset(ping, 0, 40);
+    store8(ping + 0, (id >> 8) & 0xff); store8(ping + 1, id & 0xff);
+    store8(ping + 2, 0x81); store8(ping + 3, 0x80);
+    store8(ping + 5, 1); store8(ping + 7, 1);
+    store8(ping + 12, 0xc0); store8(ping + 13, 14);
+    store8(ping + 14, 0xc0); store8(ping + 15, 12);
+    _sandhi_resolve_parse_response(ping, 40, id);
+
+    # --- ANCOUNT huge, truncated body ---
+    var trunc = alloc(64);
+    memcpy(trunc, buf, 64);
+    store8(trunc + 6, 0xff); store8(trunc + 7, 0xff);   # ANCOUNT=65535
+    _sandhi_resolve_parse_response(trunc, 30, id);
+
+    # --- RDLENGTH overflow (claims 65535 bytes) ---
+    var rdl = alloc(64);
+    var rn = _dns_a_response(rdl, id);
+    store8(rdl + rn - 6, 0xff); store8(rdl + rn - 5, 0xff);
+    _sandhi_resolve_parse_response(rdl, rn, id);
+
+    # --- AAAA variant on the crafted corpus ---
+    _sandhi_resolve_parse_response_aaaa(buf, n, id);
+    _sandhi_resolve_parse_response_aaaa(loopb, 40, id);
+    _sandhi_resolve_parse_response_aaaa(oob, 40, id);
+    _sandhi_resolve_parse_response_aaaa(ping, 40, id);
+
+    # --- raw random of many sizes, both parsers, with sprinkled 0xC0 pointers ---
+    var sizes[6];
+    store64(&sizes + 0, 12); store64(&sizes + 8, 13); store64(&sizes + 16, 32);
+    store64(&sizes + 24, 128); store64(&sizes + 32, 512); store64(&sizes + 40, 4096);
+    var zi = 0;
+    while (zi < 6) {
+        var sz = load64(&sizes + zi * 8);
+        var seed = 5 + sz;
+        var iter = 0;
+        while (iter < 24) {
+            var rb = _fz_fill(sz, seed);
+            _sandhi_resolve_parse_response(rb, sz, id);
+            _sandhi_resolve_parse_response_aaaa(rb, sz, id);
+            if (sz > 14) {
+                store8(rb + 12, 0xc0); store8(rb + 13, seed % sz);   # force a compression path
+                _sandhi_resolve_parse_response(rb, sz, id);
+            }
+            seed = seed + 2654435761;
+            iter = iter + 1;
+        }
+        zi = zi + 1;
+    }
+
+    syscall(1, 1, "dns fuzz: ok\n", 13);
+    syscall(60, 0);
+}
+
+var _ec = main();
+syscall(60, _ec);

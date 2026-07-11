@@ -217,6 +217,13 @@ jobs:
         # WebDriver URL helpers, and MCP envelope shape.
         run: cyrius test tests/rpc.tcyr
 
+      - name: Fuzz harnesses (parser robustness)
+        # 1.8.x: `cyrius fuzz` runs fuzz/*.fcyr — hand-authored adversarial
+        # harnesses over the untrusted-input parsers (URL, header block, DNS
+        # response incl. compression-pointer loops, HPACK decode). Deterministic
+        # (fixed PRNG seeds, no network/time), so a crash/hang/OOB-fault reds CI.
+        run: cyrius fuzz
+
       - name: Live-network TLS-policy gate
         # 1.3.0: build + run programs/_policy_runtime_probe.cyr.
         # Mirrors cyrius `_tls_live_gate` skip-cleanly cascade —

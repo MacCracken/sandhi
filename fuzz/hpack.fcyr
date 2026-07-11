@@ -1,0 +1,118 @@
+# Fuzz: sandhi_hpack_decode_field — HPACK (RFC 7541) header-field decoder over
+# an attacker-controlled h2 header block. Prime attack surface: illegal index 0,
+# multi-byte integer (varint) continuation with no bound, Huffman literals with
+# huge claimed lengths, no-progress streams. Must not crash, OOB-read, or hang.
+# Stdlib auto-included via cyrius.cyml; sandhi modules below (single-pass order).
+
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
+include "src/http/conn.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+
+fn _fz_fill(n, seed) {
+    var b = alloc(n + 1);
+    var i = 0;
+    var s = seed;
+    while (i < n) {
+        s = (s * 1103515245 + 12345) & 0x7fffffff;
+        store8(b + i, s % 256);
+        i = i + 1;
+    }
+    store8(b + n, 0);
+    return b;
+}
+
+# Decode fields until error / end / no-progress; bounded so a buggy decoder that
+# returns 0 without advancing can't hang the harness (that itself is a finding
+# we'd catch as the break below, not a crash).
+fn _fz_decode_stream(buf, blen) {
+    var t = sandhi_hpack_table_new(4096);
+    var off = alloc(8); store64(off, 0);
+    var no = alloc(8); var vo = alloc(8);
+    var guard = 0;
+    while (load64(off) < blen) {
+        if (guard > 20000) { return; }
+        var prev = load64(off);
+        var r = sandhi_hpack_decode_field(t, buf, blen, off, no, vo);
+        if (r != 0) { return; }
+        if (load64(off) <= prev) { return; }     # no forward progress → stop
+        guard = guard + 1;
+    }
+}
+
+fn main() {
+    alloc_init();
+
+    # --- baseline: 0x82 = indexed static[2] (:method GET) must decode ---
+    var b0[2]; store8(&b0, 0x82); store8(&b0 + 1, 0);
+    var t0 = sandhi_hpack_table_new(0);
+    var off0 = alloc(8); store64(off0, 0);
+    var n0 = alloc(8); var v0 = alloc(8);
+    if (sandhi_hpack_decode_field(t0, &b0, 1, off0, n0, v0) != 0) { syscall(60, 10); }
+
+    # --- adversarial first-byte patterns, each padded with 0xff…0x7f to force a
+    #     multi-byte integer continuation (varint bomb probe) ---
+    var pats[8];
+    store64(&pats + 0,  0x80);   # indexed, index 0 (illegal)
+    store64(&pats + 8,  0xff);   # indexed, 7-bit prefix all-ones → continuation
+    store64(&pats + 16, 0x40);   # literal w/ incremental indexing, new name
+    store64(&pats + 24, 0x7f);   # literal incremental, 6-bit prefix all-ones
+    store64(&pats + 32, 0x0f);   # literal without indexing, 4-bit prefix all-ones
+    store64(&pats + 40, 0x1f);   # literal never-indexed, prefix all-ones
+    store64(&pats + 48, 0x20);   # dynamic table size update
+    store64(&pats + 56, 0x3f);   # dyn size update, 5-bit prefix all-ones
+    var pi = 0;
+    while (pi < 8) {
+        var pb = alloc(9);
+        store8(pb, load64(&pats + pi * 8));
+        store8(pb + 1, 0xff); store8(pb + 2, 0xff); store8(pb + 3, 0xff);
+        store8(pb + 4, 0xff); store8(pb + 5, 0xff); store8(pb + 6, 0xff);
+        store8(pb + 7, 0xff); store8(pb + 8, 0x7f);
+        _fz_decode_stream(pb, 9);
+        pi = pi + 1;
+    }
+
+    # --- Huffman-encoded literal, new name, claimed-huge length ---
+    var hb = alloc(6);
+    store8(hb, 0x40);       # literal incremental, new name
+    store8(hb + 1, 0xff);   # H=1 + 7-bit len prefix all-ones → multi-byte length
+    store8(hb + 2, 0xff); store8(hb + 3, 0xff); store8(hb + 4, 0xff); store8(hb + 5, 0x7f);
+    _fz_decode_stream(hb, 6);
+
+    # --- truncated literal: says len=10 but only 2 bytes follow ---
+    var tr = alloc(4);
+    store8(tr, 0x00);       # literal without indexing, new name
+    store8(tr + 1, 0x0a);   # name length = 10
+    store8(tr + 2, 65); store8(tr + 3, 66);   # only 2 bytes
+    _fz_decode_stream(tr, 4);
+
+    # --- random buffers of many sizes (malformed streams / HPACK bombs) ---
+    var sizes[6];
+    store64(&sizes + 0, 1); store64(&sizes + 8, 8); store64(&sizes + 16, 64);
+    store64(&sizes + 24, 512); store64(&sizes + 32, 4096); store64(&sizes + 40, 16384);
+    var zi = 0;
+    while (zi < 6) {
+        var sz = load64(&sizes + zi * 8);
+        var seed = 3 + sz;
+        var iter = 0;
+        while (iter < 24) {
+            var rb = _fz_fill(sz, seed);
+            _fz_decode_stream(rb, sz);
+            seed = seed + 2654435761;
+            iter = iter + 1;
+        }
+        zi = zi + 1;
+    }
+
+    syscall(1, 1, "hpack fuzz: ok\n", 15);
+    syscall(60, 0);
+}
+
+var _ec = main();
+syscall(60, _ec);

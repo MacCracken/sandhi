@@ -6,7 +6,7 @@
 > [`requests/`](requests/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. This file was last
-> swept clean of completed work on **2026-06-29** (after 1.7.0).
+> swept clean of completed work on **2026-07-11** (after 1.8.1).
 
 ## Context (post-fold)
 
@@ -15,11 +15,11 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.3.5** (1.7.0 parity bump; was 6.2.37 across 1.6.9–1.6.13).
+is currently **cyrius 6.4.49** (1.8.0 latest-cyrius bump; was 6.3.5 at 1.7.0, 6.2.37 across 1.6.9–1.6.13).
 The 1.6.9–1.6.13 + 1.7.0 patches (client dispatch thread-safety, the server-TLS
 handshake migration + flat-RSS, the native trust-store verify-fail proof, the QU
 mDNS receive fix, the conn-off fd-collision fix, and the two yeo-cy-test fixes)
-were all pure sandhi-side (see CHANGELOG).
+were all pure sandhi-side; **1.8.0** refreshed the toolchain + streamlined the transitive `[deps]` (cyrius 6.4.x auto-resolves sigil's graph) + formalized the profile breakout bundles (`dist/sandhi-{tls,server,rpc,discovery}.cyr`), and **1.8.1** unblocked concurrent server-TLS (`max_conns > 1`) once sigil's per-thread crypto-scratch banking fixed the handshake race (see CHANGELOG).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -30,28 +30,6 @@ a named entry here (or in [`requests/`](requests/README.md)), not a buried menti
 The concrete sandhi-capacity patch sequence (1.6.10–1.6.12) shipped; everything
 remaining here is gated (profile evidence, a breaking major, a second consumer, or
 a cyrius primitive).
-
-## Consumer-filed bugs (yeo-cy-test, 2026-06-28) — SHIPPED at 1.7.0
-
-Both sandhi-side bugs surfaced adopting `sandhi_server_run_pooled_tls` + the h2
-client (folded sandhi in cyrius 6.3.x) **shipped at 1.7.0** (see CHANGELOG; issue
-docs archived): the **h2-promote IPv6 arity** one-liner (`dispatch.cyr` now passes
-the 9th `ctx`=0) and the **misleading pooled-TLS concurrency comment** (corrected +
-`max_conns = 1` recommended + the `[4]` concurrent-handshake watch added to
-`_server_tls_probe.cyr`). One residual, gated below.
-
-## Wait-for-upstream (sigil) — concurrent-handshake gate — ✅ SHIPPED at 1.8.1
-
-The sigil process-global crypto-scratch race
-(`2026-06-28-concurrent-tls-handshake-global-scratch-race`) that made a
-multi-worker HTTPS pool unsafe is **fixed** — sigil auto-banks a private
-crypto-scratch lane per thread (since 3.9.7; vendored 3.11.1 under the 6.4.49
-pin). Verified at 1.8.1 on the new pin: `_server_tls_probe.cyr` `[4]` drives 16
-genuinely-simultaneous handshakes against a 4-worker pool and **all 16 survive**
-(was 0/16 through 1.7.0 / cyrius 6.3.5). Followed through: `[4]` **promoted to
-gating**, and `sandhi_server_run_pooled_tls`'s `max_conns = 1` guidance relaxed
-(`max_conns > 1` is now supported for HTTPS). No sandhi-side code change was
-needed for the crash — sigil's per-thread lane is assigned automatically.
 
 ## Batch A — libssl retirement (sandhi 2.0 — breaking)
 
@@ -68,9 +46,10 @@ a public verb + a build flag is not a patch):
   blocked item. See `project_libssl_retirement_at_2_0` (memory).
 - **libssl smoke build is non-gating since cyrius 6.3.5 — drop at 2.0.** The
   `-D CYRIUS_TLS_LIBSSL` CI link-proof (`ci.yml`) is now `continue-on-error`:
-  6.3.x's linker refuses reachable-undefined fns, and the libssl config leaves 4
-  of sigil's transitive crypto symbols (`thread_local_init/set/get`, `ct_select`)
-  reachable-but-unlinked — a cyrius-side DCE artifact of the libssl `#ifdef`, NOT a
+  6.3.x's linker refuses reachable-undefined fns, and the libssl config leaves a
+  sigil transitive crypto symbol reachable-but-unlinked (**re-verified 6.4.49,
+  2026-07-11: the original four [`thread_local_init/set/get`, `ct_select`] now link;
+  `sha256` is the sole reachable-undef now**) — a cyrius-side DCE artifact of the libssl `#ifdef`, NOT a
   sandhi/sigil source defect (native links them all). Filed cyrius-side:
   [`issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md).
   Delete the CI step entirely as part of the 2.0 libssl removal below; revisit
@@ -155,8 +134,12 @@ moved to [`requests/`](requests/README.md) instead.
   signal-disposition helper (SIGPIPE isn't even in the `Signal` enum). A stdlib
   `signal_ignore(signum)` (portable across Linux/macOS/agnos) **or** a
   `MSG_NOSIGNAL`-aware `sock_send` would let sandhi drop the raw syscall.
-  **Re-verified absent on cyrius 6.2.37** (grep `net.cyr` / `syscalls.cyr`).
-  Revisit when either lands.
+  **Re-verified absent on cyrius 6.4.49** (grep `net.cyr` / `syscalls.cyr`:
+  `sock_send(fd,buf,len)` still flagsless, no stdlib signal-disposition helper).
+  **Filed cyrius-side 2026-07-11**: `cyrius docs/development/issues/2026-07-11-sandhi-signal-ignore-stdlib-gap.md`
+  (requests a portable `signal_ignore(signum)` or a `MSG_NOSIGNAL`-aware `sock_send`;
+  flags the macOS server-SIGPIPE DoS that has no consumer workaround). Revisit when
+  either lands.
 - **macOS server SIGPIPE guard** (`src/server/mod.cyr`) — the 1.6.6 SIGPIPE fix is
   Linux-only (`rt_sigaction`, x86_64 13 / aarch64 134); macOS is a documented
   no-op (the ESYSXLAT whitelist doesn't cover `sigaction`). Wiring it needs the BSD
@@ -164,8 +147,6 @@ moved to [`requests/`](requests/README.md) instead.
   (ground-first) — OR the stdlib `signal_ignore` above, which closes it portably in
   one move. Until then a sandhi server on macOS is still SIGPIPE-vulnerable; flagged
   so it isn't silently assumed covered.
-- **Fuzzing harness** — the Cyrius toolchain ships no AFL / libFuzzer equivalent
-  (re-verified absent on 6.2.37). Revisit when it does.
 
 ## Background watches (not slots)
 
@@ -173,6 +154,11 @@ moved to [`requests/`](requests/README.md) instead.
   per-program fixup-cap (architecture/001), carve out another `tests/<name>.tcyr`
   in the same slot (mirroring the 1.2.8 sandhi → rpc split). Don't let it block
   the ship. (At 1.6.9 the suite is 539 assertions.)
+- **Fuzz-corpus expansion** — the first `fuzz/*.fcyr` round (7 harnesses over url /
+  headers / response+chunked / dns / hpack / sse / json) shipped at **1.8.2** and
+  gates in CI (`cyrius fuzz`). Add harnesses opportunistically as new parse surfaces
+  land or a consumer's traffic motivates one (candidates: Huffman-decode direct, the
+  h2 frame header, WebDriver/Appium/MCP envelope extract). Not a committed slot.
 - **Consumer coordination docs** ([`issues/`](issues/README.md)) — yantra /
   hoosh+ifran / ark / mela / vidya / daimon (registry + MCP client). sandhi's side
   is shipped; each opens when its consumer schedules adoption. These stay live in

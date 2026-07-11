@@ -1,0 +1,107 @@
+# Fuzz: sandhi_url_parse — http/https URL parser (untrusted: redirect Location,
+# discovery targets, config). Must not crash on empty / oversized / embedded
+# CR-LF-NUL / missing scheme|host / port overflow / %-encoding / deep paths.
+# Stdlib auto-included via cyrius.cyml; sandhi modules below (single-pass order).
+
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+
+# Build a heap cstring of `n` bytes filled by a cheap PRNG, NUL-terminated.
+fn _fz_fill(n, seed) {
+    var b = alloc(n + 1);
+    var i = 0;
+    var s = seed;
+    while (i < n) {
+        s = (s * 1103515245 + 12345) & 0x7fffffff;
+        var c = 32 + (s % 95);            # printable-ish
+        if ((i % 7) == 0) { c = s % 256; }  # sprinkle control/high bytes
+        if (c == 0) { c = 1; }              # keep the cstring intact until the end
+        store8(b + i, c);
+        i = i + 1;
+    }
+    store8(b + n, 0);
+    return b;
+}
+
+fn main() {
+    alloc_init();
+
+    # --- well-formed baseline: the parser must still accept valid URLs ---
+    if (sandhi_url_parse("http://example.com/") == 0) { syscall(60, 10); }
+    if (sandhi_url_parse("https://a.b.c:8443/p?q=1&x=2") == 0) { syscall(60, 11); }
+
+    # --- degenerate / boundary (must not crash; may return 0) ---
+    sandhi_url_parse("");
+    sandhi_url_parse("h");
+    sandhi_url_parse("http://");
+    sandhi_url_parse("https://");
+    sandhi_url_parse("://");
+    sandhi_url_parse("http://:/");
+    sandhi_url_parse("http://:80/");
+    sandhi_url_parse("//example.com/");
+    sandhi_url_parse("ftp://x/");
+    sandhi_url_parse("http://[::1]:8080/");
+    sandhi_url_parse("http://a.com:999999999999999/");   # port overflow
+    sandhi_url_parse("HtTpS://EXAMPLE.com/");
+
+    # --- CR / LF / NUL injection into authority + path (0.7.1 CRLF hardening) ---
+    var inj = alloc(40);
+    var w = 0;
+    memcpy(inj, "http://a.com/", 13); w = 13;
+    store8(inj + w, 13); w = w + 1;    # CR
+    store8(inj + w, 10); w = w + 1;    # LF
+    memcpy(inj + w, "Host: x", 7); w = w + 7;
+    store8(inj + w, 0);
+    sandhi_url_parse(inj);
+
+    var crhost = alloc(32);
+    memcpy(crhost, "http://a\rb.com/", 15);
+    store8(crhost + 15, 0);
+    sandhi_url_parse(crhost);
+
+    # --- long / adversarial random buffers of many sizes ---
+    var sizes[8];
+    store64(&sizes + 0,  0);
+    store64(&sizes + 8,  1);
+    store64(&sizes + 16, 7);
+    store64(&sizes + 24, 64);
+    store64(&sizes + 32, 255);
+    store64(&sizes + 40, 4096);
+    store64(&sizes + 48, 8192);
+    store64(&sizes + 56, 65535);
+    var si = 0;
+    while (si < 8) {
+        var n = load64(&sizes + si * 8);
+        var seed = 1 + n;
+        var iter = 0;
+        while (iter < 24) {
+            var buf = _fz_fill(n, seed);
+            sandhi_url_parse(buf);           # must not crash / hang
+            seed = seed + 2654435761;
+            iter = iter + 1;
+        }
+        si = si + 1;
+    }
+
+    # --- deep scheme-prefixed random (exercise the scheme/host split) ---
+    var di = 0;
+    while (di < 64) {
+        var body = _fz_fill(128, 7 + di);
+        var full = alloc(8 + 128 + 1);
+        memcpy(full, "https://", 8);
+        memcpy(full + 8, body, 128);
+        store8(full + 8 + 128, 0);
+        sandhi_url_parse(full);
+        di = di + 1;
+    }
+
+    syscall(1, 1, "url fuzz: ok\n", 13);
+    syscall(60, 0);
+}
+
+var _ec = main();
+syscall(60, _ec);

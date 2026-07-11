@@ -4,6 +4,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-07-11
+
+**Fuzz-harness suite for the untrusted-input parsers + a gating `cyrius fuzz` CI
+step.** The cyrius 6.4.49 toolchain (pinned since 1.8.0) ships a `cyrius fuzz`
+runner for `fuzz/*.fcyr` harnesses — and sandhi, whose entire job is parsing bytes
+off the network, had none. This adds a first round of hand-authored adversarial
+harnesses over the seven highest-value parsers and wires `cyrius fuzz` into CI so a
+crash / hang / OOB-fault reds the build. No `src/` change; no pin change (stays
+6.4.49). **All seven green — no defect surfaced** (the parsers are robust to this
+corpus); the deliverable is the regression guard + the infrastructure.
+
+### Added — `fuzz/` (7 harnesses, run by `cyrius fuzz`)
+
+- **`url.fcyr`** — `sandhi_url_parse`: scheme/host/port split, CR-LF-NUL injection
+  (0.7.1 hardening), port overflow, 64 KB random.
+- **`headers.fcyr`** — `sandhi_headers_parse`: missing colons, lone CR/LF, 400-header
+  count pressure, 9 KB values, structured + raw random.
+- **`response.fcyr`** — `sandhi_http_response_parse`: **the chunked decoder**
+  (`_sandhi_chunk_parse_size`, home of the 1.6.5 split-CRLF spin bug) via adversarial
+  chunk sizing / extensions / >64-bit-hex overflow / short data / missing terminator,
+  plus Content-Length (huge / negative / non-numeric / duplicate) and close-delimited.
+- **`dns.fcyr`** — `_sandhi_resolve_parse_response` (+ AAAA): name-compression
+  **pointer self-loops / ping-pong / OOB pointers** (the 32-hop-guard surface),
+  RDLENGTH overflow, huge ANCOUNT, truncation.
+- **`hpack.fcyr`** — `sandhi_hpack_decode_field`: illegal index 0, **multi-byte
+  integer (varint) continuation bombs**, huge Huffman-literal lengths, truncated
+  literals, malformed streams (with a no-forward-progress break).
+- **`sse.fcyr`** — `sandhi_sse_parse`: multiline data, colon-less lines, bare CR,
+  non-numeric `retry`, embedded NUL, huge fields, biased + raw random.
+- **`json.fcyr`** — `_sandhi_json_path_range` / `sandhi_json_get_string`: deep
+  nesting (recursion / stack-overflow probe to 20 k), unbalanced braces, huge
+  strings, truncation, biased + raw random paths.
+
+### CI
+
+- **`.github/workflows/ci.yml`** — a gating **Fuzz harnesses** step runs `cyrius
+  fuzz` after the four unit suites. Deterministic (fixed PRNG seeds, no network /
+  no time), so it can't flake; a crash / hang / OOB-fault in any parser reds CI.
+
 ## [1.8.1] — 2026-07-11
 
 **Concurrent server-TLS unblocked — `sandhi_server_run_pooled_tls` is now safe

@@ -1,0 +1,108 @@
+# Fuzz: sandhi_http_response_parse — HTTP/1.x response framing + body decode
+# (untrusted server bytes). Exercises the CHUNKED decoder (`_sandhi_chunk_parse_size`
+# — home of the real 1.6.5 split-CRLF spin bug), Content-Length framing, and the
+# close-delimited path. Must not crash, OOB-read, or spin. Adversarial chunk
+# sizing / extensions / overflow / short data / missing terminator.
+# Stdlib auto-included via cyrius.cyml; sandhi modules below (single-pass order).
+
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/response.cyr"
+
+fn _fz_fill(n, seed) {
+    var b = alloc(n + 1);
+    var i = 0;
+    var s = seed;
+    while (i < n) {
+        s = (s * 1103515245 + 12345) & 0x7fffffff;
+        store8(b + i, s % 256);
+        i = i + 1;
+    }
+    store8(b + n, 0);
+    return b;
+}
+
+# Build "HTTP/1.1 200 OK\r\n<framing hdr>\r\n\r\n" + body[0..blen] into out; return total.
+fn _resp(out, framing, body, blen) {
+    var line = "HTTP/1.1 200 OK\r\n";
+    var w = 0;
+    memcpy(out + w, line, strlen(line)); w = w + strlen(line);
+    memcpy(out + w, framing, strlen(framing)); w = w + strlen(framing);
+    store8(out + w, 13); w = w + 1; store8(out + w, 10); w = w + 1;   # end of headers
+    memcpy(out + w, body, blen); w = w + blen;
+    return w;
+}
+
+fn _chunked(out, body, blen) { return _resp(out, "Transfer-Encoding: chunked", body, blen); }
+
+fn main() {
+    alloc_init();
+    var out = alloc(70000);
+
+    # --- baselines: valid chunked + valid CL must still parse ---
+    var t = 0;
+    t = _chunked(out, "5\r\nhello\r\n0\r\n\r\n", 14);
+    if (sandhi_http_response_parse(out, t) == 0) { syscall(60, 10); }
+    t = _resp(out, "Content-Length: 5", "hello", 5);
+    if (sandhi_http_response_parse(out, t) == 0) { syscall(60, 11); }
+
+    # --- adversarial chunked framings (must not crash / spin) ---
+    t = _chunked(out, "", 0);                             sandhi_http_response_parse(out, t);
+    t = _chunked(out, "\r\n5\r\nhi\r\n0\r\n\r\n", 15);    sandhi_http_response_parse(out, t);  # leading CRLF (1.6.5)
+    t = _chunked(out, "5\r\nhi\r\n0\r\n\r\n", 13);        sandhi_http_response_parse(out, t);  # data shorter than size
+    t = _chunked(out, "10\r\nhi\r\n0\r\n\r\n", 14);       sandhi_http_response_parse(out, t);  # size 16, 2 bytes
+    t = _chunked(out, "ffffffff\r\nx\r\n0\r\n\r\n", 19);  sandhi_http_response_parse(out, t);  # huge size
+    t = _chunked(out, "fffffffffffffffff\r\nx\r\n", 22);  sandhi_http_response_parse(out, t);  # >64-bit hex overflow
+    t = _chunked(out, "5;ext=1;a=b\r\nhello\r\n0\r\n\r\n", 25); sandhi_http_response_parse(out, t);  # chunk extension
+    t = _chunked(out, "xyz\r\nhello\r\n", 12);             sandhi_http_response_parse(out, t);  # non-hex size
+    t = _chunked(out, "5\r\nhello", 8);                   sandhi_http_response_parse(out, t);  # no terminator
+    t = _chunked(out, "-5\r\nhello\r\n", 11);             sandhi_http_response_parse(out, t);  # sign
+    t = _chunked(out, "\r\n\r\n\r\n\r\n", 8);             sandhi_http_response_parse(out, t);  # only CRLFs
+
+    # --- adversarial Content-Length ---
+    t = _resp(out, "Content-Length: 99999999999", "hi", 2);          sandhi_http_response_parse(out, t);
+    t = _resp(out, "Content-Length: -5", "hello", 5);                sandhi_http_response_parse(out, t);
+    t = _resp(out, "Content-Length: notanumber", "hello", 5);        sandhi_http_response_parse(out, t);
+    t = _resp(out, "Content-Length: 5\r\nContent-Length: 6", "hello", 5); sandhi_http_response_parse(out, t);
+    t = _resp(out, "Content-Length: 0", "trailing", 8);              sandhi_http_response_parse(out, t);
+
+    # --- many tiny chunks (count pressure) ---
+    var body = alloc(20000);
+    var bw = 0;
+    var k = 0;
+    while (k < 2000) {
+        if (bw + 6 >= 19990) { k = 2000; }
+        else { memcpy(body + bw, "1\r\nX\r\n", 6); bw = bw + 6; k = k + 1; }
+    }
+    memcpy(body + bw, "0\r\n\r\n", 5); bw = bw + 5;
+    t = _chunked(out, body, bw); sandhi_http_response_parse(out, t);
+
+    # --- random chunk region + random whole responses ---
+    var sizes[5];
+    store64(&sizes + 0, 4); store64(&sizes + 8, 32); store64(&sizes + 16, 256);
+    store64(&sizes + 24, 4096); store64(&sizes + 32, 16384);
+    var zi = 0;
+    while (zi < 5) {
+        var sz = load64(&sizes + zi * 8);
+        var seed = 9 + sz;
+        var iter = 0;
+        while (iter < 20) {
+            var rb = _fz_fill(sz, seed);
+            t = _chunked(out, rb, sz); sandhi_http_response_parse(out, t);   # chunked path
+            var raw = _fz_fill(sz, seed + 1);
+            sandhi_http_response_parse(raw, sz);                             # whole-response random
+            seed = seed + 2654435761;
+            iter = iter + 1;
+        }
+        zi = zi + 1;
+    }
+
+    syscall(1, 1, "response fuzz: ok\n", 18);
+    syscall(60, 0);
+}
+
+var _ec = main();
+syscall(60, _ec);

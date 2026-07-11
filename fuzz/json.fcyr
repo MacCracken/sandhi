@@ -1,0 +1,112 @@
+# Fuzz: sandhi_json_* dotted-path extractor (untrusted JSON-RPC / API bodies).
+# `_sandhi_json_path_range(body, blen, path)` + `sandhi_json_get_string(body, path)`.
+# Must not crash / OOB-read / stack-overflow on deep nesting, unbalanced braces,
+# huge strings, arrays, embedded control bytes, truncation.
+# Stdlib auto-included via cyrius.cyml; sandhi modules below (single-pass order).
+
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/rpc/json.cyr"
+
+fn _fz_fill(n, seed) {
+    var b = alloc(n + 1);
+    var i = 0;
+    var s = seed;
+    while (i < n) {
+        s = (s * 1103515245 + 12345) & 0x7fffffff;
+        var c = s % 256;
+        # bias toward JSON structure bytes
+        if ((i % 4) == 0) { var p = s % 8; if (p == 0) { c = 123; } if (p == 1) { c = 125; } if (p == 2) { c = 34; } if (p == 3) { c = 58; } if (p == 4) { c = 44; } if (p == 5) { c = 91; } if (p == 6) { c = 93; } }
+        store8(b + i, c);
+        i = i + 1;
+    }
+    store8(b + n, 0);
+    return b;
+}
+
+fn _probe(body, blen) {
+    _sandhi_json_path_range(body, blen, "a");
+    _sandhi_json_path_range(body, blen, "a.b.c");
+    _sandhi_json_path_range(body, blen, "");
+    _sandhi_json_path_range(body, blen, "a.b.c.d.e.f.g.h");
+}
+
+fn main() {
+    alloc_init();
+
+    # --- baseline: valid JSON extract must work ---
+    var okj = "{\"a\":{\"b\":\"hi\"}}";
+    if (sandhi_json_get_string(okj, "a.b") == 0) { syscall(60, 10); }
+
+    # --- degenerate / boundary ---
+    _probe("", 0);
+    _probe("{", 1);
+    _probe("}", 1);
+    _probe("{}", 2);
+    _probe("[]", 2);
+    _probe("null", 4);
+    _probe("\"unterminated", 13);
+    _probe("{\"a\":", 5);
+    _probe("{\"a\":}", 6);
+    _probe("{\"a\":\"\\", 7);              # trailing escape
+    _probe("{\"a\":123456789012345678901234567890}", 37);
+    _probe("[1,2,3,[4,[5,[6]]]]", 19);
+
+    # --- deep nesting (recursion / stack-overflow probe) ---
+    var depths[4];
+    store64(&depths + 0, 64);
+    store64(&depths + 8, 512);
+    store64(&depths + 16, 4096);
+    store64(&depths + 24, 20000);
+    var di = 0;
+    while (di < 4) {
+        var d = load64(&depths + di * 8);
+        var nb = alloc(2 * d + 8);
+        var w = 0;
+        var j = 0;
+        while (j < d) { store8(nb + w, 123); store8(nb + w + 1, 97); w = w + 2; j = j + 1; }  # "{a" repeated (no colons/closes)
+        store8(nb + w, 0);
+        _probe(nb, w);
+
+        # balanced deep object: {"a":{"a":{ ... }}}
+        var bb = alloc(6 * d + 8);
+        var bw = 0;
+        j = 0;
+        while (j < d) { memcpy(bb + bw, "{\"a\":", 5); bw = bw + 5; j = j + 1; }
+        store8(bb + bw, 49); bw = bw + 1;   # '1'
+        j = 0;
+        while (j < d) { store8(bb + bw, 125); bw = bw + 1; j = j + 1; }  # closing '}'
+        _probe(bb, bw);
+        sandhi_json_get_string(bb, "a.a.a.a.a");
+        di = di + 1;
+    }
+
+    # --- huge string value ---
+    var big = _fz_fill(9000, 3);
+    memcpy(big, "{\"a\":\"", 6);
+    _probe(big, 9000);
+
+    # --- raw / biased random of many sizes ---
+    var sizes[6];
+    store64(&sizes + 0, 1); store64(&sizes + 8, 16); store64(&sizes + 16, 128);
+    store64(&sizes + 24, 1024); store64(&sizes + 32, 8192); store64(&sizes + 40, 32768);
+    var zi = 0;
+    while (zi < 6) {
+        var sz = load64(&sizes + zi * 8);
+        var seed = 5 + sz;
+        var iter = 0;
+        while (iter < 20) {
+            var rb = _fz_fill(sz, seed);
+            _probe(rb, sz);
+            seed = seed + 2654435761;
+            iter = iter + 1;
+        }
+        zi = zi + 1;
+    }
+
+    syscall(1, 1, "json fuzz: ok\n", 14);
+    syscall(60, 0);
+}
+
+var _ec = main();
+syscall(60, _ec);
