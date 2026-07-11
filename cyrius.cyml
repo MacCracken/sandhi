@@ -5,7 +5,7 @@ description = "Service-boundary layer for AGNOS — shared HTTP/TCP/TLS + servic
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sandhi"
 language = "cyrius"
-cyrius = "6.4.33"
+cyrius = "6.4.49"
 
 # sandhi (सन्धि — junction, connection, joining) is the service-boundary
 # layer for AGNOS. Named 2026-04-24 after extensive search confirmed the
@@ -112,6 +112,100 @@ modules = [
     "src/main.cyr",
 ]
 
+# ─────────────────────────────────────────────────────────────────────
+# Profile bundles (1.8.0) — `cyrius distlib <profile>` emits a subset
+# `dist/sandhi-<profile>.cyr` that bundles only the modules a consumer of
+# that slice needs, so e.g. a discovery-only or TLS-policy-only consumer
+# pulls a few thousand lines instead of the full ~14k-line `dist/sandhi.cyr`.
+# Each list is a SUBSET of `[lib].modules` in the same relative order (the
+# single-pass "define-before-reference" constraint is identical). Like the
+# full bundle, a profile is a consumer-included artifact: stdlib + any sandhi
+# symbols outside the slice are supplied by the consumer, so `distlib`
+# reporting unresolved symbols is expected.
+
+# tls — TLS-policy slice (pinning / mTLS / trust-store / ALPN + the session
+# cache + conn abstraction it rides). No HTTP client, RPC, discovery, server.
+[lib.tls]
+modules = [
+    "src/tls_policy/session_cache.cyr",
+    "src/http/conn.cyr",
+    "src/tls_policy/policy.cyr",
+    "src/tls_policy/fingerprint.cyr",
+    "src/tls_policy/apply.cyr",
+    "src/tls_policy/alpn.cyr",
+    "src/tls_policy/mod.cyr",
+]
+
+# server — HTTP/HTTPS server slice (src/server/mod.cyr + its conn + TLS
+# session-cache deps). No client / RPC / discovery.
+[lib.server]
+modules = [
+    "src/tls_policy/session_cache.cyr",
+    "src/http/conn.cyr",
+    "src/server/mod.cyr",
+]
+
+# rpc — JSON-RPC dialects (WebDriver / Appium / MCP) over the HTTP client +
+# TLS-policy + SSE/stream stack. Excludes the h2 block, retry, download,
+# discovery, and the server surface.
+[lib.rpc]
+modules = [
+    "src/version_str.cyr",
+    "src/error.cyr",
+    "src/obs/trace.cyr",
+    "src/obs/prof.cyr",
+    "src/http/headers.cyr",
+    "src/http/url.cyr",
+    "src/tls_policy/session_cache.cyr",
+    "src/http/conn.cyr",
+    "src/tls_policy/policy.cyr",
+    "src/tls_policy/fingerprint.cyr",
+    "src/tls_policy/apply.cyr",
+    "src/http/response.cyr",
+    "src/net/resolve.cyr",
+    "src/http/client.cyr",
+    "src/http/pool.cyr",
+    "src/http/sse.cyr",
+    "src/http/stream.cyr",
+    "src/rpc/json.cyr",
+    "src/rpc/dispatch.cyr",
+    "src/rpc/webdriver.cyr",
+    "src/rpc/appium.cyr",
+    "src/rpc/mcp.cyr",
+    "src/rpc/mod.cyr",
+    "src/main.cyr",
+]
+
+# discovery — service discovery (mDNS / daimon-registry / chain) over the
+# HTTP client + TLS-policy stack + the rpc/json builder daimon.cyr needs.
+# Excludes the h2 block, retry, download, SSE/stream, rpc dialects, server.
+[lib.discovery]
+modules = [
+    "src/version_str.cyr",
+    "src/error.cyr",
+    "src/obs/trace.cyr",
+    "src/obs/prof.cyr",
+    "src/http/headers.cyr",
+    "src/http/url.cyr",
+    "src/tls_policy/session_cache.cyr",
+    "src/http/conn.cyr",
+    "src/tls_policy/policy.cyr",
+    "src/tls_policy/fingerprint.cyr",
+    "src/tls_policy/apply.cyr",
+    "src/http/response.cyr",
+    "src/net/resolve.cyr",
+    "src/http/client.cyr",
+    "src/http/pool.cyr",
+    "src/rpc/json.cyr",
+    "src/discovery/service.cyr",
+    "src/discovery/chain.cyr",
+    "src/discovery/daimon.cyr",
+    "src/discovery/local.cyr",
+    "src/discovery/register.cyr",
+    "src/discovery/mod.cyr",
+    "src/main.cyr",
+]
+
 [deps]
 stdlib = [
     "syscalls",
@@ -150,12 +244,6 @@ stdlib = [
     "mmap",
     "dynlib",
     "fdlopen",
-    # bayan / freelist: transitive requirements of sigil. bayan replaces the
-    # standalone `bigint` + `base64` stdlib modules carved into it @6.1.25 — it
-    # provides sigil's u256_* / base64_* via its compat aliases. Must precede
-    # "sigil" below so those symbols are defined before sigil references them.
-    "bayan",
-    "freelist",
     "net",
     "http",
     # http_server dropped at M1 — lifted into src/server/mod.cyr; stdlib
@@ -163,18 +251,18 @@ stdlib = [
     # window (see docs/development/roadmap.md M1 / M6).
     "tls",
     "ws",
-    # stdlib `json` + `base64` dropped at the 6.2.1 pin: both carved into bayan
-    # @6.1.25, so 6.2.x ships no lib/json.cyr / lib/base64.cyr. sandhi uses its
-    # OWN src/rpc/json.cyr (JSON-RPC) so it never needed stdlib-json; base64 now
-    # comes from the `bayan` entry above (compat alias).
     "sakshi",
+    # sigil — cert-fingerprint sha256 (SPKI-pin digest in
+    # src/tls_policy/apply.cyr) + trust primitives. 1.8.0 streamline: sigil's
+    # transitive deps are now resolved AUTOMATICALLY by cyrius 6.4.x's
+    # transitive dep graph, so sandhi no longer hand-declares them —
+    #   * bayan (the 6.1.25 bigint+base64 carve-out; re-exports u256_* / base64_*
+    #     via compat aliases — base64 for src/rpc/appium.cyr resolves through it)
+    #   * freelist
+    #   * ct / keccak / thread_local (sigil's sha256 constant-time / Keccak-SHAKE
+    #     / TLS-thread-local-NI deps)
+    # all five arrive transitively (verified: clean re-resolve pulls them into
+    # lib/ and the CYRIUS_DCE=1 link stays green). stdlib `json` stays dropped
+    # (carved into bayan @6.2.1); sandhi uses its OWN src/rpc/json.cyr.
     "sigil",
-    # ct / keccak / thread_local: sigil's transitive crypto deps
-    # (constant-time compares + Keccak/SHAKE + TLS-thread-local NI
-    # cache) that sigil itself does not declare. sigil's sha256 — the
-    # SPKI-pin digest in src/tls_policy/apply.cyr — needs them; without
-    # them the symbol drops out of the link and the SPKI path ud2's.
-    "ct",
-    "keccak",
-    "thread_local",
 ]

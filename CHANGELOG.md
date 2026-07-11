@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-07-11
+
+**Toolchain refresh + dependency streamline + profile breakout bundles.** A
+maintenance-and-packaging release: bumps the cyrius pin and the crypto/tracing
+deps to their latest tags, drops the now-redundant hand-declared transitive deps
+that cyrius 6.4.x resolves automatically, and formalizes profile-scoped `distlib`
+bundles so a consumer of one slice can pull a fraction of the full library. No
+source-logic change — **1112 assertions green** (sandhi 540 / h2 167 / alloc 342
+/ rpc 63, unchanged); native + `CYRIUS_DCE=1` smoke OK; lint 0/0 across `src/`.
+
+### Changed — toolchain + dependencies
+
+- **Cyrius language pin `6.4.33` → `6.4.49`** (latest). Native + DCE link proofs
+  and all four suites pass clean on the new pin; only the always-tolerated
+  `sys_chdir` / `random_bytes` unreachable-undefs remain on the native path.
+- **`sigil` `3.11.0` → `3.11.1`, `sakshi` `2.4.3` → `2.4.5`** — both the latest
+  tags, resolved automatically from the 6.4.49 toolchain snapshot (no explicit
+  pin needed; a clean `rm -rf lib cyrius.lock && cyrius deps` picks them up).
+- **Streamlined `[deps] stdlib`** — dropped the five hand-declared sigil
+  transitive deps (`bayan`, `freelist`, `ct`, `keccak`, `thread_local`). cyrius
+  6.4.x resolves a dependency's own transitive graph, so a clean re-resolve pulls
+  all five into `lib/` on sigil's behalf and the `CYRIUS_DCE=1` link stays green.
+  The historical single-pass ordering workaround ("bayan must precede sigil") is
+  gone with them; `base64` for `src/rpc/appium.cyr` still resolves through bayan's
+  compat alias, now transitively rather than via an explicit entry.
+- **`cyrius.lock` no longer generated** — with sigil/sakshi vendored from the
+  toolchain snapshot rather than pinned git deps, no `[deps.NAME]` git entries
+  remain to lock (the lockfile was always untracked; nothing to commit).
+
+### Added — profile breakout bundles (`dist/sandhi-<profile>.cyr`)
+
+- **Four `[lib.<profile>]` sections** in `cyrius.cyml` drive
+  `cyrius distlib <profile>`, each emitting a subset bundle so a consumer of one
+  slice pulls a few thousand lines instead of the full ~14k-line
+  `dist/sandhi.cyr`. Each module list is a strict subset of `[lib].modules` in
+  the same single-pass order, so regenerating reproduces the previously
+  hand-generated 1.7.x bundles **byte-for-byte** (modulo the version stamp).
+
+  | Profile | `dist/` output | Lines | Slice |
+  |---------|----------------|-------|-------|
+  | `tls` | `sandhi-tls.cyr` | ~2.1k | TLS policy (pin / mTLS / trust-store / ALPN) |
+  | `server` | `sandhi-server.cyr` | ~3.2k | HTTP/HTTPS server |
+  | `rpc` | `sandhi-rpc.cyr` | ~8.2k | JSON-RPC dialects over the HTTP client |
+  | `discovery` | `sandhi-discovery.cyr` | ~7.0k | service discovery (mDNS / daimon / chain) |
+
+  Additive packaging only — no source moved and the full `dist/sandhi.cyr` is
+  unchanged in scope.
+
+### Stdlib
+
+- Post-fold maintenance unchanged: `dist/sandhi.cyr` regenerated at 1.8.0 and the
+  cyrius-side slot refreshes `lib/sandhi.cyr` from it. The profile bundles are
+  sandhi-repo artifacts for direct consumers; they don't alter the fold.
+
 ## [1.7.3] — 2026-07-09
 
 **Cyrius language pin `6.4.32` → `6.4.33`.** Completes the 1.7.2 pin refresh: 1.7.x's

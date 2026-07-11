@@ -119,15 +119,19 @@ jobs:
         # include dependencies. Catches missing/circular includes.
         run: cyrius vet src/main.cyr
 
-      - name: Verify dist/sandhi.cyr is in sync with src/
+      - name: Verify dist bundles are in sync with src/
         run: |
+          # Full bundle + the four profile bundles (1.8.0) — each
+          # `[lib]` / `[lib.<profile>]` slice regenerated and drift-checked.
           cyrius distlib
-          if ! git diff --quiet dist/sandhi.cyr; then
-            echo "ERROR: dist/sandhi.cyr is stale. Run 'cyrius distlib' and commit the result."
-            git --no-pager diff dist/sandhi.cyr | head -40
+          for p in tls server rpc discovery; do cyrius distlib "$p"; done
+          if ! git diff --quiet dist/sandhi.cyr dist/sandhi-tls.cyr \
+                 dist/sandhi-server.cyr dist/sandhi-rpc.cyr dist/sandhi-discovery.cyr; then
+            echo "ERROR: a dist bundle is stale. Run 'cyrius distlib' (+ 'cyrius distlib <profile>' for tls/server/rpc/discovery) and commit the result."
+            git --no-pager diff --stat dist/
             exit 1
           fi
-          echo "dist/sandhi.cyr matches src/"
+          echo "all dist bundles match src/"
 
       # TLS-backend flag convention (cyrius ≥ 6.1.21): native is the
       # no-flag default; `-D CYRIUS_TLS_LIBSSL` opts out to the deprecated
