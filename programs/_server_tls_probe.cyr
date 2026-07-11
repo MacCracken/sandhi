@@ -21,18 +21,20 @@
 #       HTTPS requests STILL serve on the other workers. This exercises accept /
 #       handoff non-serialization, NOT a second concurrent TLS handshake (the
 #       silent socket is use_tls=0).
-#   [4] concurrent TLS handshakes (NON-GATING WATCH): fork pairs of clients that
-#       handshake at the SAME instant — the property a multi-worker HTTPS pool
-#       promises. This is UNSAFE today: sigil's crypto primitives use process-
-#       global scratch (filed cyrius/sigil-side:
-#       2026-06-28-concurrent-tls-handshake-global-scratch-race), so two parallel
-#       handshakes race → ECONNRESET/SIGSEGV. [4] therefore reports a
-#       KNOWN-LIMITATION and does NOT fail CI; when sigil is fixed all pairs
-#       survive and the watch should be promoted to gating (see the comment at
-#       the [4] block). Until then, the safe HTTPS config is max_conns = 1.
+#   [4] concurrent TLS handshakes (GATING as of sandhi 1.8.0 / cyrius 6.4.49):
+#       fork pairs of clients that handshake at the SAME instant against the
+#       4-worker pool — the property a multi-worker HTTPS pool promises. This
+#       was unsafe through sandhi 1.7.0 / cyrius 6.3.5 (0/16: sigil's crypto
+#       primitives raced process-global scratch — filed
+#       2026-06-28-concurrent-tls-handshake-global-scratch-race). sigil fixed it
+#       by auto-banking a private crypto-scratch lane per thread (since 3.9.7;
+#       vendored 3.11.1 under the 6.4.49 pin), so simultaneous handshakes are now
+#       race-free (verified 16/16). [4] is therefore a GATE: a shortfall is a
+#       real regression (a sigil/cyrius pin that broke the per-thread lanes, or a
+#       max_conns>1 HTTPS break), NOT a tolerated limitation.
 #
 # Skip-cleanly (exit 0) if TLS is unavailable or the fixtures are missing.
-# Exit 0 = PASS / clean-SKIP; non-zero = FAIL. [4] never contributes to FAIL.
+# Exit 0 = PASS / clean-SKIP; non-zero = FAIL. All four checks contribute to FAIL.
 include "lib/thread_local.cyr"
 include "lib/ct.cyr"
 include "lib/keccak.cyr"
@@ -210,10 +212,10 @@ fn main() {
 
     # [4] concurrent TLS handshakes — the multi-worker pool's core promise, and
     # the exact thing [1]-[3] never exercised. Fork pairs of clients that
-    # handshake at the same instant. NON-GATING: concurrent TLS handshakes are
-    # unsafe until sigil's process-global crypto scratch race is fixed
-    # (cyrius/sigil issue 2026-06-28-concurrent-tls-handshake-global-scratch-race),
-    # so a shortfall here is a KNOWN-LIMITATION, not a CI failure.
+    # handshake at the same instant against the 4-worker pool. GATING as of
+    # sandhi 1.8.0 / cyrius 6.4.49: sigil auto-banks a private crypto-scratch
+    # lane per thread (since 3.9.7; the 2026-06-28 process-global-scratch race is
+    # fixed — verified 16/16), so a shortfall here is a real REGRESSION.
     var conc_ok = 0;
     var conc_total = 0;
     var r = 0;
@@ -227,18 +229,15 @@ fn main() {
         conc_total = conc_total + 2;
         r = r + 1;
     }
-    say("[4] concurrent TLS handshakes (watch): "); fmt_int(conc_ok);
+    say("[4] concurrent TLS handshakes (gate): "); fmt_int(conc_ok);
     say(" / "); fmt_int(conc_total); say(" survived\n");
     if (conc_ok < conc_total) {
-        # EXPECTED today — do NOT fail. sigil scratch race; max_conns=1 is the
-        # safe HTTPS pool until the upstream fix lands.
-        say("    KNOWN-LIMITATION: concurrent TLS handshake unsafe (sigil global\n");
-        say("    crypto scratch race). Safe HTTPS pool = max_conns 1.\n");
-    } else {
-        # All pairs survived → the upstream race appears fixed. PROMOTE this
-        # watch to a gate: replace the branch above with `fails = fails + 1`.
-        say("    concurrent handshakes all survived — sigil race appears FIXED;\n");
-        say("    promote [4] to gating (see the [4] comment).\n");
+        # REGRESSION — every concurrent handshake must survive on sigil's
+        # per-thread crypto-scratch banking. If this fires, a sigil/cyrius pin
+        # regressed the per-thread lanes, or max_conns>1 HTTPS broke.
+        say("    REGRESSION: a concurrent TLS handshake failed — sigil per-thread\n");
+        say("    crypto-scratch banking may have regressed on this pin.\n");
+        fails = fails + 1;
     }
 
     sys_kill(pid, 9);

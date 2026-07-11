@@ -6,13 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [1.8.0] — 2026-07-11
 
-**Toolchain refresh + dependency streamline + profile breakout bundles.** A
-maintenance-and-packaging release: bumps the cyrius pin and the crypto/tracing
-deps to their latest tags, drops the now-redundant hand-declared transitive deps
-that cyrius 6.4.x resolves automatically, and formalizes profile-scoped `distlib`
-bundles so a consumer of one slice can pull a fraction of the full library. No
-source-logic change — **1112 assertions green** (sandhi 540 / h2 167 / alloc 342
-/ rpc 63, unchanged); native + `CYRIUS_DCE=1` smoke OK; lint 0/0 across `src/`.
+**Toolchain refresh + dependency streamline + profile breakout bundles + concurrent
+server-TLS unblocked.** A maintenance-and-packaging release: bumps the cyrius pin
+and the crypto/tracing deps to their latest tags, drops the now-redundant
+hand-declared transitive deps that cyrius 6.4.x resolves automatically, formalizes
+profile-scoped `distlib` bundles so a consumer of one slice can pull a fraction of
+the full library, and — because the new pin folds a fixed sigil — makes
+`sandhi_server_run_pooled_tls` safe above one worker. No behavioral source change
+(the only `src/` edit is a guidance comment) — **1112 assertions green** (sandhi
+540 / h2 167 / alloc 342 / rpc 63, unchanged); native + `CYRIUS_DCE=1` smoke OK;
+lint 0/0 across `src/`.
 
 ### Changed — toolchain + dependencies
 
@@ -51,6 +54,24 @@ source-logic change — **1112 assertions green** (sandhi 540 / h2 167 / alloc 3
 
   Additive packaging only — no source moved and the full `dist/sandhi.cyr` is
   unchanged in scope.
+
+### Changed — concurrent server-TLS now safe (`max_conns > 1`)
+
+- The 6.4.49 pin folds **sigil 3.11.1**, whose crypto primitives auto-assign a
+  **private crypto-scratch lane per thread** in `cbank()` (since sigil 3.9.7).
+  This fixes the **2026-06-28 concurrent-TLS-handshake process-global scratch
+  race** that made `sandhi_server_run_pooled_tls` unsafe above one worker
+  (SIGSEGV / ECONNRESET on two simultaneous handshakes). **No sandhi source
+  change was needed for the crash** — the lane is assigned automatically on first
+  crypto use, so each worker thread gets its own.
+- **`src/server/mod.cyr`** — the `sandhi_server_run_pooled_tls` header's
+  `max_conns = 1` directive is **relaxed**: `max_conns > 1` is now supported for
+  HTTPS (this is the only `src/` change, a guidance comment).
+- **`programs/_server_tls_probe.cyr`** — `[4]` (16 genuinely-simultaneous
+  handshakes against a 4-worker pool) **promoted from a non-gating watch to a
+  gate**: it was **0/16** through 1.7.0 / cyrius 6.3.5 and is now **16/16**
+  (stable over repeated runs), so a shortfall now reds CI. Closes the roadmap
+  "wait-for-upstream (sigil)" item.
 
 ### Stdlib
 

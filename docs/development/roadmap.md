@@ -40,18 +40,18 @@ the 9th `ctx`=0) and the **misleading pooled-TLS concurrency comment** (correcte
 `max_conns = 1` recommended + the `[4]` concurrent-handshake watch added to
 `_server_tls_probe.cyr`). One residual, gated below.
 
-## Wait-for-upstream (sigil) — promote the concurrent-handshake gate
+## Wait-for-upstream (sigil) — concurrent-handshake gate — ✅ SHIPPED at 1.8.0
 
-- **Promote `_server_tls_probe.cyr` `[4]` to gating once sigil is fixed.** The
-  root crash behind the 1.7.0 pooled-TLS doc fix is **sigil's process-global crypto
-  scratch race** (filed cyrius/sigil-side:
-  `2026-06-28-concurrent-tls-handshake-global-scratch-race`) — two simultaneous TLS
-  handshakes race shared scratch → SIGSEGV, so a multi-worker HTTPS pool is unsafe
-  and `sandhi_server_run_pooled_tls` recommends `max_conns = 1`. `[4]` is a
-  **non-gating watch** today (live: 0/16 survive). When sigil lands the fix, all
-  pairs survive → flip `[4]` to gating (one-line change documented in the probe)
-  **and** relax the pooled-TLS comment's `max_conns = 1` guidance. Re-verify
-  against the sigil fix before flipping.
+The sigil process-global crypto-scratch race
+(`2026-06-28-concurrent-tls-handshake-global-scratch-race`) that made a
+multi-worker HTTPS pool unsafe is **fixed** — sigil auto-banks a private
+crypto-scratch lane per thread (since 3.9.7; vendored 3.11.1 under the 6.4.49
+pin). Verified at 1.8.0 on the new pin: `_server_tls_probe.cyr` `[4]` drives 16
+genuinely-simultaneous handshakes against a 4-worker pool and **all 16 survive**
+(was 0/16 through 1.7.0 / cyrius 6.3.5). Followed through: `[4]` **promoted to
+gating**, and `sandhi_server_run_pooled_tls`'s `max_conns = 1` guidance relaxed
+(`max_conns > 1` is now supported for HTTPS). No sandhi-side code change was
+needed for the crash — sigil's per-thread lane is assigned automatically.
 
 ## Batch A — libssl retirement (sandhi 2.0 — breaking)
 
