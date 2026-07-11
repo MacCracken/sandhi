@@ -34,11 +34,15 @@ The 1.4.x arc closed the HTTP close-path drain (1.4.1), the repeated-HTTPS-reque
 SIGSEGV (1.4.5), the high-level client TLS-policy threading gap (1.4.6), and the
 low-level TLS-policy-enforcement live SIGSEGV (1.4.7); the AGNOS transport gap
 closed across C1 (1.5.1) / C2 (1.5.2) with the build cascade clearing at 1.5.4 /
-cyrius 6.2.7; and **1.6.9** closed the thoth client-dispatch thread-safety bite
-(the four buffered-dispatch globals lifted into a per-call request context) — all
-**resolved and archived** (see the [Archived](#archived-resolved) table). New
-sandhi-side defects land here as `YYYY-MM-DD-kebab-case.md` and move to `archive/`
-when fully closed.
+cyrius 6.2.7; **1.6.9** closed the thoth client-dispatch thread-safety bite
+(the four buffered-dispatch globals lifted into a per-call request context); and
+**1.6.13** closed the critical server/client `SandhiConnOff` offset collision (a
+last-definition-wins symbol clash that silently wrote every plaintext client
+request to fd 0) — all **resolved and archived** (see the
+[Archived](#archived-resolved) table). Two same-day-**withdrawn** filings
+(`2026-06-30` per-worker crypto-bank, `2026-07-03` rpc/mcp custom headers) are also
+archived — both premise errors, no sandhi change. New sandhi-side defects land here
+as `YYYY-MM-DD-kebab-case.md` and move to `archive/` when fully closed.
 
 ## Upstream dependencies (sandhi is blocked on stdlib / toolchain)
 
@@ -46,7 +50,7 @@ when fully closed.
 
 | Doc | Repo | Severity | Summary |
 |-----|------|----------|---------|
-| [`2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md) | cyrius | low (deprecated path) | 6.3.x's reachable-undefined linker error fails the `-D CYRIUS_TLS_LIBSSL` smoke build — the libssl config leaves 4 of sigil's transitive crypto symbols (`thread_local_init/set/get`, `ct_select`) reachable-but-unlinked. cyrius-side DCE artifact of the libssl `#ifdef`, NOT a sandhi/sigil source defect (native links them all). libssl CI step made non-gating; drops at the 2.0 retirement. |
+| [`2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md) | cyrius | low (deprecated path) | The `-D CYRIUS_TLS_LIBSSL` smoke build hard-fails on a reachable-undefined crypto symbol (cyrius on-demand-link artifact: the native crypto path that force-links it is `#ifdef`'d out under libssl). **Re-verified 2026-07-11 on cyrius `6.4.49` (sandhi 1.8.1):** still open, symptom **shifted** — the original 4 (`thread_local_init/set/get`, `ct_select`) now link; the sole remaining reachable-undef is **`sha256`**. NOT a sandhi/sigil source defect (native links clean). libssl CI step non-gating; drops at the 2.0 retirement. |
 
 Otherwise, all filed upstream dependencies to date are **resolved and archived** —
 the `lib/tls.cyr` native-TLS swap off the fdlopen-libssl bridge (✅ cyrius 6.2.8 /
@@ -61,6 +65,9 @@ stdlib primitive are tracked in [`../roadmap.md`](../roadmap.md)
 
 | Doc | Closed at | Summary |
 |-----|-----------|---------|
+| [`archive/2026-06-30-pooled-tls-workers-need-per-worker-crypto-bank.md`](archive/2026-06-30-pooled-tls-workers-need-per-worker-crypto-bank.md) | withdrawn 2026-06-30; confirmed resolved sandhi 1.8.1 | Filed off a **stale local `lib/sigil.cyr`** (3.9.4, opt-in banking). The actual sigil (3.9.7+, vendored 3.11.1 under the 6.4.49 pin) **auto-banks a private crypto-scratch lane per thread**, so `sandhi_server_run_pooled_tls` at `max_conns > 1` no longer SIGSEGVs — **no per-worker `crypto_bank_set` needed**. Confirmed at **sandhi 1.8.1**: `_server_tls_probe.cyr` `[4]` promoted to gating, 16/16 concurrent handshakes survive; the pooled-TLS `max_conns = 1` guidance was relaxed. |
+| [`archive/2026-07-03-rpc-mcp-call-no-custom-request-headers.md`](archive/2026-07-03-rpc-mcp-call-no-custom-request-headers.md) | withdrawn 2026-07-03 | Premise wrong: sandhi already exposes `sandhi_rpc_call_with_headers{,_a}` + `sandhi_rpc_mcp_call_with_headers{,_a}` (+ the `sandhi_headers_*` builder) for `traceparent` / `Authorization` / correlation propagation; the filing read only the no-header convenience shim. No sandhi change — the consumer (daimon) adopts the existing API. |
+| [`archive/2026-06-24-server-conn-off-fd-collision.md`](archive/2026-06-24-server-conn-off-fd-collision.md) | sandhi 1.6.13 | **Critical**: two `enum SandhiConnOff` shared member names but had different offsets (client `conn.cyr` `FD`=8 vs server `mod.cyr` `FD`=16); cyrius last-definition-wins resolved every `SANDHI_CONN_OFF_FD` to 16, so `_sandhi_conn_finalize` clobbered the client fd with the TLS ctx (0) → requests written to **fd 0** (echoed to the tty / lost), every plaintext client request silently failed. **Fixed** by namespacing the server struct (`SandhiServerConnOff` / `SANDHI_SRVCONN_OFF_*`). Its follow-up cross-module dup-symbol audit (`ERR_IO` / `chacha20_xor`) **re-verified clean at 1.8.1** (0 duplicate-symbol warnings on the native build). |
 | [`archive/2026-06-23-thoth-http-client-dispatch-globals-not-thread-safe.md`](archive/2026-06-23-thoth-http-client-dispatch-globals-not-thread-safe.md) | sandhi 1.6.9 / cyrius 6.2.37 | thoth (agentic-coding TUI): the buffered HTTP client stashed four pieces of per-request state in module globals (0-RTT opt-in, cred-digest for the session-cache key, pending TLS policy, open-error classification), so N concurrent `sandhi_http_post_a` workers on separate OS threads raced the shared words — the cred-digest race could cross-wire TLS session resumption between differently-credentialed requests. **Resolved** by lifting the four into an arena-allocated per-call request context (`SANDHI_REQCTX_*` + `_sandhi_reqctx_*`) threaded through dispatch → do_impl → conn-open → finalize (+ the policy pre/post-open helpers); `ctx==0` falls back to the module globals so every single-threaded caller is byte-identical. No public surface change. Tests 1097 → 1111. |
 | [`archive/2026-05-22-cyrius-native-tls-in-6.0.x.md`](archive/2026-05-22-cyrius-native-tls-in-6.0.x.md) | cyrius 6.2.8 / sandhi 1.6.0 | Upstream: `lib/tls.cyr` native-TLS swap off the fdlopen-libssl bridge. Native transport operational + no-flag default since 1.4.2 / cyrius 6.1.21; **closed at 6.2.8 / 1.6.0** when cyrius shipped the typed native trust-store + mTLS ctx verbs (`tls_ctx_load_verify_locations` / `_use_certificate_file` / `_use_private_key_file`) and sandhi 1.6.0 migrated `apply.cyr` off the last `tls_dlsym("SSL_CTX_*")` callers (Batch A1) → native enforces trust-store + mTLS. *(Residual libssl `tls_get_peer_spki_der` SPKI regression is moot/low-pri — native covers pinning, libssl retires at 2.0; tracked in the roadmap.)* |
 | [`archive/2026-05-10-daimon-server-max-conns.md`](archive/2026-05-10-daimon-server-max-conns.md) | sandhi-side 1.4.9 | daimon's `serve_async` → shared-path collapse was blocked on `sandhi_server_options_max_conns` enforcement. **Sandhi side shipped at 1.4.9**: `sandhi_server_run_async` (epoll-cooperative, batched accept bounded by `max_conns`, per-handler buffers) — approach (2) from the filing. Residual is daimon-side only (collapse its duplicated accept loop onto the shared verb); sandhi has nothing left to wire. |

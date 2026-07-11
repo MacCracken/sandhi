@@ -75,5 +75,20 @@ backend's pending retirement.
   (`.github/workflows/ci.yml`) — kept for signal, no longer gating.
 - Roadmap: a watch tracks dropping the step entirely at the 2.0 libssl retirement
   (see `roadmap.md` Batch A). No sandhi source change; no FFI workaround.
-</content>
-</invoke>
+
+## Log
+
+- **2026-07-11 (sandhi 1.8.1 / cyrius `6.4.49`) — re-verified; still open, symptom
+  shifted.** The libssl smoke build (both `CYRIUS_DCE=1` *and* plain) still hard-
+  fails, but the reachable-undef set **changed**: the four `thread_local_init/set/
+  get` + `ct_select` symbols now link (toolchain progress since 6.3.5), and the
+  single remaining reachable-undef is **`sha256`** (with `base64_encode` as an
+  unreachable-warning companion). Same upstream class — sigil's `sha256`
+  (the SPKI-pin digest in `apply.cyr`) is reachable under libssl but its
+  definition isn't pulled into the link set, because the native crypto path that
+  force-links it is `#ifdef`'d out under `-D CYRIUS_TLS_LIBSSL`. The **native
+  no-flag build links clean** (the shipping path). Note: 1.8.0 streamlined the
+  explicit `[deps]` (dropped `bayan`/`ct`/`keccak`/`thread_local` — cyrius 6.4.x
+  resolves them transitively for native); this does not change the disposition —
+  the libssl path was already failing on 6.3.5, is non-gating (`continue-on-error`),
+  and retires at sandhi 2.0. No sandhi source change; no FFI workaround.
