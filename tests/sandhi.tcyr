@@ -1247,6 +1247,87 @@ fn test_server_sigpipe_guard() {
     return 0;
 }
 
+# ── 1.9.0 peer address ──
+# A REAL loopback TCP connection, with the client bound to a KNOWN port so the peer port
+# is deterministic and verifiable — asserting "non-zero" would pass on a garbage read.
+fn test_server_peer_addr() {
+    var lo = 0x0100007F;          # 127.0.0.1, net.cyr packed convention
+    var lport = 39517;            # listener
+    var cport = 39518;            # the client binds here -> the server must report THIS
+
+    var lr = tcp_socket();
+    if (is_err_result(lr) == 1) { assert_eq(1, 1, "peer: tcp_socket unavailable — skipped"); return 0; }
+    var lfd = payload(lr);
+    sock_reuse(lfd);              # SO_REUSEADDR — else a TIME_WAIT from the previous run
+                                  # fails the bind and this test silently degrades to a skip
+    if (is_err_result(sock_bind(lfd, lo, lport)) == 1) {
+        sock_close(lfd);
+        assert_eq(1, 1, "peer: bind unavailable (port in use?) — skipped");
+        return 0;
+    }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) {
+        sock_close(lfd);
+        assert_eq(1, 1, "peer: listen unavailable — skipped");
+        return 0;
+    }
+
+    var cr = tcp_socket();
+    if (is_err_result(cr) == 1) { sock_close(lfd); assert_eq(1, 1, "peer: client socket — skipped"); return 0; }
+    var cfd = payload(cr);
+    sock_reuse(cfd);              # same: the client's bound port lands in TIME_WAIT too
+    if (is_err_result(sock_bind(cfd, lo, cport)) == 1) {
+        sock_close(cfd); sock_close(lfd);
+        assert_eq(1, 1, "peer: client bind unavailable — skipped");
+        return 0;
+    }
+    if (is_err_result(sock_connect(cfd, lo, lport)) == 1) {
+        sock_close(cfd); sock_close(lfd);
+        assert_eq(1, 1, "peer: connect unavailable — skipped");
+        return 0;
+    }
+
+    var ar = sock_accept(lfd);
+    if (is_err_result(ar) == 1) {
+        sock_close(cfd); sock_close(lfd);
+        assert_eq(1, 1, "peer: accept unavailable — skipped");
+        return 0;
+    }
+    var sfd = payload(ar);        # server side of the connection
+
+    # The whole point: the server learns WHO connected.
+    assert_eq(sandhi_server_peer_ip(sfd), lo, "peer: ip is 127.0.0.1 (packed 0x0100007F)");
+    assert_eq(sandhi_server_peer_port(sfd), cport, "peer: port is the client's bound port");
+
+    # The conn seam (plaintext) reports the same peer as the raw fd.
+    var conn = sandhi_server_conn_plain(sfd);
+    assert_eq(sandhi_server_conn_peer_ip(conn), lo, "peer: conn_peer_ip matches the raw fd");
+    assert_eq(sandhi_server_conn_peer_port(conn), cport, "peer: conn_peer_port matches the raw fd");
+
+    # And the client side sees the LISTENER's port as its peer — proves we read the
+    # remote end, not our own socket (a getsockname mix-up would pass the checks above).
+    assert_eq(sandhi_server_peer_port(cfd), lport, "peer: client's peer is the listener (not getsockname)");
+
+    sock_close(sfd); sock_close(cfd); sock_close(lfd);
+
+    # Unknown/invalid inputs report 0 (never a fabricated address).
+    assert_eq(sandhi_server_peer_ip(0 - 1), 0, "peer: bad fd -> 0 (unknown)");
+    assert_eq(sandhi_server_peer_port(0 - 1), 0, "peer: bad fd port -> 0 (unknown)");
+    assert_eq(sandhi_server_conn_peer_ip(0), 0, "peer: null conn -> 0 (unknown)");
+    assert_eq(sandhi_server_conn_peer_port(0), 0, "peer: null conn port -> 0 (unknown)");
+    return 0;
+}
+
+fn test_server_ip4_str() {
+    assert_streq(str_data(sandhi_server_ip4_str(0x0100007F)), "127.0.0.1", "ip4_str: loopback");
+    assert_streq(str_data(sandhi_server_ip4_str(0x0100000A)), "10.0.0.1", "ip4_str: 10.0.0.1");
+    assert_streq(str_data(sandhi_server_ip4_str(0)), "0.0.0.0", "ip4_str: unknown/zero");
+    assert_streq(str_data(sandhi_server_ip4_str(0xFFFFFFFF)), "255.255.255.255", "ip4_str: broadcast");
+    # Round-trips against sandhi's own parser — interop, not self-consistency.
+    assert_streq(str_data(sandhi_server_ip4_str(sandhi_net_parse_ipv4("192.168.1.42"))), "192.168.1.42",
+                 "ip4_str: round-trips sandhi_net_parse_ipv4");
+    return 0;
+}
+
 # ── 1.6.8 server-side TLS: options + transport seam + conn routing ──
 # (the TLS handshake / wire path itself is proven by the live gate
 # programs/_server_tls_probe.cyr; these unit checks cover the pure
@@ -2642,6 +2723,8 @@ fn main() {
 
     test_group("server/sigpipe_guard");
     test_server_sigpipe_guard();
+    test_server_peer_addr();
+    test_server_ip4_str();
 
     test_group("server/routing/match");
     test_route_match();

@@ -4,6 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-07-14
+
+**Peer address for server handlers + cyrius pin `6.4.49 → 6.4.63`.** A handler could reach
+the transport (`sandhi_server_conn_fd`) but had no way to learn *who* it was talking to, so
+anything keyed on the client — per-IP rate limiting, lockout/backoff on repeated auth
+failures, access logs with a source address — was impossible to build on sandhi. **Filed by
+yeo-cy-test** (SecureYeoman's Cyrius port): its `/api/login` runs Argon2id at ~244 ms of CPU
+per attempt, which is a request-amplification lever without per-IP throttling — the consumer
+could cap *concurrency* but not attribute attempts to a source.
+
+**New API** (`src/server/mod.cyr`, in the `[lib.server]` profile): `sandhi_server_peer_ip(fd)`
+/ `sandhi_server_peer_port(fd)` for a raw fd, `sandhi_server_conn_peer_ip(conn)` /
+`sandhi_server_conn_peer_port(conn)` over the SandhiConn seam (works for **both** the
+plaintext and TLS transports — both carry the raw fd), the primitive
+`sandhi_server_peer_sockaddr(fd, out16)` (caller-owned buffer → allocates nothing,
+thread-safe), and `sandhi_server_ip4_str(ip)` for dotted-quad logs / rate-limit keys. IPv4
+is packed in net.cyr's existing `addr` convention (127.0.0.1 → `0x0100007F`, the same form
+`sock_connect` takes and `sandhi_net_parse_ipv4` returns), assembled byte-wise so it does
+not depend on host endianness.
+
+**Implemented over `getpeername(2)` on the fd the conn already holds** rather than by
+capturing the address at accept. The kernel *does* fill the peer sockaddr at `accept(2)` —
+the stdlib's `sock_accept` (`lib/net.cyr`) passes a buffer and then discards it — but `lib/`
+is the vendored stdlib and not sandhi's to change; `getpeername` needs no accept-path
+surgery, is identical across both seams, and stays correct if a conn is ever adopted from
+elsewhere. Cost is one cheap syscall per call (callers needing it per-request should hoist
+it out of hot loops). Linux x86_64 syscall number, translated by the Mach-O backends the
+same way net.cyr's socket band is. **AGNOS reports "unknown" (0)** — its socket model is
+conn-id based with no BSD `getpeername` — and the contract is explicit: **0 means unknown;
+callers must fail open or fall back, never treat it as a real peer.**
+
+**Verified**: **1126 assertions green** (sandhi 540 → **554** / h2 167 / alloc 342 / rpc 63).
+The peer test is a *real* loopback TCP connection with the client bound to a **known** port,
+so the reported peer port is checked against a value we chose — asserting "non-zero" would
+have passed on a garbage read. It also asserts the client's peer is the *listener's* port,
+which is what distinguishes a correct `getpeername` from a `getsockname` mix-up, and that
+bad fd / null conn report 0 rather than a fabricated address. Both sockets set
+`SO_REUSEADDR`: without it a `TIME_WAIT` from the previous run fails the bind and the test
+**silently degrades to a skip** — caught here only because the assertion count dropped 9 → 1
+(554 → 546). Runs twice back-to-back at full count. Five dist bundles regenerated at v1.9.0;
+smoke build + run OK.
+
+**Pin `6.4.49 → 6.4.63`** (latest; folds sigil 3.12.0 / the version-aware lib-freshness
+check). `lib/` re-synced to the 6.4.63 snapshot; no source change was required by the jump —
+the 1112-assertion baseline was green on 6.4.63 *before* this feature landed.
+
 ## [1.8.2] — 2026-07-11
 
 **Fuzz-harness suite for the untrusted-input parsers + a gating `cyrius fuzz` CI
