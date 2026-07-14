@@ -13677,9 +13677,9 @@ fn sandhi_server_peer_ip(fd): i64 {
     var sa[16];
     if (sandhi_server_peer_sockaddr(fd, &sa) == 0) { return 0; }
     return (load8(&sa + 4) & 0xFF)
-        | ((load8(&sa + 5) & 0xFF) << 8)
-        | ((load8(&sa + 6) & 0xFF) << 16)
-        | ((load8(&sa + 7) & 0xFF) << 24);
+    | ((load8(&sa + 5) & 0xFF) << 8)
+    | ((load8(&sa + 6) & 0xFF) << 16)
+    | ((load8(&sa + 7) & 0xFF) << 24);
 }
 
 # Peer TCP port for a raw fd (host order). 0 = unknown. sin_port is big-endian on the
