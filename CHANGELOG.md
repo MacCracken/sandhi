@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.1] — 2026-07-22
+
+### Fixed — peer API used a hardcoded syscall number and **fabricated addresses** off x86-Linux
+
+`sandhi_server_peer_sockaddr` called the hardcoded **x86_64-Linux** number 52. cyrius's stdlib
+uses **per-arch** syscall numbers, and an untranslated number does not error — it invokes a
+*different* syscall. On **aarch64, 52 is `fchmod(fd, mode)`, and it SUCCEEDS**: the function
+returned 1 ("got it") with the sockaddr buffer **never written**, so `sandhi_server_peer_ip`
+handed back **uninitialized stack**. A rate limiter keyed on that is not a rate limiter — and
+it failed *quietly*. macOS-arm64 was affected the same way. This file's own comment claimed the
+number was "translated by the Mach-O backends the same way net.cyr's socket band is" — it was
+**not**; `getpeername` was missing from every translation table until cyrius 6.4.64.
+
+Now calls the stdlib's per-arch **`sys_getpeername`** wrapper (requires **cyrius >= 6.4.64**;
+pin bumped to 6.4.70, `./lib/` re-vendored): x86-Linux 52 · aarch64-Linux 205 · macOS via the
+EMACHO xlat → BSD 31 · Windows fail-closed `-ENOSYS` (the existing `r < 0` guard already turns
+that into "unknown", so the documented contract is unchanged) · AGNOS unchanged (early-return
+`0`, no BSD getpeername there).
+
+**Defence-in-depth:** `sandhi_server_peer_ip` / `sandhi_server_peer_port` now **zero** their
+16-byte sockaddr buffer before the call, so a future unrouted target degrades to `0.0.0.0`
+("unknown") instead of leaking stack contents — this contains the *class*, not just this
+instance.
+
+Consumer: `yeo-cy-test` per-IP rate limiting on an Argon2id `/api/login` (~244 ms/attempt, a
+request-amplification lever without throttling). Resolves cyrius
+`issues/2026-07-14-sandhi-peer-api-use-stdlib-getpeername.md`.
+
 ## [1.9.0] — 2026-07-14
 
 **Peer address for server handlers + cyrius pin `6.4.49 → 6.4.63`.** A handler could reach
