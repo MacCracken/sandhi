@@ -133,6 +133,89 @@ fn main() {
 
     sayc("PASS redirected binary download: status=200 bytes="); fmt_int(bytes);
     sayc(" (round-tripped to disk)\n");
+
+    # ── 1.9.3 gate: the streaming path can send request headers ──
+    # Before 1.9.3 the sink API hardcoded headers = 0, so an authenticated
+    # streaming download was impossible: there was no way to attach
+    # `Authorization: Bearer …`, and the one API that does not buffer the
+    # whole body could not fetch a private blob — the exact case it exists
+    # for. (stiva's registry client hit this and shipped §B buffered.)
+    #
+    # Gated against a real OCI registry rather than a header-echo service:
+    # this IS the use case, the registry is infrastructure sandhi consumers
+    # already depend on, and the pass/fail signal is unambiguous — the same
+    # blob URL returns 401 without the token and 200 with it. An echo
+    # service would only prove the bytes were sent, not that they were
+    # honored across the redirect to the CDN.
+    var tokurl = "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull";
+    var tr = sandhi_http_get_opts(tokurl, 0, opts);
+    if (tr == 0) { sayc("SKIP: header gate — token request failed\n"); return 0; }
+    var terr = sandhi_http_err_kind(tr);
+    if (terr == SANDHI_ERR_CONNECT || terr == SANDHI_ERR_DISCOVERY
+    || terr == SANDHI_ERR_TIMEOUT || terr == SANDHI_ERR_TLS) {
+        sayc("SKIP: header gate — registry unreachable\n");
+        return 0;
+    }
+    var tb = sandhi_http_body(tr);
+    if (tb == 0) { sayc("SKIP: header gate — empty token body\n"); return 0; }
+    var tk = strstr(tb, "\"token\":\"");
+    if (tk < 0) { sayc("SKIP: header gate — no token in response\n"); return 0; }
+    var ts = tk + 9;
+    var te = ts;
+    while (load8(tb + te) != 34 && load8(tb + te) != 0) { te = te + 1; }
+    var auth = alloc(te - ts + 16);
+    memcpy(auth, "Bearer ", 7);
+    memcpy(auth + 7, tb + ts, te - ts);
+    store8(auth + 7 + (te - ts), 0);
+
+    # A known-stable blob: the alpine image index (content-addressed, so the
+    # digest is immutable). Requires the bearer token; 401 without it.
+    var burl = "https://registry-1.docker.io/v2/library/alpine/manifests/latest";
+    var h = sandhi_headers_new();
+    sandhi_headers_set(h, "Authorization", auth);
+    var hpath = "/tmp/sandhi_download_hdr_probe.bin";
+    var hfd = file_open(hpath, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (hfd < 0) { sayc("SKIP: header gate — cannot open temp file\n"); return 0; }
+    var hr = sandhi_http_download_headers(burl, hfd, h, opts);
+    file_close(hfd);
+    var herr = sandhi_download_err(hr);
+    var hstat = sandhi_download_status(hr);
+    if (herr == SANDHI_ERR_CONNECT || herr == SANDHI_ERR_DISCOVERY
+    || herr == SANDHI_ERR_TIMEOUT || herr == SANDHI_ERR_TLS) {
+        sayc("SKIP: header gate — registry unreachable\n");
+        return 0;
+    }
+    # THE assertion: 401 means the Authorization header did not reach the
+    # server — the precise pre-1.9.3 failure this gate exists to catch.
+    if (hstat == 401) {
+        sayc("FAIL: header gate — 401, Authorization did not reach the server\n");
+        return 1;
+    }
+    if (hstat != 200) {
+        sayc("SKIP: header gate — unexpected status="); fmt_int(hstat);
+        sayc(" err="); fmt_int(herr); sayc("\n");
+        return 0;
+    }
+    if (_probe_disk_bytes(hpath) <= 0) {
+        sayc("FAIL: header gate — 200 but empty body\n");
+        return 1;
+    }
+
+    # Contrast run: the SAME url with no headers must 401. Without this the
+    # gate could pass on a registry that stopped requiring auth.
+    var nfd = file_open("/tmp/sandhi_download_noauth_probe.bin", O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (nfd >= 0) {
+        var nr = sandhi_http_download(burl, nfd, opts);
+        file_close(nfd);
+        if (sandhi_download_status(nr) != 401) {
+            sayc("FAIL: header gate — unauthenticated fetch did NOT 401 (status=");
+            fmt_int(sandhi_download_status(nr));
+            sayc("); the gate proves nothing\n");
+            return 1;
+        }
+    }
+
+    sayc("PASS authenticated streaming download: 200 with token, 401 without\n");
     return 0;
 }
 

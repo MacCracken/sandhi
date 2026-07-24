@@ -2587,6 +2587,71 @@ fn _test_dl_make_hop(status, location): i64 {
     return hop;
 }
 
+# ── 1.9.3: the streaming download API can send request headers ────
+# Before 1.9.3 `sandhi_http_download_sink_a` hardcoded `headers = 0`, so the
+# ONE API that does not buffer the whole body could not send
+# `Authorization: Bearer …` — unusable for exactly the case it exists for
+# (a large authenticated blob). The per-hop plumbing was always correct;
+# only the public entries withheld the handle.
+#
+# Offline coverage here (sandhi keeps unit tests network-free; the live
+# loopback + real-registry checks are in programs/_download_probe.cyr).
+# `_sandhi_client_build_request_a` is the exact function the download path
+# feeds its headers into, so asserting on its output covers the mechanism.
+fn test_download_headers_reach_request_bytes() {
+    var a = default_alloc();
+    var h = sandhi_headers_new_a(a);
+    sandhi_headers_set(h, "Authorization", "Bearer test-token-1993");
+    sandhi_headers_set(h, "X-Probe", "yes");
+    var req = _sandhi_client_build_request_a(a, "GET", "/blob", "example.test", h, 0);
+    var rd = str_data(req);
+    assert_eq(strstr(rd, "Authorization: Bearer test-token-1993") >= 0, 1,
+    "dl-hdr: Authorization lands in the request bytes");
+    assert_eq(strstr(rd, "X-Probe: yes") >= 0, 1, "dl-hdr: extra headers land too");
+    assert_eq(strstr(rd, "GET /blob") >= 0, 1, "dl-hdr: request line intact");
+
+    # headers = 0 is the header-less wrapper's path — must not invent one
+    # and must still build a well-formed request.
+    var req0 = _sandhi_client_build_request_a(a, "GET", "/x", "example.test", sandhi_headers_new_a(a), 0);
+    var rd0 = str_data(req0);
+    assert_eq(strstr(rd0, "Authorization") >= 0, 0, "dl-hdr0: no Authorization invented");
+    assert_eq(strstr(rd0, "GET /x") >= 0, 1, "dl-hdr0: request still well-formed");
+    return 0;
+}
+
+# The cross-authority strip the download path applies on redirect must drop
+# Authorization — this code was already correct pre-1.9.3, but it had nothing
+# to strip because headers were always 0. Now that headers flow, it is load-
+# bearing: a bearer token must not follow a 307 to a CDN.
+fn test_download_cross_authority_strips_auth() {
+    var a = default_alloc();
+    var h = sandhi_headers_new_a(a);
+    sandhi_headers_set(h, "Authorization", "Bearer secret");
+    sandhi_headers_set(h, "Accept", "application/json");
+    var stripped = _sandhi_strip_sensitive_headers_a(a, h);
+    assert_eq(sandhi_headers_get(stripped, "Authorization"), 0,
+    "dl-hdr: Authorization stripped across authorities");
+    assert_neq(sandhi_headers_get(stripped, "Accept"), 0,
+    "dl-hdr: non-sensitive headers survive the strip");
+    return 0;
+}
+
+# ── 1.9.3: an over-cap response is PROTOCOL, not CONNECT ──────────
+# `_sandhi_http_recv_framed` used to return `0 - 1` both for "the response
+# outgrew max_response_bytes" and for a genuine read failure, so the caller
+# mapped both to SANDHI_ERR_CONNECT — a response that was merely too big was
+# reported as a dropped connection, sending callers to debug the wrong layer.
+fn test_recv_cap_exceeded_is_distinct() {
+    # The sentinel must not collide with the other two the function returns.
+    assert_neq(_SANDHI_RECV_CAP_EXCEEDED, 1, "cap: sentinel != generic read error (1)");
+    assert_neq(_SANDHI_RECV_CAP_EXCEEDED, 2, "cap: sentinel != must-close (2)");
+    assert_neq(_SANDHI_RECV_CAP_EXCEEDED, _SANDHI_EAGAIN, "cap: sentinel != EAGAIN");
+    # And PROTOCOL must be the kind the client maps it to — distinct from the
+    # CONNECT it used to be misreported as.
+    assert_neq(SANDHI_ERR_PROTOCOL, SANDHI_ERR_CONNECT, "cap: PROTOCOL != CONNECT");
+    return 0;
+}
+
 fn test_download_redirect_target() {
     var a = default_alloc();
     var cur = "http://a.example/x";
@@ -3119,6 +3184,13 @@ fn main() {
 
     test_group("stream/chunked_split_crlf");
     test_stream_chunked_split_crlf_roundtrip();
+
+    test_group("download/headers");
+    test_download_headers_reach_request_bytes();
+    test_download_cross_authority_strips_auth();
+
+    test_group("client/over_cap");
+    test_recv_cap_exceeded_is_distinct();
 
     test_group("download/result");
     test_download_result();

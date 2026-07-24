@@ -575,6 +575,13 @@ fn _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms)
     var nread = _sandhi_http_recv_framed(conn, rbuf, cap, deadline_ms);
     sandhi_conn_close(conn);
     if (nread == 0 - _SANDHI_EAGAIN) { return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT); }
+    # 1.9.3 — the response outgrew `max_response_bytes`. Reported as PROTOCOL
+    # (the response is unusable as framed), NOT as CONNECT: it is not a network
+    # fault, and calling it one sends the caller debugging the wrong layer.
+    # Raise the cap or use the streaming download API.
+    if (nread == 0 - _SANDHI_RECV_CAP_EXCEEDED) {
+        return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL);
+    }
     var actual_n = nread;
     if (nread == 0 - 2) {
         actual_n = strlen(rbuf);
@@ -649,6 +656,13 @@ deadline_ms, pool, host, port, use_tls): i64 {
     if (nread == 0 - _SANDHI_EAGAIN) {
         sandhi_conn_close(conn);
         return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT);
+    }
+    # 1.9.3 — cap exceeded (see the non-keepalive path above). The conn is
+    # closed rather than returned to the pool: the response is only partly
+    # drained, so the socket is no longer at a message boundary.
+    if (nread == 0 - _SANDHI_RECV_CAP_EXCEEDED) {
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL);
     }
     if (nread < 0 && nread != 0 - 2) {
         # 0 - 2 is the must-close sentinel — we still got the response.

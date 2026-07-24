@@ -4,6 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.3] — 2026-07-24
+
+### Fixed — the streaming download API could not send request headers, making it useless for authenticated fetches
+
+`sandhi_http_download_sink_a` hardcoded `var h = 0;` — the request-header handle was
+never a parameter. So the **one API that does not buffer the whole body into memory**
+could not send `Authorization: Bearer …`, and therefore could not fetch a private
+registry blob: precisely the case it exists for. Every authenticated streaming
+download 401'd.
+
+The plumbing underneath was already right — `_sandhi_dl_open_drain_a` has always taken
+a `headers` argument and forwarded it into `_sandhi_client_build_request_a`. Only the
+public entry points withheld it. The fix threads the handle through:
+
+```
+sandhi_http_download_sink_headers_a(a, url, cb, ctx, headers, opts)
+sandhi_http_download_sink_headers  (url, cb, ctx, headers, opts)
+sandhi_http_download_headers_a     (a, url, fd, headers, opts)
+sandhi_http_download_headers       (url, fd, headers, opts)
+```
+
+**Purely additive** — the four pre-1.9.3 signatures remain as wrappers passing
+`headers = 0`, so no consumer has to change to upgrade.
+
+The cross-authority redirect strip (`_sandhi_strip_sensitive_headers_a`, which drops
+Authorization/Cookie when a redirect crosses authorities) was already correct; it
+simply never had anything to strip. It is now load-bearing, and covered by a test —
+this matters for registries, which 307 blob fetches to a pre-signed CDN URL where the
+bearer token must *not* follow.
+
+Verified end-to-end against Docker Hub: token → manifest → **streamed blob to an fd
+across the CDN redirect**, and the downloaded bytes' SHA-256 matches the registry
+digest exactly. The A/B is unambiguous — same URL, **200 with the token, 401 without**.
+`programs/_download_probe.cyr` gains that as a gate, including the unauthenticated
+contrast run so it cannot pass vacuously if the registry ever stops requiring auth.
+
+Filed by **stiva**, whose roadmap §B registry client had to ship on the buffered path
+because of this.
+
+### Fixed — an over-cap response was reported as a connection failure
+
+`_sandhi_http_recv_framed` returned the same `0 - 1` for two unrelated conditions:
+"the response outgrew the caller's `max_response_bytes`" and "the socket read failed".
+The buffered client mapped `< 0` to `SANDHI_ERR_CONNECT`, so a response that was merely
+**too big** was reported as a **dropped connection** — sending callers to debug the
+network layer for what is a configuration limit. With the default cap at 256 KiB, any
+larger body hit this.
+
+The cap case now returns its own sentinel (`_SANDHI_RECV_CAP_EXCEEDED`, distinct from
+both the generic read error and the `0 - 2` must-close/complete-response sentinel), and
+both client paths map it to **`SANDHI_ERR_PROTOCOL`** — the response is unusable as
+framed, but the connection was fine. On the keep-alive path the connection is closed
+rather than returned to the pool, since a partly-drained response leaves the socket off
+a message boundary.
+
+Note this is a **diagnosis** fix, not a behavior change: an over-cap response was and
+remains a hard error, not a truncation. Callers that need a bigger body should raise
+`max_response_bytes` or — now that it works — use the streaming download API.
+
+### Added — tests
+
+11 new assertions (sandhi suite 561 → 572): headers reaching the built request bytes,
+the header-less wrappers inventing nothing, the cross-authority Authorization strip,
+and the cap sentinel's distinctness from the other two. Unit tests stay network-free per
+project convention; the live checks are the `programs/_download_probe.cyr` gate above.
+
 ## [1.9.2] — 2026-07-24
 
 ### Fixed — the DNS resolver could not follow CNAMEs, so CNAME-led hosts did not resolve at all

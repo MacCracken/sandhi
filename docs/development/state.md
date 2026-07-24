@@ -4,7 +4,31 @@
 
 ## Version
 
-**1.9.2** — 2026-07-24. **DNS resolver follows CNAME chains.** The A/AAAA parsers accepted an
+**1.9.3** — 2026-07-24. **The streaming download API can send request headers; over-cap
+responses are no longer misreported as connection failures.** Two defects, both **filed by
+stiva** (roadmap §B registry client), both blocking authenticated OCI pulls.
+(1) `sandhi_http_download_sink_a` hardcoded `var h = 0;`, so the one API that does *not*
+buffer the whole body could not attach `Authorization: Bearer …` — every authenticated
+streaming fetch 401'd, i.e. the API was unusable for the exact case it exists for. The
+per-hop plumbing was always correct (`_sandhi_dl_open_drain_a` has taken and forwarded
+`headers` since 1.6.4); only the four public entries withheld it. Fixed by threading the
+handle through new `_headers` variants; the pre-1.9.3 signatures stay as `headers = 0`
+wrappers, so the change is **purely additive**. The cross-authority redirect strip was
+already correct but had nothing to strip — now load-bearing and tested, which matters
+because registries 307 blob fetches to a pre-signed CDN where the token must not follow.
+(2) `_sandhi_http_recv_framed` returned `0 - 1` for BOTH "response outgrew
+`max_response_bytes`" and "socket read failed", so the client mapped a merely-too-big
+response to `SANDHI_ERR_CONNECT` — a config limit reported as a network fault, on a
+256 KiB default cap. The cap case now has its own sentinel and maps to
+`SANDHI_ERR_PROTOCOL`; the keep-alive path closes rather than pools the connection, since
+a partly-drained response is off a message boundary. **Verified**: **1144 assertions**
+(sandhi 561 → **572** / h2 167 / alloc 342 / rpc 63); live end-to-end against Docker Hub —
+token → manifest → blob streamed to an fd across the CDN redirect, **SHA-256 of the
+downloaded bytes matches the registry digest**, and the A/B is **200 with the token, 401
+without**. `programs/_download_probe.cyr` gains that as a gate *with* an unauthenticated
+contrast run so it cannot pass vacuously. Pin unchanged at `6.4.76`.
+
+_(**1.9.2** — 2026-07-24. **DNS resolver follows CNAME chains.** The A/AAAA parsers accepted an
 answer record only when its owner name equalled the question name — the anti-answer-substitution
 guard, correct as far as it goes, but it also discarded every CNAME-led answer. The effect was not
 a missing optimization: the affected hosts **did not resolve at all**, returning
@@ -35,7 +59,7 @@ reproducible from the manifest; it now is, and the shadow warning is gone.
 > **Consumer note:** post-fold, consumers include stdlib's vendored `lib/sandhi.cyr`, not this
 > repo. stiva (and every other consumer) gets this fix only once a cyrius release refreshes
 > `lib/sandhi.cyr` from `dist/sandhi.cyr` — the cyrius-side slot in the post-fold procedure.
-> Until then a consumer pinned to 6.4.76 still has the pre-fix resolver.
+> Until then a consumer pinned to 6.4.76 still has the pre-fix resolver.)_
 
 _(1.9.1 — 2026-07-22 — peer API used a hardcoded x86_64 syscall number, fabricating addresses off
 x86-Linux (on aarch64 number 52 is `fchmod`, which *succeeds* and leaves the sockaddr unwritten).

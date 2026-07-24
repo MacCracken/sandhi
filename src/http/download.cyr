@@ -374,12 +374,26 @@ fn _sandhi_dl_stream_body_a(a, hop, cb, ctx, opts): i64 {
 # the same timeout + TLS-policy fields as the buffered client. The body
 # is never fully buffered — resident memory is bounded regardless of
 # size. Returns a download-result struct.
-fn sandhi_http_download_sink_a(a, url, cb, ctx, opts): i64 {
+#
+# `headers` (added 1.9.3) is a sandhi_headers handle sent on the first hop,
+# or 0 for none. Before this the streaming path hardcoded no headers, which
+# made it **unusable for any authenticated download**: there was no way to
+# send `Authorization: Bearer …`, so the one API that does not buffer the
+# whole body could not fetch a private registry blob — the exact case it
+# exists for. (stiva's registry client hit this and had to ship §B on the
+# buffered path instead.) The per-hop plumbing was already here —
+# `_sandhi_dl_open_drain_a` has always taken and forwarded `headers`; only
+# these public entries withheld it.
+#
+# Cross-authority redirects strip Authorization/Cookie exactly as the
+# buffered client does (`_sandhi_strip_sensitive_headers_a` below) — that
+# code was already correct, it simply never had anything to strip.
+fn sandhi_http_download_sink_headers_a(a, url, cb, ctx, headers, opts): i64 {
     var follow = sandhi_http_options_follow(opts);
     var max_hops = sandhi_http_options_hops(opts);
     if (max_hops <= 0) { max_hops = _SANDHI_DL_MAX_HOPS; }
     var u = url;
-    var h = 0;
+    var h = headers;
     var hops = 0;
     var out = 0;
     var going = 1;
@@ -413,8 +427,18 @@ fn sandhi_http_download_sink_a(a, url, cb, ctx, opts): i64 {
     return out;
 }
 
+fn sandhi_http_download_sink_headers(url, cb, ctx, headers, opts): i64 {
+    return sandhi_http_download_sink_headers_a(default_alloc(), url, cb, ctx, headers, opts);
+}
+
+# Header-less back-compat wrappers (the pre-1.9.3 signatures). Kept so the
+# 1.9.3 fix is a pure addition — no consumer has to change to upgrade.
+fn sandhi_http_download_sink_a(a, url, cb, ctx, opts): i64 {
+    return sandhi_http_download_sink_headers_a(a, url, cb, ctx, 0, opts);
+}
+
 fn sandhi_http_download_sink(url, cb, ctx, opts): i64 {
-    return sandhi_http_download_sink_a(default_alloc(), url, cb, ctx, opts);
+    return sandhi_http_download_sink_headers_a(default_alloc(), url, cb, ctx, 0, opts);
 }
 
 # Resolve the redirect target for a hop, or 0 if this hop is terminal
@@ -438,10 +462,22 @@ fn _sandhi_dl_redirect_target_a(a, hop, cur_url, follow, hops, max_hops): i64 {
 # Convenience: download `url` straight to an open file descriptor `fd`,
 # looping over partial writes. Returns a download-result; a write error
 # surfaces as err_kind = INTERNAL.
+#
+# The `_headers` variants (1.9.3) send `headers` on the first hop — this is
+# the pair an authenticated fetch actually wants (bearer token → blob → fd),
+# and the reason the streaming path was unusable before.
+fn sandhi_http_download_headers_a(a, url, fd, headers, opts): i64 {
+    return sandhi_http_download_sink_headers_a(a, url, &_sandhi_dl_fd_sink, fd, headers, opts);
+}
+
+fn sandhi_http_download_headers(url, fd, headers, opts): i64 {
+    return sandhi_http_download_sink_headers_a(default_alloc(), url, &_sandhi_dl_fd_sink, fd, headers, opts);
+}
+
 fn sandhi_http_download_a(a, url, fd, opts): i64 {
-    return sandhi_http_download_sink_a(a, url, &_sandhi_dl_fd_sink, fd, opts);
+    return sandhi_http_download_sink_headers_a(a, url, &_sandhi_dl_fd_sink, fd, 0, opts);
 }
 
 fn sandhi_http_download(url, fd, opts): i64 {
-    return sandhi_http_download_sink_a(default_alloc(), url, &_sandhi_dl_fd_sink, fd, opts);
+    return sandhi_http_download_sink_headers_a(default_alloc(), url, &_sandhi_dl_fd_sink, fd, 0, opts);
 }
