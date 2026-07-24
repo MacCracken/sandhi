@@ -4,7 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [1.9.1] — 2026-07-22
+## [1.9.2] — 2026-07-24
+
+### Fixed — the DNS resolver could not follow CNAMEs, so CNAME-led hosts did not resolve at all
+
+`_sandhi_resolve_parse_response_a` (and its AAAA twin) accepted an answer record only when its
+**owner name equalled the question name**. That check is the anti-answer-substitution guard and
+is correct as far as it goes — but it also rejected the ordinary case where the answer arrives
+as a CNAME chain:
+
+```
+Q:  auth.docker.io           A
+A1: auth.docker.io    CNAME  <cdn-name>
+A2: <cdn-name>        A      172.64.144.78     <- owner != question, so this was skipped
+```
+
+Every A record in such a response was discarded, the parser returned `-1`, and the caller
+surfaced `SANDHI_ERR_DISCOVERY` — indistinguishable from "no such host". The old comment framed
+this as "CNAME support is post-v1 unless a consumer needs it", but the effect was not a missing
+optimization: **the affected hosts were simply unreachable.** Measured on the real resolver
+before/after, same binary otherwise:
+
+| Host | before | after |
+|---|---|---|
+| `auth.docker.io` (Docker Hub token endpoint) | FAIL | 172.64.144.78 |
+| `public.ecr.aws` | FAIL | 99.83.145.10 |
+| `mcr.microsoft.com` | FAIL | 150.171.69.10 |
+| `registry-1.docker.io` · `ghcr.io` · `quay.io` | ok | ok |
+
+Note the shape of the Docker Hub failure: the *registry* host resolved fine while its **auth
+realm** did not, so a pull authenticated against Hub failed at the token step with a discovery
+error — the confusing half-working case.
+
+Both parsers now walk the chain, per RFC 1034 §3.6.2: start at the question name, accept an
+A/AAAA owned by the name currently being followed, and when only a CNAME owned by it is present,
+advance to that CNAME's target and rescan. A shared `_sandhi_resolve_find_rr_a` does one
+answer-section pass per hop.
+
+**The security property is unchanged.** A record is accepted only if its owner is the name
+currently being followed, and that name only ever advances along CNAMEs whose owner we matched
+ourselves — a crafted packet still cannot substitute an answer for an unrelated host. Two things
+were added on top: the chain is bounded by `_SANDHI_RESOLVE_MAX_CNAME_HOPS` (8) so a hostile
+cycle (`a CNAME b`, `b CNAME a`) terminates instead of spinning, and RDATA is now bounds-checked
+against the packet length for *every* record type (the old code bounded only the fixed 4/16-byte
+A/AAAA payloads, so a truncated RR of another type could advance the cursor past the buffer).
+
+A direct answer still wins over a CNAME when a response carries both, even if the CNAME is
+listed first.
+
+**6 new tests** over hand-built wire packets — chain followed (A and AAAA), direct answer
+preferred, unrelated-owner A still rejected, and a cyclic chain terminating. The resolver's
+existing coverage tested TXID mismatch and a direct A record, so the CNAME path had none.
+
+### Changed — cyrius pin `6.4.70 → 6.4.76`
+
+Maintenance bump to the current toolchain; the pin had trailed by six patches and every build
+warned about the drift. No source change was required. Re-vendored `lib/` (`cyrius lib sync`).
+
+Also cleaned four **undeclared** bundles out of `lib/` — `niyama` 1.0.5, `vani` 1.1.1,
+`yantra` 1.0.0, and `sandhi` 1.9.0 (a stale copy of *this library*, shadowing itself). None
+appears in `[deps].stdlib`, so `cyrius lib sync` never refreshed them, and each was **older than
+the version in the pinned snapshot it was shadowing** — `./lib/` takes precedence, so the build
+was silently compiling against stale vendored code. `lib/` is gitignored precisely because it is
+meant to be reproducible from the manifest; it now is. The shadow warning is gone.
+
+**Verified under the new pin**: 1133 assertions across the four suites, `CYRIUS_DCE=1` build OK,
+all 7 fuzz harnesses green, plus the live A/B resolution check above.
 
 ### Fixed — peer API used a hardcoded syscall number and **fabricated addresses** off x86-Linux
 

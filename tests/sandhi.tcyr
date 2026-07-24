@@ -1523,6 +1523,197 @@ fn test_resolve_parse_response_synthetic() {
     return 0;
 }
 
+# ── CNAME chain following (1.9.2) ────────────────────────────────
+# Before 1.9.2 the parsers accepted an RR only when its owner name
+# equalled the question name, so a CNAME-led answer resolved to nothing.
+# Real hosts are affected: auth.docker.io (the Docker Hub token
+# endpoint), public.ecr.aws, mcr.microsoft.com.
+#
+# Shared packet shape for the tests below — question "x.io", then the
+# answers each test appends:
+#   0..11  header
+#   12..16 QNAME "x.io"  = 01 'x' 02 'i' 'o' 00   (5 bytes)
+#   17..20 QTYPE + QCLASS
+#   21..   answers
+fn _dns_hdr(pkt, ancount) {
+    store8(pkt + 0, 0x12); store8(pkt + 1, 0x34);   # ID 0x1234
+    store8(pkt + 2, 0x81); store8(pkt + 3, 0x80);   # QR=1 RD=1 RA=1 RCODE=0
+    store8(pkt + 5, 1);                              # QDCOUNT=1
+    store8(pkt + 7, ancount);
+    return 0;
+}
+
+# QNAME "x.io" at offset 12; returns the offset just past QTYPE/QCLASS.
+fn _dns_q_xio(pkt) {
+    store8(pkt + 12, 1); store8(pkt + 13, 120);      # "x"
+    store8(pkt + 14, 2); store8(pkt + 15, 105); store8(pkt + 16, 111);  # "io"
+    store8(pkt + 17, 0);                              # root
+    store8(pkt + 19, 1);                              # QTYPE=A
+    store8(pkt + 21, 1);                              # QCLASS=IN
+    return 22;
+}
+
+fn test_resolve_cname_chain_followed() {
+    # ANSWER 1: x.io CNAME c.io      ANSWER 2: c.io A 192.0.2.7
+    # This is the exact shape that used to fail.
+    var pkt[96];
+    memset(&pkt, 0, 96);
+    _dns_hdr(&pkt, 2);
+    var off = _dns_q_xio(&pkt);          # 22
+
+    # Answer 1 — owner = ptr to qname(12), type CNAME(5), RDATA "c.io" (6 B)
+    store8(&pkt + off + 0, 0xC0); store8(&pkt + off + 1, 0x0C);
+    store8(&pkt + off + 3, 5);           # TYPE=CNAME
+    store8(&pkt + off + 5, 1);           # CLASS=IN
+    store8(&pkt + off + 9, 60);          # TTL
+    store8(&pkt + off + 11, 6);          # RDLENGTH=6
+    var cname_rdata = off + 12;
+    store8(&pkt + cname_rdata + 0, 1); store8(&pkt + cname_rdata + 1, 99);      # "c"
+    store8(&pkt + cname_rdata + 2, 2); store8(&pkt + cname_rdata + 3, 105);
+    store8(&pkt + cname_rdata + 4, 111);                                         # "io"
+    store8(&pkt + cname_rdata + 5, 0);                                           # root
+    off = cname_rdata + 6;               # 40
+
+    # Answer 2 — owner = ptr to the CNAME target, type A, 192.0.2.7
+    store8(&pkt + off + 0, 0xC0); store8(&pkt + off + 1, cname_rdata);
+    store8(&pkt + off + 3, 1);           # TYPE=A
+    store8(&pkt + off + 5, 1);           # CLASS=IN
+    store8(&pkt + off + 9, 60);
+    store8(&pkt + off + 11, 4);          # RDLENGTH=4
+    store8(&pkt + off + 12, 192); store8(&pkt + off + 13, 0);
+    store8(&pkt + off + 14, 2); store8(&pkt + off + 15, 7);
+    var plen = off + 16;
+
+    var ip = _sandhi_resolve_parse_response(&pkt, plen, 0x1234);
+    # 192.0.2.7 → LE uint32 = 0x070200C0
+    assert_eq(ip, 0x070200C0, "dns cname: A behind a CNAME is resolved");
+    return 0;
+}
+
+fn test_resolve_cname_direct_answer_still_wins() {
+    # Both a CNAME and a direct A for the question name are present.
+    # The direct A must win even though the CNAME comes first.
+    var pkt[96];
+    memset(&pkt, 0, 96);
+    _dns_hdr(&pkt, 2);
+    var off = _dns_q_xio(&pkt);
+
+    store8(&pkt + off + 0, 0xC0); store8(&pkt + off + 1, 0x0C);
+    store8(&pkt + off + 3, 5);           # CNAME
+    store8(&pkt + off + 5, 1);
+    store8(&pkt + off + 11, 6);
+    var cr = off + 12;
+    store8(&pkt + cr + 0, 1); store8(&pkt + cr + 1, 99);
+    store8(&pkt + cr + 2, 2); store8(&pkt + cr + 3, 105); store8(&pkt + cr + 4, 111);
+    store8(&pkt + cr + 5, 0);
+    off = cr + 6;
+
+    # A owned by the QUESTION name (not the CNAME target)
+    store8(&pkt + off + 0, 0xC0); store8(&pkt + off + 1, 0x0C);
+    store8(&pkt + off + 3, 1);
+    store8(&pkt + off + 5, 1);
+    store8(&pkt + off + 11, 4);
+    store8(&pkt + off + 12, 10); store8(&pkt + off + 13, 1);
+    store8(&pkt + off + 14, 2); store8(&pkt + off + 15, 3);
+    var plen = off + 16;
+
+    # 10.1.2.3 → LE uint32 = 0x0302010A
+    assert_eq(_sandhi_resolve_parse_response(&pkt, plen, 0x1234), 0x0302010A,
+    "dns cname: direct A preferred over the CNAME");
+    return 0;
+}
+
+fn test_resolve_cname_unrelated_a_still_rejected() {
+    # The anti-answer-substitution guard must survive the CNAME change:
+    # an A record for a name we never asked about, and which no CNAME in
+    # the packet points at, is still refused.
+    var pkt[96];
+    memset(&pkt, 0, 96);
+    _dns_hdr(&pkt, 1);
+    var off = _dns_q_xio(&pkt);
+
+    # Answer owner = "evil.io" written inline (NOT the question name)
+    store8(&pkt + off + 0, 4);
+    store8(&pkt + off + 1, 101); store8(&pkt + off + 2, 118);
+    store8(&pkt + off + 3, 105); store8(&pkt + off + 4, 108);   # "evil"
+    store8(&pkt + off + 5, 2); store8(&pkt + off + 6, 105); store8(&pkt + off + 7, 111);
+    store8(&pkt + off + 8, 0);
+    var rr = off + 9;
+    store8(&pkt + rr + 1, 1);            # TYPE=A
+    store8(&pkt + rr + 3, 1);            # CLASS=IN
+    store8(&pkt + rr + 9, 4);            # RDLENGTH=4
+    store8(&pkt + rr + 10, 6); store8(&pkt + rr + 11, 6);
+    store8(&pkt + rr + 12, 6); store8(&pkt + rr + 13, 6);
+    var plen = rr + 14;
+
+    assert_eq(_sandhi_resolve_parse_response(&pkt, plen, 0x1234), 0 - 1,
+    "dns cname: A for an unrelated name is still rejected");
+    return 0;
+}
+
+fn test_resolve_cname_cycle_terminates() {
+    # Hostile packet: x.io CNAME c.io, c.io CNAME x.io. The walk must
+    # terminate on the hop bound rather than spin.
+    var pkt[96];
+    memset(&pkt, 0, 96);
+    _dns_hdr(&pkt, 2);
+    var off = _dns_q_xio(&pkt);
+
+    # x.io CNAME c.io
+    store8(&pkt + off + 0, 0xC0); store8(&pkt + off + 1, 0x0C);
+    store8(&pkt + off + 3, 5);
+    store8(&pkt + off + 5, 1);
+    store8(&pkt + off + 11, 6);
+    var cr = off + 12;
+    store8(&pkt + cr + 0, 1); store8(&pkt + cr + 1, 99);
+    store8(&pkt + cr + 2, 2); store8(&pkt + cr + 3, 105); store8(&pkt + cr + 4, 111);
+    store8(&pkt + cr + 5, 0);
+    off = cr + 6;
+
+    # c.io CNAME x.io  (back-pointer → cycle)
+    store8(&pkt + off + 0, 0xC0); store8(&pkt + off + 1, cr);
+    store8(&pkt + off + 3, 5);
+    store8(&pkt + off + 5, 1);
+    store8(&pkt + off + 11, 2);
+    store8(&pkt + off + 12, 0xC0); store8(&pkt + off + 13, 0x0C);
+    var plen = off + 14;
+
+    assert_eq(_sandhi_resolve_parse_response(&pkt, plen, 0x1234), 0 - 1,
+    "dns cname: cyclic chain terminates and fails");
+    return 0;
+}
+
+fn test_resolve_cname_aaaa_chain_followed() {
+    # Same fix on the AAAA path: x.io CNAME c.io, c.io AAAA ::1
+    var pkt[112];
+    memset(&pkt, 0, 112);
+    _dns_hdr(&pkt, 2);
+    var off = _dns_q_xio(&pkt);
+
+    store8(&pkt + off + 0, 0xC0); store8(&pkt + off + 1, 0x0C);
+    store8(&pkt + off + 3, 5);
+    store8(&pkt + off + 5, 1);
+    store8(&pkt + off + 11, 6);
+    var cr = off + 12;
+    store8(&pkt + cr + 0, 1); store8(&pkt + cr + 1, 99);
+    store8(&pkt + cr + 2, 2); store8(&pkt + cr + 3, 105); store8(&pkt + cr + 4, 111);
+    store8(&pkt + cr + 5, 0);
+    off = cr + 6;
+
+    store8(&pkt + off + 0, 0xC0); store8(&pkt + off + 1, cr);
+    store8(&pkt + off + 3, 28);          # TYPE=AAAA
+    store8(&pkt + off + 5, 1);
+    store8(&pkt + off + 11, 16);         # RDLENGTH=16
+    store8(&pkt + off + 27, 1);          # ...::1 (last byte of the 16)
+    var plen = off + 28;
+
+    var v6 = _sandhi_resolve_parse_response_aaaa(&pkt, plen, 0x1234);
+    assert_neq(v6, 0, "dns cname: AAAA behind a CNAME is resolved");
+    assert_eq(load8(v6 + 0), 0, "dns cname: v6 leading byte");
+    assert_eq(load8(v6 + 15), 1, "dns cname: v6 trailing byte");
+    return 0;
+}
+
 fn test_resolve_parse_nxdomain() {
     # Response with RCODE=3 (NXDOMAIN) should be rejected.
     var pkt[16];
@@ -2755,6 +2946,11 @@ fn main() {
 
     test_group("net/resolve/parse_synthetic");
     test_resolve_parse_response_synthetic();
+    test_resolve_cname_chain_followed();
+    test_resolve_cname_direct_answer_still_wins();
+    test_resolve_cname_unrelated_a_still_rejected();
+    test_resolve_cname_cycle_terminates();
+    test_resolve_cname_aaaa_chain_followed();
 
     test_group("net/resolve/parse_nxdomain");
     test_resolve_parse_nxdomain();

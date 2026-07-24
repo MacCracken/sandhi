@@ -4,7 +4,45 @@
 
 ## Version
 
-**1.9.0** — 2026-07-14. **Peer address for server handlers + cyrius pin `6.4.49 → 6.4.63`.** Handlers could reach the transport (`sandhi_server_conn_fd`) but not learn *who* connected, so per-IP rate limiting / auth-failure backoff / source-address logs were unbuildable on sandhi. **Filed by yeo-cy-test**: its `/api/login` runs Argon2id (~244 ms CPU/attempt) — a request-amplification lever it could only cap by *concurrency*, not attribute to a source. New: `sandhi_server_peer_ip/peer_port(fd)`, `sandhi_server_conn_peer_ip/conn_peer_port(conn)` (both transports — plaintext + TLS carry the raw fd), `sandhi_server_peer_sockaddr(fd, out16)` (caller-owned buffer → no alloc, thread-safe), `sandhi_server_ip4_str(ip)`. IPv4 packed in net.cyr's `addr` convention (127.0.0.1 → `0x0100007F`; matches `sandhi_net_parse_ipv4`), assembled byte-wise (endianness-independent). Implemented via **`getpeername(2)`** on the fd the conn already holds — the kernel fills the peer at `accept(2)` but the stdlib's `sock_accept` discards it, and `lib/` is vendored stdlib, not sandhi's to change; `getpeername` also needs no accept-path surgery and works identically across both seams. **AGNOS → 0 ("unknown"); the contract says callers must fail open, never treat 0 as a peer.** **Verified**: **1126 assertions** (sandhi 540 → **554** / h2 167 / alloc 342 / rpc 63) — a real loopback TCP connection with the client bound to a **known** port (so the peer port is checked against a chosen value, not merely "non-zero"), plus a client-side check that its peer is the *listener* (catches a getsockname mix-up) and bad-fd/null-conn → 0. `SO_REUSEADDR` on both sockets: without it a TIME_WAIT from the prior run fails the bind and the test **silently skips** — caught only because the assertion count dropped 9 → 1. Five dist bundles at v1.9.0; smoke + run OK. Pin jump verified green (1112 baseline) *before* the feature landed.
+**1.9.2** — 2026-07-24. **DNS resolver follows CNAME chains.** The A/AAAA parsers accepted an
+answer record only when its owner name equalled the question name — the anti-answer-substitution
+guard, correct as far as it goes, but it also discarded every CNAME-led answer. The effect was not
+a missing optimization: the affected hosts **did not resolve at all**, returning
+`SANDHI_ERR_DISCOVERY`, i.e. indistinguishable from "no such host". **Filed by stiva**, whose
+roadmap §B registry client found `registry-1.docker.io` resolving while **`auth.docker.io` — the
+Hub token endpoint — did not**, so an authenticated Hub pull died at the token step. Measured
+before/after on the real resolver, same binary otherwise: `auth.docker.io`, `public.ecr.aws`,
+`mcr.microsoft.com` all **FAIL → resolved**; `registry-1.docker.io` / `ghcr.io` / `quay.io`
+unchanged. Both parsers now walk the chain per RFC 1034 §3.6.2 via a shared
+`_sandhi_resolve_find_rr_a` (one answer-section pass per hop): accept an A/AAAA owned by the name
+currently being followed, else advance along a CNAME owned by it. **The security property is
+unchanged** — a record is accepted only if its owner is a name we are already following, and that
+name only advances along CNAMEs we matched ourselves. Added: an 8-hop chain bound so a hostile
+cycle terminates, and RDATA bounds-checking for *every* RR type (the old code bounded only the
+fixed 4/16-byte A/AAAA payloads, so a truncated RR of another type could walk the cursor past the
+buffer). **Verified**: **1133 assertions** (sandhi 555 → **561** / h2 167 / alloc 342 / rpc 63) —
+6 new tests over hand-built wire packets covering chain-followed (A + AAAA), direct-answer-wins,
+unrelated-owner-still-rejected, and cycle-terminates; the resolver previously had zero CNAME
+coverage. Live A/B against the six real hosts above. `CYRIUS_DCE=1` build OK; all 7 fuzz
+harnesses green. **Cyrius pin `6.4.70 → 6.4.76`** (maintenance; the pin had trailed six patches
+and every build warned) — no source change needed, `lib/` re-vendored. Also removed four
+**undeclared** bundles from `lib/` (`niyama` 1.0.5, `vani` 1.1.1, `yantra` 1.0.0, and `sandhi`
+1.9.0 — a stale copy of *this library* shadowing itself): none is in `[deps].stdlib`, so
+`lib sync` never refreshed them, and each was **older than the snapshot copy it shadowed**,
+meaning the build was compiling against stale vendored code. `lib/` is gitignored to be
+reproducible from the manifest; it now is, and the shadow warning is gone.
+
+> **Consumer note:** post-fold, consumers include stdlib's vendored `lib/sandhi.cyr`, not this
+> repo. stiva (and every other consumer) gets this fix only once a cyrius release refreshes
+> `lib/sandhi.cyr` from `dist/sandhi.cyr` — the cyrius-side slot in the post-fold procedure.
+> Until then a consumer pinned to 6.4.76 still has the pre-fix resolver.
+
+_(1.9.1 — 2026-07-22 — peer API used a hardcoded x86_64 syscall number, fabricating addresses off
+x86-Linux (on aarch64 number 52 is `fchmod`, which *succeeds* and leaves the sockaddr unwritten).
+Now uses the per-arch `sys_getpeername`; cyrius pin `6.4.63 → 6.4.70`. Full detail in
+CHANGELOG [1.9.1].)_
+
+_(1.9.0 — 2026-07-14. **Peer address for server handlers + cyrius pin `6.4.49 → 6.4.63`.** Handlers could reach the transport (`sandhi_server_conn_fd`) but not learn *who* connected, so per-IP rate limiting / auth-failure backoff / source-address logs were unbuildable on sandhi. **Filed by yeo-cy-test**: its `/api/login` runs Argon2id (~244 ms CPU/attempt) — a request-amplification lever it could only cap by *concurrency*, not attribute to a source. New: `sandhi_server_peer_ip/peer_port(fd)`, `sandhi_server_conn_peer_ip/conn_peer_port(conn)` (both transports — plaintext + TLS carry the raw fd), `sandhi_server_peer_sockaddr(fd, out16)` (caller-owned buffer → no alloc, thread-safe), `sandhi_server_ip4_str(ip)`. IPv4 packed in net.cyr's `addr` convention (127.0.0.1 → `0x0100007F`; matches `sandhi_net_parse_ipv4`), assembled byte-wise (endianness-independent). Implemented via **`getpeername(2)`** on the fd the conn already holds — the kernel fills the peer at `accept(2)` but the stdlib's `sock_accept` discards it, and `lib/` is vendored stdlib, not sandhi's to change; `getpeername` also needs no accept-path surgery and works identically across both seams. **AGNOS → 0 ("unknown"); the contract says callers must fail open, never treat 0 as a peer.** **Verified**: **1126 assertions** (sandhi 540 → **554** / h2 167 / alloc 342 / rpc 63) — a real loopback TCP connection with the client bound to a **known** port (so the peer port is checked against a chosen value, not merely "non-zero"), plus a client-side check that its peer is the *listener* (catches a getsockname mix-up) and bad-fd/null-conn → 0. `SO_REUSEADDR` on both sockets: without it a TIME_WAIT from the prior run fails the bind and the test **silently skips** — caught only because the assertion count dropped 9 → 1. Five dist bundles at v1.9.0; smoke + run OK. Pin jump verified green (1112 baseline) *before* the feature landed.)_
 
 _(**1.8.2** — 2026-07-11. **Fuzz-harness suite for the untrusted-input parsers + a gating `cyrius fuzz` CI step.** cyrius 6.4.49 (pinned since 1.8.0) ships a `cyrius fuzz` runner for `fuzz/*.fcyr`; sandhi — whose whole job is parsing network bytes — had none. Added a first round of hand-authored adversarial harnesses over the **seven** highest-value parsers (`url` / `headers` / `response`+chunked / `dns` / `hpack` / `sse` / `json`) and wired `cyrius fuzz` into CI (gating; deterministic PRNG seeds, no network/time → no flake). Each bombards its parser with malformed / oversized / boundary / embedded-CR-LF-NUL input and asserts crash-freedom; standouts hit the **chunked decoder** (the 1.6.5 split-CRLF bug site, via `sandhi_http_response_parse`), **DNS name-compression pointer loops** (self / ping-pong / OOB), and **HPACK varint-continuation bombs**. No `src/` change; no pin change (stays 6.4.49). **Verified**: **all 7 harnesses green (7 passed / 0 failed) — no defect surfaced** (parsers robust to this corpus; the win is the regression guard + infrastructure); 1112 unit assertions unchanged; native + `CYRIUS_DCE=1` smoke OK; lint 0/0; five dist bundles regenerated at v1.8.2.)_
 
