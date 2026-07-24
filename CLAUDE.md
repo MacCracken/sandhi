@@ -21,7 +21,7 @@
 
 Be the one place AGNOS consumers go for service-to-service communication — HTTP client + JSON-RPC + WebSocket + TLS policy + service discovery — composed cleanly on top of the thin stdlib primitives.
 
-Stdlib carries the primitives; sandhi carries the patterns. Same relationship sakshi has to tracing, mabda to GPU, sankoch to compression. Scaffolded as a sibling crate; **folded into stdlib at the v5.7.0 clean-break fold (sandhi 1.0.0)** per [ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md). Now in **post-fold maintenance** — patches land here first, `dist/sandhi.cyr` regenerates, and a small cyrius slot refreshes `lib/sandhi.cyr`.
+Stdlib carries the primitives; sandhi carries the patterns. Same relationship sakshi has to tracing, mabda to GPU, sankoch to compression. Scaffolded as a sibling crate; **folded into stdlib at the v5.7.0 clean-break fold (sandhi 1.0.0)** per [ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5-7-0.md). Now in **post-fold maintenance** — patches land here first, all five dist bundles regenerate, and a small cyrius slot refreshes `lib/sandhi.cyr` from `dist/sandhi.cyr`.
 
 ## Current State
 
@@ -45,6 +45,11 @@ cyrius test tests/sandhi.tcyr                              # unit tests — run 
 cyrius lint src/*.cyr                                      # static checks
 CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke  # release-parity build
 cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr build/sandhi-smoke-libssl  # deprecated libssl opt-in
+cyrius fuzz                                                # fuzz harnesses (fuzz/*.fcyr) — gating in CI
+
+# Regenerate the dist bundles — ALL FIVE, every release. `cyrius distlib`
+# alone does only dist/sandhi.cyr; there is no --all. CI gates on all five.
+for p in "" tls server rpc discovery; do cyrius distlib $p; done
 ```
 
 > **TLS backend (native is the no-flag default since cyrius 6.1.21 / sandhi 1.4.9):**
@@ -94,17 +99,53 @@ The fold shipped — a **clean break, no alias window** (ADR 0002): cyrius delet
 `lib/http_server.cyr` and added `lib/sandhi.cyr` (vendored from `dist/sandhi.cyr`)
 in the same release; consumers `include "lib/sandhi.cyr"` and dropped their
 `[deps.sandhi]` pins. Post-fold, the ongoing process is just: regenerate
-`dist/sandhi.cyr` via `cyrius distlib` each release, and a small cyrius-side slot
-refreshes `lib/sandhi.cyr` from it. (Kept here as the procedure, not pending work.)
+**all five dist bundles** (see below) each release, and a small cyrius-side slot
+refreshes `lib/sandhi.cyr` from `dist/sandhi.cyr`. (Kept here as the procedure,
+not pending work.)
+
+> **A fix landing here does NOT reach consumers.** Consumers include stdlib's
+> vendored `lib/sandhi.cyr`, so a patch is invisible to them until a cyrius
+> release re-vendors it from `dist/sandhi.cyr`. When a fix is filed *by* a
+> consumer, say so explicitly in the CHANGELOG / `state.md` entry so nobody
+> assumes bumping their pin is enough.
+
+### Regenerating the dist bundles — **all five, every release**
+
+`cyrius distlib` regenerates **only** `dist/sandhi.cyr`. Since 1.8.0 there are
+four additional `[lib.<profile>]` breakout bundles, each needing its own
+invocation. There is no `--all`. CI's dist-drift check gates on every one:
+
+```bash
+cyrius distlib                # dist/sandhi.cyr           (full)
+cyrius distlib tls            # dist/sandhi-tls.cyr
+cyrius distlib server         # dist/sandhi-server.cyr
+cyrius distlib rpc            # dist/sandhi-rpc.cyr
+cyrius distlib discovery      # dist/sandhi-discovery.cyr
+```
+
+Verify by re-running the five and confirming `git diff dist/` is empty —
+generation is idempotent, so a second pass must be a no-op. Expect **uneven
+diffs**: a change only reaches the profiles whose `[lib.<profile>].modules`
+include the touched file (the 1.9.2 resolver fix moved `rpc` + `discovery` by
+~200 lines each while `tls` + `server` took only the version stamp). A profile
+diff of exactly the version line means the change genuinely isn't in that
+subset — not that regeneration failed.
 
 ### Closeout Pass (before minor/major bump)
 
-1. Full test suite — `.tcyr` green
+1. Full test suite — every `.tcyr` green (`sandhi` / `h2` / `alloc` / `rpc`)
 2. `cyrius lint src/*.cyr` — no unaddressed findings
-3. All consumer pins up to date with the new tag
-4. `dist/sandhi.cyr` re-generated cleanly
-5. Version triple (`VERSION`, `cyrius.cyml`, CHANGELOG header) in sync
-6. `state.md` current — fold status, consumer pins, module line counts
+3. `cyrius fuzz` — all harnesses green
+4. All consumer pins up to date with the new tag
+5. **All five** dist bundles re-generated cleanly (see above) — not just
+   `dist/sandhi.cyr`; regenerating one is the easy miss, and CI catches it
+6. Version quad (`VERSION`, `src/version_str.cyr`, `cyrius.cyml` pin,
+   CHANGELOG header) in sync — `scripts/version-bump.sh` handles the first two
+7. `state.md` current — fold status, consumer pins, module line counts
+8. Build clean of **drift and shadow warnings** — a `./lib/` bundle that is not
+   in `[deps].stdlib` is never refreshed by `cyrius lib sync` and silently
+   shadows the pinned snapshot's newer copy (four such staleness leftovers,
+   including sandhi shadowing *itself*, were removed at 1.9.2)
 
 ## Key Principles
 
@@ -137,7 +178,10 @@ refreshes `lib/sandhi.cyr` from it. (Kept here as the procedure, not pending wor
 ## CI / Release
 
 - **Toolchain pin** — `cyrius.cyml [package].cyrius` is the only authority. **Never** create a `.cyrius-toolchain` file.
-- **Release artifacts** — source tarball, `dist/sandhi.cyr` via `cyrius distlib`, SHA256SUMS.
+- **Release artifacts** — source tarball, **all five** dist bundles (`dist/sandhi.cyr` +
+  `-tls` / `-server` / `-rpc` / `-discovery`, each via its own `cyrius distlib <profile>` —
+  see [Regenerating the dist bundles](#regenerating-the-dist-bundles--all-five-every-release)),
+  SHA256SUMS.
 - **State sync** — release post-hook bumps `docs/development/state.md`.
 - **Fold-into-stdlib** retires this repo's releases at some point. Track the retirement in `state.md` when it happens.
 
