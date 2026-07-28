@@ -169,7 +169,7 @@ fn _serve(port, cap_bytes): i64 {
 
 fn main() {
     alloc_init();
-    _bcp_say("=== sandhi 1.9.4 request-cap / framing gate ===\n");
+    _bcp_say("=== sandhi request-cap / framing gate ===\n");
     var portA = 18461;
     var portB = 18462;
 

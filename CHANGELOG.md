@@ -4,6 +4,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.5] — 2026-07-28
+
+### Changed
+
+- `[package].cyrius` pin: 6.4.83 → **6.4.85**, the v6.4.x closeout cut. Cut so the 1.9.4 request-cap
+  work folds into the stdlib against a current toolchain rather than a two-release-old one.
+
+Nothing in `src/` moved. Re-verified on 6.4.85: 593 asserts green, `fmt --check` clean across
+`src/**`, `programs/*.cyr` and `tests/*.tcyr`, `cyrius vet` clean, both live server gates PASS
+(`_server_body_cap_probe` 6/6, `_server_pool_probe` 6/6), all five dist bundles regenerated.
+
+Of note for a future cut: 6.4.84 added **`chan_try_send`** (`0` enqueued / `-1` closed / `-2` full,
+uniform across all three backends). sandhi's pooled servers hand accepted fds to workers over a
+bounded `chan_send`, which blocks when the handoff channel is full — today that is the intended
+backpressure, so nothing changes here. But it is now expressible to shed instead of block, which is
+worth revisiting if a load-shedding accept policy is ever wanted.
+
 ## [1.9.4] — 2026-07-28
 
 ### Fixed — the server accepted requests it could not hold, and dispatched them anyway
