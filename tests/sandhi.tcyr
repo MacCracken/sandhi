@@ -1133,6 +1133,84 @@ fn test_server_options_mutators() {
     return 0;
 }
 
+# ── 1.9.4 — request cap + the three framing outcomes ──
+
+fn test_server_options_max_request() {
+    var o = sandhi_server_options_new();
+    assert_eq(sandhi_server_options_get_max_request(o), 65536, "max_request: default 64 KiB");
+    assert_eq(sandhi_server_options_get_max_request(0), 65536, "max_request: null opts → 64 KiB");
+
+    sandhi_server_options_max_request(o, 10485760);
+    assert_eq(sandhi_server_options_get_max_request(o), 10485760, "max_request: 10 MiB sticks");
+
+    # Sub-floor reads as "unset". This is what keeps a hand-zeroed pre-1.9.4
+    # struct from turning every single request into a 413.
+    sandhi_server_options_max_request(o, 0);
+    assert_eq(sandhi_server_options_get_max_request(o), 65536, "max_request: 0 → default");
+    sandhi_server_options_max_request(o, 1024);
+    assert_eq(sandhi_server_options_get_max_request(o), 65536, "max_request: below floor → default");
+    sandhi_server_options_max_request(o, 4096);
+    assert_eq(sandhi_server_options_get_max_request(o), 4096, "max_request: the floor itself is honored");
+    return 0;
+}
+
+fn test_server_options_struct_growth() {
+    # The options struct grew 64 → 72 bytes in 1.9.4. Every pre-existing field
+    # is read by fixed offset, so they all have to still round-trip.
+    var o = sandhi_server_options_new();
+    sandhi_server_options_idle_ms(o, 7000);
+    sandhi_server_options_max_conns(o, 12);
+    sandhi_server_options_backlog(o, 300);
+    sandhi_server_options_max_request(o, 262144);
+    assert_eq(sandhi_server_options_get_idle_ms(o), 7000, "growth: idle_ms intact");
+    assert_eq(sandhi_server_options_get_max_conns(o), 12, "growth: max_conns intact");
+    assert_eq(sandhi_server_options_get_backlog(o), 300, "growth: backlog intact");
+    assert_eq(sandhi_server_options_get_max_request(o), 262144, "growth: max_request intact");
+    assert_eq(sandhi_server_options_get_tls(o), 0, "growth: tls_on untouched");
+    return 0;
+}
+
+fn test_server_unsupported_te() {
+    # The regression this guard exists for: `Transfer-Encoding: chunked` with
+    # no Content-Length slipped past BOTH pre-1.9.4 smuggling guards, so
+    # content_length() returned 0, need_body collapsed to the header
+    # terminator, and the handler was dispatched with an EMPTY body while the
+    # chunked bytes sat unread in the socket. Silent data loss, not truncation.
+    var chunked = "POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
+    assert_eq(sandhi_server_request_has_unsupported_te(chunked, strlen(chunked)), 1,
+              "TE-only: flagged unsupported → 501");
+    assert_eq(sandhi_server_request_has_cl_te_conflict(chunked, strlen(chunked)), 0,
+              "TE-only: cl_te_conflict stays silent (no Content-Length to conflict with)");
+    assert_eq(sandhi_server_request_has_dup_smuggling_header(chunked, strlen(chunked)), 0,
+              "TE-only: dup-header guard stays silent (a single TE is not a duplicate)");
+
+    var plain = "POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\nhi";
+    assert_eq(sandhi_server_request_has_unsupported_te(plain, strlen(plain)), 0,
+              "Content-Length body: supported");
+
+    var get = "GET /x HTTP/1.1\r\nHost: h\r\n\r\n";
+    assert_eq(sandhi_server_request_has_unsupported_te(get, strlen(get)), 0,
+              "bodyless GET: supported");
+    return 0;
+}
+
+fn test_server_recv_sentinels() {
+    # The three failure modes must stay distinguishable from each other AND
+    # from a byte count — every serve loop branches on them, and -1 has to
+    # keep its pre-1.9.4 meaning so an un-updated consumer's `n > 0` check
+    # still degrades safely.
+    assert_eq(SANDHI_SERVER_ERR_RECV, 0 - 1, "sentinel: RECV keeps the pre-1.9.4 -1");
+    assert_eq(SANDHI_SERVER_ERR_TOO_LARGE, 0 - 2, "sentinel: TOO_LARGE = -2");
+    assert_eq(SANDHI_SERVER_ERR_INCOMPLETE, 0 - 3, "sentinel: INCOMPLETE = -3");
+
+    # Degenerate inputs are rejected before any read is attempted.
+    assert_eq(sandhi_server_recv_request(0, 0, 0), SANDHI_SERVER_ERR_RECV,
+              "recv_request: max <= 0 → RECV, nothing read");
+    assert_eq(sandhi_server_recv_request_c(0, 0, 16), SANDHI_SERVER_ERR_RECV,
+              "recv_request_c: null conn → RECV");
+    return 0;
+}
+
 # ── 1.6.7 routing (sandhi_server_route_match / router_* / dispatch) ──
 var _g_route_calls = 0;
 var _g_route_hit   = 0;
@@ -2976,6 +3054,16 @@ fn main() {
 
     test_group("server/options/mutators");
     test_server_options_mutators();
+
+    test_group("server/options/max_request");
+    test_server_options_max_request();
+    test_server_options_struct_growth();
+
+    test_group("server/framing/unsupported_te");
+    test_server_unsupported_te();
+
+    test_group("server/framing/sentinels");
+    test_server_recv_sentinels();
 
     test_group("server/sigpipe_guard");
     test_server_sigpipe_guard();

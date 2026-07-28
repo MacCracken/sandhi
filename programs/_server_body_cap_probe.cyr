@@ -1,0 +1,236 @@
+# programs/_server_body_cap_probe.cyr — 1.9.4 live gate for the request cap
+# and the framing outcomes that used to be silent.
+#
+# Forks twice. Each child runs a POOLED server (2 workers); the parent drives
+# raw loopback requests and asserts the STATUS THAT COMES BACK ON THE WIRE —
+# the point being that pre-1.9.4 every one of cases 1-3 was answered 200 with a
+# quietly wrong body instead.
+#
+#   server A — max_request = 4096 (the floor), so the cap is cheap to cross
+#     1. POST, Content-Length 64          → 200, handler saw all 64 body bytes
+#     2. POST, Content-Length 8192        → 413  (was: 200 + truncated body)
+#     3. POST, Transfer-Encoding: chunked → 501  (was: 200 + EMPTY body)
+#     4. POST, Content-Length + TE        → 400  (0.9.0 smuggling guard, regression check)
+#     5. GET with a >4 KiB header block   → 413  (header overflow, not just bodies)
+#
+#   server B — default cap (64 KiB), same 8192-byte POST as case 2
+#     6. POST, Content-Length 8192        → 200  (proves the knob is what decides,
+#                                                 not a hardcoded constant)
+#
+# Exit 0 PASS / non-zero FAIL. Pure loopback — no network, nothing to skip.
+include "lib/thread_local.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+include "lib/sigil.cyr"
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
+include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/http/download.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+
+
+fn _bcp_say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+# Handler: echo the number of BODY bytes that actually arrived. A truncated or
+# discarded body shows up here as the wrong number, so case 1 and case 6 prove
+# delivery rather than just a status code.
+fn echo_body_len(ctx, cfd, buf, blen): i64 {
+    var bo = sandhi_server_body_offset(buf, blen);
+    var got = 0;
+    if (bo >= 0) { got = blen - bo; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "len=");
+    str_builder_add_int(sb, got);
+    var s = str_data(str_builder_build(sb));
+    sandhi_server_send_response(cfd, 200, "OK", "text/plain", s, strlen(s), 0);
+    return 0;
+}
+
+fn _status3(rbuf, got): i64 {
+    if (got < 12) { return 0; }
+    return (load8(rbuf + 9) - 48) * 100 + (load8(rbuf + 10) - 48) * 10 + (load8(rbuf + 11) - 48);
+}
+
+# Send `len` bytes verbatim, read the whole response, return its status code.
+# `want_len` >= 0 additionally requires the body to read "len=<want_len>".
+fn _raw_req(port, req, len, want_len): i64 {
+    var conn = sandhi_conn_open(INADDR_LOOPBACK(), port, 0, "");
+    if (conn == 0) { return 0 - 1; }
+    sandhi_conn_send_all(conn, req, len);
+    var rbuf[2048];
+    var got = 0;
+    var go = 1;
+    while (go == 1) {
+        var n = sandhi_conn_recv(conn, &rbuf + got, 2047 - got);
+        if (n <= 0) { go = 0; }
+        else {
+            got = got + n;
+            if (got >= 2047) { go = 0; }
+        }
+    }
+    sandhi_conn_close(conn);
+    if (got < 12) { return 0 - 2; }
+    store8(&rbuf + got, 0);
+    if (want_len >= 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "len=");
+        str_builder_add_int(sb, want_len);
+        var want = str_data(str_builder_build(sb));
+        if (strstr(&rbuf, want) == 0) { return 0 - 3; }   # body wrong/truncated
+    }
+    return _status3(&rbuf, got);
+}
+
+# Build "POST /x HTTP/1.1 ... Content-Length: n" + n bytes of 'A'. Returns the
+# buffer; *out_len receives the total byte count.
+fn _mk_post(body_len, out_len): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "POST /x HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Length: ");
+    str_builder_add_int(sb, body_len);
+    str_builder_add_cstr(sb, "\r\n\r\n");
+    var head = str_data(str_builder_build(sb));
+    var hlen = strlen(head);
+    var total = hlen + body_len;
+    var buf = alloc(total + 1);
+    memcpy(buf, head, hlen);
+    var i = 0;
+    while (i < body_len) { store8(buf + hlen + i, 65); i = i + 1; }
+    store8(buf + total, 0);
+    store64(out_len, total);
+    return buf;
+}
+
+# A GET whose header block alone exceeds the cap (one very long header value).
+fn _mk_fat_header(pad, out_len): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "GET /x HTTP/1.1\r\nHost: h\r\nConnection: close\r\nX-Pad: ");
+    var head = str_data(str_builder_build(sb));
+    var hlen = strlen(head);
+    var total = hlen + pad + 4;
+    var buf = alloc(total + 1);
+    memcpy(buf, head, hlen);
+    var i = 0;
+    while (i < pad) { store8(buf + hlen + i, 65); i = i + 1; }
+    store8(buf + hlen + pad + 0, 13);
+    store8(buf + hlen + pad + 1, 10);
+    store8(buf + hlen + pad + 2, 13);
+    store8(buf + hlen + pad + 3, 10);
+    store8(buf + total, 0);
+    store64(out_len, total);
+    return buf;
+}
+
+fn _serve(port, cap_bytes): i64 {
+    var opts = sandhi_server_options_new();
+    sandhi_server_options_max_conns(opts, 2);
+    sandhi_server_options_idle_ms(opts, 1000);
+    if (cap_bytes > 0) { sandhi_server_options_max_request(opts, cap_bytes); }
+    sandhi_server_run_pooled(INADDR_LOOPBACK(), port, &echo_body_len, 0, opts);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    _bcp_say("=== sandhi 1.9.4 request-cap / framing gate ===\n");
+    var portA = 18461;
+    var portB = 18462;
+
+    var pidA = sys_fork();
+    if (pidA == 0) { _serve(portA, 4096); syscall(60, 0); }
+    var pidB = sys_fork();
+    if (pidB == 0) { _serve(portB, 0); syscall(60, 0); }
+
+    async_sleep_ms(500);
+    var fails = 0;
+    var len = 0;
+
+    # [1] a request comfortably inside the cap still works, body intact.
+    var r1 = _mk_post(64, &len);
+    var c1 = _raw_req(portA, r1, len, 64);
+    _bcp_say("[1] CL=64   under cap 4096 → "); fmt_int(c1); _bcp_say(" (want 200, body len=64)\n");
+    if (c1 != 200) { fails = fails + 1; }
+
+    # [2] THE BLOCKER: over the cap. Pre-1.9.4 this answered 200 and handed the
+    #     handler ~4 KiB of an 8 KiB body next to a Content-Length saying 8192.
+    var r2 = _mk_post(8192, &len);
+    var c2 = _raw_req(portA, r2, len, 0 - 1);
+    _bcp_say("[2] CL=8192 over cap 4096  → "); fmt_int(c2); _bcp_say(" (want 413)\n");
+    if (c2 != 413) { fails = fails + 1; }
+
+    # [3] chunked with no Content-Length. Pre-1.9.4: 200 with an EMPTY body.
+    var r3 = "POST /x HTTP/1.1\r\nHost: h\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nAAAA\r\n0\r\n\r\n";
+    var c3 = _raw_req(portA, r3, strlen(r3), 0 - 1);
+    _bcp_say("[3] TE: chunked, no CL     → "); fmt_int(c3); _bcp_say(" (want 501)\n");
+    if (c3 != 501) { fails = fails + 1; }
+
+    # [4] CL+TE smuggling — unchanged 0.9.0 behaviour, guarded against
+    #     regression now that a third check shares the same chain.
+    var r4 = "POST /x HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\nAAAA";
+    var c4 = _raw_req(portA, r4, strlen(r4), 0 - 1);
+    _bcp_say("[4] CL + TE (smuggling)    → "); fmt_int(c4); _bcp_say(" (want 400)\n");
+    if (c4 != 400) { fails = fails + 1; }
+
+    # [5] the cap bounds HEADERS too, not just bodies.
+    var r5 = _mk_fat_header(6000, &len);
+    var c5 = _raw_req(portA, r5, len, 0 - 1);
+    _bcp_say("[5] 6 KiB header block     → "); fmt_int(c5); _bcp_say(" (want 413)\n");
+    if (c5 != 413) { fails = fails + 1; }
+
+    # [6] the SAME 8 KiB request against the default 64 KiB cap → accepted,
+    #     body fully delivered. Proves 413 is the configured policy talking,
+    #     not a hardcoded ceiling.
+    var r6 = _mk_post(8192, &len);
+    var c6 = _raw_req(portB, r6, len, 8192);
+    _bcp_say("[6] CL=8192, default cap   → "); fmt_int(c6); _bcp_say(" (want 200, body len=8192)\n");
+    if (c6 != 200) { fails = fails + 1; }
+
+    sys_kill(pidA, 9);
+    syscall(61, pidA, 0, 0, 0);
+    sys_kill(pidB, 9);
+    syscall(61, pidB, 0, 0, 0);
+
+    if (fails == 0) { _bcp_say("PASS\n"); return 0; }
+    _bcp_say("FAIL ("); fmt_int(fails); _bcp_say(" checks failed)\n");
+    return 1;
+}
+
+var ec = main();
+syscall(60, ec);

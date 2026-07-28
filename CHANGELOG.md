@@ -4,6 +4,93 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.4] — 2026-07-28
+
+### Fixed — the server accepted requests it could not hold, and dispatched them anyway
+
+`sandhi_server_recv_request` had exactly one failure value (`-1`, socket error) and
+reported everything else as "here are N bytes". Three distinct situations produced
+an N that was **not a whole request**, and every serve loop dispatched all three:
+
+1. **Over the 64 KiB buffer.** The read loop is `while (have < max)`. Falling out
+   the bottom meant the peer had more to send — but the fn returned `have` all the
+   same, indistinguishable from a body that genuinely ended there. The handler got
+   a truncated body sitting next to a `Content-Length` header claiming the full
+   size. `HTTP_PAYLOAD_TOO_LARGE = 413` had been declared in this module since
+   0.9.x with **zero references**; nothing ever sent it.
+2. **Peer hung up mid-request.** Same `return have`, so a half-written body — or a
+   header block that never terminated — reached the handler as if complete.
+3. **`Transfer-Encoding: chunked` with no `Content-Length`.** This slipped past both
+   existing smuggling guards (`has_cl_te_conflict` returns 0 the moment
+   Content-Length is absent; `has_dup_smuggling_header` only fires on a *repeated*
+   header). `content_length` then returned 0, `need_body` collapsed to the header
+   terminator, and the recv returned the instant the headers landed. The handler ran
+   with an **empty body** while the chunked bytes sat unread in the socket — not a
+   truncated body, a silently discarded one.
+
+Each now has a distinct outcome, so a serve loop can answer instead of guess:
+
+| Situation | Return | Response |
+|---|---|---|
+| socket error | `SANDHI_SERVER_ERR_RECV` (−1, unchanged) | — |
+| exceeds the cap | `SANDHI_SERVER_ERR_TOO_LARGE` (−2) | **413** Payload Too Large |
+| peer hung up mid-request | `SANDHI_SERVER_ERR_INCOMPLETE` (−3) | **400** Bad Request |
+| unsupported transfer coding | (dispatch-time guard) | **501** Not Implemented |
+
+A `> 0` return is now a *guarantee* that the buffer holds a whole request. Wired
+into all five serve loops — `run_opts`, `run_async`, `run_pooled`, `run_tls`,
+`run_pooled_tls` — plus the TLS twin `sandhi_server_recv_request_c`, which had the
+same three fall-throughs.
+
+Refusals now **drain briefly before closing** (`_sandhi_server_drain_refused`,
+100 ms / 1 MiB budget). `close(2)` with unread bytes still queued makes the kernel
+send RST rather than FIN, and an RST can discard the 413 we just wrote before the
+client reads it — the same reason nginx has `lingering_close`. Past either bound we
+give up and let the reset happen. Not applied on the TLS path, which does not own
+the fd; see the note in `_sandhi_server_tls_serve_one`.
+
+Inbound chunked **decoding** is not part of this patch — 501 is the honest answer
+until it exists (RFC 9112 §7.1). The chunked helpers in this module remain
+response-side only.
+
+### Added — `sandhi_server_options_max_request`, so the cap is policy instead of a constant
+
+```
+sandhi_server_options_max_request(opts, 10485760);   // 10 MiB
+sandhi_server_options_max_conns(opts, 8);            // budget: cap × workers
+```
+
+`HSV_REQ_BUF_SIZE` (64 KiB) stays the default, so a consumer that never calls this
+is byte-identical to 1.9.3. The options struct grew 64 → 72 bytes; `options_new`
+seeds the field, and `get_max_request` reads anything below
+`SANDHI_SERVER_MIN_MAX_REQUEST` (4096) as "unset" → the default, so a hand-zeroed
+struct cannot turn every request into a 413.
+
+**This is a memory knob.** The pooled loops allocate one buffer per *worker* and
+the cooperative loop one per *in-flight conn*, so the footprint is
+`max_request × max_conns`: 10 MiB against the default 128 workers is 1.28 GiB.
+Raise the cap and lower the worker count together.
+
+### Changed
+
+- `[package].cyrius` pin: 6.4.76 → 6.4.83.
+- **Consumer note.** Un-updated callers that only test `n > 0` do not break — they
+  now close the connection without answering, where before they dispatched a
+  corrupt request. Callers matching `n == -1` exactly should widen to `n < 0`.
+
+### Tests
+
+- +21 asserts in `tests/sandhi.tcyr` (572 → 593): cap accessors and floor
+  behaviour, the 64 → 72 byte struct growth preserving every prior field, the
+  TE-only case slipping past both old guards, and the sentinels staying distinct.
+- New `programs/_server_body_cap_probe.cyr` — live loopback gate asserting the
+  status **on the wire** across two pooled servers: under-cap 200 with the body
+  intact, over-cap 413, TE-only 501, CL+TE 400 (regression), oversized *header*
+  block 413, and the same 8 KiB request answered 200 by a server with the default
+  cap — proving the status comes from configured policy, not a fixed ceiling.
+- `programs/_server_pool_probe.cyr` re-run green (no regression in routing,
+  pooling, or slow-client isolation).
+
 ## [1.9.3] — 2026-07-24
 
 ### Fixed — the streaming download API could not send request headers, making it useless for authenticated fetches
