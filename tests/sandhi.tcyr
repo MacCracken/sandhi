@@ -1178,19 +1178,19 @@ fn test_server_unsupported_te() {
     # chunked bytes sat unread in the socket. Silent data loss, not truncation.
     var chunked = "POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
     assert_eq(sandhi_server_request_has_unsupported_te(chunked, strlen(chunked)), 1,
-              "TE-only: flagged unsupported → 501");
+    "TE-only: flagged unsupported → 501");
     assert_eq(sandhi_server_request_has_cl_te_conflict(chunked, strlen(chunked)), 0,
-              "TE-only: cl_te_conflict stays silent (no Content-Length to conflict with)");
+    "TE-only: cl_te_conflict stays silent (no Content-Length to conflict with)");
     assert_eq(sandhi_server_request_has_dup_smuggling_header(chunked, strlen(chunked)), 0,
-              "TE-only: dup-header guard stays silent (a single TE is not a duplicate)");
+    "TE-only: dup-header guard stays silent (a single TE is not a duplicate)");
 
     var plain = "POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\nhi";
     assert_eq(sandhi_server_request_has_unsupported_te(plain, strlen(plain)), 0,
-              "Content-Length body: supported");
+    "Content-Length body: supported");
 
     var get = "GET /x HTTP/1.1\r\nHost: h\r\n\r\n";
     assert_eq(sandhi_server_request_has_unsupported_te(get, strlen(get)), 0,
-              "bodyless GET: supported");
+    "bodyless GET: supported");
     return 0;
 }
 
@@ -1205,9 +1205,9 @@ fn test_server_recv_sentinels() {
 
     # Degenerate inputs are rejected before any read is attempted.
     assert_eq(sandhi_server_recv_request(0, 0, 0), SANDHI_SERVER_ERR_RECV,
-              "recv_request: max <= 0 → RECV, nothing read");
+    "recv_request: max <= 0 → RECV, nothing read");
     assert_eq(sandhi_server_recv_request_c(0, 0, 16), SANDHI_SERVER_ERR_RECV,
-              "recv_request_c: null conn → RECV");
+    "recv_request_c: null conn → RECV");
     return 0;
 }
 
