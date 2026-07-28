@@ -1194,6 +1194,55 @@ fn test_server_unsupported_te() {
     return 0;
 }
 
+fn test_server_reject_arena_is_flat() {
+    # 1.9.6 — the refusal responses (400 / 413 / 501) are emitted BEFORE the user
+    # handler runs, so a consumer's own arena discipline cannot cover them. Until
+    # 1.9.6 they were built with the bare `_send_*` wrappers, which draw from the
+    # no-free global bump: "send malformed requests" was a way to grow RSS without
+    # bound, and 1.9.4 made it worse by adding three more such paths.
+    #
+    # Assert the mechanism directly rather than through a server: a status built
+    # on an arena, rewound each time, must cost the global bump NOTHING once the
+    # first build has settled the str_builder's growth steps.
+    var a = arena_allocator(SANDHI_SERVER_REJECT_ARENA_CAP);
+    assert_neq(a, 0, "reject arena: allocates");
+
+    # fd 2 is stderr and always open; the write is not what is under test, and a
+    # closed/invalid fd would make sock_send fail before the allocation happens.
+    var devnull = 2;
+
+    # Warm: first build grows the arena to its steady shape.
+    var w = 0;
+    while (w < 4) {
+        reset_via(a);
+        sandhi_server_send_status_a(a, devnull, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
+        w = w + 1;
+    }
+
+    var before = alloc_used();
+    var i = 0;
+    while (i < 200) {
+        reset_via(a);
+        sandhi_server_send_status_a(a, devnull, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
+        sandhi_server_send_status_a(a, devnull, HTTP_BAD_REQUEST, "Bad Request");
+        sandhi_server_send_status_a(a, devnull, HTTP_NOT_IMPLEMENTED, "Not Implemented");  #skip-lint: HTTP 501 status code — see CHANGELOG 1.9.4
+        i = i + 1;
+    }
+    var after = alloc_used();
+
+    # 600 sends (200 iterations x 3 statuses). The ONLY global-bump cost left is
+    # `sock_send`'s Result, measured at exactly 16 B per call — the response text
+    # itself is now entirely arena-backed and rewound. Pre-1.9.6 this same loop
+    # also charged the bump ~176 B per response for the str_builder.
+    #
+    # Asserting the exact figure rather than "small" is deliberate: if a future
+    # edit reverts one of these calls to a bare `_send_*` wrapper, the number
+    # jumps and this fails, which is the whole point of the test.
+    assert_eq(after - before, 600 * 16,
+    "reject arena: 600 refusals cost ONLY the stdlib sock_send Result, no response-text allocation");
+    return 0;
+}
+
 fn test_server_recv_sentinels() {
     # The three failure modes must stay distinguishable from each other AND
     # from a byte count — every serve loop branches on them, and -1 has to
@@ -3064,6 +3113,9 @@ fn main() {
 
     test_group("server/framing/sentinels");
     test_server_recv_sentinels();
+
+    test_group("server/reject_arena/flat");
+    test_server_reject_arena_is_flat();
 
     test_group("server/sigpipe_guard");
     test_server_sigpipe_guard();

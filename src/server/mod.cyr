@@ -645,6 +645,28 @@ fn sandhi_server_recv_request(cfd, buf, max): i64 {
 var SANDHI_SERVER_DRAIN_MS  = 100;
 var SANDHI_SERVER_DRAIN_MAX = 1048576;
 
+# Reject-arena capacity (1.9.6). Every refusal a serve loop emits — 400, 413,
+# 501 — is built before the user handler is reached, so a consumer's own arena
+# discipline cannot cover it, and the bare `_send_*` wrappers draw from the
+# no-free global bump. That made "send malformed requests" a way to grow RSS
+# without bound. Each serve loop now owns one of these and rewinds it per
+# request. A status line is ~176 B; 4 KiB is ample headroom for the longest
+# reason phrase and the str_builder's growth steps, and it is allocated ONCE
+# per worker (not per request), so the cost is 4 KiB × workers.
+var SANDHI_SERVER_REJECT_ARENA_CAP = 4096;
+
+# Reject arena for the two SINGLE-FLIGHT loops (run_opts / run_tls). They serve
+# one connection at a time on one thread, so a process-wide arena is safe —
+# same discipline as `_hsv_req_buf`, which they already share.
+var _hsv_reject_arena = 0;
+
+fn _hsv_ensure_reject_arena(): i64 {
+    if (_hsv_reject_arena == 0) {
+        _hsv_reject_arena = arena_allocator(SANDHI_SERVER_REJECT_ARENA_CAP);
+    }
+    return _hsv_reject_arena;
+}
+
 fn _sandhi_server_drain_refused(cfd, buf, buflen): i64 {
     if (buf == 0 || buflen <= 0) { return 0; }
     _sandhi_conn_set_timeout_ms(cfd, SANDHI_SERVER_DRAIN_MS, _SANDHI_SO_RCVTIMEO);
@@ -960,6 +982,7 @@ fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts): i64 {
     # always allocate from the global bump.
     var max_req = _hsv_resolve_req_max(opts);
     if (_hsv_ensure_req_buf(max_req) == 0) { return 1; }
+    if (_hsv_ensure_reject_arena() == 0) { return 1; }   # 1.9.6
 
     var idle_ms = sandhi_server_options_get_idle_ms(opts);
 
@@ -985,26 +1008,27 @@ fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts): i64 {
             if (idle_ms > 0) {
                 _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO);
             }
+            reset_via(_hsv_reject_arena);                    # 1.9.6
             var n = sandhi_server_recv_request(cfd, _hsv_req_buf, max_req - 1);
             # 1.9.4 — answer the two "not a whole request" outcomes instead of
-            # dispatching them.
+            # dispatching them. 1.9.6 — build every refusal on the reject arena.
             if (n == SANDHI_SERVER_ERR_TOO_LARGE) {
-                sandhi_server_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
+                sandhi_server_send_status_a(_hsv_reject_arena, cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
                 _sandhi_server_drain_refused(cfd, _hsv_req_buf, max_req);
             } elif (n == SANDHI_SERVER_ERR_INCOMPLETE) {
                 # Peer already hung up — nothing left in flight to drain.
-                sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+                sandhi_server_send_status_a(_hsv_reject_arena, cfd, HTTP_BAD_REQUEST, "Bad Request");
             } elif (n > 0) {
                 # 0.9.0 P0 #2 — reject CL+TE coexistence with 400
                 # (smuggling vector, RFC 7230 §3.3.3).
                 # 0.9.1 P1 — also reject Host.Host / CL.CL / TE.TE
                 # duplicates (smuggling vector, RFC 7230 §3.3.2 + §5.4).
                 if (sandhi_server_request_has_cl_te_conflict(_hsv_req_buf, n) == 1) {
-                    sandhi_server_send_status(cfd, 400, "Bad Request");
+                    sandhi_server_send_status_a(_hsv_reject_arena, cfd, 400, "Bad Request");
                 } elif (sandhi_server_request_has_dup_smuggling_header(_hsv_req_buf, n) == 1) {
-                    sandhi_server_send_status(cfd, 400, "Bad Request");
+                    sandhi_server_send_status_a(_hsv_reject_arena, cfd, 400, "Bad Request");
                 } elif (sandhi_server_request_has_unsupported_te(_hsv_req_buf, n) == 1) {
-                    sandhi_server_send_status(cfd, HTTP_NOT_IMPLEMENTED, "Not Implemented");  #skip-lint: HTTP 501 status code — inbound transfer-coding decoding deferred, see CHANGELOG 1.9.4
+                    sandhi_server_send_status_a(_hsv_reject_arena, cfd, HTTP_NOT_IMPLEMENTED, "Not Implemented");  #skip-lint: HTTP 501 status code — inbound transfer-coding decoding deferred, see CHANGELOG 1.9.4
                     _sandhi_server_drain_refused(cfd, _hsv_req_buf, max_req);
                 } else {
                     fncall4(handler_fp, ctx, cfd, _hsv_req_buf, n);
@@ -1060,19 +1084,26 @@ fn _sandhi_server_async_handler(arg): i64 {
     var ctx = load64(arg + SANDHI_ASYNC_ARG_CTX);
     var buf = load64(arg + SANDHI_ASYNC_ARG_BUF);
 
+    # 1.9.6 — refusals ride the process reject arena, NOT the per-batch arena:
+    # the per-conn budget there (arg 32 + buf + task 32) is sized exactly and has
+    # no slack for a response. Safe to share and to rewind here because
+    # lib/async.cyr is run-to-completion with no preemption, so two handlers are
+    # never mid-flight at once (the same invariant the per-handler recv buffer
+    # relies on).
+    reset_via(_hsv_reject_arena);
     var n = sandhi_server_recv_request(cfd, buf, _hsv_req_max - 1);
     if (n == SANDHI_SERVER_ERR_TOO_LARGE) {
-        sandhi_server_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
+        sandhi_server_send_status_a(_hsv_reject_arena, cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
         _sandhi_server_drain_refused(cfd, buf, _hsv_req_max);
     } elif (n == SANDHI_SERVER_ERR_INCOMPLETE) {
-        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        sandhi_server_send_status_a(_hsv_reject_arena, cfd, HTTP_BAD_REQUEST, "Bad Request");
     } elif (n > 0) {
         if (sandhi_server_request_has_cl_te_conflict(buf, n) == 1) {
-            sandhi_server_send_status(cfd, 400, "Bad Request");
+            sandhi_server_send_status_a(_hsv_reject_arena, cfd, 400, "Bad Request");
         } elif (sandhi_server_request_has_dup_smuggling_header(buf, n) == 1) {
-            sandhi_server_send_status(cfd, 400, "Bad Request");
+            sandhi_server_send_status_a(_hsv_reject_arena, cfd, 400, "Bad Request");
         } elif (sandhi_server_request_has_unsupported_te(buf, n) == 1) {
-            sandhi_server_send_status(cfd, HTTP_NOT_IMPLEMENTED, "Not Implemented");  #skip-lint: HTTP 501 status code — inbound transfer-coding decoding deferred, see CHANGELOG 1.9.4
+            sandhi_server_send_status_a(_hsv_reject_arena, cfd, HTTP_NOT_IMPLEMENTED, "Not Implemented");  #skip-lint: HTTP 501 status code — inbound transfer-coding decoding deferred, see CHANGELOG 1.9.4
             _sandhi_server_drain_refused(cfd, buf, _hsv_req_max);
         } else {
             fncall4(fp, ctx, cfd, buf, n);
@@ -1112,6 +1143,7 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
     # per-conn arena below is sized from it and _sandhi_server_async_handler
     # reads it.
     var max_req = _hsv_resolve_req_max(opts);
+    if (_hsv_ensure_reject_arena() == 0) { return 1; }   # 1.9.6
     # The cooperative loop runs handlers to completion with no preemption,
     # so EVERY per-connection recv MUST be time-bounded — a single client
     # that connects and sends nothing would otherwise hang the whole loop
@@ -1499,25 +1531,34 @@ fn _sandhi_server_pool_worker(arg): i64 {
     var max_req = _hsv_req_max;
     var reqbuf  = alloc_via(default_alloc(), max_req);
     if (reqbuf == 0) { return 0; }           # OOM — worker exits, pool runs short
+    # 1.9.6 — per-worker reject arena. Every refusal this loop can emit happens
+    # BEFORE the user handler runs, so a consumer's own arena discipline cannot
+    # reach it: an attacker who only ever gets 400/413/501 back was still growing
+    # the no-free global bump by ~176 B per request. Rewound at the top of each
+    # iteration, so a request always starts with the full budget no matter how
+    # the previous one exited. Worker-local, so no cross-worker reset race.
+    var rarena = arena_allocator(SANDHI_SERVER_REJECT_ARENA_CAP);
+    if (rarena == 0) { return 0; }           # OOM — worker exits, pool runs short
     while (1 == 1) {
         var cfd = chan_recv(ch);
         if (cfd == 0) { return 0; }          # channel closed
+        reset_via(rarena);
         if (idle_ms > 0) {
             _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO);
         }
         var n = sandhi_server_recv_request(cfd, reqbuf, max_req - 1);
         if (n == SANDHI_SERVER_ERR_TOO_LARGE) {
-            sandhi_server_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
+            sandhi_server_send_status_a(rarena, cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
             _sandhi_server_drain_refused(cfd, reqbuf, max_req);
         } elif (n == SANDHI_SERVER_ERR_INCOMPLETE) {
-            sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+            sandhi_server_send_status_a(rarena, cfd, HTTP_BAD_REQUEST, "Bad Request");
         } elif (n > 0) {
             if (sandhi_server_request_has_cl_te_conflict(reqbuf, n) == 1) {
-                sandhi_server_send_status(cfd, 400, "Bad Request");
+                sandhi_server_send_status_a(rarena, cfd, 400, "Bad Request");
             } elif (sandhi_server_request_has_dup_smuggling_header(reqbuf, n) == 1) {
-                sandhi_server_send_status(cfd, 400, "Bad Request");
+                sandhi_server_send_status_a(rarena, cfd, 400, "Bad Request");
             } elif (sandhi_server_request_has_unsupported_te(reqbuf, n) == 1) {
-                sandhi_server_send_status(cfd, HTTP_NOT_IMPLEMENTED, "Not Implemented");  #skip-lint: HTTP 501 status code — inbound transfer-coding decoding deferred, see CHANGELOG 1.9.4
+                sandhi_server_send_status_a(rarena, cfd, HTTP_NOT_IMPLEMENTED, "Not Implemented");  #skip-lint: HTTP 501 status code — inbound transfer-coding decoding deferred, see CHANGELOG 1.9.4
                 _sandhi_server_drain_refused(cfd, reqbuf, max_req);
             } else {
                 fncall4(fp, ctx, cfd, reqbuf, n);
@@ -2001,17 +2042,23 @@ fn _sandhi_server_tls_serve_one(a, handler_fp, ctx, shim, fd, reqbuf): i64 {
     # first, so the client generally still reads the status; a very large
     # refused body over TLS can still land as a reset. Tracked for the inbound
     # transfer-coding work rather than bolted on here.
+    # 1.9.6 — every refusal response is built through `a`, the caller's
+    # per-connection arena, which both TLS loops already reset_via per conn. The
+    # bare `_c` wrappers draw from the no-free global bump, so an attacker who
+    # can make requests get REFUSED could grow RSS without bound. `conn` itself
+    # already rides `a` (see _sandhi_server_conn_tls_a above), so this only
+    # finishes what the arena was for.
     if (n == SANDHI_SERVER_ERR_TOO_LARGE) {
-        sandhi_server_send_status_c(conn, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
+        sandhi_server_send_status_c_a(a, conn, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
     } elif (n == SANDHI_SERVER_ERR_INCOMPLETE) {
-        sandhi_server_send_status_c(conn, HTTP_BAD_REQUEST, "Bad Request");
+        sandhi_server_send_status_c_a(a, conn, HTTP_BAD_REQUEST, "Bad Request");
     } elif (n > 0) {
         if (sandhi_server_request_has_cl_te_conflict(reqbuf, n) == 1) {
-            sandhi_server_send_status_c(conn, 400, "Bad Request");
+            sandhi_server_send_status_c_a(a, conn, 400, "Bad Request");
         } elif (sandhi_server_request_has_dup_smuggling_header(reqbuf, n) == 1) {
-            sandhi_server_send_status_c(conn, 400, "Bad Request");
+            sandhi_server_send_status_c_a(a, conn, 400, "Bad Request");
         } elif (sandhi_server_request_has_unsupported_te(reqbuf, n) == 1) {
-            sandhi_server_send_status_c(conn, HTTP_NOT_IMPLEMENTED, "Not Implemented");  #skip-lint: HTTP 501 status code — inbound transfer-coding decoding deferred, see CHANGELOG 1.9.4
+            sandhi_server_send_status_c_a(a, conn, HTTP_NOT_IMPLEMENTED, "Not Implemented");  #skip-lint: HTTP 501 status code — inbound transfer-coding decoding deferred, see CHANGELOG 1.9.4
         } else {
             fncall4(handler_fp, ctx, conn, reqbuf, n);
         }
@@ -2037,6 +2084,7 @@ fn sandhi_server_run_tls(addr, port, handler_fp, ctx, opts): i64 {
     var backlog  = sandhi_server_options_get_backlog(opts);
 
     if (_hsv_ensure_req_buf(_hsv_resolve_req_max(opts)) == 0) { return 1; }
+    if (_hsv_ensure_reject_arena() == 0) { return 1; }   # 1.9.6
 
     var sfd_r = tcp_socket();
     if (is_err_result(sfd_r) == 1) { return 1; }

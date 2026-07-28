@@ -4,6 +4,54 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.6] — 2026-07-28
+
+### Fixed — refusing a request grew RSS without bound; "send garbage" was a memory-exhaustion vector
+
+Every refusal a serve loop emits — 400 on smuggling headers, and since 1.9.4 also 400 on a
+truncated request, 413 on an oversized one, 501 on an unsupported transfer coding — is built
+**before** the user handler is ever reached. A consumer's own arena discipline therefore
+cannot cover it, and all of them used the bare `sandhi_server_send_status` /
+`_send_status_c` wrappers, which draw from the **no-free global bump**.
+
+That made malformed traffic a way to grow RSS without bound, at roughly **176 B per refused
+request**, on a path an unauthenticated peer controls completely. 1.9.4 made it worse rather
+than better: it fixed the silent-truncation bug by *adding three more* bare-wrapper refusal
+paths, taking the pool worker from 2 to 5.
+
+Each serve loop now owns a **reject arena**, rewound per request:
+
+| Loop | Arena |
+|---|---|
+| `run_opts`, `run_tls` | one process-wide arena — both are single-flight on one thread, same discipline as the `_hsv_req_buf` they already share |
+| `run_pooled` | **per worker**, worker-local, so no cross-worker reset race |
+| `run_async` | the process arena, rewound at handler entry — safe because `lib/async.cyr` is run-to-completion with no preemption, the same invariant the per-handler recv buffer already relies on. Deliberately **not** the per-batch arena, whose per-conn budget (`arg 32 + buf + task 32`) is sized exactly and has no slack for a response |
+| `run_pooled_tls`, `run_tls` handlers | `_sandhi_server_tls_serve_one` now builds through the arena it was **already being handed** and previously ignored for responses |
+
+Rewind happens at the *top* of each iteration, so a request always starts with the full
+budget regardless of how the previous one exited. `SANDHI_SERVER_REJECT_ARENA_CAP` is 4 KiB,
+allocated once per worker — cost is 4 KiB × workers, not per request.
+
+**Measured, and asserted in-tree.** New `test_server_reject_arena_is_flat` runs 600 refusal
+responses and asserts the global-bump delta is **exactly** `600 × 16` — the 16 B being
+`sock_send`'s `Result`, and nothing else. The response text no longer touches the bump at
+all. The test pins the exact figure rather than "small" on purpose: if a future edit reverts
+one of these calls to a bare wrapper, the number moves and the test fails.
+
+**Known residual, upstream not ours.** That remaining 16 B is `sock_send` allocating its
+`Result` on the global bump — verified at exactly 16 B/call against cyrius 6.4.86 with a
+standalone probe. It applies to **every** send, successful responses included, and to every
+`sock_send` consumer in the ecosystem, so it cannot be fixed from sandhi. Filed upstream.
+
+**Still open (not this release):** `sandhi_router_dispatch`'s own 404/405 responses and
+`sandhi_server_router_handler_cp`'s 500 still use bare wrappers. Closing those means a new
+`sandhi_router_dispatch_a(a, ...)` public entry point, which is an API addition rather than
+a patch.
+
+### Changed
+
+- `[package].cyrius` pin: 6.4.85 → **6.4.86** (the cut that folds sandhi 1.9.5).
+
 ## [1.9.5] — 2026-07-28
 
 ### Changed
