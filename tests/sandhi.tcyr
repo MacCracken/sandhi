@@ -1358,6 +1358,100 @@ fn test_router_dispatch() {
     return 0;
 }
 
+# 1.9.7 — the per-request arena: options plumbing, and that an arena-threaded
+# dispatch is behaviourally identical to the global-bump one while allocating
+# into the arena instead.
+fn test_server_req_arena() {
+    # option round-trips, and defaults to disabled
+    var o = sandhi_server_options_new();
+    assert_eq(sandhi_server_options_get_req_arena(o), 0,
+    "req_arena defaults to 0 — opt-in, so existing consumers are unaffected");
+    sandhi_server_options_req_arena(o, 32768);
+    assert_eq(sandhi_server_options_get_req_arena(o), 32768, "req_arena round-trips");
+    sandhi_server_options_req_arena(o, 0);
+    assert_eq(sandhi_server_options_get_req_arena(o), 0, "and can be turned back off");
+    sandhi_server_options_req_arena(o, 0 - 5);
+    assert_eq(sandhi_server_options_get_req_arena(o), 0, "a negative size reads as disabled");
+    assert_eq(sandhi_server_options_get_req_arena(0), 0, "a null options struct reads as 0");
+
+    # outside a pooled worker there is no request arena
+    assert_eq(sandhi_server_request_arena(), 0,
+    "request_arena is 0 off a pooled worker — run/run_async have none to own");
+
+    # dispatch through an arena behaves exactly as through the global bump
+    var devnull = syscall(2, "/dev/null", 1, 0);
+    var r = sandhi_router_new(0);
+    sandhi_router_add(r, "GET", "/api/notes/:id", &_t_route_handler);
+    var p[264];
+    var a = arena_allocator(65536);
+    assert_neq(a, 0, "the test arena allocates");
+
+    _g_route_calls = 0;
+    _g_route_hit = 0;
+    sandhi_route_params_init(&p);
+    var req = "GET /api/notes/91 HTTP/1.1\r\nHost: x\r\n\r\n";
+    sandhi_router_dispatch_a(a, r, 0, devnull, req, strlen(req), &p);
+    assert_eq(_g_route_calls, 1, "arena dispatch: matched route invoked once");
+    assert_eq(_g_route_hit, 91, "arena dispatch: :id captured through the _a accessors");
+
+    # the arena really is where the routing path allocated — rewinding and
+    # re-dispatching must reuse it rather than growing
+    var used_before = alloc_used();
+    for (var i = 0; i < 200; i = i + 1) {
+        reset_via(a);
+        sandhi_route_params_init(&p);
+        sandhi_router_dispatch_a(a, r, 0, devnull, req, strlen(req), &p);
+    }
+    assert_eq(alloc_used(), used_before,
+    "200 arena-threaded dispatches leave the global bump flat — this is the leak 1.9.7 closes");
+
+    # the 404 and 405 arms allocate into the arena too
+    reset_via(a);
+    _g_route_calls = 0;
+    var miss = "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n";
+    var used_404 = alloc_used();
+    sandhi_router_dispatch_a(a, r, 0, devnull, miss, strlen(miss), &p);
+    assert_eq(_g_route_calls, 0, "arena dispatch: unknown path still 404s without invoking");
+    # Exactly 16 bytes, and they are not sandhi's: `sock_send` returns a
+    # `Result` allocated on the global bump by `lib/net.cyr`. Filed as
+    # cyrius `2026-07-28-sock-send-result-allocates-per-call.md` and confirmed
+    # still present on 6.5.0. Everything sandhi controls on this path — the
+    # method/path accessors and the status write — is in the arena, which is
+    # what 1.9.7 changed.
+    assert_eq(alloc_used(), used_404 + 16,
+    "a 404 costs exactly one sock_send Result and nothing else on the bump");
+
+    reset_via(a);
+    var wrong = "DELETE /api/notes/1 HTTP/1.1\r\nHost: x\r\n\r\n";
+    var used_405 = alloc_used();
+    sandhi_router_dispatch_a(a, r, 0, devnull, wrong, strlen(wrong), &p);
+    assert_eq(alloc_used(), used_405 + 16, "likewise the 405 write");
+
+    # a null router still answers, through the arena
+    reset_via(a);
+    var used_null = alloc_used();
+    sandhi_router_dispatch_a(a, 0, 0, devnull, req, strlen(req), &p);
+    assert_eq(alloc_used(), used_null + 16,
+    "a null router 404s through the arena as well, paying only that same Result");
+
+    # the router handler wrapper threads the same way
+    reset_via(a);
+    _g_route_calls = 0;
+    _g_route_hit = 0;
+    var used_h = alloc_used();
+    sandhi_server_router_handler_a(a, r, devnull, req, strlen(req));
+    assert_eq(_g_route_calls, 1, "router_handler_a dispatches");
+    assert_eq(_g_route_hit, 91, "with params captured");
+    assert_eq(alloc_used(), used_h, "and allocates nothing on the global bump");
+
+    # the bare handler still works with no arena configured — the fallback path
+    _g_route_calls = 0;
+    sandhi_server_router_handler(r, devnull, req, strlen(req));
+    assert_eq(_g_route_calls, 1,
+    "the bare router_handler still dispatches when no request arena is set");
+    return 0;
+}
+
 fn test_server_sigpipe_guard() {
     # 1.6.6 security fix — installing SIG_IGN for SIGPIPE must succeed.
     # rt_sigaction returns 0 on success; a wrong syscall number or a
@@ -3133,6 +3227,7 @@ fn main() {
 
     test_group("server/routing/dispatch");
     test_router_dispatch();
+    test_server_req_arena();
 
     test_group("server/tls/options");
     test_server_tls_options();

@@ -701,6 +701,10 @@ var HSV_REQ_BUF_SIZE = 65536;
 # a plain global safe under run_pooled. `_hsv_req_buf_cap` tracks how big the
 # process-wide singleton actually is so a raised cap re-allocates it.
 var _hsv_req_max     = 65536;
+
+# 1.9.7 — per-request arena size, published by the pooled entry points before
+# any worker is spawned. 0 disables the arena.
+var _hsv_req_arena_cap = 0;
 var _hsv_req_buf_cap = 0;
 
 # ================================================================
@@ -760,9 +764,10 @@ enum SandhiServerOptOff {
     SANDHI_SERVER_OPT_OFF_TLS_ON       = 48;
     SANDHI_SERVER_OPT_OFF_BACKLOG      = 56;
     SANDHI_SERVER_OPT_OFF_MAX_REQUEST  = 64;
+    SANDHI_SERVER_OPT_OFF_REQ_ARENA    = 72;
 }
 
-var SANDHI_SERVER_OPT_STRUCT_SIZE = 72;
+var SANDHI_SERVER_OPT_STRUCT_SIZE = 80;
 var SANDHI_SERVER_DEFAULT_IDLE_MS = 30000;
 var SANDHI_SERVER_DEFAULT_MAX_CONNS = 128;
 var SANDHI_SERVER_DEFAULT_BACKLOG = 128;
@@ -771,6 +776,59 @@ var SANDHI_SERVER_DEFAULT_BACKLOG = 128;
 # block, so every request would 413 — almost certainly a caller bug (or a
 # zeroed struct), and treated as "unset" rather than honored.
 var SANDHI_SERVER_MIN_MAX_REQUEST = 4096;
+
+# 1.9.7 — per-request handler arena, opt-in.
+#
+# The reject arena added in 1.9.6 covers only the refusals the worker itself
+# emits, all of which happen BEFORE the user handler runs. Everything from
+# `fncall4(fp, ...)` onward — the handler, and the routing accessors
+# `sandhi_server_get_method` / `_get_path` / `_path_only` that
+# `sandhi_router_dispatch` calls on every request — still allocates on the
+# no-free global bump. For a long-running server that is unbounded growth
+# proportional to requests served, which is what the module note above
+# ("arena adoption ... is the answer") has been pointing at.
+#
+# Setting this to a non-zero byte count gives each worker thread an arena that
+# is rewound at the top of every request. `sandhi_server_router_handler` picks
+# it up automatically, so a consumer already using the router gets bounded
+# per-request allocation by setting one option and changing no code. A handler
+# that allocates its own working memory can reach the same arena through
+# `sandhi_server_request_arena`.
+#
+# Default 0 (disabled) so existing consumers are bit-for-bit unaffected: an
+# arena changes *where* allocations land, and a handler that returns pointers
+# into it expecting global-bump lifetime would break. Opting in is the caller
+# asserting their handler does not outlive the request.
+var SANDHI_SERVER_DEFAULT_REQ_ARENA = 65536;
+
+# Thread-local slot holding this worker's request arena, or 0 when disabled.
+# Allocated once, lazily, on the accept thread before any worker is spawned.
+var _sandhi_req_arena_slot = 0 - 1;
+
+# Per-request arena for the calling worker thread, or 0 when not enabled.
+#
+# Valid only for the duration of one handler invocation: the worker rewinds it
+# before the next request, so anything still pointing into it becomes garbage.
+# Returns 0 under `run` / `run_async`, which have no worker threads to own one.
+fn sandhi_server_request_arena(): i64 {
+    if (_sandhi_req_arena_slot < 0) { return 0; }
+    return thread_local_get(_sandhi_req_arena_slot);
+}
+
+# Bytes of per-request arena each pooled worker gets. 0 disables it.
+fn sandhi_server_options_req_arena(opts, n): i64 {
+    if (opts == 0) { return 0; }
+    store64(opts + SANDHI_SERVER_OPT_OFF_REQ_ARENA, n);
+    return 0;
+}
+
+# The configured per-request arena size, or 0 when disabled.
+fn sandhi_server_options_get_req_arena(opts): i64 {
+    if (opts == 0) { return 0; }
+    var n = load64(opts + SANDHI_SERVER_OPT_OFF_REQ_ARENA);
+    if (n < 0) { return 0; }
+    return n;
+}
 
 fn sandhi_server_options_new_a(a): i64 {
     var o = alloc_via(a, SANDHI_SERVER_OPT_STRUCT_SIZE);
@@ -784,6 +842,7 @@ fn sandhi_server_options_new_a(a): i64 {
     store64(o + SANDHI_SERVER_OPT_OFF_TLS_ON, 0);
     store64(o + SANDHI_SERVER_OPT_OFF_BACKLOG, SANDHI_SERVER_DEFAULT_BACKLOG);
     store64(o + SANDHI_SERVER_OPT_OFF_MAX_REQUEST, HSV_REQ_BUF_SIZE);
+    store64(o + SANDHI_SERVER_OPT_OFF_REQ_ARENA, 0);
     return o;
 }
 
@@ -1445,9 +1504,21 @@ fn sandhi_router_add(router, method, pattern, fp): i64 {
 # answer; that is the module-wide "arena-per-request adoption" roadmap item, not
 # routing's to solve here.
 fn sandhi_router_dispatch(router, ctx, cfd, buf, blen, params): i64 {
-    if (router == 0) { sandhi_server_send_status(cfd, 404, "Not Found"); return 1; }
-    var method = sandhi_server_get_method(buf, blen);
-    var path   = sandhi_server_path_only(sandhi_server_get_path(buf, blen));
+    return sandhi_router_dispatch_a(default_alloc(), router, ctx, cfd, buf, blen, params);
+}
+
+# 1.9.7 — allocator-threaded dispatch. Every allocation the routing path makes
+# on behalf of a request lands in `a`: the method and path accessors, and the
+# 404/405 status writes. Pass a per-request arena and the whole dispatch becomes
+# rewindable; pass `default_alloc()` and this is exactly the pre-1.9.7 behaviour.
+#
+# The route handler itself still allocates wherever it chooses — sandhi cannot
+# reach inside `fncall5` — but it can ask for the same arena via
+# `sandhi_server_request_arena`.
+fn sandhi_router_dispatch_a(a, router, ctx, cfd, buf, blen, params): i64 {
+    if (router == 0) { sandhi_server_send_status_a(a, cfd, 404, "Not Found"); return 1; }
+    var method = sandhi_server_get_method_a(a, buf, blen);
+    var path   = sandhi_server_path_only_a(a, sandhi_server_get_path_a(a, buf, blen));
     var c      = load64(router + SANDHI_ROUTER_OFF_COUNT);
     var routes = load64(router + SANDHI_ROUTER_OFF_ROUTES);
     var path_match = 0;
@@ -1463,8 +1534,11 @@ fn sandhi_router_dispatch(router, ctx, cfd, buf, blen, params): i64 {
         }
         i = i + 1;
     }
-    if (path_match == 1) { sandhi_server_send_status(cfd, 405, "Method Not Allowed"); return 1; }
-    sandhi_server_send_status(cfd, 404, "Not Found");
+    if (path_match == 1) {
+        sandhi_server_send_status_a(a, cfd, 405, "Method Not Allowed");
+        return 1;
+    }
+    sandhi_server_send_status_a(a, cfd, 404, "Not Found");
     return 1;
 }
 
@@ -1475,11 +1549,22 @@ fn sandhi_router_dispatch(router, ctx, cfd, buf, blen, params): i64 {
 # buffer is a stack local (per-invocation → pool-safe, no alloc, no leak); route
 # handlers receive the router's `app_ctx` as their ctx.
 fn sandhi_server_router_handler(router, cfd, buf, blen): i64 {
+    # 1.9.7 — routes through the worker's per-request arena when one is
+    # configured, and through the global bump when it is not. That is what lets
+    # a consumer bound the routing path's allocation by setting
+    # `sandhi_server_options_req_arena` and changing nothing else.
+    var a = sandhi_server_request_arena();
+    if (a == 0) { a = default_alloc(); }
+    return sandhi_server_router_handler_a(a, router, cfd, buf, blen);
+}
+
+# Allocator-threaded router handler, for callers driving dispatch themselves.
+fn sandhi_server_router_handler_a(a, router, cfd, buf, blen): i64 {
     var params[264];                         # = SANDHI_ROUTE_PARAMS_SIZE
     sandhi_route_params_init(&params);
     var app_ctx = 0;
     if (router != 0) { app_ctx = load64(router + SANDHI_ROUTER_OFF_APP_CTX); }
-    return sandhi_router_dispatch(router, app_ctx, cfd, buf, blen, &params);
+    return sandhi_router_dispatch_a(a, router, app_ctx, cfd, buf, blen, &params);
 }
 
 # ================================================================
@@ -1539,10 +1624,24 @@ fn _sandhi_server_pool_worker(arg): i64 {
     # the previous one exited. Worker-local, so no cross-worker reset race.
     var rarena = arena_allocator(SANDHI_SERVER_REJECT_ARENA_CAP);
     if (rarena == 0) { return 0; }           # OOM — worker exits, pool runs short
+    # 1.9.7 — per-worker request arena, published into this thread's slot so
+    # `sandhi_server_request_arena` (and therefore the router handler) can find
+    # it without threading a parameter through the handler signature. Worker-
+    # local, so the rewind below races nothing.
+    var harena = 0;
+    if (_hsv_req_arena_cap > 0 && _sandhi_req_arena_slot >= 0) {
+        harena = arena_allocator(_hsv_req_arena_cap);
+        if (harena == 0) { return 0; }       # OOM — worker exits, pool runs short
+        thread_local_set(_sandhi_req_arena_slot, harena);
+    }
     while (1 == 1) {
         var cfd = chan_recv(ch);
         if (cfd == 0) { return 0; }          # channel closed
         reset_via(rarena);
+        # Rewound before the request, not after: a handler that stashed a
+        # pointer still sees live bytes until the next request begins, which is
+        # the same lifetime the reject arena already promises.
+        if (harena != 0) { reset_via(harena); }
         if (idle_ms > 0) {
             _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO);
         }
@@ -1588,6 +1687,15 @@ fn sandhi_server_run_pooled(addr, port, handler_fp, ctx, opts): i64 {
     # max_request × workers; the single write happens here, on this thread,
     # strictly before any reader exists.
     _hsv_resolve_req_max(opts);
+    # 1.9.7 — resolve the per-request arena cap and claim a thread-local slot
+    # BEFORE any worker exists, for the same reason `_hsv_req_max` is published
+    # here: both are read by every worker and written exactly once, on this
+    # thread, strictly before the first reader is spawned. Claiming the slot is
+    # idempotent, so the second pooled entry point reuses the first's.
+    _hsv_req_arena_cap = sandhi_server_options_get_req_arena(opts);
+    if (_hsv_req_arena_cap > 0 && _sandhi_req_arena_slot < 0) {
+        _sandhi_req_arena_slot = thread_local_alloc();
+    }
     # 1.6.8 (yeo-cy-test 🔵 handoff-depth fix): the handoff channel depth + the
     # kernel listen backlog are sized by `backlog` (default 128), DECOUPLED from
     # the worker count. A burst beyond `workers` now queues up to `backlog`
@@ -2195,6 +2303,15 @@ fn sandhi_server_run_pooled_tls(addr, port, handler_fp, ctx, opts): i64 {
     if (workers < 1) { workers = 1; }
     # 1.9.4 — publish the request cap before spawning workers (see run_pooled).
     _hsv_resolve_req_max(opts);
+    # 1.9.7 — resolve the per-request arena cap and claim a thread-local slot
+    # BEFORE any worker exists, for the same reason `_hsv_req_max` is published
+    # here: both are read by every worker and written exactly once, on this
+    # thread, strictly before the first reader is spawned. Claiming the slot is
+    # idempotent, so the second pooled entry point reuses the first's.
+    _hsv_req_arena_cap = sandhi_server_options_get_req_arena(opts);
+    if (_hsv_req_arena_cap > 0 && _sandhi_req_arena_slot < 0) {
+        _sandhi_req_arena_slot = thread_local_alloc();
+    }
     var backlog = sandhi_server_options_get_backlog(opts);
     if (backlog < workers) { backlog = workers; }
 

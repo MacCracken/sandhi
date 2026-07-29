@@ -4,6 +4,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.7] — 2026-07-29
+
+### Fixed — the routing path allocated per request on the no-free global bump
+
+1.9.6 closed the *refusal* half of per-request allocation: every 400/413/501 a worker emits
+before the handler runs now draws from a per-worker reject arena. It did not touch the other
+half. From `fncall4(fp, ...)` onward — the user handler, and the
+`sandhi_server_get_method` / `_get_path` / `_path_only` accessors that
+`sandhi_router_dispatch` calls on **every** request — allocation still went to the global
+bump, which never frees. For a long-running server that is growth proportional to requests
+served, on the success path rather than the attack path. The module's own note has pointed at
+this since routing landed: *"arena adoption … is the answer; that is the module-wide
+arena-per-request adoption roadmap item"*.
+
+**Added:**
+- `sandhi_server_options_req_arena(opts, n)` / `_get_req_arena` — bytes of per-request arena
+  each pooled worker gets. **Default 0 (disabled).**
+- `sandhi_server_request_arena()` — the calling worker's arena, or 0 outside a pooled worker.
+  Valid only for one handler invocation; the worker rewinds it before the next request.
+- `sandhi_router_dispatch_a(a, ...)` and `sandhi_server_router_handler_a(a, ...)` —
+  allocator-threaded. The non-`_a` forms are unchanged wrappers.
+
+`sandhi_server_router_handler` now picks the arena up automatically when one is configured, so
+a consumer already routing through it gets bounded per-request allocation by setting one option
+and changing no code. Both pooled entry points (`run_pooled`, `run_pooled_tls`) publish the cap
+and claim the thread-local slot before spawning any worker, matching how `_hsv_req_max` is
+already published.
+
+**Opt-in on purpose.** An arena changes *where* allocations land, and a handler that returns
+pointers into it expecting global-bump lifetime would break. Setting the option is the caller
+asserting their handler does not outlive the request; leaving it unset is bit-for-bit the
+pre-1.9.7 behaviour.
+
+**Known residual, not sandhi's to fix.** With the arena enabled, a 404/405 response still grows
+the global bump by **exactly 16 bytes** — the `Result` that `lib/net.cyr`'s `sock_send` returns.
+That is filed upstream as cyrius
+`docs/development/issues/2026-07-28-sock-send-result-allocates-per-call.md` and re-confirmed
+present on 6.5.0 while making this change. `tests/sandhi.tcyr::test_server_req_arena` asserts
+that exact bound rather than zero, so if the stdlib fix lands the test will say so.
+
+### Changed
+
+- Toolchain pin moved to cyrius **6.5.0**.
+
+
 ## [1.9.6] — 2026-07-28
 
 ### Fixed — refusing a request grew RSS without bound; "send garbage" was a memory-exhaustion vector
