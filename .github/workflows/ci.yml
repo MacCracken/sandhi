@@ -276,6 +276,27 @@ jobs:
           cyrius build programs/_server_tls_probe.cyr build/_server_tls_probe
           build/_server_tls_probe
 
+      - name: Accept-error policy gate (1.9.8)
+        # 1.9.8: every serve loop used to re-issue accept(2) immediately and
+        # forever on a persistent error — 100% of one core, no backoff, no
+        # bound. Under EMFILE the pending connection is never dequeued, so the
+        # same connection is re-raced at full speed. Reported by bote, whose
+        # http / streamable / ws / bridge transports all delegate to
+        # sandhi_server_run.
+        #
+        # The unit tests cover the classifier + backoff state machine as pure
+        # functions; they cannot cover the loop wiring, which is the half that
+        # burned the core. This forks a server whose accept(2) is guaranteed
+        # EMFILE (clamped RLIMIT_NOFILE, every descriptor but one consumed),
+        # parks a connection in its backlog, and measures the child's on-CPU
+        # nanoseconds over 1 s via /proc/<pid>/schedstat. Pre-fix: 1000 ms
+        # burned. Post-fix: 0 ms. Budget 250 ms — a 4x margin, so a loaded
+        # runner cannot flip it. Pure loopback; skips cleanly (exit 0) on
+        # non-x86_64 or a kernel without CONFIG_SCHEDSTATS.
+        run: |
+          cyrius build programs/_server_accept_emfile_probe.cyr build/_server_accept_emfile_probe
+          build/_server_accept_emfile_probe
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest

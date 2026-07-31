@@ -1133,6 +1133,154 @@ fn test_server_options_mutators() {
     return 0;
 }
 
+# ── 1.9.8 — accept-error policy ──
+#
+# The whole point of splitting the policy into pure `_sandhi_accept_action` /
+# `_sandhi_accept_backoff_next` plus a non-sleeping `_sandhi_accept_step` is
+# that all of this is reachable with no listen socket and no elapsed time.
+
+fn test_accept_action_transient() {
+    # Transient — the connection attempt failed, the listener is healthy.
+    assert_eq(_sandhi_accept_action(_SANDHI_ERRNO_EINTR), SANDHI_ACCEPT_RETRY, "accept action: EINTR → RETRY");
+    assert_eq(_sandhi_accept_action(_SANDHI_ERRNO_ECONNABORTED), SANDHI_ACCEPT_RETRY, "accept action: ECONNABORTED → RETRY");
+    assert_eq(_sandhi_accept_action(_SANDHI_ERRNO_EPROTO), SANDHI_ACCEPT_RETRY, "accept action: EPROTO → RETRY");
+    # EAGAIN must never be slowed: it is the steady state of the async
+    # non-blocking drain AND of every loop on AGNOS.
+    assert_eq(_sandhi_accept_action(_SANDHI_EAGAIN), SANDHI_ACCEPT_RETRY, "accept action: EAGAIN → RETRY (never backed off)");
+    return 0;
+}
+
+fn test_accept_action_fatal() {
+    # Structurally dead listener — accept on this fd can never succeed.
+    assert_eq(_sandhi_accept_action(_SANDHI_ERRNO_EBADF), SANDHI_ACCEPT_FATAL, "accept action: EBADF → FATAL");
+    assert_eq(_sandhi_accept_action(_SANDHI_ERRNO_EINVAL), SANDHI_ACCEPT_FATAL, "accept action: EINVAL → FATAL");
+    assert_eq(_sandhi_accept_action(_SANDHI_ERRNO_ENOTSOCK), SANDHI_ACCEPT_FATAL, "accept action: ENOTSOCK → FATAL");
+    assert_eq(_sandhi_accept_action(_SANDHI_ERRNO_EOPNOTSUPP), SANDHI_ACCEPT_FATAL, "accept action: EOPNOTSUPP → FATAL");
+    return 0;
+}
+
+fn test_accept_action_backoff() {
+    # Resource pressure — the reported trigger. EMFILE 24 / ENFILE 23 /
+    # ENOBUFS 105 / ENOMEM 12.
+    assert_eq(_sandhi_accept_action(24), SANDHI_ACCEPT_BACKOFF, "accept action: EMFILE → BACKOFF");
+    assert_eq(_sandhi_accept_action(23), SANDHI_ACCEPT_BACKOFF, "accept action: ENFILE → BACKOFF");
+    assert_eq(_sandhi_accept_action(105), SANDHI_ACCEPT_BACKOFF, "accept action: ENOBUFS → BACKOFF");
+    assert_eq(_sandhi_accept_action(12), SANDHI_ACCEPT_BACKOFF, "accept action: ENOMEM → BACKOFF");
+
+    # Unknown errnos must fall to BACKOFF, NOT FATAL — misclassifying a
+    # recoverable condition as fatal would take a working server down, and
+    # this is the safe direction of that trade. 1 is also what AGNOS's
+    # sock_accept reports for both of its error cases.
+    assert_eq(_sandhi_accept_action(1), SANDHI_ACCEPT_BACKOFF, "accept action: EPERM (AGNOS bare Err(1)) → BACKOFF, not FATAL");
+    assert_eq(_sandhi_accept_action(4095), SANDHI_ACCEPT_BACKOFF, "accept action: unrecognised errno → BACKOFF, not FATAL");
+    assert_eq(_sandhi_accept_action(0), SANDHI_ACCEPT_BACKOFF, "accept action: errno 0 → BACKOFF, not FATAL");
+    return 0;
+}
+
+fn test_accept_backoff_schedule() {
+    # 1 ms doubling, capped at 250 ms — never 0, never unbounded.
+    assert_eq(_sandhi_accept_backoff_next(0), 1, "backoff: first delay is 1 ms");
+    assert_eq(_sandhi_accept_backoff_next(1), 2, "backoff: 1 → 2");
+    assert_eq(_sandhi_accept_backoff_next(2), 4, "backoff: 2 → 4");
+    assert_eq(_sandhi_accept_backoff_next(64), 128, "backoff: 64 → 128");
+    assert_eq(_sandhi_accept_backoff_next(128), 250, "backoff: 128 → 250 (clamped, not 256)");
+    assert_eq(_sandhi_accept_backoff_next(250), 250, "backoff: 250 → 250 (stays at cap)");
+    # A negative current delay can't arise from the state machine, but the
+    # schedule must not hand back a negative sleep if it ever did.
+    assert_eq(_sandhi_accept_backoff_next(0 - 5), 1, "backoff: negative → 1 ms floor");
+    return 0;
+}
+
+fn test_accept_step_backoff_advances() {
+    var st = _sandhi_accept_state_new();
+    assert_nonnull(st, "accept state: allocates");
+    assert_eq(_sandhi_accept_state_delay(st), 0, "accept state: fresh delay is 0");
+
+    # EMFILE five times running — the delay must climb, not sit at 1 ms.
+    assert_eq(_sandhi_accept_step(st, 24), SANDHI_ACCEPT_BACKOFF, "step: EMFILE → BACKOFF");
+    assert_eq(_sandhi_accept_state_delay(st), 1, "step: 1st EMFILE sleeps 1 ms");
+    _sandhi_accept_step(st, 24);
+    assert_eq(_sandhi_accept_state_delay(st), 2, "step: 2nd EMFILE sleeps 2 ms");
+    _sandhi_accept_step(st, 24);
+    assert_eq(_sandhi_accept_state_delay(st), 4, "step: 3rd EMFILE sleeps 4 ms");
+    _sandhi_accept_step(st, 24);
+    assert_eq(_sandhi_accept_state_delay(st), 8, "step: 4th EMFILE sleeps 8 ms");
+
+    # A served connection forgives the whole streak.
+    _sandhi_accept_state_reset(st);
+    assert_eq(_sandhi_accept_state_delay(st), 0, "step: reset clears the delay");
+    assert_eq(_sandhi_accept_step(st, 24), SANDHI_ACCEPT_BACKOFF, "step: post-reset still BACKOFF");
+    assert_eq(_sandhi_accept_state_delay(st), 1, "step: post-reset restarts at 1 ms");
+    return 0;
+}
+
+fn test_accept_step_retry_and_fatal_are_stateless() {
+    var st = _sandhi_accept_state_new();
+    assert_nonnull(st, "accept state: allocates (retry/fatal)");
+
+    # RETRY must not consume backoff budget — an EINTR storm on a healthy
+    # listener must never walk the loop toward its give-up bound on its own.
+    var i = 0;
+    while (i < 1000) { _sandhi_accept_step(st, _SANDHI_ERRNO_EINTR); i = i + 1; }
+    assert_eq(_sandhi_accept_state_delay(st), 0, "step: 1000× EINTR leaves the delay at 0");
+    assert_eq(_sandhi_accept_step(st, _SANDHI_ERRNO_EINTR), SANDHI_ACCEPT_RETRY, "step: EINTR still RETRY after 1000 of them");
+
+    # ...but RETRY must not RESET it either: only a real accepted connection
+    # clears the streak, so EMFILE sprinkled with EINTR still converges.
+    _sandhi_accept_step(st, 24);
+    _sandhi_accept_step(st, 24);
+    assert_eq(_sandhi_accept_state_delay(st), 2, "step: two EMFILE → 2 ms");
+    _sandhi_accept_step(st, _SANDHI_ERRNO_EINTR);
+    assert_eq(_sandhi_accept_state_delay(st), 2, "step: interleaved EINTR does NOT reset the streak");
+    _sandhi_accept_step(st, 24);
+    assert_eq(_sandhi_accept_state_delay(st), 4, "step: streak resumes at 4 ms, not 1 ms");
+
+    assert_eq(_sandhi_accept_step(st, _SANDHI_ERRNO_EBADF), SANDHI_ACCEPT_FATAL, "step: EBADF → FATAL regardless of state");
+    # A null state can only come from OOM; it must fail closed, not spin.
+    assert_eq(_sandhi_accept_step(0, 24), SANDHI_ACCEPT_FATAL, "step: null state → FATAL (fails closed, never spins)");
+    return 0;
+}
+
+fn test_accept_step_giveup_bound() {
+    # The bound is the whole reason this is not just "sleep forever". Drive
+    # the full schedule — no sleeping happens in `_sandhi_accept_step`, which
+    # is why 200+ iterations cost microseconds here instead of ~48 s.
+    var st = _sandhi_accept_state_new();
+    assert_nonnull(st, "accept state: allocates (giveup)");
+
+    var i = 0;
+    var backoffs = 0;
+    while (i < SANDHI_ACCEPT_GIVEUP) {
+        if (_sandhi_accept_step(st, 24) == SANDHI_ACCEPT_BACKOFF) { backoffs = backoffs + 1; }
+        i = i + 1;
+    }
+    assert_eq(backoffs, SANDHI_ACCEPT_GIVEUP, "giveup: all 200 steps up to the bound back off");
+    assert_eq(_sandhi_accept_state_delay(st), SANDHI_ACCEPT_BACKOFF_MAX_MS, "giveup: delay reached the 250 ms cap before the bound");
+
+    # Step 201 is the one that ends the loop.
+    assert_eq(_sandhi_accept_step(st, 24), SANDHI_ACCEPT_FATAL, "giveup: the step past the bound returns FATAL");
+    assert_eq(_sandhi_accept_step(st, 24), SANDHI_ACCEPT_FATAL, "giveup: and stays FATAL (no wrap back into BACKOFF)");
+
+    # Mutation guard: the bound must be reachable at all. If GIVEUP were ever
+    # set to 0 or negative the first failure would kill a live server.
+    assert_gt(SANDHI_ACCEPT_GIVEUP, 0, "giveup: bound is positive");
+    assert_gt(SANDHI_ACCEPT_BACKOFF_MAX_MS, SANDHI_ACCEPT_BACKOFF_MIN_MS, "giveup: cap is above the floor");
+    return 0;
+}
+
+fn test_accept_backoff_sleep_actually_blocks() {
+    # The policy is only worth anything if `sleep_ms` genuinely yields the
+    # core — a no-op sleep would leave the EMFILE spin exactly as it was.
+    # 20 ms asked, allow generous slack for a loaded CI box; the assertion
+    # that matters is that measurable time passed at all.
+    var t0 = clock_now_ms();
+    sleep_ms(20);
+    var elapsed = clock_now_ms() - t0;
+    assert_gte(elapsed, 10, "sleep_ms(20) really blocks (>= 10 ms elapsed)");
+    assert_lt(elapsed, 5000, "sleep_ms(20) returns promptly (< 5 s)");
+    return 0;
+}
+
 # ── 1.9.4 — request cap + the three framing outcomes ──
 
 fn test_server_options_max_request() {
@@ -3201,6 +3349,22 @@ fn main() {
     test_group("server/options/max_request");
     test_server_options_max_request();
     test_server_options_struct_growth();
+
+    test_group("server/accept_policy/classify");
+    test_accept_action_transient();
+    test_accept_action_fatal();
+    test_accept_action_backoff();
+
+    test_group("server/accept_policy/backoff");
+    test_accept_backoff_schedule();
+    test_accept_step_backoff_advances();
+    test_accept_step_retry_and_fatal_are_stateless();
+
+    test_group("server/accept_policy/giveup");
+    test_accept_step_giveup_bound();
+
+    test_group("server/accept_policy/sleep_blocks");
+    test_accept_backoff_sleep_actually_blocks();
 
     test_group("server/framing/unsupported_te");
     test_server_unsupported_te();

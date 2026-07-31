@@ -27,7 +27,13 @@ zero ambiguity on what to put on its roadmap.
 
 ## Sandhi-side defects
 
-All sandhi-side defects filed to date are **resolved and archived** — see the
+**Open:**
+
+| Doc | Filed by | Severity | Summary |
+|-----|----------|----------|---------|
+| [`2026-07-30-accept-loop-unguarded-spin.md`](2026-07-30-accept-loop-unguarded-spin.md) | bote 3.2.1 | High (availability) | All five serve-loop accept sites re-issued `accept(2)` immediately and forever on a persistent error — 100% of one core, no backoff, no bound, no diagnostic; under EMFILE the pending connection is never dequeued, so the same connection is re-raced at full speed. `sandhi_server_run_async` looked handled but folded every errno into "queue drained", spinning one indirection further out. **Fixed** in `[Unreleased]` (pure errno classifier + capped 1→250 ms backoff + a 200-failure give-up bound); measured 1000 ms → 0 ms of CPU per 1 s EMFILE window, gated by `programs/_server_accept_emfile_probe.cyr`. **Not yet in consumers** — bote's four transports stay affected until a cyrius release re-vendors `lib/sandhi.cyr`. |
+
+Every other sandhi-side defect filed to date is **resolved and archived** — see the
 [Archived](#archived-resolved) table below.
 
 The 1.4.x arc closed the HTTP close-path drain (1.4.1), the repeated-HTTPS-request

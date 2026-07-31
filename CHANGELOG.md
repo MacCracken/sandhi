@@ -4,6 +4,95 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — server: the accept loop spun a core forever on any persistent accept error
+
+Every serve loop in `src/server/mod.cyr` was shaped like this, on a **blocking** listen socket:
+
+```
+while (1 == 1) { var cr = sock_accept(sfd); if (is_err_result(cr) == 0) { … } }
+```
+
+No else branch. On any persistent accept error — EMFILE, ENFILE, EBADF, EINVAL, ENOTSOCK —
+that re-issues `accept(2)` immediately, forever: **100% of one core, no backoff, no bound, no
+diagnostic**. Under EMFILE it is worse than a plain spin, because the pending connection is
+never dequeued: the same connection is re-raced at full speed and the peer is never served.
+
+Measured, before and after, with the new gate below: **1000 ms of CPU burned in a 1000 ms
+EMFILE window → 0 ms.**
+
+**Reported by bote**, whose http / streamable / ws / bridge transports are each a one-line
+delegation to `sandhi_server_run`, so all four inherited the defect. bote 3.2.1 fixed its own
+hand-rolled copy of this loop first (`_unix_accept_action` in its `src/transport_unix.cyr`);
+this is the same policy generalised across sandhi's five accept sites.
+
+**Fixed at all five:**
+
+| Function | Loop |
+|----------|------|
+| `sandhi_server_run_opts` | blocking (also covers `sandhi_server_run`) |
+| `sandhi_server_run_pooled` | blocking accept thread → handoff channel |
+| `sandhi_server_run_tls` | blocking, per-connection handshake |
+| `sandhi_server_run_pooled_tls` | blocking accept thread → handoff channel |
+| `sandhi_server_run_async` | non-blocking cooperative drain |
+
+The async loop is the subtle one. It *did* have an else branch, but it folded every errno into
+"queue drained". That is right for EAGAIN and wrong for everything else: under EMFILE the
+pending connection stays queued, so the listen fd stays readable, so `async_await_readable`
+returns instantly and the outer loop spins at 100% CPU exactly like the blocking loops — just
+one indirection further out.
+
+**The policy** (`_sandhi_accept_action`, a pure fn of errno):
+
+- **Transient → retry immediately**: EINTR, ECONNABORTED, EPROTO, EAGAIN. EAGAIN must never be
+  slowed — it is the steady state of the async drain *and* of every loop on AGNOS, where
+  `sock_accept` is non-blocking by construction.
+- **Resource pressure → capped exponential backoff**: EMFILE, ENFILE, ENOBUFS, ENOMEM. 1 ms
+  doubling to 250 ms, reset on any successful accept.
+- **Structurally dead listener → return to the caller**: EBADF, EINVAL, ENOTSOCK, EOPNOTSUPP.
+- **Unknown errnos back off rather than being treated as fatal**, so a misclassification can
+  never take a working server down. This also covers AGNOS, where `sock_accept` reports both of
+  its error cases as a bare `Err(1)`.
+
+A consecutive-failure bound (200 backoffs, ~48 s once the delay reaches its cap) ends the loop
+with `return 1` rather than sleeping forever on a listener that is never coming back. Both
+pooled loops close the handoff channel *before* the listen socket on the way out, so workers'
+`chan_recv` returns 0 and they exit instead of parking on a channel nobody will feed again.
+
+**Behaviour change:** these loops previously never returned once listening. They now return 1
+on a structurally dead listener, and on 200 consecutive resource failures. That is the point —
+the alternative is an unbounded spin — but a caller that treats `sandhi_server_run*` as
+`noreturn` should now check the return value.
+
+`_sandhi_accept_step` deliberately does **not** sleep; it returns the delay and the caller
+sleeps. That is what makes the give-up bound unit-testable in microseconds instead of the ~48 s
+the real schedule takes.
+
+**Added:**
+- `programs/_server_accept_emfile_probe.cyr` — reproduces the defect end-to-end and is wired
+  into CI. Forks a server whose `accept(2)` is guaranteed EMFILE (clamped `RLIMIT_NOFILE`,
+  every descriptor but one consumed), parks a connection in its backlog, and measures the
+  child's on-CPU nanoseconds over 1 s via `/proc/<pid>/schedstat`. Budget 250 ms — a 4x margin
+  against the pre-fix 1000 ms, so a loaded runner cannot flip it. Skips cleanly on non-x86_64
+  or a kernel without `CONFIG_SCHEDSTATS`. The unit tests cover the classifier and the state
+  machine as pure functions; they cannot cover the loop wiring, which is the half that actually
+  burned the core.
+- 49 assertions in `tests/sandhi.tcyr` (`server/accept_policy/*`) — classification of every
+  errno in each class, the backoff schedule including the 250 ms clamp, streak accounting
+  (RETRY neither consumes nor resets the streak), the give-up boundary at exactly 200/201, the
+  null-state fail-closed path, and that `sleep_ms` genuinely blocks. 613 → 662 assertions.
+
+Full write-up: [`docs/development/issues/2026-07-30-accept-loop-unguarded-spin.md`](docs/development/issues/2026-07-30-accept-loop-unguarded-spin.md).
+
+**Downstream note.** A fix landing here does not reach consumers — they include stdlib's
+vendored `lib/sandhi.cyr`, so bote's four transports stay affected until a cyrius release
+re-vendors it from `dist/sandhi.cyr`. This was filed *by* a consumer; bumping a sandhi pin is
+not enough.
+
+**Not fixed here:** `lib/net.cyr`'s `sock_accept` issues a bare `SYS_ACCEPT = 43` with no arch
+guard — the x86_64 number, correct on aarch64 only via the cyrius backend's ESYSXLAT renumber
+chain (43 is `statfs` there). That is a cyrius-repo change, filed as
+`cyrius/docs/development/issues/2026-07-30-net-cyr-x86-only-socket-syscall-numbers.md`.
+
 ## [1.9.7] — 2026-07-29
 
 ### Fixed — the routing path allocated per request on the no-free global bump

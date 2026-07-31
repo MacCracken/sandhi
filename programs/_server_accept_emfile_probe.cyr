@@ -1,0 +1,244 @@
+# programs/_server_accept_emfile_probe.cyr — 1.9.8 gate for the accept-error
+# policy. Reproduces the reported defect end-to-end and fails if it comes back.
+#
+# The defect (reported by bote, whose http / streamable / ws / bridge
+# transports are all one-line delegations to `sandhi_server_run`): every
+# serve loop was
+#
+#     while (1 == 1) { var cr = sock_accept(sfd); if (is_err_result(cr) == 0) { … } }
+#
+# with no else branch. Under EMFILE the pending connection is never dequeued,
+# so accept(2) is re-issued against the SAME connection at full speed —
+# 100% of one core, forever, with no backoff, no bound and no diagnostic.
+#
+# The unit tests in tests/sandhi.tcyr cover the classifier and the backoff
+# state machine as pure functions. They cannot cover the LOOP WIRING, which
+# is the half that actually burned the core. This does:
+#
+#   child   clamps RLIMIT_NOFILE, consumes every descriptor but one, then
+#           starts sandhi_server_run_opts — so socket/bind/listen succeed and
+#           accept(2) is guaranteed EMFILE
+#   parent  connects once (the connection parks in the listen backlog), then
+#           measures the child's on-CPU nanoseconds across a 1 s window via
+#           /proc/<pid>/schedstat
+#
+# Pre-1.9.8 the child burns ~1 s of CPU in that 1 s window. With the policy in
+# place it burns effectively none — it is asleep in the capped backoff. The
+# threshold is set at 250 ms, a 4x margin against the pre-fix behaviour, so a
+# loaded CI box cannot flip it.
+#
+# Exit 0 PASS / non-zero FAIL. Skips cleanly (exit 0) where the measurement
+# isn't available: non-x86_64 (raw setrlimit number), or a kernel built
+# without CONFIG_SCHEDSTATS.
+include "lib/thread_local.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+include "lib/sigil.cyr"
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
+include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+# RLIMIT_NOFILE. The struct is { rlim_cur, rlim_max }, two u64s.
+var PROBE_RLIMIT_NOFILE = 7;
+# Small enough to exhaust in a handful of open(2)s, comfortably above the
+# three std descriptors the runtime already holds.
+var PROBE_NOFILE_CAP = 32;
+# On-CPU nanoseconds the child may burn during the 1 s EMFILE window. The
+# pre-1.9.8 spin lands at ~1e9; the fixed loop lands near 0.
+var PROBE_CPU_BUDGET_NS = 250000000;
+var PROBE_WINDOW_MS = 1000;
+
+fn probe_handler(ctx, cfd, buf, n): i64 {
+    sandhi_server_send_response(cfd, 200, "OK", "text/plain", "hi", 2, 0);
+    return 0;
+}
+
+# Build "/proc/<pid>/schedstat" into `buf`. Returns the NUL-terminated length.
+fn probe_schedstat_path(buf, pid): i64 {
+    var p = 0;
+    memcpy(buf, "/proc/", 6);
+    p = 6;
+    p = p + fmt_int_buf(pid, buf + p);
+    memcpy(buf + p, "/schedstat", 10);
+    p = p + 10;
+    store8(buf + p, 0);
+    return p;
+}
+
+# First field of /proc/<pid>/schedstat: nanoseconds this task has spent ON CPU.
+# Returns -1 if the file can't be read (no CONFIG_SCHEDSTATS, or the child is
+# already gone), which the caller treats as "skip", never as "pass".
+fn probe_oncpu_ns(pid): i64 {
+    var path[64];
+    probe_schedstat_path(&path, pid);
+    var fd = sys_open(&path, 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var buf[128];
+    var n = sys_read(fd, &buf, 127);
+    sys_close(fd);
+    if (n <= 0) { return 0 - 1; }
+    store8(&buf + n, 0);
+
+    # Leading decimal integer, up to the first space.
+    var v = 0;
+    var i = 0;
+    var digits = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (i >= n) {
+            scanning = 0;
+        } else {
+            var c = load8(&buf + i);
+            if (c >= 48 && c <= 57) {
+                v = v * 10 + (c - 48);
+                digits = digits + 1;
+                i = i + 1;
+            } else {
+                scanning = 0;
+            }
+        }
+    }
+    if (digits == 0) { return 0 - 1; }
+    return v;
+}
+
+# Child: make accept(2) return EMFILE for certain, then serve.
+#
+# Clamping RLIMIT_NOFILE alone is not enough — we must also KNOW that no free
+# descriptor is left over for accept to hand out, and the number the runtime
+# already holds is not ours to assume. So: clamp, then open /dev/null until
+# the kernel refuses, then give exactly ONE descriptor back. The listen socket
+# claims that one; accept(2) then has nothing left.
+fn probe_child_serve(port): i64 {
+    var rl[16];
+    store64(&rl, PROBE_NOFILE_CAP);
+    store64(&rl + 8, PROBE_NOFILE_CAP);
+    syscall(160, PROBE_RLIMIT_NOFILE, &rl);   # setrlimit(2), x86_64
+
+    var last = 0 - 1;
+    var filling = 1;
+    var guard = 0;
+    while (filling == 1) {
+        var fd = sys_open("/dev/null", 0, 0);
+        if (fd < 0) {
+            filling = 0;
+        } else {
+            last = fd;
+            guard = guard + 1;
+            if (guard > PROBE_NOFILE_CAP + 8) { filling = 0; }
+        }
+    }
+    if (last < 0) { return 1; }               # never got a descriptor — bail
+    sys_close(last);                          # exactly one free, for the listener
+
+    var opts = sandhi_server_options_new();
+    sandhi_server_options_idle_ms(opts, 1000);
+    # Returns 1 once the consecutive-failure bound trips (~48 s). The parent
+    # measures long before that and kills the child, so the return is only a
+    # safety net against a runaway.
+    return sandhi_server_run_opts(INADDR_LOOPBACK(), port, &probe_handler, 0, opts);
+}
+
+fn main() {
+    alloc_init();
+    say("=== sandhi accept-error policy gate (EMFILE) ===\n");
+
+    #ifndef CYRIUS_ARCH_X86
+    # setrlimit is issued as a raw x86_64 syscall number here, and aarch64's
+    # generic table has prlimit64 rather than setrlimit — exactly the class of
+    # wrong-syscall hazard this release is guarding against elsewhere. Don't
+    # guess; skip.
+    say("SKIP (needs x86_64 for the raw setrlimit number)\n");
+    return 0;
+    #endif
+
+    var port = 18397;
+    var pid = sys_fork();
+    if (pid == 0) {
+        probe_child_serve(port);
+        syscall(60, 0);
+    }
+
+    sleep_ms(400);                            # let the child bind + listen
+
+    # Park a connection in the listen backlog. The child's accept(2) wakes,
+    # fails EMFILE, and — crucially — does NOT dequeue it, so the condition
+    # persists for as long as we care to watch.
+    var cli = sandhi_conn_open(INADDR_LOOPBACK(), port, 0, "");
+
+    var t0 = probe_oncpu_ns(pid);
+    if (t0 < 0) {
+        if (cli != 0) { sandhi_conn_close(cli); }
+        sys_kill(pid, 9);
+        syscall(61, pid, 0, 0, 0);
+        say("SKIP (no /proc/<pid>/schedstat — kernel without CONFIG_SCHEDSTATS)\n");
+        return 0;
+    }
+
+    sleep_ms(PROBE_WINDOW_MS);
+    var t1 = probe_oncpu_ns(pid);
+
+    if (cli != 0) { sandhi_conn_close(cli); }
+    sys_kill(pid, 9);
+    syscall(61, pid, 0, 0, 0);                # wait4 — reap the child
+
+    if (t1 < 0) {
+        say("FAIL (child vanished mid-measurement)\n");
+        return 1;
+    }
+
+    var burned = t1 - t0;
+    say("on-CPU during a "); fmt_int(PROBE_WINDOW_MS); say(" ms EMFILE window: ");
+    fmt_int(burned / 1000000); say(" ms (budget ");
+    fmt_int(PROBE_CPU_BUDGET_NS / 1000000); say(" ms)\n");
+
+    if (burned < PROBE_CPU_BUDGET_NS) {
+        say("PASS — the accept loop backs off instead of spinning\n");
+        return 0;
+    }
+    say("FAIL — the accept loop is spinning on EMFILE (pre-1.9.8 behaviour)\n");
+    return 1;
+}
+
+var ec = main();
+syscall(60, ec);
