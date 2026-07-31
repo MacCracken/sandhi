@@ -765,10 +765,13 @@ fn test_alloc_121bc_strip_sensitive_oom() {
 # follow_a — driver-level err-resp goes into the arena. Drive against
 # an unparseable URL (no Location header to follow) so we exercise the
 # arena-bound `_do_a` call inside follow_a and the err-resp it builds.
+# Trailing `0` is the 1.6.9 per-call request context — ctx==0 means "no
+# per-call context" (the reqctx helpers fall back to the module globals),
+# the same spelling `_sandhi_http_follow` uses.
 fn test_alloc_121bc_follow_err_resp_arena() {
     var a = arena_allocator(4096);
     var resp = _sandhi_http_follow_a(a, "GET", "not-a-valid-url", 0, 0, 0,
-    5, 0, 0, 0, 0, 0, 0);
+    5, 0, 0, 0, 0, 0, 0, 0);
     assert_eq(resp != 0, 1, "follow_a constructed err-resp");
     assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE, "URL parse fail");
     var used = arena_used(allocator_state(a));

@@ -2,7 +2,7 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [1.9.8] — 2026-07-30
 
 ### Fixed — server: the accept loop spun a core forever on any persistent accept error
 
@@ -92,6 +92,22 @@ not enough.
 guard — the x86_64 number, correct on aarch64 only via the cyrius backend's ESYSXLAT renumber
 chain (43 is `statfs` there). That is a cyrius-repo change, filed as
 `cyrius/docs/development/issues/2026-07-30-net-cyr-x86-only-socket-syscall-numbers.md`.
+
+### Fixed — tests: `tests/alloc.tcyr` did not compile against the pinned toolchain
+
+`test_alloc_121bc_follow_err_resp_arena` called `_sandhi_http_follow_a` with 13 arguments. The
+function gained a 14th — the 1.6.9 per-call request context `ctx` — and this one call site was
+never updated; cyrius 6.5.x turned call-site arity from a warning into a hard error, so the
+whole suite failed to compile (`'_sandhi_http_follow_a' expects 14 arguments, got 13`).
+
+Passes `0`, the documented "no per-call context" value: the `_sandhi_reqctx_*` helpers fall
+back to the module globals when `ctx == 0` (`src/http/conn.cyr`), which is also how the
+`_sandhi_http_follow` back-compat wrapper spells it. Test-only — no `src/` change, so the dist
+bundles are untouched.
+
+This was **not** toolchain drift. The 13-argument form is rejected by the pinned 6.5.0 compiler
+too, so the suite had been failing at the repo's own pin; the locally-installed 6.5.3 wrapper
+only surfaced it.
 
 ## [1.9.7] — 2026-07-29
 
