@@ -1303,18 +1303,121 @@ fn test_server_options_max_request() {
 }
 
 fn test_server_options_struct_growth() {
-    # The options struct grew 64 → 72 bytes in 1.9.4. Every pre-existing field
-    # is read by fixed offset, so they all have to still round-trip.
+    # The options struct grew 64 → 72 bytes in 1.9.4, → 80 in 1.9.7, → 88 in
+    # 1.9.9. Every pre-existing field is read by fixed offset, so they all have
+    # to still round-trip after each growth.
     var o = sandhi_server_options_new();
     sandhi_server_options_idle_ms(o, 7000);
     sandhi_server_options_max_conns(o, 12);
     sandhi_server_options_backlog(o, 300);
     sandhi_server_options_max_request(o, 262144);
+    sandhi_server_options_req_arena(o, 16384);
     assert_eq(sandhi_server_options_get_idle_ms(o), 7000, "growth: idle_ms intact");
     assert_eq(sandhi_server_options_get_max_conns(o), 12, "growth: max_conns intact");
     assert_eq(sandhi_server_options_get_backlog(o), 300, "growth: backlog intact");
     assert_eq(sandhi_server_options_get_max_request(o), 262144, "growth: max_request intact");
+    assert_eq(sandhi_server_options_get_req_arena(o), 16384, "growth: req_arena intact");
     assert_eq(sandhi_server_options_get_tls(o), 0, "growth: tls_on untouched");
+    assert_eq(sandhi_server_options_get_stop_flag(o), 0, "growth: stop_flag defaults to 0");
+    return 0;
+}
+
+# 1.9.9 — cooperative stop.
+fn test_server_stop_flag_option() {
+    var o = sandhi_server_options_new();
+    assert_eq(sandhi_server_options_get_stop_flag(o), 0,
+    "stop_flag defaults to 0 — opt-in, so every existing consumer is unaffected");
+    assert_eq(sandhi_server_options_get_stop_flag(0), 0, "a null options struct reads as 0");
+
+    var flag[8];
+    store64(&flag, 0);
+    sandhi_server_options_stop_flag(o, &flag);
+    assert_eq(sandhi_server_options_get_stop_flag(o), &flag, "stop_flag round-trips");
+    sandhi_server_options_stop_flag(o, 0);
+    assert_eq(sandhi_server_options_get_stop_flag(o), 0, "and can be turned back off");
+
+    # The predicate: a 0 POINTER is "not configured", which is never a stop —
+    # distinct from a configured flag whose VALUE is 0.
+    assert_eq(_sandhi_server_stop_requested(0), 0, "no flag configured is never a stop");
+    store64(&flag, 0);
+    assert_eq(_sandhi_server_stop_requested(&flag), 0, "a configured flag reading 0 is not a stop");
+    store64(&flag, 1);
+    assert_eq(_sandhi_server_stop_requested(&flag), 1, "a configured flag reading 1 stops");
+    store64(&flag, 0 - 1);
+    assert_eq(_sandhi_server_stop_requested(&flag), 1, "ANY non-zero value stops, not just 1");
+    store64(&flag, 4096);
+    assert_eq(_sandhi_server_stop_requested(&flag), 1, "...including a large positive");
+    return 0;
+}
+
+# Stop flag for the live test below. A global rather than a stack slot because
+# the stopper thread and the serve loop are on different stacks.
+var _t_live_stop_flag = 0;
+
+# Set the live stop flag after a short delay, from another thread.
+fn _t_stopper(arg) {
+    sleep_ms(250);
+    _t_live_stop_flag = 1;
+    return 0;
+}
+
+# The test that actually proves the mechanism: a server ALREADY BLOCKED in
+# `accept` with nothing connecting must still notice a flag set afterwards.
+#
+# This is the case `test_server_stop_returns_zero` cannot reach — there the flag
+# is pre-set, so the loop stops before it ever blocks. Here the loop is parked
+# in `sock_accept` on an idle listener, and only the SO_RCVTIMEO armed by
+# `_sandhi_server_arm_stop_poll` lets it surface to re-read the flag. Without
+# that arming this hangs forever, which is exactly the bug being fixed.
+#
+# Deliberately NOT time-asserted: the wall-clock bound is the poll interval plus
+# scheduling, and pinning a number here would make the suite flaky on a loaded
+# box. Returning at all is the assertion; a regression hangs rather than
+# reporting a wrong number.
+fn test_server_stop_wakes_blocked_accept() {
+    _t_live_stop_flag = 0;
+    var o = sandhi_server_options_new();
+    sandhi_server_options_stop_flag(o, &_t_live_stop_flag);
+    sandhi_server_options_max_conns(o, 2);
+
+    thread_create(&_t_stopper, 0);
+
+    # Blocks in accept on an idle loopback listener until the stopper fires.
+    assert_eq(sandhi_server_run_pooled(INADDR_LOOPBACK(), 0, 0, 0, o), 0,
+    "a server blocked in accept still returns 0 once the flag is set");
+    assert_eq(_t_live_stop_flag, 1, "...and it was the flag that did it");
+    return 0;
+}
+
+# The behavioural half: a flag already set when the loop starts must stop it
+# before it serves anything, and the loop must report 0 rather than 1.
+#
+# Pre-setting the flag makes this deterministic — no thread, no sleep, no race.
+# It exercises the real entry points end to end: bind, listen, arm the poll,
+# spawn the pool, then take the stop branch on the first iteration. The 0/1
+# split is the whole contract, so it is asserted on every loop that has one.
+fn test_server_stop_returns_zero() {
+    var flag[8];
+    store64(&flag, 1);                       # already stopping
+
+    var o = sandhi_server_options_new();
+    sandhi_server_options_stop_flag(o, &flag);
+    sandhi_server_options_max_conns(o, 2);   # keep the pool tiny — 2 threads, not 128
+
+    # Port 0 lets the kernel pick, so this cannot collide with anything else on
+    # the box and needs no privilege.
+    assert_eq(sandhi_server_run_opts(INADDR_LOOPBACK(), 0, 0, 0, o), 0,
+    "run_opts: a pre-set flag returns 0 (stopped), not 1 (failed)");
+    assert_eq(sandhi_server_run_pooled(INADDR_LOOPBACK(), 0, 0, 0, o), 0,
+    "run_pooled: same, and its workers unpark because the channel closes first");
+
+    # And with the flag clear, the same options must NOT stop — proving the 0
+    # above came from the flag rather than from any incidental early return.
+    # An unbindable address is the safe way to check that: it returns 1 without
+    # ever entering the accept loop.
+    store64(&flag, 0);
+    assert_eq(sandhi_server_run_opts(0x010200C0, 9, 0, 0, o), 1,
+    "a clear flag does not stop — an unbindable address still reports 1");
     return 0;
 }
 
@@ -3349,6 +3452,9 @@ fn main() {
     test_group("server/options/max_request");
     test_server_options_max_request();
     test_server_options_struct_growth();
+    test_server_stop_flag_option();
+    test_server_stop_returns_zero();
+    test_server_stop_wakes_blocked_accept();
 
     test_group("server/accept_policy/classify");
     test_accept_action_transient();

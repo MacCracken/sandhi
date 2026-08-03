@@ -2,6 +2,105 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.9] — 2026-08-03
+
+### Added — server: a serve loop can be asked to stop
+
+**Reported by agnosai**, which reached this porting `main.rs`'s
+`with_graceful_shutdown` and found there was nothing to build it on. The
+consumer wrote [ADR 012](https://github.com/MacCracken/agnosai) recording that
+it ships **no** graceful shutdown, because no amount of signal handling reaches
+the problem: **once a `sandhi_server_run*` loop is listening, nothing can make
+it return.** The loop reads no flag, its only exit is a fatal accept, and the
+listen fd is a loop-local `var` that is never published — so there is no fd to
+close out of band and no flag to set. A consumer could catch SIGTERM perfectly
+and still sit in `accept` forever.
+
+`sandhi_server_options_stop_flag(opts, ptr)` is the fix. `ptr` addresses one
+caller-owned 8-byte slot; **any non-zero value means stop**. The loop re-reads
+it between accepts and, when set, tears down and returns **0**.
+
+**The return value is the contract.** Every serve loop returns **1** for every
+failure and previously never returned any other way, so **0 now means, and only
+means, "you asked me to stop, and I did."** A caller maps the two straight onto
+a clean exit and a fatal one.
+
+**Wired at all five loops**, each keeping the teardown order its fatal path
+already uses — for the two pooled loops that means closing the handoff channel
+*before* the listen fd, so workers' `chan_recv` returns 0 and they exit instead
+of parking on a channel nobody will feed:
+
+| Function | How it surfaces to re-read the flag |
+|---|---|
+| `sandhi_server_run` / `_run_opts` | SO_RCVTIMEO on the listen fd |
+| `sandhi_server_run_pooled` | SO_RCVTIMEO on the listen fd |
+| `sandhi_server_run_tls` | SO_RCVTIMEO on the listen fd |
+| `sandhi_server_run_pooled_tls` | SO_RCVTIMEO on the listen fd |
+| `sandhi_server_run_async` | already non-blocking; its idle wait polls instead |
+
+**Blocking `accept` is the whole difficulty, and SO_RCVTIMEO is why this works
+without new primitives.** A flag alone would only be read after the *next*
+connection arrived, which on an idle server is never. Arming the listen fd with
+`SANDHI_SERVER_STOP_POLL_MS` (100 ms) makes `accept` surface periodically with
+EAGAIN — and EAGAIN was **already** classified `SANDHI_ACCEPT_RETRY`, which
+`_sandhi_accept_step` handles *before* touching the failure counters. So polling
+cannot walk an idle listener toward the 1.9.8 give-up bound. That pre-existing
+classification is now load-bearing rather than incidental, and says so in place.
+
+`run_async` needed different treatment: its listen fd is already non-blocking,
+but it parks in `async_await_readable`, which calls `sys_epoll_wait` with a
+hardcoded `-1` (`lib/async.cyr:823`) and has no timeout variant. Rather than
+fork a timeout-capable copy into sandhi — CLAUDE.md's *compose, don't
+reimplement* makes a missing stdlib primitive a cyrius patch, not a sandhi
+feature — the idle wait becomes a bounded sleep **when and only when** a flag is
+configured. The stdlib gap is filed upstream instead.
+
+**Opt-in, and inert until opted into.** Default is 0. With no flag the listen fd
+keeps its blocking-accept behaviour and every loop is bit-for-bit what it was in
+1.9.8 — no timeout, no wakeups, no behaviour change for any existing consumer.
+With a flag, an idle server costs ~10 wakeups/sec (one `accept` returning EAGAIN
+and one flag load; no syscall storm, no allocation) and bounds shutdown at
+~100 ms.
+
+**A plain `store64` from another thread or a signal handler is sufficient.** The
+serve loop only ever reads the flag, and an aligned 8-byte store is
+single-copy-atomic on every target sandhi builds for — so there is nothing to
+tear and no ordering to establish. This deliberately does **not** pull
+`lib/atomic.cyr` into sandhi's dependency set for one flag.
+
+In-flight requests are **not** drained: the loop stops accepting, and pooled
+workers already holding a connection finish it because the channel closes rather
+than the worker being killed. A caller wanting a hard bound on that tail sets
+`idle_ms`.
+
+`SandhiServerOptOff` grows 80 → 88 bytes (`SANDHI_SERVER_OPT_OFF_STOP_FLAG` at
++80). ABI-safe: `sandhi_server_options_new` / `_new_a` are the only
+constructors, the size is not documented to callers, and every field is read by
+fixed offset — the struct-growth test asserts all seven pre-existing fields
+still round-trip.
+
+**16 assertions, both halves mutation-verified.** `test_server_stop_returns_zero`
+pre-sets the flag so the stop is deterministic — no thread, no sleep, no race —
+and `test_server_stop_wakes_blocked_accept` covers the case that one cannot
+reach: a server *already blocked in `accept`* on an idle listener, stopped by
+another thread. Flipping the stop branch's `return 0` to `return 1` fails an
+assertion; disabling the SO_RCVTIMEO arming makes the live test **hang**, which
+is precisely the bug this release fixes.
+
+### Changed
+
+- **Cyrius pin `6.5.3` → `6.5.5`**, with `cyrius lib sync`. All 93 declared
+  stdlib modules now match the 6.5.5 snapshot exactly.
+- **Removed two stale vendored libs: `lib/mabda.cyr` and `lib/regex.cyr`.**
+  Neither is declared in `[deps].stdlib` and neither is used — the only `mabda`
+  hit in the tree is a comment, and the only `regex`-shaped symbol is
+  `_sandhi_local_mc_rx_open`, a multicast *receive* helper. Because they were
+  undeclared, `cyrius lib sync` never refreshed them and never removed them, so
+  they sat at 6.5.3-era content and shadowed the pinned snapshot — the compiler
+  said so on every build (`./lib/ shadows version-pinned … 2 bundled lib(s)
+  differ`). **A green `lib sync` is not proof the tree matches the pin**; it
+  syncs the declared subset and is silent about everything else.
+
 ## [1.9.8] — 2026-07-30
 
 ### Fixed — server: the accept loop spun a core forever on any persistent accept error

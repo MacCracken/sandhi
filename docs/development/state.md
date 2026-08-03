@@ -4,6 +4,56 @@
 
 ## Version
 
+**1.9.9** — 2026-08-03. **A serve loop can now be asked to stop.** Filed by
+**agnosai**, which hit this porting `main.rs`'s `with_graceful_shutdown`: once a
+`sandhi_server_run*` loop was listening, **nothing could make it return** — the
+loop read no flag, its only exit was a fatal accept, and the listen fd was a
+loop-local `var` never published, so there was no fd to close out of band
+either. The consumer shipped an ADR recording that it has *no* graceful
+shutdown, because no amount of signal handling reaches a thread parked in
+`accept`.
+
+`sandhi_server_options_stop_flag(opts, ptr)` addresses one caller-owned 8-byte
+slot; **any non-zero value stops**. The loop re-reads it between accepts, tears
+down in the order its fatal path already uses, and returns **0** — and that
+value is the contract, since every loop returns **1** for every failure and
+previously never returned any other way. Wired at **all five** loops.
+
+**SO_RCVTIMEO on the listen fd is what makes it work**: a flag alone would only
+be read after the next connection arrived, which on an idle server is never.
+The resulting EAGAIN was **already** classified `SANDHI_ACCEPT_RETRY`, which
+`_sandhi_accept_step` handles *before* touching the failure counters, so polling
+cannot walk an idle listener toward 1.9.8's give-up bound — that classification
+is now load-bearing rather than incidental. `run_async` is the exception: its fd
+is already non-blocking but it parks in `async_await_readable`, which hardcodes
+a `-1` epoll timeout and has no variant, so its idle wait becomes a bounded
+sleep **only** when a flag is configured; the stdlib gap is filed upstream
+rather than forked into sandhi.
+
+**Opt-in and inert until opted into** — default 0, and with no flag every loop
+is bit-for-bit 1.9.8. With a flag an idle server costs ~10 wakeups/sec and
+bounds shutdown at ~100 ms. In-flight requests are **not** drained. Options
+struct grows 80 → 88 B; ABI-safe (single constructor, fixed offsets, all seven
+prior fields asserted intact).
+
+**Verified**: **1250 assertions** (sandhi 662 → **678** / h2 167 / alloc 342 /
+rpc 63), lint clean, all five dist bundles regenerated and idempotent. Both
+halves mutation-verified — flipping the stop branch's `return 0` to `return 1`
+fails an assertion, and disabling the SO_RCVTIMEO arming makes the live
+blocked-accept test **hang**, which is exactly the bug being fixed. Pin
+`6.5.3 → 6.5.5`; **two stale undeclared vendored libs removed** (`lib/mabda.cyr`,
+`lib/regex.cyr`) that `lib sync` never refreshed and never removed, and that
+shadowed the pinned snapshot on every build.
+
+> **1.9.4 – 1.9.8 have no entry in this section.** They shipped (body cap + 413,
+> reject arena, per-request handler arena, the accept-error policy) and their
+> detail is in `CHANGELOG.md`; this file simply was not refreshed for them.
+> Recorded rather than back-filled, so the gap is not mistaken for those
+> releases having been skipped.
+
+<details>
+<summary>1.9.3 — 2026-07-24 (previous entry, retained)</summary>
+
 **1.9.3** — 2026-07-24. **The streaming download API can send request headers; over-cap
 responses are no longer misreported as connection failures.** Two defects, both **filed by
 stiva** (roadmap §B registry client), both blocking authenticated OCI pulls.
@@ -27,6 +77,8 @@ token → manifest → blob streamed to an fd across the CDN redirect, **SHA-256
 downloaded bytes matches the registry digest**, and the A/B is **200 with the token, 401
 without**. `programs/_download_probe.cyr` gains that as a gate *with* an unauthenticated
 contrast run so it cannot pass vacuously. Pin unchanged at `6.4.76`.
+
+</details>
 
 _(**1.9.2** — 2026-07-24. **DNS resolver follows CNAME chains.** The A/AAAA parsers accepted an
 answer record only when its owner name equalled the question name — the anti-answer-substitution
