@@ -2,6 +2,51 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.10] — 2026-08-12
+
+### Fixed — P1: response framing reported `SANDHI_OK` with a NULL body pointer
+
+**Reported by agnosai**, which hit it as a null dereference inside a JSON parser
+two calls away, with nothing pointing back here.
+
+`_sandhi_resp_body_copy_a` answers **0** when the allocator cannot fit
+`len + 1`. Both branches of `_sandhi_resp_frame_a` assigned that result straight
+into `body_ptr` and returned `SANDHI_OK` carrying the **real** `body_len`. A
+caller doing exactly the right thing —
+
+```
+if (sandhi_http_err_kind(r) != SANDHI_OK) { ...bail... }
+var n = sandhi_http_body_len(r);          # positive
+parse(sandhi_http_body(r), n);            # ...address 0
+```
+
+— read from address 0. The guard the function already applies to `outp_cell` /
+`outl_cell` a few lines above, and that `_sandhi_http_exchange_a` applies to
+`rbuf`, was simply missing at this one site. Framing now returns
+`SANDHI_ERR_INTERNAL`, matching those.
+
+⚠ **This is reachable on ordinary arena-backed exchanges, not just under memory
+pressure**, because `_sandhi_http_exchange_a` allocates `rbuf` **eagerly at the
+full `max_response_bytes` cap** before a single byte arrives. A consumer that
+sizes an arena at 5 MiB for a 4 MiB cap leaves ~1 MiB for this copy, so **every
+response body over roughly 1 MiB** took the null path. agnosai's reporting sites
+were a 4 MiB cap in a 5 MiB arena and a 10 MiB cap in a 12 MiB arena.
+
+⚠ The chunked branch is covered by the same check: `_sandhi_resp_decode_chunked_a`
+can leave `outp_cell` holding 0 for the same reason. A zero-length body is
+unaffected — the copy still allocates its NUL byte and returns non-zero, so
+`body_ptr == 0` means OOM and nothing else.
+
+Regression test `test_response_body_oom_is_not_ok` (`tests/sandhi.tcyr`) drives a
+real 8,000-byte body through a 4 KiB arena and asserts the error, then re-parses
+the same bytes through a 64 KiB arena to prove framing still succeeds when it
+fits. Mutation-verified: removing the guard fails it.
+
+### Changed
+
+- **Toolchain pinned to cyrius 6.5.20** (was 6.5.5). Full three-step; all four
+  suites green (**1,250 assertions**: sandhi 683, alloc 342, h2 167, rpc 63).
+
 ## [1.9.9] — 2026-08-03
 
 ### Added — server: a serve loop can be asked to stop
