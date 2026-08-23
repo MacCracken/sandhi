@@ -1,6 +1,12 @@
 # 2026-04-24 — yantra adopts `sandhi::rpc` for WebDriver + Appium backends
 
-**Status**: Awaiting yantra roadmap entry
+**Status**: **RESOLVED — adopted.** Archived 2026-08-23. Verified against
+`~/Repos/yantra` @ 1.0.3: 11 files `include "lib/sandhi.cyr"` and 35 distinct sandhi
+verbs are in use, including the WebDriver surface this doc was filed to unblock
+(`sandhi_wd_find_element` / `_element_click` / `_element_send_keys` / `_execute_script` /
+`_get_url` / `_extract_session_id` / `_extract_element_id` / `_delete_session`) and the
+1.6.3 endpoint-keyed TLS-policy registry (`sandhi_rpc_set_default_tls_policy`).
+Cross-repo scheduling — the one item this doc existed to land — is done.
 **Reporter**: sandhi post-M3 coordination sweep
 **Target**: yantra's base-OS modernization pass (pre-sandhi-fold at Cyrius v5.7.0)
 **Depends on**: sandhi v0.4.0 (shipped)

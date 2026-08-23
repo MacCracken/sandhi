@@ -11,27 +11,48 @@ gets one focused doc with a paste-ready roadmap entry, a migration
 example, and any known blockers. Handing one file to each crate's
 modernization agent beats routing through sandhi's full repo.
 
-| Doc | Crate | Side | Priority |
-|-----|-------|------|----------|
-| [`2026-04-24-yantra-sandhi-rpc.md`](2026-04-24-yantra-sandhi-rpc.md) | yantra | consumer | M2+ backend unblock |
-| [`2026-04-24-daimon-registry-endpoints.md`](2026-04-24-daimon-registry-endpoints.md) | daimon | producer | pre-fold (sandhi calls it) |
-| [`2026-04-24-daimon-sandhi-mcp-client.md`](2026-04-24-daimon-sandhi-mcp-client.md) | daimon | consumer | pre-fold |
-| [`2026-04-24-hoosh-ifran-sandhi-http.md`](2026-04-24-hoosh-ifran-sandhi-http.md) | hoosh + ifran | consumer | pre-fold |
-| [`2026-04-24-ark-sandhi-registry-ops.md`](2026-04-24-ark-sandhi-registry-ops.md) | ark | consumer | pre-fold |
-| [`2026-04-24-mela-sandhi-marketplace.md`](2026-04-24-mela-sandhi-marketplace.md) | mela | consumer | pre-fold |
-| [`2026-04-24-vidya-sandhi-fetch.md`](2026-04-24-vidya-sandhi-fetch.md) | vidya | consumer | future (low priority) |
+**Still open:**
 
-Each doc carries its own "what's assumed vs. actual" note. sandhi's
-side is shipped; the doc exists so the consumer/producer crate has
-zero ambiguity on what to put on its roadmap.
+| Doc | Crate | Side | State (verified 2026-08-23) |
+|-----|-------|------|------------------------------|
+| [`2026-04-24-daimon-registry-endpoints.md`](2026-04-24-daimon-registry-endpoints.md) | daimon | producer | **Not implemented.** daimon 2.0.2 serves `/v1/*` and has no `/services/` route; sandhi's resolver calls `{base}/services/{name}` → 404. Namespace decision needed on one side or the other. |
+| [`2026-04-24-hoosh-ifran-sandhi-http.md`](2026-04-24-hoosh-ifran-sandhi-http.md) | ~~hoosh~~ + ifran | consumer | **Half done.** hoosh 2.6.3 adopted (`http_post`, `http_stream` + SSE). ifran 2.2.0 has zero sandhi verbs. Now an ifran-only item. |
+| [`2026-04-24-ark-sandhi-registry-ops.md`](2026-04-24-ark-sandhi-registry-ops.md) | ark | consumer | **Not adopted.** ark 1.4.1, zero sandhi verbs. |
+| [`2026-04-24-vidya-sandhi-fetch.md`](2026-04-24-vidya-sandhi-fetch.md) | vidya | consumer | **Reframed.** vidya 2.8.4 already consumes the *server* surface; the *fetch* ask is unmet. Additive now, not a new dependency. Still low priority. |
+
+**Adopted and archived** — these were filed as "not confirmed from this repo";
+each has now been confirmed by reading the consumer's own source:
+
+| Doc | Crate | Evidence |
+|-----|-------|----------|
+| [`archive/2026-04-24-yantra-sandhi-rpc.md`](archive/2026-04-24-yantra-sandhi-rpc.md) | yantra 1.0.3 | 11 `include "lib/sandhi.cyr"`, 35 verbs — the whole `sandhi_wd_*` WebDriver surface this doc was filed to unblock, plus the 1.6.3 TLS-policy registry |
+| [`archive/2026-04-24-daimon-sandhi-mcp-client.md`](archive/2026-04-24-daimon-sandhi-mcp-client.md) | daimon 2.0.2 | `sandhi_rpc_mcp_call` / `_call_with_headers` / `_result_raw` / `_error_code` / `_error_message` |
+| [`archive/2026-04-24-mela-sandhi-marketplace.md`](archive/2026-04-24-mela-sandhi-marketplace.md) | mela 1.0.1 | `sandhi_http_get_auto` / `_post_auto` + `sandhi_headers_*` |
+
+Each open doc carries its own "what's assumed vs. actual" note — now replaced with
+what was actually measured rather than assumed. sandhi's side is shipped in every
+case; the doc exists so the consumer/producer crate has zero ambiguity on what to
+put on its roadmap.
 
 ## Sandhi-side defects
 
-**Open:**
+**Open: none.**
 
-| Doc | Filed by | Severity | Summary |
-|-----|----------|----------|---------|
-| [`2026-07-30-accept-loop-unguarded-spin.md`](2026-07-30-accept-loop-unguarded-spin.md) | bote 3.2.1 | High (availability) | All five serve-loop accept sites re-issued `accept(2)` immediately and forever on a persistent error — 100% of one core, no backoff, no bound, no diagnostic; under EMFILE the pending connection is never dequeued, so the same connection is re-raced at full speed. `sandhi_server_run_async` looked handled but folded every errno into "queue drained", spinning one indirection further out. **Fixed** in `[Unreleased]` (pure errno classifier + capped 1→250 ms backoff + a 200-failure give-up bound); measured 1000 ms → 0 ms of CPU per 1 s EMFILE window, gated by `programs/_server_accept_emfile_probe.cyr`. **Not yet in consumers** — bote's four transports stay affected until a cyrius release re-vendors `lib/sandhi.cyr`. |
+The last one — [`archive/2026-07-30-accept-loop-unguarded-spin.md`](archive/2026-07-30-accept-loop-unguarded-spin.md)
+(bote 3.2.1; all five serve loops spun a core forever on any persistent accept error)
+— shipped at **1.9.8** and was archived 2026-08-23. Its doc had sat at
+`Status: fixed, [Unreleased]` for three releases.
+
+> ⚠ **Archived here does not mean fixed for consumers.** Post-fold, a consumer gets a
+> sandhi fix only when a cyrius release re-vendors `lib/sandhi.cyr` from
+> `dist/sandhi.cyr` — there is no sandhi pin left to bump. bote 3.3.6 still routes all
+> four transports through `sandhi_server_run`, so it carries the accept-spin until that
+> re-vendor lands. The same caveat applies to every 1.9.12 P1.
+
+**Defects found by audit rather than by a consumer** — the 1.9.12 P-1 sweep — are
+recorded in [`../roadmap.md`](../roadmap.md) §P1-followups, not here: the eight that
+were fixed are in the CHANGELOG, and the ones left open are follow-up work with no
+external reporter to coordinate with.
 
 Every other sandhi-side defect filed to date is **resolved and archived** — see the
 [Archived](#archived-resolved) table below.
@@ -56,7 +77,7 @@ as `YYYY-MM-DD-kebab-case.md` and move to `archive/` when fully closed.
 
 | Doc | Repo | Severity | Summary |
 |-----|------|----------|---------|
-| [`2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md) | cyrius | low (deprecated path) | The `-D CYRIUS_TLS_LIBSSL` smoke build hard-fails on a reachable-undefined crypto symbol (cyrius on-demand-link artifact: the native crypto path that force-links it is `#ifdef`'d out under libssl). **Re-verified 2026-07-11 on cyrius `6.4.49` (sandhi 1.8.1):** still open, symptom **shifted** — the original 4 (`thread_local_init/set/get`, `ct_select`) now link; the sole remaining reachable-undef is **`sha256`**. NOT a sandhi/sigil source defect (native links clean). libssl CI step non-gating; drops at the 2.0 retirement. |
+| [`2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md) | cyrius | low (deprecated path) | The `-D CYRIUS_TLS_LIBSSL` smoke build hard-fails on reachable-undefined crypto symbols (cyrius on-demand-link artifact: the native crypto path that force-links them is `#ifdef`'d out under libssl). **Re-verified 2026-08-22 on cyrius `6.5.35` (sandhi 1.9.11):** still open, count **widened to 14** — essentially all of sigil's transitive crypto surface (`u256_*`, `base64_encode`, `bayan_json_get`, `_keccak_*`, `shake256`, `fl_alloc`/`_free`, `ct_eq_bytes*`, `ct_select`, `thread_local_*`, `random_bytes`). **Not a regression from the 6.5.20 → 6.5.35 bump** — a clean resolve on both pins reports the same 14. Earlier counts in this table (4, then 1) were snapshots of their own dates. NOT a sandhi/sigil source defect (native links clean and is what all five live gates run against). libssl CI step non-gating; drops at the 2.0 retirement. |
 
 Otherwise, all filed upstream dependencies to date are **resolved and archived** —
 the `lib/tls.cyr` native-TLS swap off the fdlopen-libssl bridge (✅ cyrius 6.2.8 /
@@ -71,6 +92,10 @@ stdlib primitive are tracked in [`../roadmap.md`](../roadmap.md)
 
 | Doc | Closed at | Summary |
 |-----|-----------|---------|
+| [`archive/2026-07-30-accept-loop-unguarded-spin.md`](archive/2026-07-30-accept-loop-unguarded-spin.md) | sandhi 1.9.8 | bote 3.2.1: all five serve-loop accept sites re-issued `accept(2)` immediately and forever on a persistent error — 100% of one core, no backoff, no bound, no diagnostic; under EMFILE the pending connection is never dequeued so the same connection is re-raced at full speed. **Fixed** with an errno classifier + capped 1→250 ms backoff + a 200-failure give-up bound; measured 1000 ms → 0 ms of CPU per 1 s EMFILE window, gated by `programs/_server_accept_emfile_probe.cyr`. Archived 2026-08-23 (the doc had sat at `[Unreleased]` since 1.9.8). **bote 3.3.6 still carries the bug** until a cyrius release re-vendors `lib/sandhi.cyr`. |
+| [`archive/2026-04-24-yantra-sandhi-rpc.md`](archive/2026-04-24-yantra-sandhi-rpc.md) | adopted; archived 2026-08-23 | Coordination doc — would yantra adopt `sandhi::rpc` for WebDriver + Appium backends? **Yes.** yantra 1.0.3 includes `lib/sandhi.cyr` in 11 files and uses 35 sandhi verbs, including the full `sandhi_wd_*` surface M3 shipped to unblock it and the 1.6.3 endpoint-keyed TLS-policy registry. Cross-repo scheduling — the only item this doc tracked — is done. |
+| [`archive/2026-04-24-daimon-sandhi-mcp-client.md`](archive/2026-04-24-daimon-sandhi-mcp-client.md) | adopted; archived 2026-08-23 | Coordination doc (consumer half of daimon's two touchpoints) — would daimon adopt `sandhi::rpc::mcp` for MCP-over-HTTP dispatch? **Yes.** daimon 2.0.2 uses `sandhi_rpc_mcp_call` / `_call_with_headers` / `_result_raw` / `_error_code` / `_error_message`. The **producer** half stays open. |
+| [`archive/2026-04-24-mela-sandhi-marketplace.md`](archive/2026-04-24-mela-sandhi-marketplace.md) | adopted; archived 2026-08-23 | Coordination doc — would mela adopt `sandhi::http` for the marketplace API? **Yes.** mela 1.0.1 calls `sandhi_http_get_auto` / `_post_auto` with `sandhi_http_options_new` + `sandhi_headers_*`. Note mela sits on the `_auto` surface: no TLS policy today, so it was not exposed to the 1.9.12 policy-drop P1, but it needs that re-vendor before adding one. |
 | [`archive/2026-06-30-pooled-tls-workers-need-per-worker-crypto-bank.md`](archive/2026-06-30-pooled-tls-workers-need-per-worker-crypto-bank.md) | withdrawn 2026-06-30; confirmed resolved sandhi 1.8.1 | Filed off a **stale local `lib/sigil.cyr`** (3.9.4, opt-in banking). The actual sigil (3.9.7+, vendored 3.11.1 under the 6.4.49 pin) **auto-banks a private crypto-scratch lane per thread**, so `sandhi_server_run_pooled_tls` at `max_conns > 1` no longer SIGSEGVs — **no per-worker `crypto_bank_set` needed**. Confirmed at **sandhi 1.8.1**: `_server_tls_probe.cyr` `[4]` promoted to gating, 16/16 concurrent handshakes survive; the pooled-TLS `max_conns = 1` guidance was relaxed. |
 | [`archive/2026-07-03-rpc-mcp-call-no-custom-request-headers.md`](archive/2026-07-03-rpc-mcp-call-no-custom-request-headers.md) | withdrawn 2026-07-03 | Premise wrong: sandhi already exposes `sandhi_rpc_call_with_headers{,_a}` + `sandhi_rpc_mcp_call_with_headers{,_a}` (+ the `sandhi_headers_*` builder) for `traceparent` / `Authorization` / correlation propagation; the filing read only the no-header convenience shim. No sandhi change — the consumer (daimon) adopts the existing API. |
 | [`archive/2026-06-24-server-conn-off-fd-collision.md`](archive/2026-06-24-server-conn-off-fd-collision.md) | sandhi 1.6.13 | **Critical**: two `enum SandhiConnOff` shared member names but had different offsets (client `conn.cyr` `FD`=8 vs server `mod.cyr` `FD`=16); cyrius last-definition-wins resolved every `SANDHI_CONN_OFF_FD` to 16, so `_sandhi_conn_finalize` clobbered the client fd with the TLS ctx (0) → requests written to **fd 0** (echoed to the tty / lost), every plaintext client request silently failed. **Fixed** by namespacing the server struct (`SandhiServerConnOff` / `SANDHI_SRVCONN_OFF_*`). Its follow-up cross-module dup-symbol audit (`ERR_IO` / `chacha20_xor`) **re-verified clean at 1.8.1** (0 duplicate-symbol warnings on the native build). |

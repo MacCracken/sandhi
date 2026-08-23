@@ -62,11 +62,19 @@ a public verb + a build flag is not a patch):
   alive past 2.0 (unlikely). Context:
   [`issues/archive/2026-05-22-cyrius-native-tls-in-6.0.x.md`](issues/archive/2026-05-22-cyrius-native-tls-in-6.0.x.md).
 
-## P1-followups — audited at 1.9.12, deliberately not patched
+## P1 follow-ups from the 1.9.12 sweep — and the 1.9.13 repair queue
 
-The 1.9.12 P-1 sweep fixed eight defects (see the CHANGELOG). These are the
-findings from the same sweep that were **verified as real but left alone**, each
-with the reason. They are here so none of it is a buried deferral.
+The 1.9.12 P-1 sweep fixed eight defects (see the CHANGELOG). This section holds
+everything from that sweep that did **not** ship in it, so none of it is a buried
+deferral:
+
+- **Confirmed but deliberately not patched** (below) — real, with a stated reason
+  the obvious fix is wrong or too large for a patch.
+- **[The 1.9.13 repair queue](#1913--the-confirmed-repair-queue)** — the findings
+  whose adversarial verifiers were killed mid-run by a spend limit, since
+  **re-verified by hand (2026-08-23)**. Five of six are real, four are P1. That is
+  the next release's worklist, in priority order.
+- **Split verdicts** — one verifier each way; each needs a decision, not a fix.
 
 ### Confirmed, but the fix does not belong where the defect is
 
@@ -109,30 +117,89 @@ with the reason. They are here so none of it is a buried deferral.
   held. The 1.6.5 split-CRLF fix addressed the sibling condition in the chunked
   decoder; this is the SSE-parser half.
 
-### Unverified — the sweep's verifiers died mid-run
+### 1.9.13 — the confirmed repair queue
 
-Nine findings had **both** adversarial verifiers killed by a spend limit. The
-harness only scored a finding "survived" when every vote returned, so these were
-bucketed with the refuted ones **without any reasoning behind them**. They are
-neither confirmed nor cleared, and each needs a first-principles read before it
-is either fixed or dismissed:
+The nine "unverified" findings from the 1.9.12 sweep (their adversarial verifiers
+were killed by a spend limit, so they were bucketed as refuted with no reasoning
+behind them) were **re-verified by hand on 2026-08-23**. Three were duplicates of
+defects 1.9.12 already fixed. Of the remaining six, **five are real and four are
+P1.** This is the 1.9.13 worklist, in the order it should be picked up.
 
-| Site | Claim as filed |
-|---|---|
-| `src/http/pool.cyr:366` | chunk-size i64 overflow in `_sandhi_pool_chunked_complete` → remote SIGSEGV on the default client path |
-| `src/http/pool.cyr:66` | `sandhi_http_pool_new_a` stores `map_new_a`'s OOM 0 into the struct and returns success |
-| `src/http/h2/request.cyr:119` | h2 request header encoder writes an unbounded HPACK block into a fixed 8192-byte `hbuf` |
-| `src/http/h2/hpack.cyr:278` | `sandhi_hpack_table_add_a` installs a half-rebuilt name/value vec pair after a `vec_push_a` OOM |
-| `src/http/h2/response.cyr:135` | h2 PING handler echoes a hardcoded 8 bytes regardless of the peer's declared frame length |
-| `src/server/mod.cyr:432` | response builders drop every `str_builder` OOM return, then deref `str_data(str_builder_build_a(...))` |
-| `src/net/resolve.cyr:200` | (duplicate of the fixed DNS overflow — **resolved at 1.9.12**) |
-| `src/http/stream.cyr:199` | (duplicate of the fixed chunk-size overflow — **resolved at 1.9.12**) |
-| `src/server/mod.cyr:171` | (duplicate of the fixed server CL overflow — **resolved at 1.9.12**) |
+**1. `_sandhi_pool_chunked_complete` has no chunk-size cap — P1, do this first.**
+`src/http/pool.cyr`. `size = size * 16 + digit` with no bound, then:
+```
+if (off + size + 2 > blen) { return 0; }
+off = off + size + 2;
+```
+A wrapped-negative `size` passes that guard and drives `off` to an
+attacker-chosen 64-bit offset; the loop then reads `load8(buf + off)` there.
+**Demonstrated**: a `8000000000000000` chunk size against a 20-byte body made the
+function answer **1 = "this chunked response is complete"** — it found its
+terminal chunk by reading outside the buffer. `_sandhi_http_recv_framed` uses that
+verdict to stop reading, so a remote peer gets an out-of-bounds read *and* a
+truncated response framed as whole, on the **default client path**.
+This is the **third copy** of the same missing cap. The buffered
+`_sandhi_resp_chunk_size` has had `_SANDHI_RESP_CHUNK_MAX` since 0.9.0 P0 #3;
+1.9.12 added it to the streaming `_sandhi_chunk_parse_size`; this one was missed
+in that same sweep. Fix is the identical one-line bound — **and then grep for a
+fourth.**
 
-The first six are live. `pool.cyr:366` and `h2/request.cyr:119` are the two worth
-reading first — both are claimed memory-safety issues on remotely-driven paths,
-and the two duplicates that *were* independently confirmed in this sweep
-(`resolve.cyr:200`, `stream.cyr:199`) both turned out to be real.
+**2. `sandhi_h2_request_encode_headers_a` writes unbounded into a fixed 8 KiB
+buffer — P1.** `src/http/h2/request.cyr`. The function's own header comment says
+it: *"encoder lacks overflow checking — caller's responsibility"* — and its only
+caller (line 228) allocates exactly `_SANDHI_H2_REQ_HBUF_CAP` (8192) and then
+loops over every user header without checking `off`. So the contract is unmet by
+sandhi's own caller. Request headers are caller-supplied rather than remote, but
+they routinely carry attacker-influenced content (a long cookie, a URL-derived
+value, a token from upstream) and the redirect-follow path re-emits them. Bound
+each emit against the cap and refuse rather than overflow.
+
+**3. `sandhi_hpack_table_add_a` ignores every `vec_push_a` return — P1 (OOM).**
+`src/http/h2/hpack.cyr`. On a mid-rebuild allocation failure the two vectors are
+installed anyway, and `CUR_SIZE` is incremented by `sz` as though the add
+succeeded. Two consequences, both bad: the size accounting diverges from the
+contents, and `new_names` / `new_values` can end up **different lengths**, so a
+header's name pairs with a *different* header's value. Subsequent HPACK index
+lookups then resolve to the wrong header — an `Authorization` name against
+someone else's value is the shape to worry about. Rebuild into locals, verify
+both vectors survived, and only then install.
+
+**4. `sandhi_http_pool_new_a` stores two unchecked `map_new_a` results — P1 (OOM).**
+`src/http/pool.cyr`. Both `SANDHI_POOL_OFF_MAP` and `SANDHI_POOL_OFF_H2_MAP` take
+the result unguarded while the struct allocation two lines above *is* guarded —
+the exact asymmetry 1.9.12 fixed in the TLS-policy constructors and the response
+parser. Yields a live pool handle whose maps are null; the first `_pool_take` /
+`_put` dereferences one. Fail closed: return 0.
+
+**5. Server response builders deref `str_builder_build_a` unchecked — P2.**
+`src/server/mod.cyr`, 6+ sites (`sandhi_server_send_status_a` and siblings). The
+filing said "drop every str_builder OOM return", which is **overstated** —
+`str_builder_new_a` *is* guarded, and the comment there records closing that gap.
+What is genuinely unchecked is `str_data(str_builder_build_a(a, sb))`: a build
+OOM returns 0 and `str_data(0)` dereferences it. This sits on the refusal path,
+which is exactly the arena-pressure path 1.9.6 built the reject arena for.
+
+**6. `_h2_handle_ping` echoes 8 bytes regardless of the declared frame length — P3.**
+`src/http/h2/response.cyr`. RFC 7540 §6.7: a PING frame MUST be 8 octets and any
+other length is a `FRAME_SIZE_ERROR` connection error. sandhi echoes a hardcoded
+8 from the payload buffer, so a short PING reads a few bytes past it and an
+oversized one is silently accepted. Cheap to fix, low severity, and it removes an
+OOB read on principle.
+
+**Not in this queue but adjacent** — the 1.9.12 CHANGELOG lists the four
+confirmed-but-deliberately-unpatched items above (short-`Content-Length` clamp,
+`Connection: close` `strlen()` re-measure, Slowloris, SSE split-boundary drops).
+The first two need design work rather than a patch; the last two are
+self-contained and could ride along if 1.9.13 has room.
+
+**Suggested shape**: items 1–4 are one arc — every one is "an allocation or an
+accumulator was not checked, and the unchecked value became an unsafe state",
+which is the same defect class 1.9.10 and 1.9.12 both closed instances of. Ship
+them together with the same mutation-verified test discipline, then 5–6 as
+cleanup. Worth budgeting a sweep specifically for *the fourth copy* of the
+chunk-size cap and any other allocation-result store that skips its guard —
+1.9.12 found three such asymmetries and this queue has three more, so the class
+is clearly not exhausted.
 
 ### Split verdicts — one verifier each way, worth a decision
 

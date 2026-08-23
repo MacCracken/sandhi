@@ -1,6 +1,10 @@
 # 2026-04-24 — daimon adopts `sandhi::rpc::mcp` for MCP-over-HTTP dispatch
 
-**Status**: Awaiting daimon roadmap entry (consumer-side)
+**Status**: **RESOLVED — adopted.** Archived 2026-08-23. Verified against
+`~/Repos/daimon` @ 2.0.2: the MCP client surface is in use — `sandhi_rpc_mcp_call`,
+`_call_with_headers`, `_result_raw`, `_error_code`, `_error_message`.
+⚠ The **producer** half of daimon's sandhi story is NOT done and stays open — see
+[`../2026-04-24-daimon-registry-endpoints.md`](../2026-04-24-daimon-registry-endpoints.md).
 **Reporter**: sandhi post-M3 coordination sweep
 **Target**: daimon's base-OS modernization pass (pre-sandhi-fold at Cyrius v5.7.0)
 **Depends on**: sandhi v0.4.0 (shipped)

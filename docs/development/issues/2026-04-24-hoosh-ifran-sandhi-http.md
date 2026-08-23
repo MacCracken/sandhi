@@ -1,6 +1,16 @@
 # 2026-04-24 — hoosh + ifran adopt `sandhi::http` + `sandhi::rpc::json` for LLM-provider routing
 
-**Status**: Awaiting hoosh / ifran roadmap entries
+**Status**: **PARTIALLY RESOLVED — now an ifran-only item** (re-checked 2026-08-23).
+
+- **hoosh @ 2.6.3 — ADOPTED.** Uses `sandhi_http_post`, `sandhi_http_stream` +
+  `sandhi_sse_event_data` / `sandhi_stream_err` / `_status` (streaming LLM responses,
+  which is exactly the shape this doc proposed), plus `sandhi_headers_*`,
+  `sandhi_resolve_ipv4`, `sandhi_net_parse_ipv4` and `sandhi_server_run`.
+- **ifran @ 2.2.0 — NOT adopted.** Zero sandhi verbs in `src/`.
+
+The doc deliberately covered both because their needs were identical. They have now
+diverged, which is the condition its own header called out for splitting it. Everything
+below still reads as written for ifran; hoosh's half is done.
 **Reporter**: sandhi post-M3 coordination sweep
 **Target**: hoosh & ifran base-OS modernization pass (pre-sandhi-fold at Cyrius v5.7.0)
 **Depends on**: sandhi v0.4.0 (shipped)

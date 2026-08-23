@@ -1,6 +1,14 @@
 # 2026-04-24 — vidya adopts `sandhi::http` for external-knowledge fetch
 
-**Status**: Awaiting vidya roadmap entry — **low priority, future milestone**
+**Status**: **OPEN — but the framing has changed** (re-checked 2026-08-23).
+vidya @ 2.8.4 **is already a sandhi consumer** — just not for fetch. It includes
+`lib/sandhi.cyr` in 2 files and uses the **server** surface (`sandhi_server_run`,
+`_get_path`, `_get_param[_a]`, `_path_segment`, `_send_response`, `_url_decode_a`,
+`sandhi_json_escape`). The external-knowledge **fetch** ask in this doc is still unmet.
+
+That makes this cheaper than filed: vidya has already paid the adoption cost and knows
+the library. Adding the client surface is additive, not a new dependency. Still
+consumer-scheduled, still low priority.
 **Reporter**: sandhi post-M3 coordination sweep
 **Target**: vidya's fetch milestone (no specific timing; treated as future)
 **Depends on**: sandhi v0.3.0 (shipped)

@@ -1,6 +1,9 @@
 # 2026-04-24 — ark adopts `sandhi::http` + `sandhi::rpc::json` for remote registry ops
 
-**Status**: Awaiting ark roadmap entry
+**Status**: **OPEN — confirmed not adopted** (re-checked 2026-08-23 against
+`~/Repos/ark` @ 1.4.1: zero sandhi verbs in `src/`). No longer an assumption. The
+sandhi-side surface has been ready since v0.4.0 and has only grown since
+(streaming download at 1.6.4 is a direct fit for registry artifact pulls).
 **Reporter**: sandhi post-M3 coordination sweep
 **Target**: ark's base-OS modernization pass (pre-sandhi-fold at Cyrius v5.7.0)
 **Depends on**: sandhi v0.4.0 (shipped)

@@ -4,7 +4,11 @@
 **Reporter:** bote 3.2.1
 **Affected:** `src/server/mod.cyr` — all five accept sites
 **Severity:** High (availability). Not a privilege defect; no data exposure.
-**Status:** fixed, `[Unreleased]` (see CHANGELOG)
+**Status:** **RESOLVED** — shipped in **1.9.8** (2026-07-30). Archived 2026-08-23.
+**Consumer reach:** post-fold, bote picks this up only when a cyrius release re-vendors
+`lib/sandhi.cyr` from `dist/sandhi.cyr`. Bumping a sandhi pin does nothing — there is no
+sandhi pin any more. Verified 2026-08-23: bote 3.3.6 still routes all four transports
+through `sandhi_server_run`, so it stays affected until that re-vendor lands.
 
 ## What was wrong
 

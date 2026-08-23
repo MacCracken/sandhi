@@ -42,13 +42,15 @@ that identical clamp and are indistinguishable at that line, so the obvious
 refusal would break every HEAD request. Recorded in the roadmap rather than
 patched.
 
-⚠ **20 verifier agents died on a spend limit mid-run.** The harness scored a
-finding "survived" only when every vote returned, so those landed in the refuted
-bucket **with no reasoning behind them** — unverified, not cleared. Nine such
-findings, six still live (notably `pool.cyr:366` and `h2/request.cyr:119`, both
-claimed memory-safety on remotely-driven paths), are listed in
-[`roadmap.md`](roadmap.md) §P1-followups along with the four confirmed-but-
-deliberately-unpatched items and three split verdicts.
+⚠ **20 verifier agents died on a spend limit mid-run**, and the harness scored a
+finding "survived" only when every vote returned — so those landed in the refuted
+bucket with no reasoning behind them. **Re-verified by hand on 2026-08-23**: of
+the nine, three were duplicates of defects 1.9.12 already fixed, and of the
+remaining six **five are real and four are P1**. They are now the
+[1.9.13 repair queue](roadmap.md) in priority order, headed by a **third copy of
+the missing chunk-size cap** in `_sandhi_pool_chunked_complete` — demonstrated to
+answer "this response is complete" after an out-of-bounds read, on the default
+client path. 1.9.12 fixed two of the three chunk-size parsers and missed that one.
 
 **1.9.11** — 2026-08-22. **Toolchain pinned to cyrius 6.5.35** (was 6.5.20). Pure
 maintenance — no sandhi behaviour change, no public-surface change. All four suites
@@ -309,7 +311,7 @@ All milestone surfaces are live: M1 server (incl. server-side TLS, 1.6.8), M2 HT
 | `src/version_str.cyr` | 13 | auto-generated from `VERSION` by `scripts/version-bump.sh` — the single source of truth for `SANDHI_VERSION` at runtime. Never edited by hand; CI's drift check re-runs the script and fails on any diff |
 | `src/http/retry.cyr` | 192 | **0.7.2 new** — retry-with-backoff wrappers for idempotent methods (GET/HEAD/PUT/DELETE). Exponential 2× capped at max_backoff_ms. 0.9.3: AWS-style full-jitter sleep replaces fixed-exponential (thundering-herd guard). 0.9.5: `_sandhi_http_retry` routes through `sandhi_http_request_auto` so retries inherit h2 selection when the pool has an h2 conn for the route. 1.2.1: `_a` variant `_sandhi_http_retry_a` threads allocator through every attempt via `sandhi_http_request_auto_a`. |
 | `src/http/h2/dispatch.cyr` | 362 | **0.8.1 new** — `sandhi_http_request_auto` (per-method `_get_auto` / `_head_auto` / `_post_auto` / `_put_auto` / `_patch_auto` / `_delete_auto`). Pool h2-take → 1.1 single-shot fallback. 0.9.5: redirect-following hoisted to this layer — new `_sandhi_http_auto_once` (per-hop dispatch) + `_sandhi_http_auto_follow` (mirrors 1.1 follow's security semantics; each hop re-evaluates h2 selection). 0.9.6: ALPN-driven h2 auto-promotion — `_sandhi_http_try_h2_promote` opens advertising `h2,http/1.1`, runs preface + SETTINGS on h2-pick and caches via `sandhi_http_pool_put_h2`, donates conn to 1.1 pool slot on http/1.1-pick. First release where live h2 fires end-to-end via the auto path. 1.2.1: `_a` variants for the entire family (`_try_h2_promote_a`, `_auto_once_a`, `_auto_follow_a`, `sandhi_http_request_auto_a`) thread allocator through h2 take / promote / 1.1 fallback uniformly. 1.3.2: `sandhi_http_request_auto_a` save+restores the module-level `_sandhi_allow_0rtt` flag from `sandhi_http_options_get_allow_0rtt(opts)` for the duration of the dispatch — the 1.1 fallback's `_do_impl_a` eligibility check reads the flag. h2 path doesn't enable 0-RTT yet (CONNECTION preface vs. early-data ordering pinned for a later milestone). 1.3.3: same save+restore shape extended to `_sandhi_cred_digest` from `_sandhi_compute_cred_digest(user_headers)`, so the conn-finalize sees the right cred-digest for the cache-key isolation. |
-| `src/http/h2/huffman.cyr` | 296 | **0.8.x** — RFC 7541 Huffman decode tree + encode table, built from the Appendix B blob. Line 73 is that 2,570-char table as a **single literal** (one fixup, [architecture/001](../architecture/001-per-program-fixup-cap.md)) and is allowlisted in CI's lint step |
+| `src/http/h2/huffman.cyr` | 296 | **0.8.x** — RFC 7541 Huffman decode tree + encode table, built from the Appendix B blob. Line 73 is that 2,570-char table as a **single literal** (one fixup, [architecture/001](../architecture/001-hpack-huffman-blob.md)) and is allowlisted in CI's lint step |
 | `src/http/h2/hpack.cyr` | 633 | **0.8.x** — HPACK header compression: static table, dynamic table with eviction, integer + string primitives |
 | `src/http/h2/frame.cyr` | 291 | **0.8.x** — HTTP/2 frame wire format (RFC 7540 §6): header parse/serialize, SETTINGS, WINDOW_UPDATE, GOAWAY, RST_STREAM |
 | `src/http/h2/conn.cyr` | 277 | **0.8.x** — per-call reentrant h2 connection lifecycle: preface, settings exchange, stream-id allocation, flow-control accounting |
@@ -412,10 +414,22 @@ No external git deps — pure stdlib composition. Since **1.8.0**, `sigil` + `sa
 
 ## Next
 
-As of **1.9.11** the toolchain is on cyrius **6.5.35** (a maintenance parity bump:
-`fmt` continuation-line indent absorbed across 24 files, `distlib --all` + the new
-per-profile `.deps` sidecars wired into CI and the release workflow, ten undeclared
-`lib/` shadows removed). The roadmap is clean of stalled items; the only
+**1.9.13 is scoped and queued.** As of **1.9.12** the toolchain is on cyrius
+**6.5.35** (unchanged since the 1.9.11 parity bump). The next release is a
+**continuation of the 1.9.12 P-1 sweep** rather than a new direction: six findings
+whose verifiers died mid-sweep were re-verified by hand on 2026-08-23, and five
+are real — four P1. Priority order, scoping and evidence are in
+[`roadmap.md`](roadmap.md#1913--the-confirmed-repair-queue). Item 1 is the one to
+read first: a **third copy** of the chunk-size cap that 1.9.12 added to two of the
+three parsers, in `_sandhi_pool_chunked_complete`, on the default client path.
+
+Everything in that queue is one defect class — *an allocation result or an
+accumulator was stored without its guard, and the unchecked value became an unsafe
+state*. 1.9.10, 1.9.12 and now 1.9.13 are all instances of it, so the class is
+demonstrably not exhausted; 1.9.13 should end with a sweep for the fourth copy
+rather than assume the list is closed.
+
+Beyond that queue the roadmap is clean of stalled items; the only other
 genuinely-open thread is the deprecated **libssl** path, parked for the **2.0**
 clean-sweep removal.
 

@@ -1,6 +1,16 @@
 # 2026-04-24 — Daimon service-registry endpoints (cross-repo coordination)
 
-**Status**: Awaiting daimon roadmap entry
+**Status**: **OPEN — confirmed not implemented** (re-checked 2026-08-23 against
+`~/Repos/daimon` @ 2.0.2). This is no longer an assumption: daimon serves a `/v1/*` API
+(`/v1/agents`, `/v1/edge/nodes`, `/v1/mcp/*`, `/v1/rag/ingest`, `/v1/health`, `/v1/metrics`)
+and there is **no `/services/` route anywhere in its source**.
+
+⚠ **Namespace mismatch, not just an absence.** sandhi's `src/discovery/daimon.cyr`
+resolver calls `GET {base}/services/{name}` and registers with
+`POST {base}/services/{name}` — against real daimon both 404. Whoever lands this must
+decide which side moves: daimon adds `/services/{name}`, or sandhi's resolver is
+re-pointed at a `/v1/`-namespaced route. sandhi's side is a small, contained change
+(one module, one URL builder) if the API lands under `/v1/`.
 **Reporter**: sandhi M4 close
 **Affects**: sandhi v0.5.0+ live testing; sandhi fold-into-stdlib at Cyrius v5.7.0 (ADR 0002)
 **Target**: land during the in-progress base-OS modernization pass toward latest Cyrius

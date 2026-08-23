@@ -1,6 +1,12 @@
 # 2026-04-24 — mela adopts `sandhi::http` + `sandhi::rpc::json` for marketplace API
 
-**Status**: Awaiting mela roadmap entry
+**Status**: **RESOLVED — adopted.** Archived 2026-08-23. Verified against
+`~/Repos/mela` @ 1.0.1: the marketplace client calls `sandhi_http_get_auto` /
+`sandhi_http_post_auto` with `sandhi_http_options_new` + `sandhi_headers_*`, reading
+`sandhi_http_status` / `_body` / `_body_len`.
+⚠ mela is on the **`_auto`** surface. It attaches no TLS policy today, so it was NOT
+exposed to the 1.9.12 policy-drop P1 — but it is one `sandhi_http_options_tls_policy`
+call away from having been. It needs the 1.9.12 `lib/sandhi.cyr` re-vendor before adding one.
 **Reporter**: sandhi post-M3 coordination sweep
 **Target**: mela's base-OS modernization pass (pre-sandhi-fold at Cyrius v5.7.0)
 **Depends on**: sandhi v0.4.0 (shipped)
