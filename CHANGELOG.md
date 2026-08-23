@@ -2,6 +2,217 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.12] — 2026-08-23
+
+**P-1 audit / hardening / security sweep.** Full-codebase pass with the heaviest
+scrutiny on everything added since the last full sweep (the 1.4.12 closeout):
+the server thread-pool + routing + server-TLS surface, `download.cyr`, the h2
+auto-dispatch path, and the TLS-policy plumbing. Eight defects fixed, seven of
+them P1. Every fix is mutation-verified — reverting the guard makes its test
+fail (or SIGSEGV) — and the two security ones are demonstrated live.
+
+No pin change (stays cyrius 6.5.35). **1,308 assertions** (was 1,255; sandhi
+683 → 736), 8/8 fuzz harnesses, all live gates green.
+
+### Fixed — P1: a wrong certificate pin was ignored by the entire `_auto` and `_retry` surface
+
+**The most serious finding in this sweep, and it is demonstrated, not argued.**
+Against a real host, with a deliberately WRONG SPKI pin attached to the options,
+`sandhi_http_get_auto` returned **HTTP 200**. The connection completed against a
+certificate that did not match the pin, and the caller was told nothing was
+wrong.
+
+`_sandhi_http_auto_once_a` read every other field off `opts` and passed
+`ctx = 0` to `_sandhi_http_do_a`. On the `ctx == 0` branch,
+`_sandhi_reqctx_tls_policy` falls back to the module global
+`_sandhi_tls_policy_pending` — which is declared at `conn.cyr:123`, read at
+`conn.cyr:327`, and **never assigned anywhere in the tree**. So `has_policy` in
+`_sandhi_http_do_impl_a` was unconditionally 0 on this path:
+`_sandhi_policy_pre_open_a` never ran (no trust-store or mTLS load, and no
+fail-closed check) and `_sandhi_policy_post_open_a` never ran (no post-handshake
+SPKI check). The request also stayed pool- and 0-RTT-eligible, both of which
+1.4.6 deliberately forbids for a policy-bound connection.
+
+This is the 1.4.6 P1 exactly — fixed then only on the buffered dispatch path. It
+reaches every `_auto` verb **and every `_retry` verb**, because
+`_sandhi_http_retry_a` routes each attempt through `sandhi_http_request_auto_a`.
+
+`_sandhi_http_auto_once_a` now builds a real `SANDHI_REQCTX_SIZE` context
+carrying the policy, and a policied HTTPS request skips the h2 fast path
+entirely — both halves of it bypass enforcement, since a pooled h2 conn was
+established under whatever policy created it and `_sandhi_http_try_h2_promote_a`
+opens a fresh TLS connection with no policy bracket at all and then caches it.
+The 0-RTT and cred-digest slots are seeded from the globals the caller already
+save/restores, so those keep their exact prior per-dispatch semantics.
+
+**Why it survived four years of gates**: `programs/_https_policy_threading_gate.cyr`
+drove `sandhi_http_get_opts` and nothing else. It now carries `[D]` and `[E]`,
+which run the same wrong-pin / correct-pin pair through `sandhi_http_get_auto`.
+Verified both ways — pre-fix `[D]` reports `status = 200`; post-fix it fails
+closed with `err=TLS`.
+
+### Fixed — P1: a TLS policy could claim enforcement it was not performing
+
+`_sandhi_tls_policy_dup_a` answers 0 both on OOM **and when handed a NULL
+argument**, and all three enforcement constructors stored that result unchecked
+(the struct allocation two lines above was guarded; this one was not). The
+result was a live handle whose FLAGS said PINNED / MTLS / CUSTOM_TRUST while the
+corresponding slot held 0 — and every enforcement branch keys off the **slot**,
+never the flag. `_sandhi_policy_pre_open_a` computed `needs_pin = 0` and took its
+"nothing to enforce" early return; `_sandhi_policy_post_open_a` skipped
+`_sandhi_check_spki_a` entirely. The handshake completed on default CA
+verification while the caller believed it was pinned — the silent downgrade
+[ADR 0004](docs/adr/0004-security-first-refusal-model.md) P0 #5 exists to forbid.
+
+Measured, all four shapes returning a live handle with an empty slot:
+
+| Constructor | Trigger |
+|---|---|
+| `sandhi_tls_policy_new_pinned(0)` | NULL argument — **no memory pressure required** |
+| `sandhi_tls_policy_new_trust_store(0)` | NULL argument |
+| `sandhi_tls_policy_new_mtls(cert, 0)` | half a pair — armed the ctx with a certificate and **no matching private key** |
+| `sandhi_tls_policy_new_pinned_a(tight, hex)` | 48-byte struct fits, 65-byte hex dup does not |
+
+The trust-store case is the worst: a caller restricting trust to a private CA
+fell back to the **full system trust store**, so any publicly-trusted
+certificate for the hostname was accepted.
+
+Two-layer fix. The constructors fail closed — no handle rather than a lying one
+(matching `sandhi_tls_policy_new_default_a`, whose 0-on-OOM contract
+`tests/alloc.tcyr` already asserts). And `_sandhi_policy_pre_open_a` now refuses
+any policy whose flags and slots disagree, which makes the class impossible
+rather than merely absent: a hand-built struct, a policy that outlived its
+arena, or a future constructor bug all land there.
+
+### Fixed — P1: the DNS label encoder wrote the hostname before checking its bound
+
+`_sandhi_resolve_encode_labels` checked `wi > 255` only **after** storing every
+byte. Both callers hand it a 512-byte heap block and it starts at `out + 12`, so
+a long hostname walked straight off the end. Measured with a canary: a
+2 KiB single-label host clobbered **1,549 bytes past the allocation, furthest
+write at +2060**. The function then correctly returned -1 — after the damage.
+
+Remotely reachable. With `sandhi_http_options_follow` set, a redirect
+`Location:` supplies the hostname, and `_sandhi_url_safe` rejects only
+CR/LF/TAB/SPACE — every byte of a long label passes it. Nothing upstream caps
+host length. The per-label `llen > 63` guard does not help: a single long label
+never hits it until the end, and 600 short labels each pass it individually.
+
+The bound now runs before each store. Contract unchanged (total ≤ 255), valid
+names take exactly the same path. The regression test canaries the region past
+the contract for both shapes; reverting either guard clobbers 769 bytes.
+
+### Fixed — P1: server Content-Length overflowed to negative and framed a body-less request as complete
+
+`n = n * 10 + d` had no bound, so a 20-digit `Content-Length` overflowed i64 and
+**wrapped negative** while `seen_digit` and the trailing-whitespace check still
+passed. Both server recv loops then computed `need_body = bo + clen`, which went
+negative, making `have >= need_body` true on the very first pass: a headers-only
+request was framed as **COMPLETE** and dispatched, and a handler calling
+`sandhi_server_content_length` to size the body got a negative length.
+
+Answering `0` would not have been safe either — `0` means "no body", so the
+promised bytes would sit unread in the socket for a keep-alive connection to
+parse as the **next request**. The parser now answers `0 - 1` for
+"well-formed digits, too large to represent", distinct from the `0` that means
+"absent or malformed", and both recv loops map it onto
+`SANDHI_SERVER_ERR_TOO_LARGE` → 413, drain, close.
+
+### Fixed — P1: a chunk size of 2³² was read as the terminal zero-chunk
+
+`_sandhi_chunk_parse_size` (the streaming decoder, shared by `stream.cyr` and
+`download.cyr`) had no cap on its hex accumulator — the buffered sibling
+`_sandhi_resp_chunk_size` has had `_SANDHI_RESP_CHUNK_MAX` since the 0.9.0 P0 #3
+sweep, and this copy never got it. Worse than an ordinary overflow, because the
+return packs the size into the **low 32 bits** of `size | (i << 32)`: a chunk
+size of `100000000` — nine hex digits, exactly 2³², entirely legal on the wire —
+truncated to 0, which `_sandhi_stream_decode_chunked_into` reads as the terminal
+zero-chunk. **The body ended early, the rest went unread, and the caller was
+handed `SANDHI_OK`.**
+
+Now capped and refused. The sentinel is `0 - 2`, deliberately distinct from this
+function's existing `0 - 1` ("need more bytes") — returning -1 would have made
+the decoder buffer forever instead of refusing. The decoder propagates it and
+both consumers answer `SANDHI_ERR_PROTOCOL`.
+
+### Fixed — P1: a truncated download reported success
+
+`_sandhi_dl_stream_plain_a` has the declared `clen` in scope and already uses it
+as the loop's completion test, but its EOF branch returned `SANDHI_OK`
+unconditionally. A server that declared `Content-Length: 10485760` and sent 2 MiB
+before FIN produced a **truncated file on disk while the caller was told the
+download succeeded** — the one outcome a download API must never report. The
+chunked sibling loop has always answered PROTOCOL for its equivalent
+"closed before the terminal 0-chunk" case; the plain loop was the asymmetric one.
+
+EOF with an unsatisfied `Content-Length` is now `SANDHI_ERR_PROTOCOL`. `clen == 0`
+still means close-delimited and keeps clean-EOF semantics. Covered by a real
+loopback socket test — the peer writes 5 bytes against a declared 100 and closes
+— plus a control proving close-delimited bodies still succeed.
+
+### Fixed — P1: an OOM'd header vector crashed the parser, and a NULL result crashed the caller
+
+Two halves of the defect class 1.9.10 opened, one layer above it and one below.
+
+**Above:** `sandhi_headers_parse_a` correctly answers 0 when the arena cannot fit
+the header vector, and `sandhi_http_response_parse_a` passed it straight into
+`_sandhi_resp_frame_a`, whose first act is `_sandhi_resp_is_chunked(headers)` =
+`vec_len(0)`. **SIGSEGV inside the parser** — the caller never receives a value
+to check. `src/http/h2/response.cyr` has carried exactly this guard since 1.2.8,
+with a comment naming the same crash; the three HTTP/1.1 paths
+(`response.cyr`, `stream.cyr`, `download.cyr`) never got it.
+
+**Below:** all three result constructors (`_sandhi_resp_new_a`,
+`_sandhi_stream_result_a`, `_sandhi_dl_result_a`) return 0 when the allocator
+cannot fit the struct — and `_sandhi_resp_err_a` is built on the first of them,
+so even the **refusal path** returns 0 under the arena exhaustion it exists to
+report. 46 construction sites can hand a caller that 0, and all 14 public
+accessors dereferenced it unguarded. `sandhi_http_err_kind(0)` is
+`load64(0 + 32)`: **the one check every consumer is told to make first was itself
+the crash**, with no value they could have tested to avoid it.
+
+A null result now reads as INTERNAL with no status, body or headers — the same
+shape a successfully-allocated OOM response carries, so
+`if (sandhi_http_err_kind(r) != SANDHI_OK) { bail }` works for both and no caller
+learns a new rule. This matches the TLS-policy accessors, which have been
+null-guarded all along.
+
+### Fixed — h2 response bodies of exactly 1 MiB were not NUL-terminated
+
+`sandhi_http_body(r)` is documented as NUL-terminated, and both HTTP/1.1
+producers honour it by allocating `len + 1`. The h2 path allocated exactly
+`_SANDHI_H2_BODY_CAP`, and its accumulator admits `body_len == cap` (the guard is
+strictly-greater), so at exactly 1 MiB the terminator was correctly skipped —
+writing it would have been an out-of-bounds store — and a non-terminated buffer
+was handed to a caller told it was terminated. Allocating `cap + 1` removes the
+special case; the store is now unconditional. P2, fixed here because it is one
+byte.
+
+### Method
+
+Eight parallel audit dimensions over `src/`, each finding then put to two
+independent adversarial verifiers prompted to **refute** it. 44 candidates → 18
+unanimously confirmed, 6 split, 20 rejected. The verification earned its keep:
+it killed a plausible-looking "short Content-Length is silently clamped" finding
+by demonstrating that **HEAD and 304 responses hit that identical clamp and are
+indistinguishable at that line**, because `_sandhi_resp_frame_a` receives no
+request method — refusing there would break every HEAD request. That one is
+recorded in the roadmap rather than patched blind.
+
+Note for anyone re-running this: 20 verifier agents died on a spend limit
+mid-run, and the harness scored a finding as "survived" only when every vote
+returned — so those landed in the refuted bucket with no reasoning behind them.
+They are **unverified, not cleared**, and are listed in the roadmap as such.
+
+### Known — audited, not fixed here
+
+Recorded in [`roadmap.md`](docs/development/roadmap.md) §P1-followups rather than
+patched, each with why: the short-`Content-Length` clamp (fix cannot live at that
+symbol — see above), the `Connection: close` `strlen()` re-measure that truncates
+a body containing a NUL (needs `_sandhi_http_recv_framed` to carry its byte
+count), the missing total-request deadline (Slowloris), SSE events split across
+a recv boundary, and the nine findings whose verifiers died.
+
 ## [1.9.11] — 2026-08-22
 
 ### Changed — toolchain pinned to cyrius 6.5.35 (was 6.5.20)

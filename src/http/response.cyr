@@ -52,12 +52,30 @@ var SANDHI_RESP_STRUCT_SIZE = 48;
 
 # Public accessors. Same rationale as URL accessors — lets us reshape
 # the struct without churning call sites.
-fn sandhi_http_status(r): i64 { return load64(r + SANDHI_RESP_OFF_STATUS); }
-fn sandhi_http_body(r): i64 { return load64(r + SANDHI_RESP_OFF_BODY_PTR); }
-fn sandhi_http_body_len(r): i64 { return load64(r + SANDHI_RESP_OFF_BODY_LEN); }
-fn sandhi_http_headers(r): i64 { return load64(r + SANDHI_RESP_OFF_HEADERS); }
-fn sandhi_http_err_kind(r): i64 { return load64(r + SANDHI_RESP_OFF_ERR_KIND); }
-fn sandhi_http_err_message(r): i64 { return load64(r + SANDHI_RESP_OFF_ERR_MSG); }
+# 1.9.12 P1 — every accessor answers for `r == 0`.
+#
+# `_sandhi_resp_new_a` returns 0 when the allocator cannot fit the 48-byte
+# struct, and `_sandhi_resp_err_a` is built ON it — so the REFUSAL path returns
+# 0 under exactly the arena exhaustion it exists to report. 46 construction
+# sites across src/ can hand a caller that 0.
+#
+# Unguarded, `sandhi_http_err_kind(0)` is `load64(0 + 32)` → SIGSEGV, which
+# means the one check every consumer is told to make first is itself the crash.
+# There is no value a caller could have tested to avoid it.
+#
+# A null response now reads as INTERNAL with no status, no body, no headers —
+# the same shape a successfully-allocated OOM response carries, so
+# `if (sandhi_http_err_kind(r) != SANDHI_OK) { bail }` works for both and no
+# caller needs to learn a new rule. Per ADR 0004: refuse, don't crash.
+fn sandhi_http_status(r): i64 { if (r == 0) { return 0; } return load64(r + SANDHI_RESP_OFF_STATUS); }
+fn sandhi_http_body(r): i64 { if (r == 0) { return 0; } return load64(r + SANDHI_RESP_OFF_BODY_PTR); }
+fn sandhi_http_body_len(r): i64 { if (r == 0) { return 0; } return load64(r + SANDHI_RESP_OFF_BODY_LEN); }
+fn sandhi_http_headers(r): i64 { if (r == 0) { return 0; } return load64(r + SANDHI_RESP_OFF_HEADERS); }
+fn sandhi_http_err_kind(r): i64 {
+    if (r == 0) { return SANDHI_ERR_INTERNAL; }
+    return load64(r + SANDHI_RESP_OFF_ERR_KIND);
+}
+fn sandhi_http_err_message(r): i64 { if (r == 0) { return 0; } return load64(r + SANDHI_RESP_OFF_ERR_MSG); }
 
 # Build a response struct in one shot, allocated from `a`. Returns 0
 # on OOM. This is THE central constructor — every public client verb
@@ -574,6 +592,23 @@ fn sandhi_http_response_parse_a(a, buf, blen): i64 {
     var hblock_len = hend - header_start;
     if (hblock_len < 0) { hblock_len = 0; }
     var headers = sandhi_headers_parse_a(a, buf + header_start, hblock_len);
+
+    # 1.9.12 P1 — `sandhi_headers_parse_a` answers 0 when `a` cannot fit the
+    # header vector, and this result was passed straight into
+    # `_sandhi_resp_frame_a`, whose FIRST act is `_sandhi_resp_is_chunked(headers)`
+    # → `vec_len(0)` → SIGSEGV. The crash is inside the parser, so the caller
+    # never gets a value to check at all.
+    #
+    # Same OOM condition 1.9.10 addressed one layer down (the body copy), and
+    # the same guard `src/http/h2/response.cyr` has carried since 1.2.8 for the
+    # identical `vec_push_a(a, h=null, ...)` shape. The HTTP/1.1 paths never got
+    # it. Reachable on any arena-backed exchange, not only under memory pressure:
+    # `_sandhi_http_exchange_a` allocates `rbuf` eagerly at the full
+    # `max_response_bytes` cap, so a tight arena reaches this with room for the
+    # buffer but not the header vector.
+    if (headers == 0) {
+        return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL);
+    }
 
     var body_start = hend + 4;
     if (load8(buf + hend) == 10) { body_start = hend + 2; }

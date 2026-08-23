@@ -34,6 +34,8 @@
 #   3  — [B] wrong-pin GET did NOT fail-closed / wrong err_kind (SECURITY)
 #   4  — [C] could not capture the live peer SPKI
 #   5  — [C] correct-pin GET failed (pinning rejects a matching cert)
+#   6  — [D] wrong-pin AUTO GET did NOT fail-closed (SECURITY, 1.9.12)
+#   7  — [E] correct-pin AUTO GET failed (1.9.12)
 
 # sigil's SHA-256 (SPKI digest) pulls thread_local / ct / keccak,
 # which sigil does not declare — include the chain so `sha256` links.
@@ -180,6 +182,49 @@ fn main() {
         return 5;
     }
     say("    PASS (status = "); fmt_int(sandhi_http_status(rc)); say(")\n");
+
+    # ---------------------------------------------------------------
+    # [D] / [E] — 1.9.12. Gates [A]-[C] only ever drove
+    # `sandhi_http_get_opts`, the BUFFERED dispatch path. The `_auto`
+    # surface and every `_retry` verb reach enforcement through a
+    # different function (`sandhi_http_request_auto_a`), which read
+    # every other option off `opts` and never the TLS policy — it
+    # passed `ctx = 0`, and do_impl's ctx==0 fallback reads the module
+    # global `_sandhi_tls_policy_pending`, which is never assigned
+    # anywhere. So a pinned policy was silently dropped and the request
+    # went out on default CA verification. Same defect as 1.4.6, on the
+    # paths that gate never covered. These two close that coverage gap.
+    # ---------------------------------------------------------------
+    say("[D] WRONG pin + AUTO path -> must fail-closed (err=TLS)\n");
+    var od = sandhi_http_options_new();
+    sandhi_http_options_connect_ms(od, 3000);
+    sandhi_http_options_read_ms(od, 5000);
+    sandhi_http_options_tls_policy(od, sandhi_tls_policy_new_pinned(bad_pin));
+    var rd = sandhi_http_get_auto(url, 0, od);
+    if (sandhi_http_status(rd) > 0) {
+        say("    FAIL: wrong-pin AUTO GET returned a status (policy dropped — SECURITY); status = ");
+        fmt_int(sandhi_http_status(rd)); say("\n");
+        return 6;
+    }
+    if (sandhi_http_err_kind(rd) != SANDHI_ERR_TLS) {
+        say("    FAIL: wrong-pin AUTO err_kind != SANDHI_ERR_TLS; got = ");
+        fmt_int(sandhi_http_err_kind(rd)); say("\n");
+        return 6;
+    }
+    say("    PASS (fail-closed, err=TLS)\n");
+
+    say("[E] CORRECT pin + AUTO path -> must succeed\n");
+    var oe = sandhi_http_options_new();
+    sandhi_http_options_connect_ms(oe, 3000);
+    sandhi_http_options_read_ms(oe, 5000);
+    sandhi_http_options_tls_policy(oe, sandhi_tls_policy_new_pinned(hex));
+    var re = sandhi_http_get_auto(url, 0, oe);
+    if (sandhi_http_status(re) <= 0) {
+        say("    FAIL: correct-pin AUTO GET failed (enforcement is not 'always reject'); err_kind = ");
+        fmt_int(sandhi_http_err_kind(re)); say("\n");
+        return 7;
+    }
+    say("    PASS (status = "); fmt_int(sandhi_http_status(re)); say(")\n");
 
     say("\nALL GATES PASS\n");
     return 0;

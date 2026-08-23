@@ -62,6 +62,94 @@ a public verb + a build flag is not a patch):
   alive past 2.0 (unlikely). Context:
   [`issues/archive/2026-05-22-cyrius-native-tls-in-6.0.x.md`](issues/archive/2026-05-22-cyrius-native-tls-in-6.0.x.md).
 
+## P1-followups — audited at 1.9.12, deliberately not patched
+
+The 1.9.12 P-1 sweep fixed eight defects (see the CHANGELOG). These are the
+findings from the same sweep that were **verified as real but left alone**, each
+with the reason. They are here so none of it is a buried deferral.
+
+### Confirmed, but the fix does not belong where the defect is
+
+- **Short `Content-Length` is silently clamped and returned as `SANDHI_OK`.**
+  `_sandhi_resp_frame_a` does `if (body_start + n > blen) { n = blen - body_start; }`,
+  so `Content-Length: 100` with 3 body bytes yields status 200, `err_kind = OK`,
+  `body_len = 3`. Reachable: `_sandhi_http_recv_framed` returns a POSITIVE count
+  on EOF and both consumers treat any positive value as complete.
+  **Why not patched:** `_sandhi_resp_frame_a` receives no request method, and a
+  HEAD response and a 304 legitimately carry a non-zero `Content-Length` with
+  zero body bytes (RFC 7230 §3.3.2, RFC 7232 §4.1). All three shapes are
+  *indistinguishable at that line* — verified by probe during the sweep — so
+  refusing there breaks every HEAD request and every 304. The real fix is to
+  carry "a body was expected, and how much" down from the request layer (or to
+  compare against the `content_length` that `_sandhi_http_recv_framed` already
+  parsed at pool.cyr:444 and discards on the EOF exit). That is a design change,
+  not a patch. **Do not "fix" this by adding a refusal to the clamp.**
+
+- **`Connection: close` responses are re-measured with `strlen()`.**
+  `_sandhi_http_exchange_a` does `if (nread == 0 - 2) { actual_n = strlen(rbuf); }`
+  because `_sandhi_http_recv_framed` signals must-close with a sentinel instead
+  of a byte count. Any body containing a NUL is truncated at the first one —
+  silently, and only on the close-delimited path. **Why not patched:** the fix is
+  to make `_sandhi_http_recv_framed` carry both the count and the must-close flag
+  (an out-param cell, or a packed return like the chunk parser's), which touches
+  every caller of a widely-used internal. Wants its own slot.
+
+### Confirmed, availability rather than correctness
+
+- **No total-request deadline on the server (Slowloris).** `SO_RCVTIMEO` bounds
+  each individual read, so a peer that dribbles one byte per timeout-interval
+  keeps a serve loop alive indefinitely. 1.9.9's stop-flag and 1.9.8's
+  accept-error policy do not cover it — the connection is progressing, just
+  arbitrarily slowly. Wants a `sandhi_server_options_request_ms` whole-request
+  budget checked in both recv loops.
+
+- **SSE events split across a recv boundary can be dropped.**
+  `_sandhi_stream_feed_sse_a` consumes field lines it has not dispatched, so an
+  event whose blank-line terminator lands in the next read is lost rather than
+  held. The 1.6.5 split-CRLF fix addressed the sibling condition in the chunked
+  decoder; this is the SSE-parser half.
+
+### Unverified — the sweep's verifiers died mid-run
+
+Nine findings had **both** adversarial verifiers killed by a spend limit. The
+harness only scored a finding "survived" when every vote returned, so these were
+bucketed with the refuted ones **without any reasoning behind them**. They are
+neither confirmed nor cleared, and each needs a first-principles read before it
+is either fixed or dismissed:
+
+| Site | Claim as filed |
+|---|---|
+| `src/http/pool.cyr:366` | chunk-size i64 overflow in `_sandhi_pool_chunked_complete` → remote SIGSEGV on the default client path |
+| `src/http/pool.cyr:66` | `sandhi_http_pool_new_a` stores `map_new_a`'s OOM 0 into the struct and returns success |
+| `src/http/h2/request.cyr:119` | h2 request header encoder writes an unbounded HPACK block into a fixed 8192-byte `hbuf` |
+| `src/http/h2/hpack.cyr:278` | `sandhi_hpack_table_add_a` installs a half-rebuilt name/value vec pair after a `vec_push_a` OOM |
+| `src/http/h2/response.cyr:135` | h2 PING handler echoes a hardcoded 8 bytes regardless of the peer's declared frame length |
+| `src/server/mod.cyr:432` | response builders drop every `str_builder` OOM return, then deref `str_data(str_builder_build_a(...))` |
+| `src/net/resolve.cyr:200` | (duplicate of the fixed DNS overflow — **resolved at 1.9.12**) |
+| `src/http/stream.cyr:199` | (duplicate of the fixed chunk-size overflow — **resolved at 1.9.12**) |
+| `src/server/mod.cyr:171` | (duplicate of the fixed server CL overflow — **resolved at 1.9.12**) |
+
+The first six are live. `pool.cyr:366` and `h2/request.cyr:119` are the two worth
+reading first — both are claimed memory-safety issues on remotely-driven paths,
+and the two duplicates that *were* independently confirmed in this sweep
+(`resolve.cyr:200`, `stream.cyr:199`) both turned out to be real.
+
+### Split verdicts — one verifier each way, worth a decision
+
+- **`src/tls_policy/session_cache.cyr:218`** (P2) — the TLS session-cache key omits
+  policy identity, so resumption can cross mTLS client certs and trust stores.
+  1.6.9 added the cred-digest to the key for the credential half of this; the
+  policy half is not covered.
+- **`src/tls_policy/apply.cyr:230`** (P1 claimed) — the policy hook is armed in a
+  process-wide global across the connect+handshake window, so concurrent policied
+  opens could swap enforcement. Verifiers disagreed on whether any supported
+  concurrency mode reaches it; 1.6.9 moved the *dispatch* globals into a per-call
+  context but left the hook override global.
+- **`src/server/mod.cyr:2482 / 2613`** (P2) — two verifiers reached opposite
+  conclusions on whether `run_pooled_tls`'s per-request arena is ever created,
+  i.e. whether HTTPS routing still allocates from the no-free global bump.
+  Settle it by measurement, not by reading.
+
 ## Batch B — profile-justified optimization picks (parked; need prof evidence)
 
 The 1.2.5 prof captures (`sandhi_prof_*`) are the gate. No pre-committed

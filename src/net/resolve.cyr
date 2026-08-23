@@ -188,6 +188,25 @@ fn _sandhi_resolve_encode_labels(host, out): i64 {
     var p = 0;
     var wi = 1;  # +1: leaves room for the length byte of label 0
     while (load8(host + p) != 0) {
+        # 1.9.12 P1 — bound the write cursor BEFORE storing, not after.
+        #
+        # The `wi > 255` check at the bottom of this function ran only once the
+        # entire hostname had already been written, so an over-long name was
+        # correctly REJECTED but not before it had walked off the end of the
+        # caller's buffer. Both callers (`_sandhi_resolve_ipv4_impl_a`,
+        # `_sandhi_resolve_ipv6_impl_a`) pass a 512-byte heap block and the
+        # encoder starts at `out + 12`, so a 2 KiB single-label host wrote 1,549
+        # bytes past the allocation (measured, furthest write at +2060).
+        #
+        # Remotely reachable: with `sandhi_http_options_follow` set, a redirect
+        # `Location:` supplies the hostname, and `_sandhi_url_safe` rejects only
+        # CR/LF/TAB/SPACE — every byte of a long label passes it. Nothing
+        # upstream caps host length.
+        #
+        # The contract is unchanged (total <= 255, so the last writable index is
+        # 254); this only moves the enforcement ahead of the store. A valid name
+        # takes exactly the same path it always did.
+        if (wi > 254) { return 0 - 1; }
         var c = load8(host + p);
         if (c == 46) {
             var llen = p - label_start;
@@ -207,6 +226,9 @@ fn _sandhi_resolve_encode_labels(host, out): i64 {
     var last_len = p - label_start;
     if (last_len == 0) { return 0 - 1; }
     if (last_len > 63) { return 0 - 1; }
+    # Same bound for the root terminator — it is the one remaining store that
+    # lands at index `wi` rather than at an already-reserved lower slot.
+    if (wi > 254) { return 0 - 1; }
     store8(out + (wi - last_len - 1), last_len);
     store8(out + wi, 0);  # root terminator
     wi = wi + 1;

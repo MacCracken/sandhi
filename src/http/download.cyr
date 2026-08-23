@@ -92,10 +92,14 @@ fn _sandhi_dl_result_a(a, status, bytes, err, stopped): i64 {
     return r;
 }
 
-fn sandhi_download_status(r): i64  { return load64(r + SANDHI_DL_OFF_STATUS); }
-fn sandhi_download_bytes(r): i64   { return load64(r + SANDHI_DL_OFF_BYTES); }
-fn sandhi_download_err(r): i64     { return load64(r + SANDHI_DL_OFF_ERR); }
-fn sandhi_download_stopped(r): i64 { return load64(r + SANDHI_DL_OFF_STOPPED); }
+# 1.9.12 P1 — null-safe for the same reason as the response accessors:
+# `_sandhi_dl_result_a` returns 0 when the allocator cannot fit the result
+# struct, and `sandhi_download_err(0)` would be `load64(0 + 16)` → SIGSEGV on
+# the caller's first check. A null result reads as INTERNAL, zero bytes written.
+fn sandhi_download_status(r): i64  { if (r == 0) { return 0; } return load64(r + SANDHI_DL_OFF_STATUS); }
+fn sandhi_download_bytes(r): i64   { if (r == 0) { return 0; } return load64(r + SANDHI_DL_OFF_BYTES); }
+fn sandhi_download_err(r): i64     { if (r == 0) { return SANDHI_ERR_INTERNAL; } return load64(r + SANDHI_DL_OFF_ERR); }
+fn sandhi_download_stopped(r): i64 { if (r == 0) { return 0; } return load64(r + SANDHI_DL_OFF_STOPPED); }
 
 # ----------------------------------------------------------------
 # fd-write sink (ctx carries the destination fd directly)
@@ -227,6 +231,17 @@ fn _sandhi_dl_drain_headers_a(a, hop, conn): i64 {
     if (hend < 0) { hend = header_end; }
     var headers = sandhi_headers_parse_a(a, hp + hstart, hend - hstart);
 
+    # 1.9.12 P1 — OOM here answers 0, and both `sandhi_headers_get(0, ...)` and
+    # `_sandhi_resp_is_chunked(0)` below are `vec_len(0)` → SIGSEGV. Closes the
+    # conn on the way out like every other failure exit in this function, so the
+    # guard cannot leak the socket it is bailing on. Sibling of the same fix in
+    # `src/http/response.cyr` and `src/http/stream.cyr`.
+    if (headers == 0) {
+        sandhi_conn_close(conn);
+        store64(hop + SANDHI_DL_HOP_ERR, SANDHI_ERR_INTERNAL);
+        return hop;
+    }
+
     # Stash leftover body bytes (past the \r\n\r\n) for the body loop.
     var body_sb = _sandhi_sb_new_a(a, _SANDHI_DL_WORK_CAP);
     if (body_sb == 0) { sandhi_conn_close(conn); store64(hop + SANDHI_DL_HOP_ERR, SANDHI_ERR_INTERNAL); return hop; }
@@ -276,7 +291,10 @@ fn _sandhi_dl_stream_chunked_a(a, conn, body_sb, scratch, status, cb, ctx, deadl
     var going = 1;
     while (going == 1) {
         store64(decoded + SANDHI_SB_OFF_LEN, 0);
-        _sandhi_stream_decode_chunked_into(body_sb, chunk_state, decoded);
+        # 1.9.12 P1 — refuse a malformed chunk header instead of decoding on.
+        if (_sandhi_stream_decode_chunked_into(body_sb, chunk_state, decoded) != 0) {
+            return _sandhi_dl_result_a(a, status, load64(written), SANDHI_ERR_PROTOCOL, 0);
+        }
         var dlen = _sandhi_sb_len(decoded);
         if (dlen > 0) {
             var v = _sandhi_dl_emit(cb, ctx, _sandhi_sb_ptr(decoded), dlen, written);
@@ -330,7 +348,25 @@ fn _sandhi_dl_stream_plain_a(a, conn, body_sb, scratch, status, cb, ctx, deadlin
         if (n == 0 - _SANDHI_EAGAIN) { return _sandhi_dl_result_a(a, status, load64(written), SANDHI_ERR_TIMEOUT, 0); }
         if (n < 0) { return _sandhi_dl_result_a(a, status, load64(written), SANDHI_ERR_CONNECT, 0); }
         if (n == 0) {
-            # Clean EOF — for a close-delimited body this is the end.
+            # 1.9.12 P1 — EOF is only "the end" for a CLOSE-DELIMITED body.
+            #
+            # This returned SANDHI_OK unconditionally, even though `clen` is
+            # right here in scope and the loop above already uses it as the
+            # completion test. A server that declared `Content-Length: 10485760`
+            # and sent 2 MiB before FIN therefore produced a TRUNCATED FILE ON
+            # DISK and told the caller the download succeeded — the one outcome
+            # a download API must never report. The chunked sibling loop already
+            # answers PROTOCOL for its equivalent "closed before the terminal
+            # 0-chunk" case; the plain loop was the asymmetric one.
+            #
+            # `clen == 0` still means close-delimited (no Content-Length, or a
+            # zero/malformed one) and keeps the clean-EOF semantics unchanged.
+            # A 204/304 never reaches here — only a 2xx body streams — and a
+            # download is always a GET, so the HEAD/304 ambiguity that makes the
+            # same clamp unfixable in `_sandhi_resp_frame_a` does not arise.
+            if (clen > 0 && load64(written) < clen) {
+                return _sandhi_dl_result_a(a, status, load64(written), SANDHI_ERR_PROTOCOL, 0);
+            }
             return _sandhi_dl_result_a(a, status, load64(written), SANDHI_OK, 0);
         }
         var v = _sandhi_dl_emit(cb, ctx, scratch, n, written);

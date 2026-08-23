@@ -350,6 +350,71 @@ fn test_url_crlf_injection() {
 # response struct and NOT for the body — that is exactly the shape a real
 # consumer hits when the receive buffer is allocated eagerly at the full
 # `max_response_bytes` cap and the body has to be copied out of what is left.
+# 1.9.12 P1 — the header vector's OOM must not crash the parser.
+#
+# `sandhi_headers_parse_a` answers 0 when the arena cannot fit the vec, and
+# `sandhi_http_response_parse_a` passed that straight into `_sandhi_resp_frame_a`,
+# whose first act is `_sandhi_resp_is_chunked(headers)` = `vec_len(0)`. Pre-fix
+# this SIGSEGVs *inside the parser*, so the caller never receives a value to
+# check. Mutation-verified: removing the `headers == 0` guard in
+# `src/http/response.cyr` turns this test into a signal-11 abort, not a failure.
+fn test_response_headers_oom_is_not_a_crash() {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nabcd");
+    var raw_s = str_builder_build(sb);
+    var raw = str_data(raw_s);
+    var rlen = str_len(raw_s);
+
+    # 64 bytes: enough for the allocator to exist, far too little for the header
+    # vector. This is the layer ABOVE the 1.9.10 body-copy OOM — that test uses
+    # 4 KiB, which comfortably fits the vec and only starves the body.
+    var tiny = arena_allocator(64);
+    var r = sandhi_http_response_parse_a(tiny, raw, rlen);
+    assert(sandhi_http_err_kind(r) != SANDHI_OK,
+      "headers oom: parse reports an error instead of faulting");
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_INTERNAL,
+      "headers oom: and reports it as INTERNAL, matching the other OOM guards");
+    assert_eq(sandhi_http_body(r), 0, "headers oom: no body pointer");
+    assert_eq(sandhi_http_status(r), 0, "headers oom: no status");
+
+    # The same bytes through a sufficient arena still parse, so the assertions
+    # above are not passing because parsing broke outright.
+    var big = arena_allocator(65536);
+    var ok = sandhi_http_response_parse_a(big, raw, rlen);
+    assert_eq(sandhi_http_err_kind(ok), SANDHI_OK, "headers oom: a sufficient arena still parses OK");
+    assert_eq(sandhi_http_body_len(ok), 4, "with the full body length");
+    return 0;
+}
+
+# 1.9.12 P1 — a NULL result is readable by every public accessor.
+#
+# All three result constructors (`_sandhi_resp_new_a`, `_sandhi_stream_result_a`,
+# `_sandhi_dl_result_a`) return 0 when the allocator cannot fit the struct, and
+# `_sandhi_resp_err_a` is built on the first of them — so even the REFUSAL path
+# returns 0 under the arena exhaustion it exists to report. Unguarded,
+# `sandhi_http_err_kind(0)` is `load64(0 + 32)`: the one check every consumer is
+# told to make first was itself the crash, with no value they could have tested
+# to avoid it. Mutation-verified: dropping any `r == 0` guard signal-11s here.
+fn test_null_result_accessors_are_safe() {
+    assert_eq(sandhi_http_err_kind(0), SANDHI_ERR_INTERNAL, "null response: err_kind reads INTERNAL");
+    assert_eq(sandhi_http_status(0), 0, "null response: status 0");
+    assert_eq(sandhi_http_body(0), 0, "null response: body 0");
+    assert_eq(sandhi_http_body_len(0), 0, "null response: body_len 0");
+    assert_eq(sandhi_http_headers(0), 0, "null response: headers 0");
+    assert_eq(sandhi_http_err_message(0), 0, "null response: err_message 0");
+
+    assert_eq(sandhi_stream_err(0), SANDHI_ERR_INTERNAL, "null stream result: err reads INTERNAL");
+    assert_eq(sandhi_stream_status(0), 0, "null stream result: status 0");
+    assert_eq(sandhi_stream_events(0), 0, "null stream result: events 0");
+    assert_eq(sandhi_stream_stopped(0), 0, "null stream result: stopped 0");
+
+    assert_eq(sandhi_download_err(0), SANDHI_ERR_INTERNAL, "null download result: err reads INTERNAL");
+    assert_eq(sandhi_download_status(0), 0, "null download result: status 0");
+    assert_eq(sandhi_download_bytes(0), 0, "null download result: bytes 0");
+    assert_eq(sandhi_download_stopped(0), 0, "null download result: stopped 0");
+    return 0;
+}
+
 fn test_response_body_oom_is_not_ok() {
     # A REAL body, present in the buffer, larger than the arena can copy. The
     # first attempt at this test declared Content-Length without supplying the
@@ -1762,6 +1827,123 @@ fn test_server_sigpipe_guard() {
     return 0;
 }
 
+# Counting sink for the download truncation test — accepts everything.
+fn _t_dl_count_sink(ctx, buf, len): i64 { return 1; }
+
+# 1.9.12 P1 — a download that ends before the declared Content-Length must
+# report PROTOCOL, not SANDHI_OK.
+#
+# `_sandhi_dl_stream_plain_a` has `clen` in scope and already uses it as the
+# completion test, but its EOF branch returned SANDHI_OK unconditionally. A
+# server declaring `Content-Length: N` that sends M < N bytes and closes left a
+# TRUNCATED FILE ON DISK while the caller was told the download succeeded — the
+# one outcome a download API must never produce. The chunked sibling loop has
+# always answered PROTOCOL for its equivalent case; the plain loop was the
+# asymmetric one.
+#
+# Real loopback socket: the peer writes a short body and closes, which is
+# exactly the wire condition. Mutation-verified: restoring the unconditional
+# SANDHI_OK fails this.
+fn test_download_truncated_body_is_not_ok() {
+    var lo = 0x0100007F;
+    var lport = 39619;
+    var lr = tcp_socket();
+    if (is_err_result(lr) == 1) { assert_eq(1, 1, "dl trunc: tcp_socket unavailable — skipped"); return 0; }
+    var lfd = payload(lr);
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, lo, lport)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "dl trunc: bind unavailable — skipped"); return 0;
+    }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "dl trunc: listen unavailable — skipped"); return 0;
+    }
+    var cr = tcp_socket();
+    if (is_err_result(cr) == 1) { sock_close(lfd); assert_eq(1, 1, "dl trunc: client socket — skipped"); return 0; }
+    var cfd = payload(cr);
+    sock_reuse(cfd);
+    if (is_err_result(sock_connect(cfd, lo, lport)) == 1) {
+        sock_close(cfd); sock_close(lfd); assert_eq(1, 1, "dl trunc: connect — skipped"); return 0;
+    }
+    var ar = sock_accept(lfd);
+    if (is_err_result(ar) == 1) {
+        sock_close(cfd); sock_close(lfd); assert_eq(1, 1, "dl trunc: accept — skipped"); return 0;
+    }
+    var sfd = payload(ar);
+
+    # Peer sends 5 body bytes then closes, having "declared" 100.
+    sock_send(sfd, "ABCDE", 5);
+    sock_close(sfd);
+
+    var a = default_alloc();
+    var conn = alloc_via(a, SANDHI_CONN_STRUCT_SIZE);
+    store64(conn + SANDHI_CONN_OFF_KIND, SANDHI_CONN_PLAIN);
+    store64(conn + SANDHI_CONN_OFF_FD, cfd);
+    store64(conn + SANDHI_CONN_OFF_TLS_CTX, 0);
+    store64(conn + SANDHI_CONN_OFF_ALPN_DATA, 0);
+    store64(conn + SANDHI_CONN_OFF_0RTT_STATUS, 0);
+
+    var body_sb = _sandhi_sb_new_a(a, 4096);
+    var scratch = alloc_via(a, 4096);
+    var r = _sandhi_dl_stream_plain_a(a, conn, body_sb, scratch, 200,
+      &_t_dl_count_sink, 0, 0, 100);
+    assert_eq(sandhi_download_err(r), SANDHI_ERR_PROTOCOL,
+      "dl trunc: short body vs declared Content-Length reports PROTOCOL");
+    assert_eq(sandhi_download_bytes(r), 5, "dl trunc: and reports the bytes actually delivered");
+    sock_close(cfd);
+    sock_close(lfd);
+    return 0;
+}
+
+# Control for the above: with NO declared Content-Length the body is
+# close-delimited and EOF genuinely IS the end — must stay SANDHI_OK.
+fn test_download_close_delimited_eof_is_ok() {
+    var lo = 0x0100007F;
+    var lport = 39620;
+    var lr = tcp_socket();
+    if (is_err_result(lr) == 1) { assert_eq(1, 1, "dl close-delim: skipped"); return 0; }
+    var lfd = payload(lr);
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, lo, lport)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "dl close-delim: bind — skipped"); return 0;
+    }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "dl close-delim: listen — skipped"); return 0;
+    }
+    var cr = tcp_socket();
+    if (is_err_result(cr) == 1) { sock_close(lfd); assert_eq(1, 1, "dl close-delim: skipped"); return 0; }
+    var cfd = payload(cr);
+    sock_reuse(cfd);
+    if (is_err_result(sock_connect(cfd, lo, lport)) == 1) {
+        sock_close(cfd); sock_close(lfd); assert_eq(1, 1, "dl close-delim: connect — skipped"); return 0;
+    }
+    var ar = sock_accept(lfd);
+    if (is_err_result(ar) == 1) {
+        sock_close(cfd); sock_close(lfd); assert_eq(1, 1, "dl close-delim: accept — skipped"); return 0;
+    }
+    var sfd = payload(ar);
+    sock_send(sfd, "ABCDE", 5);
+    sock_close(sfd);
+
+    var a = default_alloc();
+    var conn = alloc_via(a, SANDHI_CONN_STRUCT_SIZE);
+    store64(conn + SANDHI_CONN_OFF_KIND, SANDHI_CONN_PLAIN);
+    store64(conn + SANDHI_CONN_OFF_FD, cfd);
+    store64(conn + SANDHI_CONN_OFF_TLS_CTX, 0);
+    store64(conn + SANDHI_CONN_OFF_ALPN_DATA, 0);
+    store64(conn + SANDHI_CONN_OFF_0RTT_STATUS, 0);
+
+    var body_sb = _sandhi_sb_new_a(a, 4096);
+    var scratch = alloc_via(a, 4096);
+    var r = _sandhi_dl_stream_plain_a(a, conn, body_sb, scratch, 200,
+      &_t_dl_count_sink, 0, 0, 0);
+    assert_eq(sandhi_download_err(r), SANDHI_OK,
+      "dl close-delim: clean EOF with no Content-Length stays OK");
+    assert_eq(sandhi_download_bytes(r), 5, "dl close-delim: full body delivered");
+    sock_close(cfd);
+    sock_close(lfd);
+    return 0;
+}
+
 # ── 1.9.0 peer address ──
 # A REAL loopback TCP connection, with the client bound to a KNOWN port so the peer port
 # is deterministic and verifiable — asserting "non-zero" would pass on a garbage read.
@@ -1979,6 +2161,56 @@ fn test_retry_should_retry_on_5xx() {
     var raw200 = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
     var r200 = sandhi_http_response_parse(raw200, strlen(raw200));
     assert_eq(_sandhi_retry_should_retry(r200), 0, "retry: 200 → no retry");
+    return 0;
+}
+
+# 1.9.12 P1 — the label encoder must reject an over-long name BEFORE writing it.
+#
+# `wi > 255` was checked only after the whole hostname had been stored, so an
+# over-long name was correctly rejected but had already walked off the end of
+# the caller's buffer. Both real callers pass a 512-byte block and the encoder
+# starts at +12: a 2 KiB single-label host wrote 1,549 bytes past the
+# allocation, furthest write at +2060. Remotely reachable through a redirect
+# `Location:` when follow is enabled — `_sandhi_url_safe` rejects only
+# CR/LF/TAB/SPACE, so every byte of a long label passes it.
+#
+# Canary the region past the 255-byte contract and assert it is untouched.
+# Mutation-verified: reverting either `wi > 254` guard fails this.
+fn test_resolve_label_encode_no_overflow() {
+    var buf[1024];
+    memset(&buf, 0xAB, 1024);
+
+    # 2048-byte single label (no dots) — the shape that never hits the
+    # per-label `llen > 63` check until the very end.
+    var sb = str_builder_new();
+    for (var i = 0; i < 2048; i = i + 1) { str_builder_putc(sb, 97); }
+    var hs = str_builder_build(sb);
+    var n = _sandhi_resolve_encode_labels(str_data(hs), &buf);
+    assert_eq(n, 0 - 1, "dns labels: over-long single label rejected");
+    var smashed = 0;
+    for (var i = 255; i < 1024; i = i + 1) {
+        if (load8(&buf + i) != 0xAB) { smashed = smashed + 1; }
+    }
+    assert_eq(smashed, 0, "dns labels: single label wrote nothing past the 255-byte contract");
+
+    # Many SHORT labels — each passes `llen > 63` individually, so the per-label
+    # guard never fires and only the total bound can stop it.
+    memset(&buf, 0xAB, 1024);
+    var sb2 = str_builder_new();
+    for (var i = 0; i < 600; i = i + 1) { str_builder_add_cstr(sb2, "ab."); }
+    str_builder_add_cstr(sb2, "com");
+    var hs2 = str_builder_build(sb2);
+    var n2 = _sandhi_resolve_encode_labels(str_data(hs2), &buf);
+    assert_eq(n2, 0 - 1, "dns labels: many-short-labels name rejected");
+    var smashed2 = 0;
+    for (var i = 255; i < 1024; i = i + 1) {
+        if (load8(&buf + i) != 0xAB) { smashed2 = smashed2 + 1; }
+    }
+    assert_eq(smashed2, 0, "dns labels: many short labels wrote nothing past the contract");
+
+    # A valid name still encodes byte-for-byte as before.
+    memset(&buf, 0, 64);
+    assert_eq(_sandhi_resolve_encode_labels("example.com", &buf), 13, "dns labels: valid name unchanged");
     return 0;
 }
 
@@ -2710,6 +2942,76 @@ fn test_tls_policy_default() {
     return 0;
 }
 
+# 1.9.12 P1 — a policy must never claim enforcement it cannot perform.
+#
+# `_sandhi_tls_policy_dup_a` answers 0 both on OOM and for a NULL argument, and
+# the three enforcement constructors stored that unchecked. The result was a
+# live handle whose FLAGS said PINNED / MTLS / CUSTOM_TRUST while the
+# corresponding slot held 0 — and every enforcement branch keys off the SLOT
+# (`_sandhi_policy_pre_open_a` sets needs_pin from `pinned != 0`;
+# `_sandhi_policy_post_open_a` runs `_sandhi_check_spki_a` only `if (pinned != 0)`).
+# So the handshake completed on default CA verification while the caller
+# believed it was pinned — the silent downgrade ADR 0004 P0 #5 forbids. The
+# trust-store variant is the worst: a private-CA-only client fell back to the
+# full system trust store.
+#
+# Two triggers, and only one of them needs memory pressure. Mutation-verified:
+# restoring any unchecked `store64(..., _sandhi_tls_policy_dup_a(...))` fails this.
+fn test_tls_policy_never_claims_unenforceable() {
+    # Trigger 1 — NULL argument, no OOM required.
+    assert_eq(sandhi_tls_policy_new_pinned(0), 0, "policy: pinned(NULL) yields no handle");
+    assert_eq(sandhi_tls_policy_new_trust_store(0), 0, "policy: trust_store(NULL) yields no handle");
+    assert_eq(sandhi_tls_policy_new_mtls(0, 0), 0, "policy: mtls(NULL,NULL) yields no handle");
+    # A half-supplied mTLS pair is just as unenforceable as none.
+    assert_eq(sandhi_tls_policy_new_mtls("/tmp/cert.pem", 0), 0, "policy: mtls with no key yields no handle");
+    assert_eq(sandhi_tls_policy_new_mtls(0, "/tmp/key.pem"), 0, "policy: mtls with no cert yields no handle");
+
+    # Trigger 2 — the 48-byte struct fits, the hex dup does not.
+    var tight = arena_allocator(64);
+    assert_eq(sandhi_tls_policy_new_pinned_a(tight,
+        "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"), 0,
+      "policy: pinned OOM on the dup yields no handle, not an unenforced policy");
+
+    # A well-formed policy is completely unaffected.
+    var ok = sandhi_tls_policy_new_pinned("abc123");
+    assert_eq(sandhi_tls_policy_has_flag(ok, SANDHI_TLS_POLICY_PINNED), 1, "policy: valid pin still builds");
+    assert_streq(sandhi_tls_policy_pinned_hash(ok), "abc123", "policy: valid pin still stored");
+    return 0;
+}
+
+# 1.9.12 P1 (defence in depth) — enforcement fails closed on a policy whose
+# flags and slots disagree, whatever built it. The constructors above can no
+# longer produce one, but a hand-built struct or a policy that outlived its
+# arena can, and `_sandhi_policy_pre_open_a` used to read it as "demands
+# nothing" and proceed.
+fn test_tls_policy_flag_slot_mismatch_fails_closed() {
+    var a = default_alloc();
+    var p = _sandhi_tls_policy_empty_a(a);
+    assert(p != 0, "policy mismatch: empty policy built");
+
+    # An empty policy demands nothing — must still proceed.
+    assert_eq(_sandhi_policy_pre_open_a(a, p, 0), 0, "policy mismatch: empty policy proceeds");
+    _sandhi_policy_post_open_a(a, 0, p, 0);
+
+    # Now claim PINNED with an empty pin slot — the exact shape the old
+    # constructors emitted.
+    store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_PINNED);
+    assert_eq(_sandhi_policy_pre_open_a(a, p, 0), 0 - 1,
+      "policy mismatch: PINNED flag with an empty slot fails closed");
+    _sandhi_policy_post_open_a(a, 0, p, 0);
+
+    store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_CUSTOM_TRUST);
+    assert_eq(_sandhi_policy_pre_open_a(a, p, 0), 0 - 1,
+      "policy mismatch: CUSTOM_TRUST flag with an empty slot fails closed");
+    _sandhi_policy_post_open_a(a, 0, p, 0);
+
+    store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_MTLS);
+    assert_eq(_sandhi_policy_pre_open_a(a, p, 0), 0 - 1,
+      "policy mismatch: MTLS flag with empty slots fails closed");
+    _sandhi_policy_post_open_a(a, 0, p, 0);
+    return 0;
+}
+
 fn test_tls_policy_pinned() {
     var p = sandhi_tls_policy_new_pinned("abc123");
     assert_eq(sandhi_tls_policy_has_flag(p, SANDHI_TLS_POLICY_PINNED), 1, "policy: pinned flag set");
@@ -2966,6 +3268,79 @@ fn test_stream_result_accessors() {
     assert_eq(sandhi_stream_events(r), 5, "stream: event count");
     assert_eq(sandhi_stream_err(r), SANDHI_OK, "stream: err_kind");
     assert_eq(sandhi_stream_stopped(r), 1, "stream: stopped-by-cb flag");
+    return 0;
+}
+
+# 1.9.12 P1 — a chunk size that cannot be represented must be refused, not
+# wrapped into the terminal zero-chunk.
+#
+# The accumulator had no cap (the buffered sibling `_sandhi_resp_chunk_size` has
+# had one since the 0.9.0 P0 #3 sweep; this streaming copy never got it), and
+# the return packs the size into the LOW 32 BITS of `size | (i << 32)`. So
+# "100000000" — nine hex digits, 2^32, entirely legal on the wire — truncated
+# to 0, and `_sandhi_stream_decode_chunked_into` read that as the terminal
+# zero-chunk: body ends early, rest of the response left unread, caller handed
+# SANDHI_OK. Mutation-verified: removing the cap makes the 2^32 case return
+# size 0 and this test fails.
+fn test_stream_chunk_size_overflow_refused() {
+    # Exactly 2^32 — the value that used to alias to the terminal chunk.
+    var sb = _sandhi_sb_new(256);
+    var s = "100000000\r\n";
+    _sandhi_sb_append(sb, s, strlen(s));
+    var sz = _sandhi_chunk_parse_size(sb);
+    assert_eq(sz, 0 - 2, "chunk: 2^32 size refused with the bad-header sentinel");
+    assert_neq(sz & 0xFFFFFFFF, 0, "chunk: and is NOT reported as a zero-length terminal chunk");
+
+    # Well past the cap.
+    var sb2 = _sandhi_sb_new(256);
+    var s2 = "ffffffffffffffff\r\n";
+    _sandhi_sb_append(sb2, s2, strlen(s2));
+    assert_eq(_sandhi_chunk_parse_size(sb2), 0 - 2, "chunk: 16-hex-digit size refused");
+
+    # The sentinel must stay distinct from "need more bytes" (0 - 1), or the
+    # decoder buffers forever instead of refusing.
+    var sb3 = _sandhi_sb_new(256);
+    var s3 = "ff";
+    _sandhi_sb_append(sb3, s3, strlen(s3));
+    assert_eq(_sandhi_chunk_parse_size(sb3), 0 - 1, "chunk: incomplete still means need-more, not bad");
+
+    # A large-but-representable size is untouched.
+    var sb4 = _sandhi_sb_new(256);
+    var s4 = "7fffffff\r\n";
+    _sandhi_sb_append(sb4, s4, strlen(s4));
+    var sz4 = _sandhi_chunk_parse_size(sb4);
+    assert_eq(sz4 & 0xFFFFFFFF, 0x7FFFFFFF, "chunk: the cap value itself still parses");
+    return 0;
+}
+
+# 1.9.12 P1 — a Content-Length too large to represent must be refused.
+#
+# `n = n * 10 + d` had no bound, so a 20-digit value overflowed i64 and wrapped
+# NEGATIVE while `seen_digit` and the trailing check still passed. Both server
+# recv loops then computed `need_body = bo + clen`, which went negative, making
+# `have >= need_body` true on the first pass — a headers-only request was framed
+# as COMPLETE and dispatched, and a handler calling this verb to size the body
+# got a negative length. Answering 0 would be no better: 0 means "no body", so
+# the promised bytes would sit unread in the socket for a keep-alive connection
+# to parse as the next request. `0 - 1` maps onto SANDHI_SERVER_ERR_TOO_LARGE →
+# 413, drain, close.
+fn test_server_content_length_overflow_refused() {
+    var req = "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 99999999999999999999\r\n\r\n";
+    var n = sandhi_server_content_length(req, strlen(req));
+    assert_eq(n, 0 - 1, "server CL: 20-digit value refused");
+    assert(n < 0, "server CL: and never a wrapped positive length");
+
+    # Just past the representable cap.
+    var req2 = "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 2147483648\r\n\r\n";
+    assert_eq(sandhi_server_content_length(req2, strlen(req2)), 0 - 1, "server CL: 2^31 refused");
+
+    # The cap itself, and ordinary values, are unchanged.
+    var req3 = "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 2147483647\r\n\r\n";
+    assert_eq(sandhi_server_content_length(req3, strlen(req3)), 0x7FFFFFFF, "server CL: cap value still parses");
+    var req4 = "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 42\r\n\r\n";
+    assert_eq(sandhi_server_content_length(req4, strlen(req4)), 42, "server CL: ordinary value unchanged");
+    var req5 = "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 10, 20\r\n\r\n";
+    assert_eq(sandhi_server_content_length(req5, strlen(req5)), 0, "server CL: 0.9.1 malformed-value refusal unchanged");
     return 0;
 }
 
@@ -3279,6 +3654,8 @@ fn main() {
 
     test_group("http/response/content_length");
     test_response_body_oom_is_not_ok();
+    test_response_headers_oom_is_not_a_crash();
+    test_null_result_accessors_are_safe();
     test_response_content_length();
 
     test_group("http/response/chunked");
@@ -3554,6 +3931,7 @@ fn main() {
 
     test_group("net/resolve/label_encode");
     test_resolve_label_encode();
+    test_resolve_label_encode_no_overflow();
 
     test_group("net/resolve/label_single");
     test_resolve_label_encode_single();
@@ -3643,6 +4021,8 @@ fn main() {
 
     test_group("tls_policy/pinned");
     test_tls_policy_pinned();
+    test_tls_policy_never_claims_unenforceable();
+    test_tls_policy_flag_slot_mismatch_fails_closed();
 
     test_group("tls_policy/mtls");
     test_tls_policy_mtls();
@@ -3716,6 +4096,10 @@ fn main() {
     test_group("stream/result");
     test_stream_result_accessors();
 
+    test_group("stream/chunk_size_overflow");
+    test_stream_chunk_size_overflow_refused();
+    test_server_content_length_overflow_refused();
+
     test_group("stream/chunk_parse_size");
     test_stream_chunk_parse_size();
 
@@ -3749,6 +4133,10 @@ fn main() {
 
     test_group("download/redirect_target");
     test_download_redirect_target();
+
+    test_group("download/truncated_body");
+    test_download_truncated_body_is_not_ok();
+    test_download_close_delimited_eof_is_ok();
 
     return assert_summary();
 }

@@ -199,6 +199,31 @@ fn _sandhi_policy_pre_open_a(a, policy, ctx): i64 {
     var needs_pin = 0;
     if (pinned != 0)      { needs_pin = 1; }
 
+    # 1.9.12 P1 — a policy whose FLAGS demand enforcement but whose slot is
+    # empty must fail closed, never read as "demands nothing".
+    #
+    # Everything below derives from the slots alone, so a policy with
+    # FLAGS = PINNED and pin slot 0 fell straight through the
+    # `needs_ctx == 0 && needs_pin == 0` early return and connected on default
+    # CA verification — with the caller believing it was pinned. The three
+    # constructors in `src/tls_policy/policy.cyr` no longer build such a policy
+    # (they now fail closed on the dup), but this is the check that makes the
+    # class impossible rather than merely absent: a hand-built policy struct, a
+    # policy that outlived its arena, or a future constructor bug all land here.
+    var flags = sandhi_tls_policy_flags(policy);
+    if ((flags & SANDHI_TLS_POLICY_PINNED) != 0 && pinned == 0) {
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
+        return 0 - 1;
+    }
+    if ((flags & SANDHI_TLS_POLICY_MTLS) != 0 && (mtls_cert == 0 || sandhi_tls_policy_mtls_key(policy) == 0)) {
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
+        return 0 - 1;
+    }
+    if ((flags & SANDHI_TLS_POLICY_CUSTOM_TRUST) != 0 && trust_store == 0) {
+        _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
+        return 0 - 1;
+    }
+
     if (needs_ctx == 0 && needs_pin == 0) { return 0; }
 
     if (needs_ctx == 1 && sandhi_tls_policy_enforcement_available() == 0) {

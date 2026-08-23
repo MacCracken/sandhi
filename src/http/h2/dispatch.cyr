@@ -189,6 +189,24 @@ fn _sandhi_http_try_h2_promote(url, opts, host, port, pool): i64 {
 # h2 path uses `sandhi_h2_request_a(a, ...)` for the per-request resp;
 # 1.1 path uses `_sandhi_http_do_a(a, ...)`.
 fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts): i64 {
+    # 1.9.12 P1 — the auto path must honour a TLS policy attached to `opts`.
+    #
+    # This function read every other option off `opts` and passed `ctx = 0` to
+    # `_sandhi_http_do_a`. On the `ctx == 0` branch `_sandhi_reqctx_tls_policy`
+    # falls back to the module global `_sandhi_tls_policy_pending`, which is
+    # declared at conn.cyr:123, read at conn.cyr:327, and **never assigned
+    # anywhere in the tree**. So `has_policy` in `_sandhi_http_do_impl_a` was
+    # unconditionally 0 here: `_sandhi_policy_pre_open_a` never ran (no
+    # trust-store or mTLS load, and no fail-closed check) and
+    # `_sandhi_policy_post_open_a` never ran (no post-handshake SPKI pin check).
+    # The request went out on default CA verification and the caller was told
+    # nothing was wrong.
+    #
+    # This is the 1.4.6 P1 exactly, which was fixed only on the buffered
+    # dispatch path. It reaches the whole public `_auto` surface AND every
+    # `_retry` verb, since `_sandhi_http_retry_a` routes every attempt through
+    # `sandhi_http_request_auto_a` (retry.cyr:134,143).
+    var policy = sandhi_http_options_get_tls_policy(opts);
     var pool = sandhi_http_options_get_pool(opts);
     if (pool != 0) {
         var u = sandhi_url_parse_a(a, url);
@@ -197,20 +215,32 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts):
             var port = sandhi_url_port(u);
             var tls = 0;
             if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { tls = 1; }
-            var h2c = sandhi_http_pool_take_h2(pool, host, port, tls);
-            if (h2c != 0) {
-                return sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len);
-            }
-            # Try ALPN promotion only when the pool has nothing for
-            # this route in either map. If the 1.1 slot already has
-            # an idle conn, a previous promotion attempt landed there
-            # (server picked 1.1) — repeating it would burn a TLS
-            # handshake every request instead of reusing the idle
-            # 1.1 conn.
-            if (tls == 1 && _sandhi_pool_has_idle(pool, host, port, 1) == 0) {
-                var promoted = _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool);
-                if (promoted != 0) {
-                    return sandhi_h2_request_a(a, promoted, method, url, user_headers, body, body_len);
+            # A policied HTTPS request skips the h2 fast path entirely. Both
+            # halves of it would bypass enforcement: a pooled h2 conn was
+            # established under whatever policy (or none) created it, and
+            # `_sandhi_http_try_h2_promote_a` opens a fresh TLS connection with
+            # no policy bracket at all and then caches it. Same rule
+            # `_sandhi_http_do_impl_a` already applies to the 1.1 pool
+            # (client.cyr:401, `pool != 0 && has_policy == 0`) — policy-bound
+            # conns are single-use. The `tls == 1` term matches do_impl's
+            # `has_policy` definition, so a policy on a plaintext URL stays the
+            # no-op it has always been and plaintext pooling is unaffected.
+            if (policy == 0 || tls == 0) {
+                var h2c = sandhi_http_pool_take_h2(pool, host, port, tls);
+                if (h2c != 0) {
+                    return sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len);
+                }
+                # Try ALPN promotion only when the pool has nothing for
+                # this route in either map. If the 1.1 slot already has
+                # an idle conn, a previous promotion attempt landed there
+                # (server picked 1.1) — repeating it would burn a TLS
+                # handshake every request instead of reusing the idle
+                # 1.1 conn.
+                if (tls == 1 && _sandhi_pool_has_idle(pool, host, port, 1) == 0) {
+                    var promoted = _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool);
+                    if (promoted != 0) {
+                        return sandhi_h2_request_a(a, promoted, method, url, user_headers, body, body_len);
+                    }
                 }
             }
         }
@@ -220,12 +250,21 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts):
     var write_ms = sandhi_http_options_get_write_ms(opts);
     var connect_ms = sandhi_http_options_get_connect_ms(opts);
     var total_ms = sandhi_http_options_get_total_ms(opts);
-    # ctx=0 — the auto/h2 path keeps the module-global 0-RTT + cred-digest
-    # save/restore in `sandhi_http_request_auto_a` (single-threaded; thoth
-    # drives the buffered `_sandhi_http_dispatch_a` path, not this one). The
-    # 1.1 fallback reads those globals via do_impl's ctx==0 branch.
+    # 1.9.12 P1 — a real request context, so the TLS policy reaches enforcement.
+    #
+    # The 0-RTT and cred-digest slots are seeded from the module globals that
+    # `sandhi_http_request_auto_a` already save/restores around this call, which
+    # is exactly what do_impl's `ctx == 0` branch used to read — so those two
+    # keep their prior per-dispatch semantics (computed once from the original
+    # headers, not recomputed per redirect hop) and only the policy is new.
+    var ctx = alloc_via(a, SANDHI_REQCTX_SIZE);
+    if (ctx == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
+    store64(ctx + SANDHI_REQCTX_OFF_ALLOW_0RTT, _sandhi_allow_0rtt);
+    store64(ctx + SANDHI_REQCTX_OFF_CRED_DIGEST, _sandhi_cred_digest);
+    store64(ctx + SANDHI_REQCTX_OFF_TLS_POLICY, policy);
+    store64(ctx + SANDHI_REQCTX_OFF_LAST_ERR, SANDHI_CONN_OPEN_OK);
     return _sandhi_http_do_a(a, method, url, user_headers, body, body_len,
-      max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
+      max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx);
 }
 
 fn _sandhi_http_auto_once(method, url, user_headers, body, body_len, opts): i64 {

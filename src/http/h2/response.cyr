@@ -148,7 +148,19 @@ fn _h2_handle_ping(h2c, hdr, payload): i64 {
 fn sandhi_h2_response_recv_a(a, h2c, stream_id): i64 {
     var hblock = alloc_via(a, _SANDHI_H2_HBLOCK_CAP);
     var hblock_len = 0;
-    var body = alloc_via(a, _SANDHI_H2_BODY_CAP);
+    # 1.9.12 — `+ 1` so the NUL terminator is always writable.
+    #
+    # The public contract (src/http/response.cyr's struct doc, and
+    # docs/guides/getting-started.md) says `sandhi_http_body(r)` is
+    # NUL-terminated, and both HTTP/1.1 producers honour it by allocating
+    # `len + 1` (`_sandhi_resp_body_copy_a`, `_sandhi_resp_decode_chunked_a`).
+    # h2 allocated exactly the cap, and the accumulator admits `body_len ==
+    # _SANDHI_H2_BODY_CAP` (its guard is strictly-greater), so a body of exactly
+    # 1 MiB left the terminator unwritten — correctly, since writing it would
+    # have been the out-of-bounds store the guard below exists to prevent — and
+    # handed a NON-terminated buffer to a caller told it was terminated. One
+    # extra byte removes the special case entirely.
+    var body = alloc_via(a, _SANDHI_H2_BODY_CAP + 1);
     if (hblock == 0 || body == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
     var body_len = 0;
     var headers_complete = 0;
@@ -245,10 +257,10 @@ fn sandhi_h2_response_recv_a(a, h2c, stream_id): i64 {
     var status = _h2_decode_response_headers_a(a, h2c, hblock, hblock_len, headers);
     if (status == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL); }
 
-    # Null-terminate body for cstr-style consumers.
-    if (body_len < _SANDHI_H2_BODY_CAP) {
-        store8(body + body_len, 0);
-    }
+    # Null-terminate body for cstr-style consumers. Unconditional since
+    # 1.9.12 — the buffer is `_SANDHI_H2_BODY_CAP + 1` bytes, so index
+    # `body_len` is in bounds even at the cap.
+    store8(body + body_len, 0);
     return _sandhi_resp_new_a(a, status, body, body_len, headers, SANDHI_OK);
 }
 

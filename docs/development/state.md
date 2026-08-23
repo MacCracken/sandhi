@@ -4,6 +4,52 @@
 
 ## Version
 
+**1.9.12** — 2026-08-23. **P-1 audit / hardening / security sweep.** Full-codebase
+pass weighted toward everything added since the last full sweep (1.4.12): the
+server thread-pool + routing + server-TLS surface, `download.cyr`, the h2
+auto-dispatch path, and the TLS-policy plumbing. **Eight defects fixed, seven
+P1.** No pin change (stays cyrius 6.5.35). **1,308 assertions** (was 1,255;
+sandhi 683 → 736), 8/8 fuzz, all live gates green. Every fix mutation-verified;
+the two security fixes demonstrated live.
+
+**The headline is demonstrated, not argued**: against a real host, with a
+deliberately WRONG SPKI pin on the options, `sandhi_http_get_auto` returned
+**HTTP 200**. `_sandhi_http_auto_once_a` passed `ctx = 0`, and the `ctx == 0`
+fallback reads `_sandhi_tls_policy_pending` — a global that is declared, read,
+and **never assigned anywhere in the tree**. So the whole `_auto` surface *and
+every `_retry` verb* (retry routes through auto) silently dropped pinning, mTLS
+and trust-store overrides. The 1.4.6 P1, fixed then only on the buffered path.
+The gate that should have caught it drove `sandhi_http_get_opts` and nothing
+else; it now carries `[D]`/`[E]` for the auto path, verified failing pre-fix.
+
+The other seven:
+
+| Defect | Shape |
+|---|---|
+| TLS policy could claim enforcement it wasn't doing | `_sandhi_tls_policy_dup_a` answers 0 on OOM **and for a NULL argument**; stored unchecked → FLAGS say PINNED, slot is 0, and every enforcement branch keys off the slot. Trust-store variant silently reverted a private-CA client to the **system** trust store |
+| DNS label encoder heap overflow | bound checked *after* every store; a 2 KiB host clobbered **1,549 bytes past a 512-byte allocation**. Remotely reachable via a redirect `Location:` |
+| Server `Content-Length` overflow | 20 digits wrapped negative → `need_body` negative → a headers-only request framed **COMPLETE** and dispatched |
+| Chunk size 2³² read as the terminal chunk | streaming parser had no cap and packs size into the low 32 bits → body ends early, caller gets `SANDHI_OK` |
+| Truncated download reported success | EOF branch returned OK ignoring the `clen` already in scope → **truncated file on disk, reported as a successful download** |
+| OOM'd header vector crashed the parser | `sandhi_headers_parse_a`'s 0 fed into `vec_len(0)`; h2 has had this guard since 1.2.8, the three HTTP/1.1 paths never got it |
+| A NULL result crashed the caller's first check | all 3 result constructors return 0 on OOM (including the **refusal** path), all 14 public accessors dereferenced it — `sandhi_http_err_kind(0)` *was* the crash |
+
+**Method**: eight parallel audit dimensions, every finding put to two independent
+adversarial verifiers prompted to refute. 44 candidates → 18 unanimous, 6 split,
+20 rejected. Verification paid for itself by killing a plausible
+"short Content-Length is silently clamped" finding — HEAD and 304 responses hit
+that identical clamp and are indistinguishable at that line, so the obvious
+refusal would break every HEAD request. Recorded in the roadmap rather than
+patched.
+
+⚠ **20 verifier agents died on a spend limit mid-run.** The harness scored a
+finding "survived" only when every vote returned, so those landed in the refuted
+bucket **with no reasoning behind them** — unverified, not cleared. Nine such
+findings, six still live (notably `pool.cyr:366` and `h2/request.cyr:119`, both
+claimed memory-safety on remotely-driven paths), are listed in
+[`roadmap.md`](roadmap.md) §P1-followups along with the four confirmed-but-
+deliberately-unpatched items and three split verdicts.
+
 **1.9.11** — 2026-08-22. **Toolchain pinned to cyrius 6.5.35** (was 6.5.20). Pure
 maintenance — no sandhi behaviour change, no public-surface change. All four suites
 green (**1,255 assertions**: sandhi 683 / h2 167 / alloc 342 / rpc 63), 8/8 fuzz
@@ -315,9 +361,9 @@ Build outputs:
 
 ## Tests
 
-**1,255 assertions green** across four suites (CI runs all four; measured on the **6.5.35** pin at 1.9.11):
+**1,308 assertions green** across four suites (CI runs all four; measured on the **6.5.35** pin at 1.9.12):
 
-- `tests/sandhi.tcyr` — **683** — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint (incl. the 1.6.0 native trust/mTLS enforcement-available + pin-available flips) / SSE / streaming (incl. the 1.6.5 split-inter-chunk-CRLF decoder fix — leading-CRLF parse + split-across-append round-trip, both fail pre-fix) / **download** (1.6.4: result accessors, fd-sink temp-file round-trip + write-error signal, redirect-target resolver across 302/200/follow-off/hops-exhausted/no-Location/downgrade-sentinel) / **server SIGPIPE guard** (1.6.6: `_sandhi_server_ignore_sigpipe()` returns 0 + idempotent) / **server routing** (1.6.7: `route_match` exact/`:name`-capture/segment-count/non-absolute, `_param_int` numeric+non-numeric→-1+oob, router add/cap-full, `router_dispatch` 200/404/405 + query-strip — 28 assertions) / **server TLS** (1.6.8: options `_tls`/`_get_tls` + `_backlog` decouple/floor, `SandhiConn` plain accessors + `conn_write`/`send_*_c` over a /dev/null conn, conn-aware `dispatch_c`/`router_handler_c` 200/404/405 — 22 assertions) / **client dispatch thread-safety** (1.6.9: the `_sandhi_reqctx_*` per-call request context — ctx==0 module-global fallback + per-call isolation, proving a context's open-error / cred-digest don't leak into a sibling context or the module global — 14 assertions) / **mDNS QU receive** (1.6.12: the `discovery/local/qu_unicast` loopback dispatch gate — an unconnected RX receives a unicast reply with a connected TX coexisting on the same port via `SO_REUSEPORT` — 1 assertion).
+- `tests/sandhi.tcyr` — **736** — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint (incl. the 1.6.0 native trust/mTLS enforcement-available + pin-available flips) / SSE / streaming (incl. the 1.6.5 split-inter-chunk-CRLF decoder fix — leading-CRLF parse + split-across-append round-trip, both fail pre-fix) / **download** (1.6.4: result accessors, fd-sink temp-file round-trip + write-error signal, redirect-target resolver across 302/200/follow-off/hops-exhausted/no-Location/downgrade-sentinel) / **server SIGPIPE guard** (1.6.6: `_sandhi_server_ignore_sigpipe()` returns 0 + idempotent) / **server routing** (1.6.7: `route_match` exact/`:name`-capture/segment-count/non-absolute, `_param_int` numeric+non-numeric→-1+oob, router add/cap-full, `router_dispatch` 200/404/405 + query-strip — 28 assertions) / **server TLS** (1.6.8: options `_tls`/`_get_tls` + `_backlog` decouple/floor, `SandhiConn` plain accessors + `conn_write`/`send_*_c` over a /dev/null conn, conn-aware `dispatch_c`/`router_handler_c` 200/404/405 — 22 assertions) / **client dispatch thread-safety** (1.6.9: the `_sandhi_reqctx_*` per-call request context — ctx==0 module-global fallback + per-call isolation, proving a context's open-error / cred-digest don't leak into a sibling context or the module global — 14 assertions) / **mDNS QU receive** (1.6.12: the `discovery/local/qu_unicast` loopback dispatch gate — an unconnected RX receives a unicast reply with a connected TX coexisting on the same port via `SO_REUSEPORT` — 1 assertion).
 - `tests/h2.tcyr` — **167** — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
 - `tests/alloc.tcyr` — **342** — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0). (1.6.1: the conn-timeout test now asserts `_sandhi_conn_set_timeout_ms_a` is arena-independent — it composes the stdlib `sock_set_*_timeout` setters — rather than the retired arena-allocates-timeval behaviour; net −1 vs 343.)
 - `tests/rpc.tcyr` — **63** — JSON builder/extractor, RPC dispatch err-envelope, WebDriver URL helpers, MCP envelope, **+ the 1.6.3 endpoint-keyed TLS-policy registry** (set/get/replace, longest-prefix + host-boundary guard, scheme-agnostic resolve, clear/clear-all/nested-survives-sibling-clear, 16-endpoint cap + replace-at-cap).

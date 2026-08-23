@@ -44,10 +44,14 @@ fn _sandhi_stream_result(status, events, err, stopped): i64 {
     return _sandhi_stream_result_a(default_alloc(), status, events, err, stopped);
 }
 
-fn sandhi_stream_status(r): i64 { return load64(r + SANDHI_STREAM_OFF_STATUS); }
-fn sandhi_stream_events(r): i64 { return load64(r + SANDHI_STREAM_OFF_EVENTS); }
-fn sandhi_stream_err(r): i64 { return load64(r + SANDHI_STREAM_OFF_ERR); }
-fn sandhi_stream_stopped(r): i64 { return load64(r + SANDHI_STREAM_OFF_STOPPED); }
+# 1.9.12 P1 — null-safe for the same reason as the response accessors:
+# `_sandhi_stream_result_a` returns 0 when the allocator cannot fit the result
+# struct, and `sandhi_stream_err(0)` would be `load64(0 + 16)` → SIGSEGV on the
+# caller's first check. A null result reads as INTERNAL, nothing consumed.
+fn sandhi_stream_status(r): i64 { if (r == 0) { return 0; } return load64(r + SANDHI_STREAM_OFF_STATUS); }
+fn sandhi_stream_events(r): i64 { if (r == 0) { return 0; } return load64(r + SANDHI_STREAM_OFF_EVENTS); }
+fn sandhi_stream_err(r): i64 { if (r == 0) { return SANDHI_ERR_INTERNAL; } return load64(r + SANDHI_STREAM_OFF_ERR); }
+fn sandhi_stream_stopped(r): i64 { if (r == 0) { return 0; } return load64(r + SANDHI_STREAM_OFF_STOPPED); }
 
 # ================================================================
 # Buffer helpers
@@ -185,6 +189,19 @@ fn _sandhi_chunk_parse_size(sb): i64 {
         elif (c >= 97 && c <= 102)   { size = size * 16 + (c - 87); seen_digit = 1; i = i + 1; }
         elif (c >= 65 && c <= 70)    { size = size * 16 + (c - 55); seen_digit = 1; i = i + 1; }
         else { scanning = 0; }
+        # 1.9.12 P1 — cap the accumulator, exactly as the buffered sibling
+        # `_sandhi_resp_chunk_size` has since the 0.9.0 P0 #3 sweep. This
+        # streaming copy never got the bound, and it is worse here than an
+        # ordinary overflow because of the packed return below: the size is
+        # carried in the LOW 32 BITS of `size | (i << 32)`, so any chunk size
+        # that is a multiple of 2^32 — `100000000` is nine hex digits and
+        # entirely legal on the wire — truncates to 0 and is read by
+        # `_sandhi_stream_decode_chunked_into` as the TERMINAL zero-chunk. The
+        # body ends early, the remaining bytes are left unread, and the caller
+        # is handed SANDHI_OK. Refuse instead (ADR 0004); -1 is this function's
+        # distinct `0 - 2` sentinel, because this function's `0 - 1` already means
+        # "need more bytes" and would make the decoder buffer forever.
+        if (size > _SANDHI_RESP_CHUNK_MAX) { return 0 - 2; }
     }
     # Skip chunk extensions (";name=value" etc.) up to CRLF/LF.
     while (i < n && load8(p + i) != 13 && load8(p + i) != 10) { i = i + 1; }
@@ -402,6 +419,14 @@ fn _sandhi_stream_read_loop_a(a, conn, cb, ctx, cap, deadline_ms): i64 {
     var hend = _sandhi_resp_headers_end(hp, header_end);
     if (hend < 0) { hend = header_end; }
     var headers = sandhi_headers_parse_a(a, hp + hstart, hend - hstart);
+
+    # 1.9.12 P1 — OOM here answers 0, and `_sandhi_resp_is_chunked(0)` is
+    # `vec_len(0)` → SIGSEGV on the very next line. Sibling of the same fix in
+    # `src/http/response.cyr` and `src/http/download.cyr`; `src/http/h2/response.cyr`
+    # has carried this guard since 1.2.8.
+    if (headers == 0) {
+        return _sandhi_stream_result_a(a, status, 0, SANDHI_ERR_INTERNAL, 0);
+    }
     var chunked = _sandhi_resp_is_chunked(headers);
 
     # Body-buffer starts with whatever's past the header marker.
@@ -437,7 +462,13 @@ fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ct
         # Process whatever's already in body_sb.
         if (chunked == 1) {
             var decoded = _sandhi_sb_new_a(a, cap);
-            _sandhi_stream_decode_chunked_into(body_sb, chunk_state, decoded);
+            if (decoded == 0) {
+                return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_INTERNAL, 0);
+            }
+            # 1.9.12 P1 — refuse a malformed chunk header instead of decoding on.
+            if (_sandhi_stream_decode_chunked_into(body_sb, chunk_state, decoded) != 0) {
+                return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_PROTOCOL, 0);
+            }
             if (_sandhi_sb_len(decoded) > 0) {
                 _sandhi_stream_feed_sse_a(a, decoded, cb, ctx, total_events_cell, stop_cell);
                 if (load64(stop_cell) == 1) { going = 0; }
@@ -487,6 +518,10 @@ fn _sandhi_stream_decode_chunked_into(in_sb, chunk_state, out_sb): i64 {
             # Reading a chunk-size line.
             var sz = _sandhi_chunk_parse_size(in_sb);
             if (sz == 0 - 1) { return 0; }  # need more bytes
+            # 1.9.12 P1 — an oversize/unrepresentable chunk size is a protocol
+            # error, not "need more". Propagated to the caller as `0 - 1` so the
+            # exchange is refused rather than silently ending the body.
+            if (sz == 0 - 2) { return 0 - 1; }
             var size = sz & 0xFFFFFFFF;
             var consumed = (sz >> 32) & 0xFFFFFFFF;
             _sandhi_sb_consume(in_sb, consumed);

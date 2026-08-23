@@ -82,8 +82,24 @@ fn sandhi_tls_policy_new_default(): i64 {
 fn sandhi_tls_policy_new_pinned_a(a, spki_hex): i64 {
     var p = _sandhi_tls_policy_empty_a(a);
     if (p == 0) { return 0; }
+    # 1.9.12 P1 — a policy must never claim enforcement it cannot perform.
+    #
+    # `_sandhi_tls_policy_dup_a` answers 0 both on OOM AND when handed a NULL
+    # argument, and that result used to be stored unchecked. The struct alloc
+    # two lines up was guarded; this one was not. The result was a live handle
+    # whose FLAGS said PINNED while the pin slot held 0 — and every enforcement
+    # branch keys off the SLOT, not the flag (`_sandhi_policy_pre_open_a` reads
+    # `pinned != 0` to set `needs_pin`, `_sandhi_policy_post_open_a` reads it to
+    # decide whether to run `_sandhi_check_spki_a` at all). A 0 slot therefore
+    # read as "this policy demands nothing": the handshake completed on default
+    # CA verification and the caller was told nothing was wrong.
+    #
+    # That is precisely the silent downgrade ADR 0004 P0 #5 exists to forbid.
+    # Fail closed instead — no handle rather than a lying one.
+    var d = _sandhi_tls_policy_dup_a(a, spki_hex);
+    if (d == 0) { return 0; }
     store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_PINNED);
-    store64(p + SANDHI_TLS_POLICY_OFF_PINNED, _sandhi_tls_policy_dup_a(a, spki_hex));
+    store64(p + SANDHI_TLS_POLICY_OFF_PINNED, d);
     return p;
 }
 
@@ -95,9 +111,18 @@ fn sandhi_tls_policy_new_pinned(spki_hex): i64 {
 fn sandhi_tls_policy_new_mtls_a(a, cert_path, key_path): i64 {
     var p = _sandhi_tls_policy_empty_a(a);
     if (p == 0) { return 0; }
+    # 1.9.12 P1 — see `sandhi_tls_policy_new_pinned_a`. BOTH halves must land:
+    # if only the key dup failed, `cert != 0` still set `needs_ctx = 1`, the
+    # hook armed, `tls_ctx_use_certificate_file` ran, and
+    # `tls_ctx_use_private_key_file` was skipped by its own `if (key != 0)` —
+    # leaving a ctx holding a certificate with no matching private key.
+    var c = _sandhi_tls_policy_dup_a(a, cert_path);
+    if (c == 0) { return 0; }
+    var k = _sandhi_tls_policy_dup_a(a, key_path);
+    if (k == 0) { return 0; }
     store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_MTLS);
-    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_CERT, _sandhi_tls_policy_dup_a(a, cert_path));
-    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_KEY, _sandhi_tls_policy_dup_a(a, key_path));
+    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_CERT, c);
+    store64(p + SANDHI_TLS_POLICY_OFF_MTLS_KEY, k);
     return p;
 }
 
@@ -109,8 +134,14 @@ fn sandhi_tls_policy_new_mtls(cert_path, key_path): i64 {
 fn sandhi_tls_policy_new_trust_store_a(a, bundle_path): i64 {
     var p = _sandhi_tls_policy_empty_a(a);
     if (p == 0) { return 0; }
+    # 1.9.12 P1 — see `sandhi_tls_policy_new_pinned_a`. This is the worst of the
+    # three to lose silently: a caller restricting trust to a private CA fell
+    # back to the FULL SYSTEM trust store, so any publicly-trusted certificate
+    # for the hostname was accepted.
+    var d = _sandhi_tls_policy_dup_a(a, bundle_path);
+    if (d == 0) { return 0; }
     store64(p + SANDHI_TLS_POLICY_OFF_FLAGS, SANDHI_TLS_POLICY_CUSTOM_TRUST);
-    store64(p + SANDHI_TLS_POLICY_OFF_TRUST_STORE, _sandhi_tls_policy_dup_a(a, bundle_path));
+    store64(p + SANDHI_TLS_POLICY_OFF_TRUST_STORE, d);
     return p;
 }
 
