@@ -95,6 +95,20 @@ Pure loopback, no DNS — every hostname is fictional and only the hook maps it
 anywhere. Mutation-verified: removing the v4 hook makes `[1]` report
 `hook saw first=0 second=0` and the gate exits 3.
 
+### Note — comment placement
+
+The first cut of this feature hung a 55-line design essay off the `enum`
+declaration. `cyrius distlib` scans a declaration's attached comment when
+deriving the `.deps` sidecars, so the bare word `assert` in one sentence added
+`assert` as a leaf requirement to `dist/sandhi-tls.deps` and
+`dist/sandhi-server.deps` — two slices that use no such thing. Reverting that
+one word removed it, both directions.
+
+Declarations now carry a short factual line; the contract sits on
+`sandhi_client_set_resolver`, and the rationale sits here. All five sidecars were
+checked for other comment-only leaves — there are none. Recorded as a convention
+in CLAUDE.md.
+
 ### Notes on the caveats bote raised
 
 - **First-A-record only** — `_sandhi_resolve_parse_response_a` still returns on

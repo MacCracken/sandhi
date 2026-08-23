@@ -201,6 +201,13 @@ genuinely isn't in that subset — not that regeneration failed.
 - No closures — named functions
 - No negative literals — `(0 - N)`, not `-N`
 - Test exit pattern: `syscall(60, assert_summary())`
+- **Keep prose out of declarations.** A comment block attached to an `enum` or a
+  top-level `var` is part of that declaration to the tooling, and `cyrius distlib`
+  scans its identifiers when deriving the `.deps` sidecars — the bare word
+  `assert` in a sentence added `assert` as a leaf requirement to two profile
+  bundles (1.9.14, caught and reverted). Declarations get a short factual line.
+  Contracts go on the function that implements them; design rationale goes in the
+  CHANGELOG or `docs/architecture/`, not welded to a symbol.
 
 ## CI / Release
 
