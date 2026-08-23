@@ -110,18 +110,44 @@ fn _h2_emit_user_header(h2c, name, value, hbuf, off): i64 {
 # Build a complete header block for a request
 # ================================================================
 #
-# Returns the byte length of the encoded block. Caller-allocated
-# `hbuf` MUST hold ≥ _SANDHI_H2_REQ_HBUF_CAP bytes (encoder lacks
-# overflow checking — caller's responsibility). `user_headers` may
-# be 0 for "no extras." `:method`/`:scheme`/`:path`/`:authority` are
-# emitted in that exact order per RFC 7540 §8.1.2.1.
+# Returns the byte length of the encoded block, or `_SANDHI_H2_ERR_MALFORMED`
+# if the block will not fit. Caller-allocated `hbuf` MUST hold
+# ≥ _SANDHI_H2_REQ_HBUF_CAP bytes. `user_headers` may be 0 for
+# "no extras." `:method`/`:scheme`/`:path`/`:authority` are emitted in
+# that exact order per RFC 7540 §8.1.2.1.
+#
+# 1.9.13 P1 — this comment used to end "(encoder lacks overflow checking —
+# caller's responsibility)", and the only caller allocates EXACTLY
+# `_SANDHI_H2_REQ_HBUF_CAP` (8192) and then loops over every user header
+# without checking `off`. So the contract was unmet by sandhi's own caller:
+# more than ~8 KiB of request headers walked off the end of a heap buffer.
+# Request headers are caller-supplied rather than remote, but they routinely
+# carry attacker-influenced content — a long cookie, a URL-derived value, a
+# token from upstream — and the redirect-follow path re-emits them.
+#
+# The bound is enforced HERE rather than pushed onto callers, because the
+# constant this buffer is sized from lives in this module. Each emit is
+# preceded by a conservative worst-case reservation: HPACK literal output is
+# never longer than the raw octets plus its length prefixes (the encoder picks
+# Huffman only when strictly shorter), so `strlen(name) + strlen(value) + 16`
+# covers index prefix + two length varints with room to spare.
+fn _h2_hbuf_fits(off, need): i64 {
+    if (off < 0)  { return 0; }
+    if (need < 0) { return 0; }
+    if (off + need > _SANDHI_H2_REQ_HBUF_CAP) { return 0; }
+    return 1;
+}
 
 fn sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path, authority,
   user_headers, hbuf): i64 {
     var off = 0;
+    if (_h2_hbuf_fits(off, strlen(method) + 16) == 0)    { return _SANDHI_H2_ERR_MALFORMED; }
     off = _h2_emit_method(h2c, method, hbuf, off);
+    if (_h2_hbuf_fits(off, strlen(scheme) + 16) == 0)    { return _SANDHI_H2_ERR_MALFORMED; }
     off = _h2_emit_scheme(h2c, scheme, hbuf, off);
+    if (_h2_hbuf_fits(off, strlen(path) + 16) == 0)      { return _SANDHI_H2_ERR_MALFORMED; }
     off = _h2_emit_path(h2c, path, hbuf, off);
+    if (_h2_hbuf_fits(off, strlen(authority) + 16) == 0) { return _SANDHI_H2_ERR_MALFORMED; }
     off = _h2_emit_authority(h2c, authority, hbuf, off);
 
     var have_te = 0;
@@ -129,6 +155,7 @@ fn sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path, authority,
         if (sandhi_headers_has(user_headers, "TE") == 1) { have_te = 1; }
     }
     if (have_te == 0) {
+        if (_h2_hbuf_fits(off, 26) == 0) { return _SANDHI_H2_ERR_MALFORMED; }
         off = _h2_emit_user_header_a(a, h2c, "te", "trailers", hbuf, off);
     }
 
@@ -139,6 +166,9 @@ fn sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path, authority,
             var name = sandhi_headers_name_at(user_headers, i);
             var value = sandhi_headers_value_at(user_headers, i);
             if (_h2_header_is_forbidden(name, value) == 0) {
+                if (_h2_hbuf_fits(off, strlen(name) + strlen(value) + 16) == 0) {
+                    return _SANDHI_H2_ERR_MALFORMED;
+                }
                 off = _h2_emit_user_header_a(a, h2c, name, value, hbuf, off);
             }
             i = i + 1;

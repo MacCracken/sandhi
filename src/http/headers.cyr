@@ -133,6 +133,41 @@ fn _sandhi_hdr_has_unsafe_byte(s): i64 {
 #
 # 0.9.1 P1 — refuses caller-supplied name/value containing CR / LF.
 # Returns 0 on success, `0 - 1` on byte-rejection, `0 - 2` on OOM.
+# Append an entry that already owns its `name` / `value` — both must be
+# `a`-allocated and referenced by nobody else. Shared tail of the two adders.
+#
+# `vec_push_a` answers -1 when it cannot grow, which was ignored here: the entry
+# was built, dropped on the floor, and the caller told the header was added.
+# Same shape as the HPACK rebuild fixed in this release. Propagated as the
+# existing `0 - 2` OOM code.
+fn _sandhi_hdr_push_entry_a(a, h, name, value): i64 {
+    var e = _sandhi_hdr_entry_new_a(a, name, value);
+    if (e == 0) { return 0 - 2; }
+    if (vec_push_a(a, h, e) < 0) { return 0 - 2; }
+    return 0;
+}
+
+# 1.9.13 optimization — take ownership instead of copying.
+#
+# `sandhi_headers_add_a` must defensively copy: its `name` / `value` are
+# caller-owned and may be stack memory, a literal, or freed after the call. The
+# WIRE PARSER has no such problem — `sandhi_headers_parse_a` allocates both
+# strings out of `a` immediately before handing them over, and nothing else ever
+# references them. Routing the parser through the public adder therefore
+# allocated and memcpy'd every name and every value a SECOND time, and threw the
+# first pair away — into a bump/arena allocator that never reclaims it.
+#
+# Five allocations and four copies per header where three and two suffice.
+# Measured on the `headers_parse/6` benchmark (see tests/sandhi.bcyr).
+# Validation is identical — the CRLF/NUL injection guard from 0.9.1 P1 #2 still
+# runs on both strings, because it is the guard and not the copy that makes the
+# add safe.
+fn _sandhi_hdr_add_owned_a(a, h, name, value): i64 {
+    if (_sandhi_hdr_has_unsafe_byte(name) == 1)  { return 0 - 1; }
+    if (_sandhi_hdr_has_unsafe_byte(value) == 1) { return 0 - 1; }
+    return _sandhi_hdr_push_entry_a(a, h, name, value);
+}
+
 fn sandhi_headers_add_a(a, h, name, value): i64 {
     if (_sandhi_hdr_has_unsafe_byte(name) == 1)  { return 0 - 1; }
     if (_sandhi_hdr_has_unsafe_byte(value) == 1) { return 0 - 1; }
@@ -140,10 +175,7 @@ fn sandhi_headers_add_a(a, h, name, value): i64 {
     if (name_dup == 0) { return 0 - 2; }
     var value_dup = _sandhi_hdr_cstr_dup_a(a, value);
     if (value_dup == 0) { return 0 - 2; }
-    var e = _sandhi_hdr_entry_new_a(a, name_dup, value_dup);
-    if (e == 0) { return 0 - 2; }
-    vec_push_a(a, h, e);
-    return 0;
+    return _sandhi_hdr_push_entry_a(a, h, name_dup, value_dup);
 }
 
 fn sandhi_headers_add(h, name, value): i64 {
@@ -305,7 +337,11 @@ fn sandhi_headers_parse_a(a, buf, blen): i64 {
                 # Value: [colon+1, trim_end) — trim leading + trailing whitespace.
                 var val = _sandhi_hdr_trim_copy_a(a, buf, colon + 1, trim_end);
                 if (val == 0) { return h; }
-                sandhi_headers_add_a(a, h, name, val);
+                # 1.9.13 — hand `name`/`val` over rather than re-copying them.
+                # Both were just allocated out of `a` two lines up and are
+                # referenced by nothing else, so the public adder's defensive
+                # dup was pure waste on this path. Same validation.
+                _sandhi_hdr_add_owned_a(a, h, name, val);
             }
         }
 
@@ -348,11 +384,48 @@ fn _sandhi_hdr_count_ci(h, name): i64 {
     return count;
 }
 
+# 1.9.13 optimization — one pass, not three.
+#
+# This ran `_sandhi_hdr_count_ci` three times, so every response paid three full
+# walks of the header list with a case-insensitive string compare at each entry,
+# and each walk counted to completion even once the answer was known. It is on
+# the framing path, so every response pays it.
+#
+# Now a single walk with three counters, an early return the moment any name
+# repeats, and a first-byte discriminator: a header name whose first byte is not
+# h/c/t cannot be any of the three, which is the overwhelming majority of real
+# responses, so those cost one byte compare instead of three string compares.
+# Same answer for the same input — the result is a boolean "did any of Host /
+# Content-Length / Transfer-Encoding appear more than once", which does not
+# depend on the order the three are checked in.
 fn sandhi_headers_smuggle_dup(h): i64 {
     if (h == 0) { return 0; }
-    if (_sandhi_hdr_count_ci(h, "Host") > 1)              { return 1; }
-    if (_sandhi_hdr_count_ci(h, "Content-Length") > 1)    { return 1; }
-    if (_sandhi_hdr_count_ci(h, "Transfer-Encoding") > 1) { return 1; }
+    var host = 0;
+    var clen = 0;
+    var te = 0;
+    var n = sandhi_headers_count(h);
+    var i = 0;
+    while (i < n) {
+        var nm = _sandhi_hdr_entry_name(vec_get(h, i));
+        var c0 = _sandhi_hdr_to_lower(load8(nm));
+        if (c0 == 104) {
+            if (_sandhi_hdr_ieq(nm, "Host") == 1) {
+                host = host + 1;
+                if (host > 1) { return 1; }
+            }
+        } elif (c0 == 99) {
+            if (_sandhi_hdr_ieq(nm, "Content-Length") == 1) {
+                clen = clen + 1;
+                if (clen > 1) { return 1; }
+            }
+        } elif (c0 == 116) {
+            if (_sandhi_hdr_ieq(nm, "Transfer-Encoding") == 1) {
+                te = te + 1;
+                if (te > 1) { return 1; }
+            }
+        }
+        i = i + 1;
+    }
     return 0;
 }
 

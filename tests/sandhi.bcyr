@@ -1,11 +1,138 @@
-# sandhi benchmarks
-# Stdlib auto-included via cyrius.toml
+include "lib/bench.cyr"
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
+include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/http/retry.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/server/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/main.cyr"  # sandhi_version() — referenced by http/client.cyr's UA builder
 
-fn bench_noop() { return 0; }
+# sandhi benchmarks — the parse/encode hot paths.
+#
+# 1.9.13: this file previously called `bench(name, fp, n)`, which is not in the
+# stdlib bench API (`bench_new` / `bench_run` / `bench_report`). `cyrius bench`
+# therefore failed to COMPILE, and had presumably been failing for a long time.
+# That is the direct reason roadmap Batch B ("profile-justified optimization
+# picks") never had the prof evidence its own gate requires: there was no
+# working harness to produce any.
+#
+# Benched here: the per-request work that scales with response size or header
+# count, i.e. everything a consumer pays on every single call. Live network and
+# TLS are deliberately excluded — they are dominated by the peer and would drown
+# the signal.
+
+fn _b_headers_parse() {
+    var raw = "Content-Type: application/json\r\nContent-Length: 1234\r\nServer: nginx\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\nCache-Control: no-cache\r\nX-Request-Id: abc123def456\r\n\r\n";
+    sandhi_headers_parse(raw, strlen(raw));
+    return 0;
+}
+
+fn _b_response_parse_small() {
+    var raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 27\r\n\r\n{\"ok\":true,\"id\":123456789}";
+    sandhi_http_response_parse(raw, strlen(raw));
+    return 0;
+}
+
+fn _b_response_parse_many_headers() {
+    # 12 headers — framing does several case-insensitive lookups over the list
+    # (Content-Length, the chunked check, and smuggle_dup's three counts), so
+    # this shows whether those scans scale badly with header count.
+    var raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 27\r\nServer: nginx\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\nCache-Control: no-cache\r\nX-Request-Id: abc123\r\nX-Trace: t-1\r\nVary: Accept\r\nETag: \"abc\"\r\nX-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nStrict-Transport-Security: max-age=31536000\r\n\r\n{\"ok\":true,\"id\":123456789}";
+    sandhi_http_response_parse(raw, strlen(raw));
+    return 0;
+}
+
+fn _b_url_parse() {
+    sandhi_url_parse("https://api.example.com:8443/v1/resources/42?filter=active&limit=100");
+    return 0;
+}
+
+fn _b_hpack_huffman_decode() {
+    # "www.example.com" Huffman-encoded (RFC 7541 C.4.1).
+    var enc[16];
+    store8(&enc + 0,  0xf1); store8(&enc + 1,  0xe3); store8(&enc + 2,  0xc2);
+    store8(&enc + 3,  0xe5); store8(&enc + 4,  0xf2); store8(&enc + 5,  0x3a);
+    store8(&enc + 6,  0x6b); store8(&enc + 7,  0xa0); store8(&enc + 8,  0xab);
+    store8(&enc + 9,  0x90); store8(&enc + 10, 0xf4); store8(&enc + 11, 0xff);
+    sandhi_hpack_huffman_decode(&enc, 0, 12);
+    return 0;
+}
+
+fn _b_h2_encode_headers() {
+    var h2c = sandhi_h2_conn_new(0);
+    var hbuf = alloc(8192);
+    sandhi_h2_request_encode_headers(h2c, "GET", "https", "/v1/resources/42",
+      "api.example.com", 0, hbuf);
+    return 0;
+}
+
+fn _b_chunked_decode() {
+    var raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1a\r\nabcdefghijklmnopqrstuvwxyz\r\n1a\r\nABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n0\r\n\r\n";
+    sandhi_http_response_parse(raw, strlen(raw));
+    return 0;
+}
+
+fn _b_route_match() {
+    var params = alloc(256);
+    sandhi_route_params_init(params);
+    sandhi_server_route_match("/v1/users/4821/posts/99123", "/v1/users/:id/posts/:post", params);
+    return 0;
+}
+
+fn _b_json_extract() {
+    var doc = "{\"result\":{\"session\":{\"id\":\"abc-123\",\"caps\":{\"browser\":\"firefox\"}}}}";
+    sandhi_json_get_string(doc, "result.session.caps.browser");
+    return 0;
+}
 
 fn main() {
     alloc_init();
-    bench("noop", &bench_noop, 1000000);
+    bench_report_clock();
+
+    var benches = vec_new();
+
+    var b1 = bench_new("headers_parse/6");        bench_run(b1, &_b_headers_parse, 20000);       vec_push(benches, b1);
+    var b2 = bench_new("response_parse/small");   bench_run(b2, &_b_response_parse_small, 20000); vec_push(benches, b2);
+    var b2b = bench_new("response_parse/12hdr"); bench_run(b2b, &_b_response_parse_many_headers, 20000); vec_push(benches, b2b);
+    var b3 = bench_new("url_parse");              bench_run(b3, &_b_url_parse, 20000);           vec_push(benches, b3);
+    var b4 = bench_new("hpack_huffman_decode");   bench_run(b4, &_b_hpack_huffman_decode, 20000); vec_push(benches, b4);
+    var b5 = bench_new("h2_encode_headers");      bench_run(b5, &_b_h2_encode_headers, 5000);    vec_push(benches, b5);
+    var b6 = bench_new("chunked_decode/2");       bench_run(b6, &_b_chunked_decode, 20000);      vec_push(benches, b6);
+    var b7 = bench_new("route_match/2params");    bench_run(b7, &_b_route_match, 20000);         vec_push(benches, b7);
+    var b8 = bench_new("json_extract/depth4");    bench_run(b8, &_b_json_extract, 20000);        vec_push(benches, b8);
+
+    bench_report_all(benches);
     return 0;
 }
 

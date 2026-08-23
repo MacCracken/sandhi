@@ -2,6 +2,171 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.13] — 2026-08-23
+
+**Optimization sweep + the repair queue 1.9.12 left behind.** No pin change
+(stays cyrius 6.5.35). **2,840 assertions** (was 1,308 — the h2 suite gained a
+1,499-assertion property sweep), 8/8 fuzz, all eight live gates green.
+
+Two halves. First, the six findings whose adversarial verifiers were killed
+mid-sweep at 1.9.12 — re-verified by hand and **five were real, four P1**.
+Second, an optimization pass that could finally be run on evidence, because the
+benchmark harness turned out to have been broken.
+
+### Fixed — P1: a third copy of the missing chunk-size cap, and this one segfaults
+
+`_sandhi_pool_chunked_complete` (`src/http/pool.cyr`) accumulated `size = size *
+16 + digit` with no bound. A wrapped-negative `size` walks straight through the
+`off + size + 2 > blen` guard — a hugely negative sum is not greater than `blen`
+— and `off = off + size + 2` then puts the read cursor at an attacker-chosen
+64-bit offset that the next `load8(buf + off)` dereferences. **Measured: the
+test suite exits 139 (SIGSEGV) without the cap and 0 with it.** This is on the
+**default client path**: `_sandhi_http_recv_framed` calls it to decide when a
+chunked response is complete.
+
+The buffered `_sandhi_resp_chunk_size` has had `_SANDHI_RESP_CHUNK_MAX` since
+0.9.0 P0 #3. 1.9.12 added it to the streaming `_sandhi_chunk_parse_size`. **This
+third copy was missed by that same sweep** — worth stating plainly, because the
+1.9.12 notes implied the class was closed.
+
+> **Correction to the 1.9.13 planning note in the roadmap.** That note described
+> this as answering `1 = "complete"` after an out-of-bounds read. That came from
+> a probe with `body_start = 48` against a 47-byte header block, so the walker
+> began mid-token and parsed `0000000000000000` — a legitimate terminal
+> zero-chunk. With the offset correct the real behaviour is a **segfault**. The
+> regression test now derives the body offset instead of hardcoding it, which is
+> what caught the error.
+
+### Fixed — P1: the h2 header encoder wrote past a fixed 8 KiB buffer
+
+`sandhi_h2_request_encode_headers_a` carried the comment *"encoder lacks overflow
+checking — caller's responsibility"* — and its only caller allocates **exactly**
+`_SANDHI_H2_REQ_HBUF_CAP` (8192) and then loops over every user header without
+checking `off`. The contract was unmet by sandhi's own caller.
+
+Measured with a canary past the cap: **2,597 bytes clobbered** by a single 12 KiB
+header, **6,196 bytes** by 40 medium headers that only overflow in aggregate.
+Request headers are caller-supplied rather than remote, but they routinely carry
+attacker-influenced content — a long cookie, a URL-derived value, a token from
+upstream — and the redirect-follow path re-emits them.
+
+Each emit is now preceded by a conservative reservation (`strlen(name) +
+strlen(value) + 16`, since HPACK literal output never exceeds the raw octets plus
+its length prefixes) and the block is refused with `_SANDHI_H2_ERR_MALFORMED`
+rather than overflowed. The bound lives in the encoder, not on callers, because
+the constant the buffer is sized from lives in that module.
+
+### Fixed — P1: the HPACK dynamic table could be installed half-rebuilt
+
+`sandhi_hpack_table_add_a` rebuilds both vectors and ignored **every**
+`vec_push_a` return. `vec_new_a` preallocates cap 16, so a small table never
+allocates during a rebuild; past 15 entries the loop crosses a growth boundary,
+and an allocator that cannot fund it makes the push drop its value. The short
+vectors were installed anyway with `CUR_SIZE` incremented as though the add had
+succeeded.
+
+Measured, 20-entry table rebuilt through a 304-byte arena: the table **silently
+lost 4 entries (20 → 16) while CUR_SIZE went to 788 against an actual 603**, and
+a reader then hit `vec: index out of bounds`. The peer's encoder still believes
+the dropped entries are present, so its later indexed references resolve to the
+wrong entry or past the end.
+
+> **Correction.** The 1.9.13 planning note claimed the two vectors could end up
+> **different lengths**, pairing one header's name with another's value. That is
+> **wrong** — they are built in lockstep with same-size back-to-back
+> allocations, so an allocator that fails one fails the other. Verified by
+> sweeping every arena size in 32..2048: no size produces differing lengths. The
+> real corruption is that both are truncated together while the size counter is
+> not. The regression test asserts the invariant that actually holds.
+
+### Fixed — P1: `sandhi_http_pool_new_a` returned a pool with null maps
+
+Both `map_new_a` results were stored unchecked while the struct allocation one
+line above was guarded — the same asymmetry 1.9.12 fixed in the TLS-policy
+constructors and the response parser. The result was a live pool handle whose map
+slot held 0, dereferenced by the first take or put. Fails closed now.
+
+### Fixed — response builders dereferenced an OOM'd string builder
+
+`str_data(str_builder_build_a(a, sb))` at six sites in `src/server/mod.cyr`.
+`str_builder_new_a` **is** guarded at each of them (a comment there records
+closing that gap); this was the remaining half. It sits on the refusal path —
+400/413/501 — which is precisely the arena-pressure path 1.9.6 built the reject
+arena for, so "only under OOM" is not reassuring. P2.
+
+> The original filing said these builders "drop every str_builder OOM return",
+> which overstated it. Only the `build_a` half was unchecked.
+
+### Fixed — h2 PING echoed 8 bytes regardless of the declared frame length
+
+RFC 7540 §6.7: a PING frame carries exactly 8 octets and any other length is a
+`FRAME_SIZE_ERROR` connection error. sandhi echoed a hardcoded 8, so a short PING
+read past the payload buffer the frame reader sized from the peer's declared
+length, and an oversized one was silently accepted. Small read, but it is one a
+remote peer chooses the size of. P3.
+
+### Fixed — the benchmark harness never compiled
+
+`tests/sandhi.bcyr` called `bench(name, fp, n)`, which is not in the stdlib bench
+API (`bench_new` / `bench_run` / `bench_report_all`). `cyrius bench` therefore
+failed at the **compile** step, and had evidently been failing for a long time.
+
+**This is the direct reason roadmap Batch B — "profile-justified optimization
+picks" — never had the prof evidence its own gate requires: there was no working
+harness to produce any.** The suite now covers the per-request work that scales
+with response size or header count: header parse, response framing at 2 and 12
+headers, URL parse, HPACK Huffman decode, h2 header encode, chunked decode, route
+match, JSON dotted-path extract. Live network and TLS are excluded — they are
+dominated by the peer and would drown the signal.
+
+### Changed — optimization, gated on that evidence
+
+The harness immediately said the hot path is header handling, not any of the
+three parked Batch B candidates. Three changes, all behaviour-preserving:
+
+**Header parsing takes ownership instead of copying.** `sandhi_headers_parse_a`
+allocated a name and a value out of `a`, then handed both to
+`sandhi_headers_add_a`, which **defensively copied both again** and threw the
+first pair away — into a bump/arena allocator that never reclaims it. The public
+adder must copy, because its arguments are caller-owned and may be stack memory
+or a literal; the wire parser has no such problem. Five allocations and four
+copies per header where three and two suffice. Validation is unchanged — the
+CRLF/NUL injection guard from 0.9.1 P1 #2 still runs on both strings, because it
+is the guard and not the copy that makes the add safe.
+
+**`sandhi_headers_smuggle_dup` walks the list once, not three times.** It called
+`_sandhi_hdr_count_ci` three times, each a full walk with a case-insensitive
+compare per entry, each counting to completion after the answer was known. Now
+one walk, three counters, an early return, and a first-byte discriminator — a
+name whose first byte is not h/c/t cannot be any of the three, which is most
+real headers. It is on the framing path, so every response paid it.
+
+**One Content-Length lookup in framing, not two.** `_sandhi_resp_frame_a` scanned
+for it to set `has_clen` and scanned again to read the value.
+
+Measured before and after on the same machine, same run:
+
+| benchmark | before | after | |
+|---|---|---|---|
+| `headers_parse/6` | 2.436 µs | 1.753 µs | **−28.0%** |
+| `response_parse/small` | 1.960 µs | 1.448 µs | **−26.1%** |
+| `response_parse/12hdr` | 6.950 µs | 4.890 µs | **−29.6%** |
+| `chunked_decode/2` | 1.378 µs | 1.205 µs | **−12.6%** |
+
+The allocation saving is the part that does not show up here: two fewer
+allocations per header, permanently, on an allocator that never frees. For a
+long-lived server that is resident memory, not just time.
+
+None of the three parked Batch B candidates was touched — the evidence did not
+justify them. `hpack_huffman_decode` measures 535 ns and `route_match` 183 ns;
+neither is where the time goes.
+
+### Also
+
+- `vec_push_a`'s return is now checked when appending a header entry. It answers
+  -1 when it cannot grow, which was ignored: the entry was built, dropped, and
+  the caller told the header had been added. Same shape as the HPACK bug above.
+
 ## [1.9.12] — 2026-08-23
 
 **P-1 audit / hardening / security sweep.** Full-codebase pass with the heaviest

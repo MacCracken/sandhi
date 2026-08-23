@@ -557,6 +557,137 @@ fn test_h2_request_encode_simple_get() {
     return 0;
 }
 
+# 1.9.13 P1 — the header encoder must refuse a block that will not fit.
+#
+# Its own header comment used to end "(encoder lacks overflow checking —
+# caller's responsibility)", and its only caller allocates EXACTLY
+# `_SANDHI_H2_REQ_HBUF_CAP` (8192) and then loops over every user header without
+# checking `off`. So the documented contract was unmet by sandhi's own caller:
+# more than ~8 KiB of request headers walked off the end of a heap buffer.
+# Request headers are caller-supplied, but they routinely carry
+# attacker-influenced content (a long cookie, a URL-derived value, a token from
+# upstream) and the redirect-follow path re-emits them.
+#
+# Canary the region past the cap: the encoder must refuse rather than write
+# there. Mutation-verified — dropping the `_h2_hbuf_fits` guards clobbers it.
+# 1.9.13 — the HPACK dynamic table must never be installed half-rebuilt.
+#
+# `sandhi_hpack_table_add_a` rebuilds both vectors and ignored every
+# `vec_push_a` return. `vec_new_a` preallocates cap 16, so a small table never
+# allocates during the rebuild; past 15 entries the loop crosses a growth
+# boundary, and an allocator that cannot fund it makes the push DROP its value.
+# The short vectors were installed anyway with CUR_SIZE incremented as though
+# the add had succeeded.
+#
+# Measured pre-fix at a 304-byte arena: 20 entries became 16 while CUR_SIZE went
+# to 788 against an actual 603. The peer's encoder still believes the dropped
+# entries are present, so its later indexed references resolve to the wrong
+# entry or past the end — a reader hit `vec: index out of bounds`.
+#
+# The two vectors do NOT diverge from each other (lockstep, same-size
+# allocations), so this asserts the real invariant: CUR_SIZE always equals the
+# summed size of the entries actually present, and entries are never silently
+# lost. Mutation-verified — removing the install guard fails this.
+fn test_hpack_table_add_oom_never_corrupts() {
+    var big = arena_allocator(1048576);
+    var t = sandhi_hpack_table_new_a(big, 65536);
+    assert(t != 0, "hpack oom: table built");
+
+    # 20 entries — past vec_new_a's cap-16 preallocation, so a rebuild must grow.
+    var i = 0;
+    while (i < 20) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "hdr");
+        str_builder_add_int(sb, i);
+        sandhi_hpack_table_add_a(big, t, str_data(str_builder_build(sb)), "v");
+        i = i + 1;
+    }
+    var seeded = vec_len(load64(t + SANDHI_HPACK_TBL_OFF_NAMES));
+    assert_eq(seeded, 20, "hpack oom: 20 entries seeded");
+
+    # Sweep the arena sizes the rebuild actually allocates in. 304 is the first
+    # size that corrupted the table pre-fix; the whole band is swept so the test
+    # does not depend on one magic number surviving an allocator change.
+    var sz = 32;
+    while (sz <= 2048) {
+        var tight = arena_allocator(sz);
+        sandhi_hpack_table_add_a(tight, t, "probe", "p");
+
+        var names = load64(t + SANDHI_HPACK_TBL_OFF_NAMES);
+        var values = load64(t + SANDHI_HPACK_TBL_OFF_VALUES);
+        var nn = vec_len(names);
+        assert_eq(nn, vec_len(values), "hpack oom: names and values stay in lockstep");
+        assert(nn >= seeded, "hpack oom: a failed add never silently drops entries");
+
+        var real = 0;
+        var q = 0;
+        while (q < nn) {
+            real = real + _hpack_entry_size(vec_get(names, q), vec_get(values, q));
+            q = q + 1;
+        }
+        assert_eq(load64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE), real,
+          "hpack oom: CUR_SIZE matches the entries actually present");
+        sz = sz + 4;
+    }
+
+    # A successful add against a real allocator still works afterwards.
+    var before = vec_len(load64(t + SANDHI_HPACK_TBL_OFF_NAMES));
+    sandhi_hpack_table_add_a(big, t, "delta", "four");
+    assert(vec_len(load64(t + SANDHI_HPACK_TBL_OFF_NAMES)) > before,
+      "hpack oom: a real add still lands after the sweep");
+    return 0;
+}
+
+fn test_h2_request_encode_refuses_oversized_block() {
+    var h2c = sandhi_h2_conn_new(0);
+    # 16 KiB of slack past the 8192-byte cap, filled with a canary.
+    var region = alloc(24576);
+    memset(region + 8192, 0xAB, 16384);
+
+    # One 12 KiB header value — comfortably past the cap on its own.
+    var sb = str_builder_new();
+    for (var i = 0; i < 12288; i = i + 1) { str_builder_putc(sb, 120); }
+    var big = str_data(str_builder_build(sb));
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "X-Big", big);
+
+    var n = sandhi_h2_request_encode_headers(h2c, "GET", "https", "/",
+      "www.example.com", h, region);
+    assert(n < 0, "h2 encode: an oversized header block is refused");
+
+    var smashed = 0;
+    for (var i = 0; i < 16384; i = i + 1) {
+        if (load8(region + 8192 + i) != 0xAB) { smashed = smashed + 1; }
+    }
+    assert_eq(smashed, 0, "h2 encode: nothing written past the 8192-byte cap");
+
+    # Many medium headers that only overflow in aggregate — the shape a single
+    # per-header check would miss.
+    var region2 = alloc(24576);
+    memset(region2 + 8192, 0xAB, 16384);
+    var h2 = sandhi_headers_new();
+    var sb2 = str_builder_new();
+    for (var i = 0; i < 400; i = i + 1) { str_builder_putc(sb2, 121); }
+    var med = str_data(str_builder_build(sb2));
+    for (var k = 0; k < 40; k = k + 1) { sandhi_headers_add(h2, "X-Pad", med); }
+    var n2 = sandhi_h2_request_encode_headers(h2c, "GET", "https", "/",
+      "www.example.com", h2, region2);
+    assert(n2 < 0, "h2 encode: headers overflowing only in aggregate are refused");
+    var smashed2 = 0;
+    for (var i = 0; i < 16384; i = i + 1) {
+        if (load8(region2 + 8192 + i) != 0xAB) { smashed2 = smashed2 + 1; }
+    }
+    assert_eq(smashed2, 0, "h2 encode: aggregate case wrote nothing past the cap");
+
+    # A normal block still encodes exactly as before.
+    var hbuf = alloc(8192);
+    var ok = sandhi_h2_request_encode_headers(h2c, "GET", "https", "/",
+      "www.example.com", 0, hbuf);
+    assert(ok > 0, "h2 encode: an ordinary block still encodes");
+    assert_eq(load8(hbuf + 0), 0x82, "h2 encode: and byte 0 is unchanged");
+    return 0;
+}
+
 fn test_h2_request_encode_decode_roundtrip() {
     # Encode then decode (using a fresh dynamic-table) and verify
     # we recover the original pseudo-headers in order.
@@ -820,6 +951,12 @@ fn main() {
 
     test_group("h2/request/encode_simple_get");
     test_h2_request_encode_simple_get();
+
+    test_group("h2/hpack/table_add_oom");
+    test_hpack_table_add_oom_never_corrupts();
+
+    test_group("h2/request/encode_bounds");
+    test_h2_request_encode_refuses_oversized_block();
 
     test_group("h2/request/roundtrip");
     test_h2_request_encode_decode_roundtrip();

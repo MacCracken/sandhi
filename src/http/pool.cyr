@@ -63,7 +63,19 @@ var SANDHI_POOL_DEFAULT_IDLE_TIMEOUT_MS  = 90000;  # 90 s — Go default
 fn sandhi_http_pool_new_a(a, max_per_host, idle_timeout_ms): i64 {
     var p = alloc_via(a, SANDHI_POOL_STRUCT_SIZE);
     if (p == 0) { return 0; }
-    store64(p + SANDHI_POOL_OFF_MAP, map_new_a(a));
+    # 1.9.13 P1 — both maps must land, or there is no pool.
+    #
+    # These two `map_new_a` results were stored unchecked while the struct
+    # allocation one line above was guarded — the same asymmetry 1.9.12 fixed in
+    # the TLS-policy constructors and the response parser. A partial pool is a
+    # live handle whose map slot holds 0, and the first `_sandhi_pool_take` /
+    # `_put` dereferences it. Fail closed: no handle rather than a broken one,
+    # matching every other constructor in the tree.
+    var m11 = map_new_a(a);
+    if (m11 == 0) { return 0; }
+    var mh2 = map_new_a(a);
+    if (mh2 == 0) { return 0; }
+    store64(p + SANDHI_POOL_OFF_MAP, m11);
     var mph = max_per_host;
     if (mph <= 0) { mph = SANDHI_POOL_DEFAULT_MAX_PER_HOST; }
     var ito = idle_timeout_ms;
@@ -75,7 +87,7 @@ fn sandhi_http_pool_new_a(a, max_per_host, idle_timeout_ms): i64 {
     # the same "host:port:tls" cstrs the 1.1 map uses; values are
     # sandhi_h2_conn ptrs (not idle_conn wrappers — h2 is always
     # active so last_used_ms isn't meaningful).
-    store64(p + SANDHI_POOL_OFF_H2_MAP, map_new_a(a));
+    store64(p + SANDHI_POOL_OFF_H2_MAP, mh2);
     store64(p + SANDHI_POOL_OFF_ALLOC, a);
     return p;
 }
@@ -341,6 +353,23 @@ fn _sandhi_pool_chunked_complete(buf, body_start, blen): i64 {
             elif (c >= 97 && c <= 102)   { size = size * 16 + (c - 87); seen = 1; off = off + 1; }
             elif (c >= 65 && c <= 70)    { size = size * 16 + (c - 55); seen = 1; off = off + 1; }
             else { scan = 0; }
+            # 1.9.13 P1 — cap the accumulator. THIRD copy of this bound: the
+            # buffered `_sandhi_resp_chunk_size` has had `_SANDHI_RESP_CHUNK_MAX`
+            # since 0.9.0 P0 #3, 1.9.12 added it to the streaming
+            # `_sandhi_chunk_parse_size`, and this one — on the DEFAULT client
+            # path — was missed by that same sweep.
+            #
+            # Without it a wrapped-negative `size` walks straight through the
+            # `off + size + 2 > blen` guard below (a hugely negative sum is not
+            # greater than `blen`), and `off = off + size + 2` then puts the read
+            # cursor at an attacker-chosen 64-bit offset that the next
+            # `load8(buf + off)` dereferences. Measured on the pre-fix tree: a
+            # `8000000000000000` chunk size against a 20-byte body made this
+            # function answer **1 — "the chunked response is complete"** — having
+            # found its terminal chunk outside the buffer. `_sandhi_http_recv_framed`
+            # acts on that verdict, so the peer gets an out-of-bounds read AND a
+            # truncated response framed as whole.
+            if (size > _SANDHI_RESP_CHUNK_MAX) { return 0 - 1; }
         }
         if (seen == 0 && off >= blen) { return 0; }
         if (seen == 0) { return 0 - 1; }

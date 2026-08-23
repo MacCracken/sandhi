@@ -488,8 +488,12 @@ fn _sandhi_resp_frame_a(a, buf, blen, status, headers, body_start): i64 {
     var body_ptr = 0;
     var body_len = 0;
     var chunked = _sandhi_resp_is_chunked(headers);
+    # 1.9.13 — one Content-Length lookup, not two. This scanned the header list
+    # here to set `has_clen` and scanned it again below to read the value; both
+    # are linear walks with a case-insensitive compare per entry. Hoisted.
+    var clen_v = sandhi_headers_get(headers, "Content-Length");
     var has_clen = 0;
-    if (sandhi_headers_get(headers, "Content-Length") != 0) { has_clen = 1; }
+    if (clen_v != 0) { has_clen = 1; }
 
     if (chunked == 1 && has_clen == 1) {
         return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL);
@@ -515,7 +519,6 @@ fn _sandhi_resp_frame_a(a, buf, blen, status, headers, body_start): i64 {
         body_ptr = load64(outp_cell);
         body_len = load64(outl_cell);
     } else {
-        var clen_v = sandhi_headers_get(headers, "Content-Length");
         if (clen_v != 0) {
             var n = _sandhi_resp_parse_clen(clen_v);
             if (n < 0) {

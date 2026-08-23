@@ -284,6 +284,35 @@ fn sandhi_hpack_table_add_a(a, t, name, value): i64 {
         vec_push_a(a, new_values, vec_get(values, i));
         i = i + 1;
     }
+    # 1.9.13 — install the rebuilt table only if it is actually intact.
+    #
+    # Every `vec_push_a` above ignores its return. `vec_new_a` preallocates
+    # cap 16, so for a table of <= 15 entries the rebuild never allocates and
+    # nothing can go wrong; past that the loop crosses a growth boundary, and an
+    # allocator that cannot fund it makes `vec_push_a` answer -1 and DROP the
+    # value. The short vectors were then installed anyway and CUR_SIZE was
+    # incremented by `sz` as though the add had succeeded.
+    #
+    # Measured on the pre-fix tree, 20-entry table rebuilt through a 304-byte
+    # arena: the table silently lost 4 entries (20 -> 16) while CUR_SIZE went to
+    # 788 against an actual 603. Both consequences matter — the peer's encoder
+    # still believes the dropped entries are present, so its subsequent indexed
+    # references resolve to the WRONG entry or past the end (a reader in the
+    # probe hit `vec: index out of bounds`), and the eviction math now runs
+    # against a fictional budget.
+    #
+    # Note the two vectors do NOT go out of step with each other: they are built
+    # in lockstep with same-size back-to-back allocations, so an allocator that
+    # fails one fails the other. Verified by sweeping every arena size in
+    # 32..2048 — no size produces differing lengths. The corruption is that both
+    # are truncated together while the size counter is not.
+    #
+    # The expected post-state is the new entry plus every surviving old one.
+    # Anything shorter means a push was dropped: leave the table exactly as it
+    # was (not adding an entry is already a legal outcome of the eviction path
+    # above) rather than install a truncated one with inflated accounting.
+    var want = n + 1;
+    if (vec_len(new_names) != want || vec_len(new_values) != want) { return 0; }
     store64(t + SANDHI_HPACK_TBL_OFF_NAMES, new_names);
     store64(t + SANDHI_HPACK_TBL_OFF_VALUES, new_values);
     store64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE,

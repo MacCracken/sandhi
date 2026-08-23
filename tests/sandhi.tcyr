@@ -1944,6 +1944,76 @@ fn test_download_close_delimited_eof_is_ok() {
     return 0;
 }
 
+# 1.9.13 P1 — the pool's chunked-completeness walker must cap its chunk size.
+#
+# THIRD copy of the bound the buffered parser has had since 0.9.0 P0 #3 and the
+# streaming parser got at 1.9.12. Without it a wrapped-negative `size` passes the
+# `off + size + 2 > blen` guard (a hugely negative sum is not greater than blen)
+# and `off = off + size + 2` puts the read cursor at an attacker-chosen 64-bit
+# offset. Measured pre-fix: a `8000000000000000` chunk size against a 20-byte
+# body made this answer **1 = "complete"**, having found its terminal chunk
+# outside the buffer — and `_sandhi_http_recv_framed` acts on that verdict.
+# Mutation-verified: removing the cap makes the 2^63 case answer 1 again.
+fn test_pool_chunk_size_overflow_refused() {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+    str_builder_add_cstr(sb, "8000000000000000\r\npadpadpad\r\n");
+    var s0 = str_builder_build(sb);
+    var buf = str_data(s0);
+    var blen = str_len(s0);
+    # Derive the body offset rather than hardcoding it — an off-by-one here
+    # starts the walker mid-token and the test silently measures nothing.
+    var hdr = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    var body_start = strlen(hdr);
+    assert_eq(_sandhi_pool_chunked_complete(buf, body_start, blen), 0 - 1,
+      "pool chunk: 2^63 chunk size refused as malformed");
+
+    # Just past the representable cap.
+    var sb2 = str_builder_new();
+    str_builder_add_cstr(sb2, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+    str_builder_add_cstr(sb2, "80000000\r\nx\r\n");
+    var s2 = str_builder_build(sb2);
+    assert_eq(_sandhi_pool_chunked_complete(str_data(s2), strlen(hdr), str_len(s2)), 0 - 1,
+      "pool chunk: 2^31 chunk size refused");
+
+    # A well-formed chunked body still reads as complete.
+    var sb3 = str_builder_new();
+    str_builder_add_cstr(sb3, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+    str_builder_add_cstr(sb3, "5\r\nhello\r\n0\r\n\r\n");
+    var s3 = str_builder_build(sb3);
+    assert_eq(_sandhi_pool_chunked_complete(str_data(s3), strlen(hdr), str_len(s3)), 1,
+      "pool chunk: a well-formed chunked body is still complete");
+
+    # And an incomplete one still asks for more.
+    var sb4 = str_builder_new();
+    str_builder_add_cstr(sb4, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+    str_builder_add_cstr(sb4, "5\r\nhel");
+    var s4 = str_builder_build(sb4);
+    assert_eq(_sandhi_pool_chunked_complete(str_data(s4), strlen(hdr), str_len(s4)), 0,
+      "pool chunk: a partial body still reports need-more");
+    return 0;
+}
+
+# 1.9.13 P1 — a pool with an un-allocatable map must not be handed back.
+#
+# Both `map_new_a` results were stored unchecked while the struct alloc one line
+# above was guarded. A partial pool is a live handle whose map slot holds 0, and
+# the first take/put dereferences it.
+fn test_pool_new_oom_yields_no_handle() {
+    # 48-byte struct fits; neither map does.
+    var tight = arena_allocator(64);
+    assert_eq(sandhi_http_pool_new_a(tight, 4, 1000), 0,
+      "pool new: OOM on the maps yields no handle, not a pool with null maps");
+
+    # A sufficient arena still builds a usable pool.
+    var big = arena_allocator(65536);
+    var p = sandhi_http_pool_new_a(big, 4, 1000);
+    assert(p != 0, "pool new: a sufficient arena still builds");
+    assert_eq(sandhi_http_pool_max_per_host(p), 4, "pool new: options still applied");
+    assert_eq(sandhi_http_pool_idle_count(p), 0, "pool new: starts empty");
+    return 0;
+}
+
 # ── 1.9.0 peer address ──
 # A REAL loopback TCP connection, with the client bound to a KNOWN port so the peer port
 # is deterministic and verifiable — asserting "non-zero" would pass on a garbage read.
@@ -4133,6 +4203,10 @@ fn main() {
 
     test_group("download/redirect_target");
     test_download_redirect_target();
+
+    test_group("pool/chunk_size_overflow");
+    test_pool_chunk_size_overflow_refused();
+    test_pool_new_oom_yields_no_handle();
 
     test_group("download/truncated_body");
     test_download_truncated_body_is_not_ok();

@@ -117,89 +117,38 @@ deferral:
   held. The 1.6.5 split-CRLF fix addressed the sibling condition in the chunked
   decoder; this is the SSE-parser half.
 
-### 1.9.13 — the confirmed repair queue
+### 1.9.13 repair queue — ✅ shipped
 
-The nine "unverified" findings from the 1.9.12 sweep (their adversarial verifiers
-were killed by a spend limit, so they were bucketed as refuted with no reasoning
-behind them) were **re-verified by hand on 2026-08-23**. Three were duplicates of
-defects 1.9.12 already fixed. Of the remaining six, **five are real and four are
-P1.** This is the 1.9.13 worklist, in the order it should be picked up.
+All six items shipped at **1.9.13** (see CHANGELOG): the third chunk-size cap in
+`_sandhi_pool_chunked_complete` (which segfaults, not merely misreads), the h2
+header encoder's unbounded write into a fixed 8 KiB buffer, the half-rebuilt
+HPACK table, `sandhi_http_pool_new_a`'s unchecked maps, the server response
+builders' unchecked `str_builder_build_a`, and h2 PING length validation.
 
-**1. `_sandhi_pool_chunked_complete` has no chunk-size cap — P1, do this first.**
-`src/http/pool.cyr`. `size = size * 16 + digit` with no bound, then:
-```
-if (off + size + 2 > blen) { return 0; }
-off = off + size + 2;
-```
-A wrapped-negative `size` passes that guard and drives `off` to an
-attacker-chosen 64-bit offset; the loop then reads `load8(buf + off)` there.
-**Demonstrated**: a `8000000000000000` chunk size against a 20-byte body made the
-function answer **1 = "this chunked response is complete"** — it found its
-terminal chunk by reading outside the buffer. `_sandhi_http_recv_framed` uses that
-verdict to stop reading, so a remote peer gets an out-of-bounds read *and* a
-truncated response framed as whole, on the **default client path**.
-This is the **third copy** of the same missing cap. The buffered
-`_sandhi_resp_chunk_size` has had `_SANDHI_RESP_CHUNK_MAX` since 0.9.0 P0 #3;
-1.9.12 added it to the streaming `_sandhi_chunk_parse_size`; this one was missed
-in that same sweep. Fix is the identical one-line bound — **and then grep for a
-fourth.**
+**Two of the queue's own descriptions were wrong and were corrected in flight** —
+both are recorded in the 1.9.13 CHANGELOG rather than quietly amended:
 
-**2. `sandhi_h2_request_encode_headers_a` writes unbounded into a fixed 8 KiB
-buffer — P1.** `src/http/h2/request.cyr`. The function's own header comment says
-it: *"encoder lacks overflow checking — caller's responsibility"* — and its only
-caller (line 228) allocates exactly `_SANDHI_H2_REQ_HBUF_CAP` (8192) and then
-loops over every user header without checking `off`. So the contract is unmet by
-sandhi's own caller. Request headers are caller-supplied rather than remote, but
-they routinely carry attacker-influenced content (a long cookie, a URL-derived
-value, a token from upstream) and the redirect-follow path re-emits them. Bound
-each emit against the cap and refuse rather than overflow.
+- The pool chunk-size item was described here as answering `1 = "complete"` after
+  an out-of-bounds read. That came from a probe with an off-by-one `body_start`,
+  which made the walker parse a legitimate terminal zero-chunk. The real
+  behaviour is a **segfault**.
+- The HPACK item claimed the name and value vectors could reach **different
+  lengths**, pairing one header's name with another's value. They cannot — they
+  are built in lockstep with same-size back-to-back allocations. The real
+  corruption is that both are truncated together while `CUR_SIZE` is not.
 
-**3. `sandhi_hpack_table_add_a` ignores every `vec_push_a` return — P1 (OOM).**
-`src/http/h2/hpack.cyr`. On a mid-rebuild allocation failure the two vectors are
-installed anyway, and `CUR_SIZE` is incremented by `sz` as though the add
-succeeded. Two consequences, both bad: the size accounting diverges from the
-contents, and `new_names` / `new_values` can end up **different lengths**, so a
-header's name pairs with a *different* header's value. Subsequent HPACK index
-lookups then resolve to the wrong header — an `Authorization` name against
-someone else's value is the shape to worry about. Rebuild into locals, verify
-both vectors survived, and only then install.
+**The lesson worth keeping**: a finding described from a probe is only as good as
+the probe. Both errors were caught by writing the regression test *properly* —
+deriving the body offset instead of hardcoding it, and asserting the invariant
+that actually holds instead of the one assumed. Write the test before believing
+the finding.
 
-**4. `sandhi_http_pool_new_a` stores two unchecked `map_new_a` results — P1 (OOM).**
-`src/http/pool.cyr`. Both `SANDHI_POOL_OFF_MAP` and `SANDHI_POOL_OFF_H2_MAP` take
-the result unguarded while the struct allocation two lines above *is* guarded —
-the exact asymmetry 1.9.12 fixed in the TLS-policy constructors and the response
-parser. Yields a live pool handle whose maps are null; the first `_pool_take` /
-`_put` dereferences one. Fail closed: return 0.
-
-**5. Server response builders deref `str_builder_build_a` unchecked — P2.**
-`src/server/mod.cyr`, 6+ sites (`sandhi_server_send_status_a` and siblings). The
-filing said "drop every str_builder OOM return", which is **overstated** —
-`str_builder_new_a` *is* guarded, and the comment there records closing that gap.
-What is genuinely unchecked is `str_data(str_builder_build_a(a, sb))`: a build
-OOM returns 0 and `str_data(0)` dereferences it. This sits on the refusal path,
-which is exactly the arena-pressure path 1.9.6 built the reject arena for.
-
-**6. `_h2_handle_ping` echoes 8 bytes regardless of the declared frame length — P3.**
-`src/http/h2/response.cyr`. RFC 7540 §6.7: a PING frame MUST be 8 octets and any
-other length is a `FRAME_SIZE_ERROR` connection error. sandhi echoes a hardcoded
-8 from the payload buffer, so a short PING reads a few bytes past it and an
-oversized one is silently accepted. Cheap to fix, low severity, and it removes an
-OOB read on principle.
-
-**Not in this queue but adjacent** — the 1.9.12 CHANGELOG lists the four
-confirmed-but-deliberately-unpatched items above (short-`Content-Length` clamp,
-`Connection: close` `strlen()` re-measure, Slowloris, SSE split-boundary drops).
-The first two need design work rather than a patch; the last two are
-self-contained and could ride along if 1.9.13 has room.
-
-**Suggested shape**: items 1–4 are one arc — every one is "an allocation or an
-accumulator was not checked, and the unchecked value became an unsafe state",
-which is the same defect class 1.9.10 and 1.9.12 both closed instances of. Ship
-them together with the same mutation-verified test discipline, then 5–6 as
-cleanup. Worth budgeting a sweep specifically for *the fourth copy* of the
-chunk-size cap and any other allocation-result store that skips its guard —
-1.9.12 found three such asymmetries and this queue has three more, so the class
-is clearly not exhausted.
+**The defect class is still not exhausted.** 1.9.10, 1.9.12 and 1.9.13 are all
+instances of *"an allocation result or an accumulator was stored without its
+guard"*, and 1.9.13 found a **third** copy of a bound that two prior sweeps had
+each fixed one instance of. Before the next release assume there is a fourth:
+grep every `size = size * ` / `n = n * ` accumulator fed from the wire, and every
+`store64(..., <alloc-returning-call>(...))` that skips its zero check.
 
 ### Split verdicts — one verifier each way, worth a decision
 

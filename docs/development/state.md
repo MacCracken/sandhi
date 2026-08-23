@@ -4,6 +4,50 @@
 
 ## Version
 
+**1.9.13** — 2026-08-23. **Optimization sweep + the repair queue 1.9.12 left
+behind.** No pin change (cyrius 6.5.35). **2,840 assertions**, 8/8 fuzz, all
+eight live gates green.
+
+Six repairs, four P1 — the findings whose adversarial verifiers were killed
+mid-sweep at 1.9.12, re-verified by hand. Headline: a **third copy** of the
+chunk-size cap, in `_sandhi_pool_chunked_complete` on the default client path,
+where a wrapped-negative size walks past the bounds guard and puts the read
+cursor at an attacker-chosen 64-bit offset — **the suite exits 139 without the
+cap**. Also the h2 header encoder writing past a fixed 8 KiB buffer (2,597 bytes
+clobbered by one oversized header, 6,196 by many medium ones), the HPACK table
+installing a truncated rebuild with inflated accounting (20 entries → 16,
+CUR_SIZE 788 vs an actual 603), `sandhi_http_pool_new_a` returning a pool with
+null maps, six unchecked `str_builder_build_a` derefs on the server refusal path,
+and h2 PING length validation.
+
+**Two of the queue's own descriptions were wrong and were corrected in flight**
+(both recorded in the CHANGELOG, not quietly amended): the pool item was
+described from a probe with an off-by-one `body_start`, and the HPACK item
+claimed a name/value misalignment that cannot occur. Both errors surfaced only
+when the regression tests were written properly. A finding described from a probe
+is worth exactly what the probe is worth.
+
+**The benchmark harness never compiled.** `tests/sandhi.bcyr` called
+`bench(name, fp, n)`, which is not in the stdlib API — so `cyrius bench` failed
+at the compile step, and *that* is why roadmap Batch B never had the prof
+evidence its own gate demands. With a working harness the evidence pointed at
+header handling, not at any of the three parked Batch B candidates (Huffman
+decode measures 535 ns, route match 183 ns — not where the time goes). Three
+behaviour-preserving changes followed: the wire parser takes ownership of the
+name/value it just allocated instead of letting the public adder copy both again,
+`sandhi_headers_smuggle_dup` walks the list once rather than three times, and
+framing does one Content-Length lookup rather than two.
+
+| benchmark | before | after | |
+|---|---|---|---|
+| `headers_parse/6` | 2.436 µs | 1.753 µs | **−28.0%** |
+| `response_parse/small` | 1.960 µs | 1.448 µs | **−26.1%** |
+| `response_parse/12hdr` | 6.950 µs | 4.890 µs | **−29.6%** |
+| `chunked_decode/2` | 1.378 µs | 1.205 µs | **−12.6%** |
+
+Plus two fewer allocations per header, permanently, on an allocator that never
+frees — resident memory for a long-lived server, not just time.
+
 **1.9.12** — 2026-08-23. **P-1 audit / hardening / security sweep.** Full-codebase
 pass weighted toward everything added since the last full sweep (1.4.12): the
 server thread-pool + routing + server-TLS surface, `download.cyr`, the h2
@@ -363,10 +407,10 @@ Build outputs:
 
 ## Tests
 
-**1,308 assertions green** across four suites (CI runs all four; measured on the **6.5.35** pin at 1.9.12):
+**2,840 assertions green** across four suites (CI runs all four; measured on the **6.5.35** pin at 1.9.13):
 
-- `tests/sandhi.tcyr` — **736** — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint (incl. the 1.6.0 native trust/mTLS enforcement-available + pin-available flips) / SSE / streaming (incl. the 1.6.5 split-inter-chunk-CRLF decoder fix — leading-CRLF parse + split-across-append round-trip, both fail pre-fix) / **download** (1.6.4: result accessors, fd-sink temp-file round-trip + write-error signal, redirect-target resolver across 302/200/follow-off/hops-exhausted/no-Location/downgrade-sentinel) / **server SIGPIPE guard** (1.6.6: `_sandhi_server_ignore_sigpipe()` returns 0 + idempotent) / **server routing** (1.6.7: `route_match` exact/`:name`-capture/segment-count/non-absolute, `_param_int` numeric+non-numeric→-1+oob, router add/cap-full, `router_dispatch` 200/404/405 + query-strip — 28 assertions) / **server TLS** (1.6.8: options `_tls`/`_get_tls` + `_backlog` decouple/floor, `SandhiConn` plain accessors + `conn_write`/`send_*_c` over a /dev/null conn, conn-aware `dispatch_c`/`router_handler_c` 200/404/405 — 22 assertions) / **client dispatch thread-safety** (1.6.9: the `_sandhi_reqctx_*` per-call request context — ctx==0 module-global fallback + per-call isolation, proving a context's open-error / cred-digest don't leak into a sibling context or the module global — 14 assertions) / **mDNS QU receive** (1.6.12: the `discovery/local/qu_unicast` loopback dispatch gate — an unconnected RX receives a unicast reply with a connected TX coexisting on the same port via `SO_REUSEPORT` — 1 assertion).
-- `tests/h2.tcyr` — **167** — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
+- `tests/sandhi.tcyr` — **744** — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint (incl. the 1.6.0 native trust/mTLS enforcement-available + pin-available flips) / SSE / streaming (incl. the 1.6.5 split-inter-chunk-CRLF decoder fix — leading-CRLF parse + split-across-append round-trip, both fail pre-fix) / **download** (1.6.4: result accessors, fd-sink temp-file round-trip + write-error signal, redirect-target resolver across 302/200/follow-off/hops-exhausted/no-Location/downgrade-sentinel) / **server SIGPIPE guard** (1.6.6: `_sandhi_server_ignore_sigpipe()` returns 0 + idempotent) / **server routing** (1.6.7: `route_match` exact/`:name`-capture/segment-count/non-absolute, `_param_int` numeric+non-numeric→-1+oob, router add/cap-full, `router_dispatch` 200/404/405 + query-strip — 28 assertions) / **server TLS** (1.6.8: options `_tls`/`_get_tls` + `_backlog` decouple/floor, `SandhiConn` plain accessors + `conn_write`/`send_*_c` over a /dev/null conn, conn-aware `dispatch_c`/`router_handler_c` 200/404/405 — 22 assertions) / **client dispatch thread-safety** (1.6.9: the `_sandhi_reqctx_*` per-call request context — ctx==0 module-global fallback + per-call isolation, proving a context's open-error / cred-digest don't leak into a sibling context or the module global — 14 assertions) / **mDNS QU receive** (1.6.12: the `discovery/local/qu_unicast` loopback dispatch gate — an unconnected RX receives a unicast reply with a connected TX coexisting on the same port via `SO_REUSEPORT` — 1 assertion).
+- `tests/h2.tcyr` — **1,691** — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
 - `tests/alloc.tcyr` — **342** — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0). (1.6.1: the conn-timeout test now asserts `_sandhi_conn_set_timeout_ms_a` is arena-independent — it composes the stdlib `sock_set_*_timeout` setters — rather than the retired arena-allocates-timeval behaviour; net −1 vs 343.)
 - `tests/rpc.tcyr` — **63** — JSON builder/extractor, RPC dispatch err-envelope, WebDriver URL helpers, MCP envelope, **+ the 1.6.3 endpoint-keyed TLS-policy registry** (set/get/replace, longest-prefix + host-boundary guard, scheme-agnostic resolve, clear/clear-all/nested-survives-sibling-clear, 16-endpoint cap + replace-at-cap).
 
