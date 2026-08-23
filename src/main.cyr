@@ -61,6 +61,15 @@
 #                             stdlib `tls_dlsym`); fail-closed when a
 #                             policy demands enforcement that isn't
 #                             wired.
+#   sandhi::client::resolve — `sandhi_client_set_resolver(fn, ctx)` /
+#                             `_clear_resolver` / `_resolver_installed`
+#                             (1.9.14). A consumer's policy sits between
+#                             hostname and connect and can REFUSE, so an
+#                             SSRF guard vets the address the client will
+#                             actually dial instead of one it resolved
+#                             separately a moment earlier. Fires per
+#                             redirect hop and for IP literals, so it is a
+#                             genuine single choke point. Filed by bote.
 #   sandhi::server          — HTTP/1.1 server. Canonical names are
 #                             `sandhi_server_*` (post-0.9.2 rename);
 #                             `http_*` aliases retained as transitional

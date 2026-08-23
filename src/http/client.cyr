@@ -27,6 +27,18 @@ var _SANDHI_HTTP_RESP_BUF_SIZE = 262144;  # 256 KB — enough for most API respo
 # Resolve `host` via IPv4 literal then DNS, allocating any DNS scratch
 # from `a`. Returns the address on hit, (0 - 1) on miss.
 fn _sandhi_client_resolve_a(a, host): i64 {
+    # 1.9.14 — a consumer's resolve hook, when installed, is the ONLY thing
+    # that decides what this connects to. See the contract in
+    # `src/http/conn.cyr`. Deliberately ahead of the IP-literal fast path: a
+    # policy that never sees `http://169.254.169.254/` is not a policy. Both
+    # `0` (0.0.0.0 — itself an SSRF target) and the stock `(0 - 1)` miss
+    # sentinel mean refuse.
+    if (_sandhi_client_resolver_fn != 0) {
+        var hooked = fncall3(_sandhi_client_resolver_fn, _sandhi_client_resolver_ctx,
+          host, SANDHI_RESOLVE_V4);
+        if (hooked == 0 || hooked == 0 - 1) { return 0 - 1; }
+        return hooked;
+    }
     var lit = sandhi_net_parse_ipv4(host);
     if (lit != 0 - 1) { return lit; }
     return sandhi_resolve_ipv4_a(a, host);
@@ -39,6 +51,13 @@ fn _sandhi_client_resolve(host): i64 {
 # IPv6 fallback into `a`. Returns a 16-byte AAAA buffer or 0.
 fn _sandhi_client_resolve_v6_a(a, host): i64 {
     if (host == 0) { return 0; }
+    # 1.9.14 — same hook, v6 half. The caller falls here when the v4 attempt
+    # answered (0 - 1), so a hook that refuses v4 is asked about v6 before the
+    # request is abandoned; refusing both surfaces as SANDHI_ERR_DISCOVERY.
+    if (_sandhi_client_resolver_fn != 0) {
+        return fncall3(_sandhi_client_resolver_fn, _sandhi_client_resolver_ctx,
+          host, SANDHI_RESOLVE_V6);
+    }
     return sandhi_resolve_ipv6_a(a, host);
 }
 

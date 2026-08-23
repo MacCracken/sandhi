@@ -2014,6 +2014,81 @@ fn test_pool_new_oom_yields_no_handle() {
     return 0;
 }
 
+# ── 1.9.14 client resolve hook (filed by bote) ──
+var _t_rsv_calls = 0;
+var _t_rsv_last_host = 0;
+var _t_rsv_v4_seen = 0;
+var _t_rsv_v6_seen = 0;
+
+fn _t_resolver_refuse(ctx, host, family): i64 {
+    _t_rsv_calls = _t_rsv_calls + 1;
+    _t_rsv_last_host = host;
+    if (family == SANDHI_RESOLVE_V4) { _t_rsv_v4_seen = _t_rsv_v4_seen + 1; }
+    if (family == SANDHI_RESOLVE_V6) { _t_rsv_v6_seen = _t_rsv_v6_seen + 1; }
+    return 0;
+}
+
+fn _t_resolver_loopback(ctx, host, family): i64 {
+    _t_rsv_calls = _t_rsv_calls + 1;
+    if (family == SANDHI_RESOLVE_V6) { return 0; }
+    return 0x0100007F;
+}
+
+# 1.9.14 — a consumer's resolve hook must be able to VETO a connection.
+#
+# Filed by bote 3.3.7: its SSRF classifier can only guard IP-literal URLs,
+# because for a hostname the only shape available was resolve-then-fetch —
+# bote resolves and classifies, then `sandhi_http_get` resolves AGAIN. Two
+# independent resolutions with an attacker-controlled gap is a DNS-rebinding
+# hole, not a guard. The hook closes the gap: one resolution, vetted, and the
+# client connects to exactly what the policy approved.
+#
+# No network needed — a refusal short-circuits before any DNS or connect.
+fn test_client_resolver_hook_can_refuse() {
+    assert_eq(sandhi_client_resolver_installed(), 0, "resolver: none installed by default");
+
+    _t_rsv_calls = 0; _t_rsv_v4_seen = 0; _t_rsv_v6_seen = 0;
+    sandhi_client_set_resolver(&_t_resolver_refuse, 0);
+    assert_eq(sandhi_client_resolver_installed(), 1, "resolver: reports installed");
+
+    var r = sandhi_http_get("http://example.invalid/x", 0);
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_DISCOVERY,
+      "resolver: a refusal surfaces as DISCOVERY, and no connection is made");
+    assert(_t_rsv_calls >= 1, "resolver: the hook was actually consulted");
+    assert_eq(_t_rsv_v4_seen, 1, "resolver: asked about v4");
+    assert_eq(_t_rsv_v6_seen, 1, "resolver: and asked about v6 before giving up");
+    assert_streq(_t_rsv_last_host, "example.invalid", "resolver: got the URL's host verbatim");
+
+    # ⚠ The literal case is the one a name-only hook would miss. Without a hook
+    # `_sandhi_client_resolve_a` short-circuits a literal through
+    # `sandhi_net_parse_ipv4` and never resolves; the hook is deliberately
+    # ahead of that fast path, so a policy sees `169.254.169.254` too.
+    _t_rsv_calls = 0;
+    var r2 = sandhi_http_get("http://169.254.169.254/latest/meta-data/", 0);
+    assert_eq(sandhi_http_err_kind(r2), SANDHI_ERR_DISCOVERY,
+      "resolver: an IP-literal host is refused too — no bypass");
+    assert(_t_rsv_calls >= 1, "resolver: the hook saw the literal");
+
+    sandhi_client_clear_resolver();
+    assert_eq(sandhi_client_resolver_installed(), 0, "resolver: cleared");
+    return 0;
+}
+
+# 1.9.14 — the address the hook returns is the address that gets dialled.
+#
+# `example.invalid` is guaranteed never to resolve (RFC 6761), so without the
+# hook this is DISCOVERY. Getting CONNECT instead proves the client dialled
+# 127.0.0.1:1 — the hook's answer — rather than resolving the name itself.
+fn test_client_resolver_hook_address_is_dialled() {
+    sandhi_client_set_resolver(&_t_resolver_loopback, 0);
+    var r = sandhi_http_get("http://example.invalid:1/", 0);
+    var k = sandhi_http_err_kind(r);
+    sandhi_client_clear_resolver();
+    assert_eq(k, SANDHI_ERR_CONNECT,
+      "resolver: the hook's address is what the client connects to");
+    return 0;
+}
+
 # ── 1.9.0 peer address ──
 # A REAL loopback TCP connection, with the client bound to a KNOWN port so the peer port
 # is deterministic and verifiable — asserting "non-zero" would pass on a garbage read.
@@ -4203,6 +4278,10 @@ fn main() {
 
     test_group("download/redirect_target");
     test_download_redirect_target();
+
+    test_group("client/resolver_hook");
+    test_client_resolver_hook_can_refuse();
+    test_client_resolver_hook_address_is_dialled();
 
     test_group("pool/chunk_size_overflow");
     test_pool_chunk_size_overflow_refused();

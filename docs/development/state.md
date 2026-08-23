@@ -4,6 +4,49 @@
 
 ## Version
 
+**1.9.14** — 2026-08-23. **Client resolve hook — closes bote's hostname SSRF
+guard.** No pin change (cyrius 6.5.35). **2,851 assertions**, 8/8 fuzz, **nine**
+live gates green. Purely additive: no existing signature changes, no behaviour
+change without a hook installed.
+
+Filed by **bote 3.3.7**, whose `web_fetch` ships as an MCP tool. bote has a
+tested SSRF classifier but could only apply it to IP-literal URLs — for a
+hostname the only available shape was **resolve-then-fetch**, two independent
+resolutions with an attacker-controlled gap between them. That is a
+DNS-rebinding hole wearing a guard's clothes, and bote was right to refuse to
+ship it.
+
+`sandhi_client_set_resolver(lookup_fn, ctx)` + `_clear_resolver` +
+`_resolver_installed`. `lookup_fn(ctx, host, family) -> addr`, **0 to refuse** —
+refusing is the load-bearing half. A refusal surfaces as `SANDHI_ERR_DISCOVERY`.
+
+bote offered two shapes; sandhi took the **hook** rather than a pre-resolved
+`sandhi_http_get_at`, because the hook makes the caveat bote flagged as *"easy to
+miss and would silently defeat the whole fix"* impossible rather than merely
+handled:
+
+- **Per redirect hop, by construction** — `_sandhi_http_follow_a` re-enters the
+  dispatch path and each hop resolves again. A pre-resolved entry point would
+  have had to *disable* redirect-following to stay honest, since the vetted
+  address is only valid for hop 1's host.
+- **No bypass** — all four client paths (buffered, auto/h2, streaming, download)
+  funnel through the same two private resolve functions; an address parameter
+  would guard only the call sites that remembered to pass it.
+- **Covers IP literals** — placed ahead of the `sandhi_net_parse_ipv4` fast
+  path, so `http://169.254.169.254/` cannot slip past a name-only policy.
+
+`Host:` / SNI were never at risk — both still derive from the URL. Process-wide
+and config-shaped (install once at startup); a per-request hook would be a
+security control with a hole in it.
+
+Gated by `programs/_ssrf_resolver_gate.cyr` (CI), which forks a real server that
+302s across hosts: the hook must vet **both** hops, and refusing hop 2 must stop
+the request. Mutation-verified — removing the v4 hook makes the gate report
+`hook saw first=0 second=0` and exit 3.
+
+⚠ **bote does not get this by bumping a pin** — post-fold there is none. It
+arrives when a cyrius release re-vendors `lib/sandhi.cyr` from `dist/sandhi.cyr`.
+
 **1.9.13** — 2026-08-23. **Optimization sweep + the repair queue 1.9.12 left
 behind.** No pin change (cyrius 6.5.35). **2,840 assertions**, 8/8 fuzz, all
 eight live gates green.
@@ -407,9 +450,9 @@ Build outputs:
 
 ## Tests
 
-**2,840 assertions green** across four suites (CI runs all four; measured on the **6.5.35** pin at 1.9.13):
+**2,851 assertions green** across four suites (CI runs all four; measured on the **6.5.35** pin at 1.9.14):
 
-- `tests/sandhi.tcyr` — **744** — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint (incl. the 1.6.0 native trust/mTLS enforcement-available + pin-available flips) / SSE / streaming (incl. the 1.6.5 split-inter-chunk-CRLF decoder fix — leading-CRLF parse + split-across-append round-trip, both fail pre-fix) / **download** (1.6.4: result accessors, fd-sink temp-file round-trip + write-error signal, redirect-target resolver across 302/200/follow-off/hops-exhausted/no-Location/downgrade-sentinel) / **server SIGPIPE guard** (1.6.6: `_sandhi_server_ignore_sigpipe()` returns 0 + idempotent) / **server routing** (1.6.7: `route_match` exact/`:name`-capture/segment-count/non-absolute, `_param_int` numeric+non-numeric→-1+oob, router add/cap-full, `router_dispatch` 200/404/405 + query-strip — 28 assertions) / **server TLS** (1.6.8: options `_tls`/`_get_tls` + `_backlog` decouple/floor, `SandhiConn` plain accessors + `conn_write`/`send_*_c` over a /dev/null conn, conn-aware `dispatch_c`/`router_handler_c` 200/404/405 — 22 assertions) / **client dispatch thread-safety** (1.6.9: the `_sandhi_reqctx_*` per-call request context — ctx==0 module-global fallback + per-call isolation, proving a context's open-error / cred-digest don't leak into a sibling context or the module global — 14 assertions) / **mDNS QU receive** (1.6.12: the `discovery/local/qu_unicast` loopback dispatch gate — an unconnected RX receives a unicast reply with a connected TX coexisting on the same port via `SO_REUSEPORT` — 1 assertion).
+- `tests/sandhi.tcyr` — **755** — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint (incl. the 1.6.0 native trust/mTLS enforcement-available + pin-available flips) / SSE / streaming (incl. the 1.6.5 split-inter-chunk-CRLF decoder fix — leading-CRLF parse + split-across-append round-trip, both fail pre-fix) / **download** (1.6.4: result accessors, fd-sink temp-file round-trip + write-error signal, redirect-target resolver across 302/200/follow-off/hops-exhausted/no-Location/downgrade-sentinel) / **server SIGPIPE guard** (1.6.6: `_sandhi_server_ignore_sigpipe()` returns 0 + idempotent) / **server routing** (1.6.7: `route_match` exact/`:name`-capture/segment-count/non-absolute, `_param_int` numeric+non-numeric→-1+oob, router add/cap-full, `router_dispatch` 200/404/405 + query-strip — 28 assertions) / **server TLS** (1.6.8: options `_tls`/`_get_tls` + `_backlog` decouple/floor, `SandhiConn` plain accessors + `conn_write`/`send_*_c` over a /dev/null conn, conn-aware `dispatch_c`/`router_handler_c` 200/404/405 — 22 assertions) / **client dispatch thread-safety** (1.6.9: the `_sandhi_reqctx_*` per-call request context — ctx==0 module-global fallback + per-call isolation, proving a context's open-error / cred-digest don't leak into a sibling context or the module global — 14 assertions) / **mDNS QU receive** (1.6.12: the `discovery/local/qu_unicast` loopback dispatch gate — an unconnected RX receives a unicast reply with a connected TX coexisting on the same port via `SO_REUSEPORT` — 1 assertion).
 - `tests/h2.tcyr` — **1,691** — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
 - `tests/alloc.tcyr` — **342** — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0). (1.6.1: the conn-timeout test now asserts `_sandhi_conn_set_timeout_ms_a` is arena-independent — it composes the stdlib `sock_set_*_timeout` setters — rather than the retired arena-allocates-timeval behaviour; net −1 vs 343.)
 - `tests/rpc.tcyr` — **63** — JSON builder/extractor, RPC dispatch err-envelope, WebDriver URL helpers, MCP envelope, **+ the 1.6.3 endpoint-keyed TLS-policy registry** (set/get/replace, longest-prefix + host-boundary guard, scheme-agnostic resolve, clear/clear-all/nested-survives-sibling-clear, 16-endpoint cap + replace-at-cap).

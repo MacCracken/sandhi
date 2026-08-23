@@ -1,0 +1,175 @@
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
+include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/http/retry.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/server/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/main.cyr"  # sandhi_version() — referenced by http/client.cyr's UA builder
+
+# programs/_ssrf_resolver_gate.cyr — 1.9.14 live gate for the client resolve
+# hook filed by bote 3.3.7.
+#
+# The unit tests in tests/sandhi.tcyr cover install / refuse / literal / "the
+# hook's address is the one dialled" without a socket. They CANNOT cover the
+# property the filing flagged as easy to miss and silently fatal:
+#
+#   "Redirects. If the client follows redirects internally, each hop resolves
+#    again and re-opens the window. Either the hook must fire per hop, or `_at`
+#    must disable redirect-following and hand control back."
+#
+# That needs a real server that actually 302s. This gate forks one and checks
+# both halves:
+#
+#   [1] the hook fires for EVERY hop, with the redirect target's host — not
+#       just the first;
+#   [2] a hook that approves hop 1 and REFUSES hop 2 stops the request, so a
+#       redirect pointing at an internal address is blocked rather than
+#       followed. This is the whole point of the feature: without it a public
+#       hostname that 302s to 169.254.169.254 walks straight through a guard
+#       that only ever saw hop 1.
+#
+# Pure loopback — no network, no DNS. Every hostname is fictional and only the
+# hook maps it anywhere.
+#
+# Exit codes: 0 PASS · 2 hop-1 request failed · 3 hook not fired per hop
+#             4 refusal on hop 2 did not stop the request
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+var _g_port      = 18461;
+var _g_calls     = 0;
+var _g_saw_first = 0;
+var _g_saw_second = 0;
+var _g_refuse_second = 0;
+
+# Every fictional host resolves to loopback, EXCEPT that when
+# `_g_refuse_second` is armed the second hop's host is refused — standing in
+# for "this address is internal, veto it".
+fn _g_resolver(ctx, host, family): i64 {
+    _g_calls = _g_calls + 1;
+    if (family == SANDHI_RESOLVE_V6) { return 0; }
+    if (streq(host, "first.invalid") == 1)  { _g_saw_first = _g_saw_first + 1; }
+    if (streq(host, "second.invalid") == 1) {
+        _g_saw_second = _g_saw_second + 1;
+        if (_g_refuse_second == 1) { return 0; }
+    }
+    return INADDR_LOOPBACK();
+}
+
+fn _g_handler(ctx, cfd, buf, blen, params): i64 {
+    var path = sandhi_server_get_path(buf, blen);
+    if (streq(path, "/start") == 1) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "HTTP/1.1 302 Found\r\nLocation: http://second.invalid:");
+        str_builder_add_int(sb, _g_port);
+        str_builder_add_cstr(sb, "/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        var s = str_data(str_builder_build(sb));
+        sock_send(cfd, s, strlen(s));
+        return 0;
+    }
+    sandhi_server_send_response(cfd, 200, "OK", "text/plain", "arrived", 7, 0);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    say("=== sandhi client resolve-hook gate (SSRF / redirect hop) ===\n");
+
+    var pid = sys_fork();
+    if (pid == 0) {
+        var opts = sandhi_server_options_new();
+        sandhi_server_options_idle_ms(opts, 1000);
+        sandhi_server_run_opts(INADDR_LOOPBACK(), _g_port, &_g_handler, 0, opts);
+        syscall(60, 0);
+    }
+    async_sleep_ms(400);
+
+    var fails = 0;
+
+    # [1] hook fires per hop.
+    _g_calls = 0; _g_saw_first = 0; _g_saw_second = 0; _g_refuse_second = 0;
+    sandhi_client_set_resolver(&_g_resolver, 0);
+    var o1 = sandhi_http_options_new();
+    sandhi_http_options_follow_redirects(o1, 1);
+    sandhi_http_options_max_hops(o1, 3);
+    sandhi_http_options_connect_ms(o1, 2000);
+    sandhi_http_options_read_ms(o1, 2000);
+    var r1 = sandhi_http_get_opts("http://first.invalid:18461/start", 0, o1);
+    say("[1] follow 302 across hosts: status="); fmt_int(sandhi_http_status(r1));
+    say(" err="); fmt_int(sandhi_http_err_kind(r1));
+    say("  hook saw first="); fmt_int(_g_saw_first);
+    say(" second="); fmt_int(_g_saw_second); say("\n");
+    if (sandhi_http_status(r1) != 200) {
+        say("    FAIL: the followed request did not complete\n");
+        fails = fails + 1;
+    }
+    if (_g_saw_first < 1 || _g_saw_second < 1) {
+        say("    FAIL: the hook did NOT fire for every hop — a redirect would\n");
+        say("          re-open the DNS-rebinding window this feature closes\n");
+        fails = fails + 1;
+    } else {
+        say("    PASS (hook vetted both hops)\n");
+    }
+
+    # [2] refusing hop 2 stops the request.
+    _g_calls = 0; _g_saw_first = 0; _g_saw_second = 0; _g_refuse_second = 1;
+    var o2 = sandhi_http_options_new();
+    sandhi_http_options_follow_redirects(o2, 1);
+    sandhi_http_options_max_hops(o2, 3);
+    sandhi_http_options_connect_ms(o2, 2000);
+    sandhi_http_options_read_ms(o2, 2000);
+    var r2 = sandhi_http_get_opts("http://first.invalid:18461/start", 0, o2);
+    say("[2] refuse hop 2: status="); fmt_int(sandhi_http_status(r2));
+    say(" err="); fmt_int(sandhi_http_err_kind(r2));
+    say("  hook saw second="); fmt_int(_g_saw_second); say("\n");
+    if (sandhi_http_status(r2) == 200) {
+        say("    FAIL: the refused hop was followed anyway (SECURITY)\n");
+        fails = fails + 1;
+    } else {
+        say("    PASS (refused hop not followed)\n");
+    }
+
+    sandhi_client_clear_resolver();
+    sys_kill(pid, 15);
+
+    if (fails > 0) {
+        say("\nGATE FAILED\n");
+        return 3;
+    }
+    say("\nALL GATES PASS\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

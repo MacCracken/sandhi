@@ -2,6 +2,112 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.14] — 2026-08-23
+
+**Client resolve hook — closes bote's hostname SSRF guard.** No pin change
+(cyrius 6.5.35). **2,851 assertions** (was 2,840), 8/8 fuzz, nine live gates
+green. Purely additive: no existing signature changes and no behaviour change
+for anyone who does not install a hook.
+
+### Added — `sandhi_client_set_resolver`: a consumer can vet the address, and refuse it
+
+Filed by **bote 3.3.7**, whose `web_fetch` ships as an MCP tool. bote has a
+tested IPv4/IPv6 SSRF classifier (113 assertions) but could only apply it to
+URLs whose host is an **IP literal**. For a hostname there was nowhere to stand:
+`sandhi_http_get` takes a URL and resolves internally through
+`_sandhi_client_resolve_a`, which is private, has no parameter and no hook.
+
+The only shape available to a consumer was resolve-then-fetch:
+
+```
+addr = sandhi_resolve_ipv4(host);   # consumer resolves, then classifies
+...                                 # SSRF check runs here
+sandhi_http_get(url, hdrs);         # sandhi resolves AGAIN, independently
+```
+
+⛔ That is **not a fix — it is a DNS-rebinding vulnerability with extra steps.**
+Two independent resolutions with an attacker-controlled interval between them:
+the name answers a public address for the consumer's check and
+`169.254.169.254` for sandhi's connect. The guard reads as protective while
+providing nothing, and bote was right to refuse to ship it.
+
+Three new verbs:
+
+| Verb | |
+|---|---|
+| `sandhi_client_set_resolver(lookup_fn, ctx)` | install the hook |
+| `sandhi_client_clear_resolver()` | remove it |
+| `sandhi_client_resolver_installed()` | 1 when armed — so a consumer whose posture depends on the hook can assert it at startup rather than discover at request time that its guard was never wired |
+
+`lookup_fn(ctx, host, family) -> i64`, with `family` one of
+`SANDHI_RESOLVE_V4` / `SANDHI_RESOLVE_V6`. Return the packed IPv4 address (the
+shape `sandhi_resolve_ipv4` answers) or a pointer to 16 address bytes for v6 —
+or **0 to refuse**. Refusing is the load-bearing half; it is what lets a policy
+veto. A refusal surfaces as `SANDHI_ERR_DISCOVERY`, which is accurate — no
+address was obtained — and needs no new error kind.
+
+**Why the hook rather than a pre-resolved `sandhi_http_get_at(url, hdrs, addr)`.**
+bote proposed either. The hook was chosen because it makes the caveat bote
+flagged as *"easy to miss and would silently defeat the whole fix"* impossible
+rather than merely handled:
+
+- **It fires per redirect hop, by construction.** `_sandhi_http_follow_a`
+  re-enters `_sandhi_http_do_impl_a` for every hop and each hop resolves again,
+  so hop 2 is vetted exactly like hop 1. A pre-resolved entry point would have
+  had to *disable* redirect-following to stay honest, because the address the
+  caller vetted is only valid for the first hop's host — otherwise a public
+  hostname that 302s to `169.254.169.254` walks straight through a guard that
+  only ever saw hop 1.
+- **It has no bypass.** All four client paths — buffered, auto/h2, streaming,
+  download — funnel through the same two private resolve functions (verified:
+  `sandhi_resolve_ipv4_a` / `_ipv6_a` have no other callers in `src/`). An
+  address parameter would only guard the call sites that remembered to pass it.
+- **It covers IP literals too.** Deliberately placed *ahead* of the
+  `sandhi_net_parse_ipv4` fast path, so `http://169.254.169.254/` cannot slip
+  past a policy that only sees names. A hook wanting stock literal behaviour
+  returns `sandhi_net_parse_ipv4(host)`.
+
+`Host:` and TLS SNI are untouched — both still derive from the **URL**, never
+from the address, so virtual hosts and SNI keep working. That was bote's
+explicit warning and it needed no special handling: the hook replaces only the
+name→address step.
+
+**Process-wide and config-shaped** — install once at startup, before dispatch.
+Deliberate: a per-request hook is a security control with a hole in it, since
+every path that forgot to pass it would be unguarded. It is not intended to be
+swapped per request and is not synchronised for that.
+
+### Verified
+
+`programs/_ssrf_resolver_gate.cyr`, wired into CI. The unit tests cover install,
+refusal, the literal case, and "the hook's address is the one actually dialled"
+(pointing a non-resolvable name at loopback and asserting `CONNECT` rather than
+`DISCOVERY` — which only holds if the hook's answer was used). None of them can
+reach the redirect property, so the gate forks a real server that 302s across
+hosts:
+
+| | |
+|---|---|
+| **[1]** | hook fires for **both** `first.invalid` and `second.invalid`; request completes 200 |
+| **[2]** | hook approves hop 1 and **refuses hop 2** → request stops, `err=DISCOVERY`, redirect not followed |
+
+Pure loopback, no DNS — every hostname is fictional and only the hook maps it
+anywhere. Mutation-verified: removing the v4 hook makes `[1]` report
+`hook saw first=0 second=0` and the gate exits 3.
+
+### Notes on the caveats bote raised
+
+- **First-A-record only** — `_sandhi_resolve_parse_response_a` still returns on
+  the first `A` hit, so a multi-homed name where only some addresses are
+  internal would be partly unguarded by sandhi's own resolver. **With a hook
+  installed this stops being sandhi's problem**: the consumer resolves, so it
+  sees and vets every address it wants to. Unchanged for hook-less callers, and
+  left as-is rather than quietly widened.
+- **IPv6** — covered. The hook carries a family tag and both
+  `_sandhi_client_resolve_a` and `_sandhi_client_resolve_v6_a` consult it. A
+  hook that refuses v4 is still asked about v6 before the request is abandoned.
+- **Redirects** — covered and gated, see above.
+
 ## [1.9.13] — 2026-08-23
 
 **Optimization sweep + the repair queue 1.9.12 left behind.** No pin change
