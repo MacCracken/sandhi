@@ -92,3 +92,23 @@ backend's pending retirement.
   resolves them transitively for native); this does not change the disposition —
   the libssl path was already failing on 6.3.5, is non-gating (`continue-on-error`),
   and retires at sandhi 2.0. No sandhi source change; no FFI workaround.
+
+- **2026-08-22 (sandhi 1.9.11 / cyrius `6.5.35`) — re-verified; still open, set
+  widened again.** The libssl smoke build now fails with **14** reachable-undefined
+  functions, up from the single `sha256` recorded at 1.8.1 and the four
+  `thread_local_*` / `ct_select` recorded at 6.3.5. The set is essentially all of
+  sigil's transitive crypto surface: `u256_*` + `base64_encode` + `bayan_json_get`
+  (bayan), `_keccak_absorb` / `_keccak_f1600` / `shake256` (keccak), `fl_alloc` /
+  `fl_free` (freelist), `ct_eq_bytes` / `ct_eq_bytes_lens` / `ct_select` (ct),
+  `thread_local_alloc` / `_get` / `_init` / `_set` (thread_local), plus
+  `random_bytes`.
+
+  **Not a regression from the 6.5.20 → 6.5.35 bump.** Verified by building the same
+  tree against a clean `cyrius deps` resolve on each pin: **both report 14**. The
+  "4" and "1" in the entries above are simply the counts at their own dates.
+
+  Same root cause and same disposition: the native crypto path that force-links
+  these definitions is `#ifdef`'d out under `-D CYRIUS_TLS_LIBSSL`, the **native
+  no-flag build links clean** (the shipping path, and the one all five live gates
+  run against), the CI step stays `continue-on-error`, and the whole step retires
+  with the backend at sandhi **2.0**. No sandhi source change; no FFI workaround.

@@ -152,7 +152,7 @@ fn main() {
     if (tr == 0) { sayc("SKIP: header gate — token request failed\n"); return 0; }
     var terr = sandhi_http_err_kind(tr);
     if (terr == SANDHI_ERR_CONNECT || terr == SANDHI_ERR_DISCOVERY
-    || terr == SANDHI_ERR_TIMEOUT || terr == SANDHI_ERR_TLS) {
+      || terr == SANDHI_ERR_TIMEOUT || terr == SANDHI_ERR_TLS) {
         sayc("SKIP: header gate — registry unreachable\n");
         return 0;
     }
@@ -181,7 +181,7 @@ fn main() {
     var herr = sandhi_download_err(hr);
     var hstat = sandhi_download_status(hr);
     if (herr == SANDHI_ERR_CONNECT || herr == SANDHI_ERR_DISCOVERY
-    || herr == SANDHI_ERR_TIMEOUT || herr == SANDHI_ERR_TLS) {
+      || herr == SANDHI_ERR_TIMEOUT || herr == SANDHI_ERR_TLS) {
         sayc("SKIP: header gate — registry unreachable\n");
         return 0;
     }

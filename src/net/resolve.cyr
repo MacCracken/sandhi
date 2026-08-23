@@ -147,13 +147,13 @@ fn _sandhi_resolve_read_resolv_conf_a(a): i64 {
             while (i < n && load8(buf + i) != 10) { i = i + 1; }
             i = i + 1;
         } elif (i + 10 < n && memeq(buf + i, "nameserver", 10) == 1
-        && (load8(buf + i + 10) == 32 || load8(buf + i + 10) == 9)) {
+          && (load8(buf + i + 10) == 32 || load8(buf + i + 10) == 9)) {
             # Found "nameserver" — advance past whitespace, read up to ws/EOL.
             i = i + 10;
             while (i < n && (load8(buf + i) == 32 || load8(buf + i) == 9)) { i = i + 1; }
             var ns_start = i;
             while (i < n && load8(buf + i) != 32 && load8(buf + i) != 9
-            && load8(buf + i) != 13 && load8(buf + i) != 10) {
+              && load8(buf + i) != 13 && load8(buf + i) != 10) {
                 i = i + 1;
             }
             var nlen = i - ns_start;
@@ -332,7 +332,7 @@ fn _sandhi_resolve_name_eq_a(a, buf, blen, off_a, off_b): i64 {
     var la_cell = alloc_via(a, 8);
     var lb_cell = alloc_via(a, 8);
     if (pa_cell == 0 || pb_cell == 0 || ha_cell == 0 || hb_cell == 0
-    || la_buf  == 0 || lb_buf  == 0 || la_cell == 0 || lb_cell == 0) { return 0; }
+      || la_buf  == 0 || lb_buf  == 0 || la_cell == 0 || lb_cell == 0) { return 0; }
     store64(pa_cell, off_a);
     store64(pb_cell, off_b);
     store64(ha_cell, 0);
@@ -383,7 +383,7 @@ fn _sandhi_resolve_name_eq(buf, blen, off_a, off_b): i64 {
 # The owner-name match is the anti-answer-substitution guard: a record
 # is only ever considered for a name we are already asking about.
 fn _sandhi_resolve_find_rr_a(a, buf, blen, ancount, ans_start, name_off, want_type,
-rdata_cell, rdlen_cell, cname_cell): i64 {
+  rdata_cell, rdlen_cell, cname_cell): i64 {
     var found_cname = 0;
     var off = ans_start;
     var i = 0;
@@ -470,7 +470,7 @@ fn _sandhi_resolve_parse_response_a(a, buf, blen, expected_id): i64 {
     var hops = 0;
     while (hops <= _SANDHI_RESOLVE_MAX_CNAME_HOPS) {
         var r = _sandhi_resolve_find_rr_a(a, buf, blen, ancount, ans_start, cur,
-        _SANDHI_RR_A, rdata_cell, rdlen_cell, cname_cell);
+          _SANDHI_RR_A, rdata_cell, rdlen_cell, cname_cell);
         if (r < 0) { return 0 - 1; }
         if (r == 1) {
             if (load64(rdlen_cell) != 4) { return 0 - 1; }
@@ -551,7 +551,7 @@ fn _sandhi_resolve_parse_response_aaaa_a(a, buf, blen, expected_id): i64 {
     var hops = 0;
     while (hops <= _SANDHI_RESOLVE_MAX_CNAME_HOPS) {
         var r = _sandhi_resolve_find_rr_a(a, buf, blen, ancount, ans_start, cur,
-        _SANDHI_RR_AAAA, rdata_cell, rdlen_cell, cname_cell);
+          _SANDHI_RR_AAAA, rdata_cell, rdlen_cell, cname_cell);
         if (r < 0) { return 0; }
         if (r == 1) {
             if (load64(rdlen_cell) != 16) { return 0; }

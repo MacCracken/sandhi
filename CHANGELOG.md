@@ -2,6 +2,142 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.11] — 2026-08-22
+
+### Changed — toolchain pinned to cyrius 6.5.35 (was 6.5.20)
+
+Pure maintenance: no sandhi behaviour changes, no public-surface change. All four
+suites green on the new pin (**1,255 assertions**: sandhi 683, alloc 342, h2 167,
+rpc 63), all 8 fuzz harnesses green, `cyrius lint` clean over `src/`, `cyrius vet`
+clean, smoke links and runs. Three things in the toolchain reach the tree, and one
+housekeeping item rides along.
+
+**1. `cyrius fmt` now indents continuation lines.** A wrapped expression is indented
+`+2` from the line that opened it, where 6.5.20 left it flush:
+
+```
+             if ((c1 == 108 || c1 == 76) && (c2 == 111 || c2 == 79)
+-            && (c3 == 99 || c3 == 67) && (c4 == 97 || c4 == 65)
++              && (c3 == 99 || c3 == 67) && (c4 == 97 || c4 == 65)
+```
+
+CI's Format-check step gates on `cyrius fmt --check`, so this is not optional — 24
+files drifted the moment the pin moved (16 under `src/`, 5 under `programs/`, 3
+under `tests/`) and are reformatted here. **Whitespace only**: `git diff -w` over
+`src/ programs/ tests/` reports nothing but the version-string bump. The same
+reflow flows into all five dist bundles, which is why they show ~333 changed lines
+for what is, semantically, a version stamp.
+
+**2. `cyrius distlib` emits a `.deps` sidecar per profile.** Alongside the
+long-standing `dist/sandhi.deps` (28 stdlib leaves) there are now four more, listing
+what each 1.8.0 breakout slice actually needs in scope:
+
+| Sidecar | stdlib leaves |
+|---|---|
+| `dist/sandhi.deps` | 28 |
+| `dist/sandhi-tls.deps` | 12 |
+| `dist/sandhi-server.deps` | 16 |
+| `dist/sandhi-rpc.deps` | 18 |
+| `dist/sandhi-discovery.deps` | 18 |
+
+These are generated artifacts a consumer's `cyrius deps` reads, so they are tracked
+and drift exactly like the bundles do. **CI's drift check was rewritten to cover the
+whole `dist/` tree** rather than five hand-listed `.cyr` paths — a newly-emitted
+sidecar is *untracked*, and `git diff` of named paths cannot see an untracked file
+at all, so the check now also fails on `git status --porcelain dist/` being
+non-empty. That gap is the reason this is called out rather than just committed.
+
+**3. `cyrius distlib --all` exists** (base + every `[lib.<profile>]` in one
+invocation), as does `--check` (verify without writing; it checks all five and
+cleans up its temporaries). Both workflows and CLAUDE.md now use `--all`. The
+five-invocation loop still works and is kept in the docs as the explicit form.
+
+**4. Stale `lib/` shadows removed** — `ganita`, `mabda`, `niyama`, `patra`,
+**`sandhi`**, `sankoch`, `simd`, `vani`, `yantra`, `yukti`. `cyrius lib sync`
+refreshes only the declared `[deps].stdlib` subset, so a bundle sitting in `lib/`
+that nothing declares is never updated and silently shadows the pin's newer copy.
+All ten were byte-different from the 6.5.35 snapshot and none is reachable from any
+real `include` (every textual hit is a comment). Third occurrence — four cleared at
+1.9.2, two at 1.9.9, ten here — and **sandhi shadowed itself again**, a 1.9.9 copy
+sitting under a 1.9.10 tree.
+
+The recurrence has a one-command answer that the docs did not previously give:
+`rm -rf lib && cyrius deps`, which is exactly what CI does (it starts from an empty
+`lib/`) and yields the pin's set with no shadows — **67 files at 6.5.35**, every one
+byte-identical to `~/.cyrius/versions/6.5.35/lib/`. Verified that a clean resolve
+reproduces this release bit for bit: same 2,355,680-byte DCE'd smoke, same 1,255
+assertions, byte-identical dist bundles. Worth knowing that **`cyrius lib sync` and
+`cyrius deps` do not resolve the same set** — `lib sync` takes the declared
+`[deps].stdlib` subset (60 files, including `hashmap_fast` / `ws_server`) while
+`deps` also walks sigil's transitive graph (`bayan`, `ct`, `keccak`, `freelist`,
+plus `result` / `slice` / `sync*`). `deps` is authoritative because it is CI's.
+`lib/` is gitignored, so none of this is a shipped change.
+
+**Size, as a free side effect.** Same sources, same `lib/`, only the compiler
+changed:
+
+| DCE'd `programs/smoke.cyr` | 6.5.20 | 6.5.35 |
+|---|---|---|
+| binary | 12,130,160 B | 2,355,680 B (**−80.6%**) |
+| reported large-static-data | 10,790,128 B | 798,896 B |
+
+6.5.35 also stopped emitting the `lib/bayan.cyr` *"assigning non-pointer to typed
+pointer"* warnings that 6.5.20 produced on every build.
+
+### Fixed — release workflow could ship stale profile bundles and untested code
+
+Two gaps in `.github/workflows/release.yml`, both pre-dating this release and both
+found while wiring `--all` through:
+
+- It ran bare `cyrius distlib`, which regenerates **only** `dist/sandhi.cyr`. A tag
+  could therefore publish four stale profile bundles even though CI's drift check
+  had passed on the same commit. Now `cyrius distlib --all`, and all five bundles
+  plus their `.deps` sidecars ship as release artifacts and enter `SHA256SUMS` —
+  which is what CLAUDE.md has described as the artifact set since 1.8.0.
+- It ran only `tests/sandhi.tcyr` and `tests/h2.tcyr`. `alloc` (1.1.0) and `rpc`
+  (1.2.8) were carved out and wired into CI but never added here, so a release could
+  go out with either red. All four now run, matching CI and the closeout gate.
+
+### Verified
+
+All five CI live gates pass on the new pin, including the ones that need real
+network and real TLS 1.3:
+
+| Gate | Result |
+|---|---|
+| `_policy_runtime_probe` (TLS policy, live) | ALL GATES PASS — default round-trip, wrong-pin fail-closed, bogus-CA refused, loadable-wrong-CA verify-fail |
+| `_https_native_loop_gate` (repeated-request P1) | 6/6 survived, no crash |
+| `_https_policy_threading_gate` (1.4.6) | ALL GATES PASS — wrong pin fails closed, correct pin 200s |
+| `_server_tls_probe` (server-side TLS, 1.6.8) | 8/8 trusted 200+body, untrusted rejected, 8/8 under a pinned worker, **16/16 concurrent handshakes** |
+| `_server_accept_emfile_probe` (1.9.8) | 0 ms on-CPU across a 1000 ms EMFILE window (budget 250 ms) |
+
+aarch64 cross-build produces a valid aarch64 ELF (2,871,552 B). Security scan and
+docs job clean.
+
+### Known — not introduced here, not sandhi's to fix
+
+- `warning: undefined function 'random_bytes'` on every build. `lib/sigil.cyr` calls
+  stdlib `random_bytes` but its distlib bundle does not `include "lib/random.cyr"`,
+  and `random` is not a leaf any consumer declares. The call site is unreachable in
+  sandhi's link (6.3.x's linker refuses *reachable*-undefined fns and this one
+  passes), so it is a warning and nothing more. Present identically on 6.5.20 —
+  the pin bump neither caused nor cured it. An upstream sigil-packaging gap; sandhi
+  composes stdlib and does not patch a vendored bundle. Already on record as
+  always-tolerated in
+  [`issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](docs/development/issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md).
+- `src/http/h2/huffman.cyr:73` exceeds the 120-char line limit. That is the 2,570-char
+  HPACK Appendix B table as a single literal, deliberate per architecture/001 and
+  explicitly allowlisted in CI's lint step.
+- The **deprecated libssl** link proof fails with **14** reachable-undefined functions
+  (sigil's transitive crypto surface: `u256_*`, `base64_encode`, `bayan_json_get`,
+  `_keccak_*`, `shake256`, `fl_alloc`/`_free`, `ct_eq_bytes*`, `ct_select`,
+  `thread_local_*`, `random_bytes`). **Not a regression** — a clean resolve on 6.5.20
+  reports the same 14, checked specifically for this release. The step is
+  `continue-on-error` in CI and retires with the backend at 2.0; the native no-flag
+  build links clean and is what all five live gates run against. Logged in
+  [`issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](docs/development/issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md),
+  whose earlier counts (4, then 1) were snapshots of their own dates.
+
 ## [1.9.10] — 2026-08-12
 
 ### Fixed — P1: response framing reported `SANDHI_OK` with a NULL body pointer

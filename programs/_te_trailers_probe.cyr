@@ -134,7 +134,7 @@ fn main() {
     var h2c = sandhi_h2_conn_new(0);
     var hbuf = alloc(8192);
     var hlen = sandhi_h2_request_encode_headers(h2c, "GET", "https", "/", "x",
-    hh, hbuf);
+      hh, hbuf);
     # When caller has TE set (any value), default-injection skips.
     # Caller's te:gzip is then dropped by the forbidden filter.
     fails = fails + check("    te:gzip dropped", h2_block_has(hbuf, hlen, "te", 0) == 0);
@@ -147,7 +147,7 @@ fn main() {
     var h2c2 = sandhi_h2_conn_new(0);
     var hbuf2 = alloc(8192);
     var hlen2 = sandhi_h2_request_encode_headers(h2c2, "GET", "https", "/", "x",
-    hh2, hbuf2);
+      hh2, hbuf2);
     fails = fails + check("    te:trailers auto-injected", h2_block_has(hbuf2, hlen2, "te", "trailers") == 1);
 
     # [4] h2: caller te:trailers (the spec-allowed value) flows through.
@@ -157,7 +157,7 @@ fn main() {
     var h2c3 = sandhi_h2_conn_new(0);
     var hbuf3 = alloc(8192);
     var hlen3 = sandhi_h2_request_encode_headers(h2c3, "GET", "https", "/", "x",
-    hh3, hbuf3);
+      hh3, hbuf3);
     fails = fails + check("    te:trailers present", h2_block_has(hbuf3, hlen3, "te", "trailers") == 1);
 
     say("\n");

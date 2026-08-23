@@ -21,9 +21,9 @@ at 1.0.0 / Cyrius v5.7.0 ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5
 Patches land here first; `dist/sandhi.cyr` is regenerated each release and a
 small cyrius slot re-folds it.
 
-Current: **1.8.2**, pinned to **Cyrius 6.4.49**. **1112 test assertions green**
-(540 sandhi + 167 h2 + 342 alloc + 63 rpc), plus a `cyrius fuzz` harness suite
-(7 parser-robustness harnesses) gating in CI. Builds clean for x86_64, aarch64,
+Current: **1.9.11**, pinned to **Cyrius 6.5.35**. **1,255 test assertions green**
+(683 sandhi + 167 h2 + 342 alloc + 63 rpc), plus a `cyrius fuzz` harness suite
+(8 parser-robustness harnesses) gating in CI. Builds clean for x86_64, aarch64,
 and the **AGNOS** target.
 
 **TLS backend: native by default, no flag** (since Cyrius 6.1.21). `-D
@@ -39,7 +39,7 @@ cyrius deps
 cyrius build programs/smoke.cyr build/sandhi-smoke   # link proof
 cyrius test  tests/sandhi.tcyr                        # core tests
 cyrius test  tests/h2.tcyr                            # HTTP/2 tests
-cyrius distlib                                        # produce dist/sandhi.cyr
+cyrius distlib --all                                  # produce all five dist bundles
 ```
 
 Smallest useful program (see [`docs/examples/01-simple-get.cyr`](docs/examples/01-simple-get.cyr)):
@@ -155,7 +155,7 @@ end-to-end on the native backend. The last cyrius-side dependency closed at
 ```sh
 cyrius deps                                                 # resolve stdlib deps
 cyrius build programs/smoke.cyr build/sandhi-smoke          # smoke link proof (native, no flag)
-cyrius test  tests/sandhi.tcyr                              # core (540 assertions)
+cyrius test  tests/sandhi.tcyr                              # core (683 assertions)
 cyrius test  tests/h2.tcyr                                  # h2-specific (167 assertions)
 cyrius test  tests/alloc.tcyr                               # allocator / arena (342 assertions)
 cyrius test  tests/rpc.tcyr                                 # RPC dialects (63 assertions)
@@ -163,7 +163,7 @@ cyrius fuzz                                                 # parser-robustness 
 cyrius lint  src/*.cyr src/**/*.cyr                         # static checks (warn-as-fail in CI)
 CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke              # release-parity (native)
 cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr build/sandhi-smoke-libssl   # deprecated libssl opt-out
-cyrius distlib                                              # → dist/sandhi.cyr
+cyrius distlib --all                                        # → dist/sandhi.cyr + the four profile bundles
 ```
 
 Toolchain pin: `cyrius.cyml [package].cyrius` is the source of truth; never create a `.cyrius-toolchain` file.

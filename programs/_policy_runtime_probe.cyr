@@ -114,7 +114,7 @@ fn run_policy_gates(ip): i64 {
     # [2] default policy → must succeed (no enforcement, either backend).
     say("  [2] default policy round-trip ... ");
     var c2 = sandhi_conn_open_with_policy(ip, 443, 1, "one.one.one.one",
-    sandhi_tls_policy_new_default());
+      sandhi_tls_policy_new_default());
     if (c2 == 0) {
         say("FAIL (last_err="); fmt_int(sandhi_conn_last_open_err()); say(")\n");
         return 2;
@@ -128,7 +128,7 @@ fn run_policy_gates(ip): i64 {
     say("  [3] wrong-pin fail-closed ... ");
     var bad = "0000000000000000000000000000000000000000000000000000000000000000";
     var c3 = sandhi_conn_open_with_policy(ip, 443, 1, "one.one.one.one",
-    sandhi_tls_policy_new_pinned(bad));
+      sandhi_tls_policy_new_pinned(bad));
     if (c3 != 0) {
         say("FAIL: opened (fail-closed broken — SECURITY)\n");
         sandhi_conn_close(c3);
@@ -149,7 +149,7 @@ fn run_policy_gates(ip): i64 {
     # a security regression.
     say("  [4] trust-store(bogus CA) refused ... ");
     var c4 = sandhi_conn_open_with_policy(ip, 443, 1, "one.one.one.one",
-    sandhi_tls_policy_new_trust_store("/nonexistent/ca.pem"));
+      sandhi_tls_policy_new_trust_store("/nonexistent/ca.pem"));
     if (c4 != 0) {
         say("FAIL: opened (custom trust store ignored — SECURITY)\n");
         sandhi_conn_close(c4);
@@ -176,7 +176,7 @@ fn run_policy_gates(ip): i64 {
     # load-fail case cannot catch.
     say("  [5] trust-store(loadable wrong CA) verify-fail ... ");
     var c5 = sandhi_conn_open_with_policy(ip, 443, 1, "one.one.one.one",
-    sandhi_tls_policy_new_trust_store("programs/_tls_fixtures/cert.pem"));
+      sandhi_tls_policy_new_trust_store("programs/_tls_fixtures/cert.pem"));
     if (c5 != 0) {
         say("FAIL: opened (custom anchor not verified against — SECURITY)\n");
         sandhi_conn_close(c5);

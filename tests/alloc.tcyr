@@ -360,7 +360,7 @@ fn test_alloc_batch4_response_parse_arena() {
     assert_streq(sandhi_http_body(resp), "hello", "body bytes decoded");
     assert_eq(sandhi_http_err_kind(resp), SANDHI_OK, "no err");
     assert_streq(sandhi_headers_get(sandhi_http_headers(resp), "Content-Type"),
-    "text/plain", "header surfaced");
+      "text/plain", "header surfaced");
 
     var used = arena_used(allocator_state(a));
     assert_eq(used > 0, 1, "arena consumed bytes for headers + body + struct");
@@ -428,14 +428,14 @@ fn test_alloc_batch5_conn_timeout_arena() {
     var a = arena_allocator(2048);
     # ms <= 0 short-circuits returning 0.
     assert_eq(_sandhi_conn_set_timeout_ms_a(a, 0, 0, _SANDHI_SO_RCVTIMEO), 0,
-    "ms<=0 returns 0");
+      "ms<=0 returns 0");
     assert_eq(arena_used(allocator_state(a)), 0, "no-op didn't touch arena");
 
     # ms>0 with fd=-1 — the underlying setsockopt fails, but the helper no
     # longer allocates the timeval from `a`; the arena must stay untouched.
     _sandhi_conn_set_timeout_ms_a(a, 0 - 1, 1000, _SANDHI_SO_RCVTIMEO);
     assert_eq(arena_used(allocator_state(a)), 0,
-    "set_timeout_ms_a is arena-independent (composes stdlib sock_set_*_timeout)");
+      "set_timeout_ms_a is arena-independent (composes stdlib sock_set_*_timeout)");
     return 0;
 }
 
@@ -450,7 +450,7 @@ fn test_alloc_batch5_h2_conn_arena() {
     assert_eq(sandhi_h2_conn_enc_table(c) != 0, 1, "enc table allocated");
     assert_eq(sandhi_h2_conn_dec_table(c) != 0, 1, "dec table allocated");
     assert_eq(sandhi_h2_conn_peer_max_frame(c), _SANDHI_H2_DEFAULT_PEER_FRAME,
-    "default peer max-frame initialized");
+      "default peer max-frame initialized");
     # next_stream_id starts at 1 and bumps by 2.
     assert_eq(sandhi_h2_conn_next_stream_id(c), 1, "first stream id = 1");
     assert_eq(sandhi_h2_conn_next_stream_id(c), 3, "second stream id = 3");
@@ -475,9 +475,9 @@ fn test_alloc_batch5_resolve_name_eq_arena() {
     while (i < 39) { store8(&buf + i, load8(labels + i)); i = i + 1; }
 
     assert_eq(_sandhi_resolve_name_eq_a(a, &buf, 39, 0, 13), 1,
-    "identical names compare equal");
+      "identical names compare equal");
     assert_eq(_sandhi_resolve_name_eq_a(a, &buf, 39, 0, 26), 1,
-    "case-insensitive equal");
+      "case-insensitive equal");
 
     var used = arena_used(allocator_state(a));
     assert_eq(used > 0, 1, "name_eq scratch landed in arena");
@@ -578,13 +578,13 @@ fn test_alloc_batch6_stream_result_oom() {
 fn test_alloc_batch5_resolve_oom() {
     var failer = fail_after_n_allocs(0);
     assert_eq(_sandhi_resolve_read_resolv_conf_a(failer), 0 - 1,
-    "resolv.conf read OOM → -1");
+      "resolv.conf read OOM → -1");
     # name_eq with failing alloc → returns 0 (not equal) without
     # crashing.
     var buf[2];
     store8(&buf, 0); store8(&buf + 1, 0);
     assert_eq(_sandhi_resolve_name_eq_a(failer, &buf, 2, 0, 1), 0,
-    "name_eq_a OOM → 0");
+      "name_eq_a OOM → 0");
     return 0;
 }
 
@@ -639,7 +639,7 @@ fn test_alloc_120a_build_request_arena() {
     var i = 0;
     while (i + 17 < strlen(s)) {
         if (load8(s + i) == 72 && load8(s + i + 1) == 111 && load8(s + i + 2) == 115
-        && load8(s + i + 3) == 116 && load8(s + i + 4) == 58 && load8(s + i + 5) == 32) {
+          && load8(s + i + 3) == 116 && load8(s + i + 4) == 58 && load8(s + i + 5) == 32) {
             has_host = 1;
         }
         i = i + 1;
@@ -670,11 +670,11 @@ fn test_alloc_120a_build_request_va_keepalive() {
     var i = 0;
     while (i + 17 < strlen(s)) {
         if (load8(s + i) == 67 && load8(s + i + 1) == 111 && load8(s + i + 2) == 110
-        && load8(s + i + 3) == 110 && load8(s + i + 4) == 101 && load8(s + i + 5) == 99
-        && load8(s + i + 6) == 116 && load8(s + i + 7) == 105 && load8(s + i + 8) == 111
-        && load8(s + i + 9) == 110 && load8(s + i + 10) == 58 && load8(s + i + 11) == 32
-        && load8(s + i + 12) == 99 && load8(s + i + 13) == 108 && load8(s + i + 14) == 111
-        && load8(s + i + 15) == 115 && load8(s + i + 16) == 101) {
+          && load8(s + i + 3) == 110 && load8(s + i + 4) == 101 && load8(s + i + 5) == 99
+          && load8(s + i + 6) == 116 && load8(s + i + 7) == 105 && load8(s + i + 8) == 111
+          && load8(s + i + 9) == 110 && load8(s + i + 10) == 58 && load8(s + i + 11) == 32
+          && load8(s + i + 12) == 99 && load8(s + i + 13) == 108 && load8(s + i + 14) == 111
+          && load8(s + i + 15) == 115 && load8(s + i + 16) == 101) {
             has_close = 1;
         }
         i = i + 1;
@@ -693,14 +693,14 @@ fn test_alloc_120a_dispatch_err_resp_arena() {
     var resp = _sandhi_http_dispatch_a(a, "GET", "not-a-valid-url", 0, 0, 0, opts);
     assert_eq(resp != 0, 1, "dispatch_a err-resp constructed");
     assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE,
-    "URL parse fail → SANDHI_ERR_PARSE");
+      "URL parse fail → SANDHI_ERR_PARSE");
 
     var used = arena_used(allocator_state(a));
     assert_eq(used > 0, 1, "arena bytes consumed by err-resp construction");
 
     reset_via(a);
     assert_eq(arena_used(allocator_state(a)), 0,
-    "reset_via reclaims the err-resp arena allocations");
+      "reset_via reclaims the err-resp arena allocations");
     return 0;
 }
 
@@ -771,7 +771,7 @@ fn test_alloc_121bc_strip_sensitive_oom() {
 fn test_alloc_121bc_follow_err_resp_arena() {
     var a = arena_allocator(4096);
     var resp = _sandhi_http_follow_a(a, "GET", "not-a-valid-url", 0, 0, 0,
-    5, 0, 0, 0, 0, 0, 0, 0);
+      5, 0, 0, 0, 0, 0, 0, 0);
     assert_eq(resp != 0, 1, "follow_a constructed err-resp");
     assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE, "URL parse fail");
     var used = arena_used(allocator_state(a));
@@ -817,7 +817,7 @@ fn test_alloc_121bc_retry_non_retryable_arena() {
     var resp = _sandhi_http_retry_a(a, "GET", "garbage://x", 0, 0, 0, opts, policy);
     assert_eq(resp != 0, 1, "retry_a returned a response");
     assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE,
-    "PARSE is non-retryable; first attempt returned");
+      "PARSE is non-retryable; first attempt returned");
     return 0;
 }
 
@@ -1007,7 +1007,7 @@ fn test_alloc_124f_mcp_build_request_arena() {
 fn test_alloc_124f_mcp_build_request_with_params_arena() {
     var a = arena_allocator(2048);
     var body = _sandhi_mcp_build_request_a(a, "tools/call",
-    "{\"name\":\"echo\"}");
+      "{\"name\":\"echo\"}");
     assert_eq(body != 0, 1, "mcp build_request_a with params non-zero");
     return 0;
 }
@@ -1033,9 +1033,9 @@ fn test_alloc_124f_wd_join_arena() {
     var url = _sandhi_wd_join_a(a, "http://wd.local:4444", "/session");
     assert_streq(url, "http://wd.local:4444/session", "join_a concat");
     var sess_url = _sandhi_wd_session_url_a(a, "http://wd.local:4444",
-    "abc-123", "/url");
+      "abc-123", "/url");
     assert_streq(sess_url, "http://wd.local:4444/session/abc-123/url",
-    "session_url_a concat");
+      "session_url_a concat");
     return 0;
 }
 
@@ -1054,7 +1054,7 @@ fn test_alloc_125_prof_disabled_default() {
     assert_eq(sandhi_prof_enabled(), 0, "default disabled");
     sandhi_prof_capture(SANDHI_PROF_PHASE_URL_PARSE_END);
     assert_eq(sandhi_prof_get(SANDHI_PROF_PHASE_URL_PARSE_END), 0,
-    "disabled capture returns 0");
+      "disabled capture returns 0");
     return 0;
 }
 
@@ -1109,7 +1109,7 @@ fn test_alloc_125_prof_reset_clears() {
     # returns 0 elapsed (capture timestamp == start timestamp).
     sandhi_prof_reset();
     assert_eq(sandhi_prof_get(SANDHI_PROF_PHASE_EXCHANGE_END), 0,
-    "post-reset, uncaptured phase reads 0");
+      "post-reset, uncaptured phase reads 0");
 
     sandhi_prof_enable(0);
     return 0;
@@ -1176,7 +1176,7 @@ fn test_alloc_126_exchange_path_arena() {
     var a = arena_allocator(4096);
     var resp = sandhi_http_get_a(a, "garbage://x", 0);
     assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE,
-    "exchange path err-resp threads through arena");
+      "exchange path err-resp threads through arena");
     return 0;
 }
 
@@ -1187,7 +1187,7 @@ fn test_alloc_126_exchange_path_arena() {
 fn test_alloc_126_wd_navigate_to_oom() {
     var failer = fail_after_n_allocs(0);
     var resp = sandhi_wd_navigate_to_a(failer, "http://wd.local",
-    "abc-123", "https://example.com");
+      "abc-123", "https://example.com");
     # Either the resp itself is 0 (double-OOM during _sandhi_rpc_resp_new_a)
     # or its err_kind is INTERNAL. Either way: no SIGSEGV.
     if (resp == 0) {
@@ -1195,7 +1195,7 @@ fn test_alloc_126_wd_navigate_to_oom() {
         return 0;
     }
     assert_eq(sandhi_rpc_err_kind(resp), SANDHI_ERR_INTERNAL,
-    "single-OOM returned INTERNAL err-resp");
+      "single-OOM returned INTERNAL err-resp");
     return 0;
 }
 
@@ -1203,10 +1203,10 @@ fn test_alloc_126_wd_navigate_to_oom() {
 fn test_alloc_126_wd_find_element_oom() {
     var failer = fail_after_n_allocs(0);
     var resp = sandhi_wd_find_element_a(failer, "http://wd.local",
-    "abc-123", "css selector", "#x");
+      "abc-123", "css selector", "#x");
     if (resp == 0) { assert_eq(1, 1, "double-OOM 0"); return 0; }
     assert_eq(sandhi_rpc_err_kind(resp), SANDHI_ERR_INTERNAL,
-    "find_element_a OOM → INTERNAL");
+      "find_element_a OOM → INTERNAL");
     return 0;
 }
 
@@ -1216,10 +1216,10 @@ fn test_alloc_126_wd_find_element_oom() {
 fn test_alloc_126_wd_element_attribute_oom() {
     var failer = fail_after_n_allocs(0);
     var resp = sandhi_wd_element_attribute_a(failer, "http://wd.local",
-    "abc-123", "elem-1", "href");
+      "abc-123", "elem-1", "href");
     if (resp == 0) { assert_eq(1, 1, "double-OOM 0"); return 0; }
     assert_eq(sandhi_rpc_err_kind(resp), SANDHI_ERR_INTERNAL,
-    "element_attribute_a OOM → INTERNAL");
+      "element_attribute_a OOM → INTERNAL");
     return 0;
 }
 
@@ -1229,9 +1229,9 @@ fn test_alloc_126_wd_element_attribute_oom() {
 fn test_alloc_126_wd_build_helper_oom() {
     var failer = fail_after_n_allocs(0);
     assert_eq(_sandhi_wd_build_path_a(failer, "value.", "key"), 0,
-    "build_path_a OOM → 0");
+      "build_path_a OOM → 0");
     assert_eq(_sandhi_wd_build_element_suffix_a(failer, "abc", "/click"), 0,
-    "build_element_suffix_a OOM → 0");
+      "build_element_suffix_a OOM → 0");
     return 0;
 }
 
@@ -1240,10 +1240,10 @@ fn test_alloc_126_wd_build_helper_oom() {
 fn test_alloc_126_ap_set_context_oom() {
     var failer = fail_after_n_allocs(0);
     var resp = sandhi_ap_set_context_a(failer, "http://wd.local",
-    "abc-123", "NATIVE_APP");
+      "abc-123", "NATIVE_APP");
     if (resp == 0) { assert_eq(1, 1, "double-OOM 0"); return 0; }
     assert_eq(sandhi_rpc_err_kind(resp), SANDHI_ERR_INTERNAL,
-    "set_context_a OOM → INTERNAL");
+      "set_context_a OOM → INTERNAL");
     return 0;
 }
 
@@ -1253,10 +1253,10 @@ fn test_alloc_126_ap_set_context_oom() {
 fn test_alloc_126_ap_new_session_oom() {
     var failer = fail_after_n_allocs(0);
     var resp = sandhi_ap_new_session_a(failer, "http://wd.local",
-    "Android", "UiAutomator2", 0);
+      "Android", "UiAutomator2", 0);
     if (resp == 0) { assert_eq(1, 1, "double-OOM 0"); return 0; }
     assert_eq(sandhi_rpc_err_kind(resp), SANDHI_ERR_INTERNAL,
-    "new_session_a OOM → INTERNAL");
+      "new_session_a OOM → INTERNAL");
     return 0;
 }
 
@@ -1267,7 +1267,7 @@ fn test_alloc_126_ap_new_session_oom() {
 fn test_alloc_126_mcp_build_request_oom() {
     var failer = fail_after_n_allocs(0);
     assert_eq(_sandhi_mcp_build_request_a(failer, "tools/list", 0), 0,
-    "mcp_build_request_a OOM → 0");
+      "mcp_build_request_a OOM → 0");
     return 0;
 }
 
@@ -1277,10 +1277,10 @@ fn test_alloc_126_mcp_build_request_oom() {
 fn test_alloc_126_mcp_stream_oom() {
     var failer = fail_after_n_allocs(0);
     var sr = sandhi_rpc_mcp_stream_a(failer, "http://daimon.local/mcp",
-    "tools/list", 0, 0, 0);
+      "tools/list", 0, 0, 0);
     if (sr == 0) { assert_eq(1, 1, "double-OOM 0"); return 0; }
     assert_eq(sandhi_stream_err(sr), SANDHI_ERR_INTERNAL,
-    "stream_a OOM → INTERNAL");
+      "stream_a OOM → INTERNAL");
     return 0;
 }
 
@@ -1309,7 +1309,7 @@ fn test_alloc_127g_send_status_oom() {
 fn test_alloc_127g_send_response_oom() {
     var failer = fail_after_n_allocs(0);
     var rc = sandhi_server_send_response_a(failer, 0 - 1, 200, "OK",
-    "application/json", "{}", 2, 0);
+      "application/json", "{}", 2, 0);
     assert_eq(rc, 0 - 1, "send_response_a OOM → -1");
     return 0;
 }
@@ -1324,7 +1324,7 @@ fn test_alloc_127g_send_204_oom() {
 fn test_alloc_127g_send_chunked_start_oom() {
     var failer = fail_after_n_allocs(0);
     var rc = sandhi_server_send_chunked_start_a(failer, 0 - 1, 200,
-    "text/event-stream", 0);
+      "text/event-stream", 0);
     assert_eq(rc, 0 - 1, "send_chunked_start_a OOM → -1");
     return 0;
 }
@@ -1404,7 +1404,7 @@ fn test_alloc_128_h2_response_headers_alloc_oom() {
     # is the precondition the guard catches.
     var failer = fail_after_n_allocs(0);
     assert_eq(sandhi_headers_new_a(failer), 0,
-    "headers_new_a OOM → 0 (caller's guard precondition)");
+      "headers_new_a OOM → 0 (caller's guard precondition)");
     return 0;
 }
 
@@ -1429,15 +1429,15 @@ fn test_alloc_128_sse_parse_oom() {
 fn test_alloc_128_resolve_location_arena() {
     var a = arena_allocator(2048);
     var resolved = _sandhi_resolve_location_a(a,
-    "http://example.com/api/v1", "/api/v2/foo");
+      "http://example.com/api/v1", "/api/v2/foo");
     assert_streq(resolved, "http://example.com/api/v2/foo",
-    "absolute-from-base resolution");
+      "absolute-from-base resolution");
 
     var used = arena_used(allocator_state(a));
     assert_eq(used > 0, 1, "arena consumed by resolve");
     reset_via(a);
     assert_eq(arena_used(allocator_state(a)), 0,
-    "reset reclaims everything (no default_alloc leak)");
+      "reset reclaims everything (no default_alloc leak)");
     return 0;
 }
 
@@ -1446,7 +1446,7 @@ fn test_alloc_128_resolve_location_arena() {
 fn test_alloc_128_resolve_location_oom() {
     var failer = fail_after_n_allocs(0);
     var resolved = _sandhi_resolve_location_a(failer,
-    "http://example.com/api/v1", "/api/v2/foo");
+      "http://example.com/api/v1", "/api/v2/foo");
     assert_eq(resolved, 0, "resolve_location_a OOM → 0");
     return 0;
 }
@@ -1536,9 +1536,9 @@ fn test_alloc_131_session_cache_store_lookup_roundtrip() {
     var fake_sess2 = 0xCAFEBABE;
     sandhi_session_cache_store("test1.example.com", 0xABCDEF, 0, fake_sess2);
     assert_eq(sandhi_session_cache_lookup("test1.example.com", 0xABCDEF, 0),
-    fake_sess2, "hook_fp distinguishes slots");
+      fake_sess2, "hook_fp distinguishes slots");
     assert_eq(sandhi_session_cache_lookup("test1.example.com", 0, 0),
-    fake_sess, "original slot unaffected");
+      fake_sess, "original slot unaffected");
 
     sandhi_session_cache_enable(was_enabled);
     return 0;
@@ -1555,17 +1555,17 @@ fn test_alloc_132_options_allow_0rtt_roundtrip() {
     var opts = sandhi_http_options_new();
     assert_neq(opts, 0, "options allocated");
     assert_eq(sandhi_http_options_get_allow_0rtt(opts), 0,
-    "0-RTT defaults off");
+      "0-RTT defaults off");
     sandhi_http_options_allow_0rtt(opts, 1);
     assert_eq(sandhi_http_options_get_allow_0rtt(opts), 1,
-    "set 1 round-trips");
+      "set 1 round-trips");
     sandhi_http_options_allow_0rtt(opts, 0);
     assert_eq(sandhi_http_options_get_allow_0rtt(opts), 0,
-    "reset to 0 round-trips");
+      "reset to 0 round-trips");
     # opts == 0 guard: getter must return 0 for the null-opts path
     # because dispatch chains it through `_sandhi_http_dispatch_a`.
     assert_eq(sandhi_http_options_get_allow_0rtt(0), 0,
-    "null opts → 0");
+      "null opts → 0");
     return 0;
 }
 
@@ -1583,7 +1583,7 @@ fn test_alloc_132_method_is_replay_safe() {
     assert_eq(_sandhi_method_is_replay_safe("DELETE"), 0, "DELETE unsafe");
     # Case-sensitive — HTTP methods are case-sensitive per RFC 7230 §3.1.1.
     assert_eq(_sandhi_method_is_replay_safe("get"), 0,
-    "lowercase get unsafe (method names are case-sensitive)");
+      "lowercase get unsafe (method names are case-sensitive)");
     return 0;
 }
 
@@ -1596,7 +1596,7 @@ fn test_alloc_132_allow_0rtt_flag_default() {
     # `_sandhi_alpn_advertise_h2`. Mirrors that pattern exactly —
     # default 0, set transiently around dispatch, restored after.
     assert_eq(_sandhi_allow_0rtt, 0,
-    "module-level 0-RTT flag defaults to 0");
+      "module-level 0-RTT flag defaults to 0");
     return 0;
 }
 
@@ -1625,7 +1625,7 @@ fn test_alloc_133_cred_digest_non_cred_headers() {
     sandhi_headers_add(h, "User-Agent", "sandhi-test/1.3.3");
     sandhi_headers_add(h, "X-Custom", "anything");
     assert_eq(_sandhi_compute_cred_digest(h), 0,
-    "non-cred-bearing headers don't change digest");
+      "non-cred-bearing headers don't change digest");
     return 0;
 }
 
@@ -1669,8 +1669,8 @@ fn test_alloc_133_cred_digest_cookie_and_proxy() {
     var h_collision_b = sandhi_headers_new();
     sandhi_headers_add(h_collision_b, "Proxy-Authorization", "shared");
     assert_neq(_sandhi_compute_cred_digest(h_collision_a),
-    _sandhi_compute_cred_digest(h_collision_b),
-    "same value across different cred headers → different digests");
+      _sandhi_compute_cred_digest(h_collision_b),
+      "same value across different cred headers → different digests");
     return 0;
 }
 
@@ -1685,9 +1685,9 @@ fn test_alloc_133_cred_digest_case_insensitive_header_name() {
     sandhi_headers_add(h_mixed, "AUTHORIZATION", "Bearer x");
     var d = _sandhi_compute_cred_digest(h_canon);
     assert_eq(_sandhi_compute_cred_digest(h_lower), d,
-    "lowercase header name → same digest");
+      "lowercase header name → same digest");
     assert_eq(_sandhi_compute_cred_digest(h_mixed), d,
-    "uppercase header name → same digest");
+      "uppercase header name → same digest");
     return 0;
 }
 
@@ -1709,14 +1709,14 @@ fn test_alloc_133_cache_isolates_by_cred_digest() {
     sandhi_session_cache_store("iso.example.com", 0, 0xC0FFEE02, fake_b);
 
     assert_eq(sandhi_session_cache_lookup("iso.example.com", 0, 0xC0FFEE01),
-    fake_a, "cred_digest A → session A");
+      fake_a, "cred_digest A → session A");
     assert_eq(sandhi_session_cache_lookup("iso.example.com", 0, 0xC0FFEE02),
-    fake_b, "cred_digest B → session B");
+      fake_b, "cred_digest B → session B");
     # Default digest 0 is yet a 3rd slot — must miss.
     assert_eq(sandhi_session_cache_lookup("iso.example.com", 0, 0),
-    0, "cred_digest 0 → miss (3rd distinct slot)");
+      0, "cred_digest 0 → miss (3rd distinct slot)");
     assert_eq(sandhi_session_cache_size(), sz_before + 2,
-    "exactly 2 new slots from 2 different cred_digest values");
+      "exactly 2 new slots from 2 different cred_digest values");
 
     sandhi_session_cache_enable(was_enabled);
     return 0;
@@ -1728,7 +1728,7 @@ fn test_alloc_133_cache_isolates_by_cred_digest() {
 # request.
 fn test_alloc_133_cred_digest_flag_default() {
     assert_eq(_sandhi_cred_digest, 0,
-    "module-level cred_digest flag defaults to 0");
+      "module-level cred_digest flag defaults to 0");
     return 0;
 }
 
@@ -1744,13 +1744,13 @@ fn test_alloc_132_conn_0rtt_status_accessor() {
     # Zero-init the slot — `alloc_via` does not guarantee zeroing.
     store64(fake + SANDHI_CONN_OFF_0RTT_STATUS, TLS_EARLY_DATA_NOT_SENT);
     assert_eq(sandhi_conn_0rtt_status(fake), TLS_EARLY_DATA_NOT_SENT,
-    "accessor reads NOT_SENT");
+      "accessor reads NOT_SENT");
     store64(fake + SANDHI_CONN_OFF_0RTT_STATUS, TLS_EARLY_DATA_REJECTED);
     assert_eq(sandhi_conn_0rtt_status(fake), TLS_EARLY_DATA_REJECTED,
-    "accessor reads REJECTED");
+      "accessor reads REJECTED");
     store64(fake + SANDHI_CONN_OFF_0RTT_STATUS, TLS_EARLY_DATA_ACCEPTED);
     assert_eq(sandhi_conn_0rtt_status(fake), TLS_EARLY_DATA_ACCEPTED,
-    "accessor reads ACCEPTED");
+      "accessor reads ACCEPTED");
     return 0;
 }
 
@@ -1764,7 +1764,7 @@ fn test_alloc_131_session_cache_disabled_noops() {
 
     sandhi_session_cache_store("noop.example.com", 0, 0, 0xFEEDFACE);
     assert_eq(sandhi_session_cache_size(), sz_before,
-    "store no-op when disabled");
+      "store no-op when disabled");
     var sess = sandhi_session_cache_lookup("noop.example.com", 0, 0);
     assert_eq(sess, 0, "lookup no-op when disabled");
     assert_eq(sandhi_session_cache_hit_count(), 0, "no hit-count delta");
@@ -1786,9 +1786,9 @@ fn test_alloc_131_session_cache_disabled_noops() {
 # the config vars exist regardless of TLS capability.
 fn test_alloc_134_defaults() {
     assert_eq(sandhi_session_cache_max_size(), 256,
-    "default max_size is 256");
+      "default max_size is 256");
     assert_eq(sandhi_session_cache_max_age_ms(), 86400000,
-    "default max_age_ms is 24h");
+      "default max_age_ms is 24h");
     return 0;
 }
 
@@ -1821,7 +1821,7 @@ fn test_alloc_134_evict_counters_default_zero() {
     sandhi_session_cache_reset_stats();
     assert_eq(sandhi_session_cache_evict_count(), 0, "evict_count starts 0");
     assert_eq(sandhi_session_cache_age_evict_count(), 0,
-    "age_evict_count starts 0");
+      "age_evict_count starts 0");
     return 0;
 }
 
@@ -1846,13 +1846,13 @@ fn test_alloc_134_evict_oldest_at_max() {
 
     # evict1 was inserted first → smallest last_used_ms → evicted.
     assert_eq(sandhi_session_cache_lookup("evict1.example.com", 0, 0), 0,
-    "evict1 was evicted (oldest)");
+      "evict1 was evicted (oldest)");
     assert_eq(sandhi_session_cache_lookup("evict2.example.com", 0, 0),
-    0x22222222, "evict2 still present");
+      0x22222222, "evict2 still present");
     assert_eq(sandhi_session_cache_lookup("evict3.example.com", 0, 0),
-    0x33333333, "evict3 still present");
+      0x33333333, "evict3 still present");
     assert_eq(sandhi_session_cache_evict_count(), 1,
-    "exactly one LRU eviction recorded");
+      "exactly one LRU eviction recorded");
 
     # Cleanup — drop bound back, clear residual entries via store
     # under a fresh max so they don't bleed into later tests.
@@ -1885,7 +1885,7 @@ fn test_alloc_134_lookup_touch_promotes_lru() {
     var t1 = clock_now_ms();
     while (clock_now_ms() <= t1) { }
     assert_eq(sandhi_session_cache_lookup("touch_a.example.com", 0, 0),
-    0xAAAA0001, "A lookup hit");
+      0xAAAA0001, "A lookup hit");
 
     # Now store C → B should be evicted (oldest), not A.
     var t2 = clock_now_ms();
@@ -1893,11 +1893,11 @@ fn test_alloc_134_lookup_touch_promotes_lru() {
     sandhi_session_cache_store("touch_c.example.com", 0, 0, 0xCCCC0003);
 
     assert_eq(sandhi_session_cache_lookup("touch_a.example.com", 0, 0),
-    0xAAAA0001, "A preserved (touched, became newest)");
+      0xAAAA0001, "A preserved (touched, became newest)");
     assert_eq(sandhi_session_cache_lookup("touch_b.example.com", 0, 0), 0,
-    "B evicted (oldest after A was touched)");
+      "B evicted (oldest after A was touched)");
     assert_eq(sandhi_session_cache_lookup("touch_c.example.com", 0, 0),
-    0xCCCC0003, "C present (newly stored)");
+      0xCCCC0003, "C present (newly stored)");
 
     sandhi_session_cache_set_max_size(was_max);
     sandhi_session_cache_enable(was_enabled);
@@ -1921,9 +1921,9 @@ fn test_alloc_134_replace_in_place_no_evict() {
     sandhi_session_cache_store("repl.example.com", 0, 0, 0xDDDD0002);
 
     assert_eq(sandhi_session_cache_lookup("repl.example.com", 0, 0),
-    0xDDDD0002, "second store overwrote first");
+      0xDDDD0002, "second store overwrote first");
     assert_eq(sandhi_session_cache_evict_count(), 0,
-    "replace-in-place doesn't count as LRU eviction");
+      "replace-in-place doesn't count as LRU eviction");
 
     sandhi_session_cache_set_max_size(was_max);
     sandhi_session_cache_enable(was_enabled);
@@ -1951,9 +1951,9 @@ fn test_alloc_134_age_evict_on_lookup() {
     var sess = sandhi_session_cache_lookup("age.example.com", 0, 0);
     assert_eq(sess, 0, "stale entry returns miss");
     assert_eq(sandhi_session_cache_age_evict_count(), 1,
-    "age-eviction recorded");
+      "age-eviction recorded");
     assert_eq(sandhi_session_cache_miss_count(), 1,
-    "stale-evict also counts as miss for stats");
+      "stale-evict also counts as miss for stats");
 
     sandhi_session_cache_set_max_age_ms(was_age);
     sandhi_session_cache_enable(was_enabled);
@@ -1973,15 +1973,15 @@ fn test_alloc_146_tls_policy_roundtrip() {
     var opts = sandhi_http_options_new();
     assert_neq(opts, 0, "options allocated");
     assert_eq(sandhi_http_options_get_tls_policy(opts), 0,
-    "tls_policy defaults to 0 (no enforcement)");
+      "tls_policy defaults to 0 (no enforcement)");
     # A policy handle is just an opaque pointer to the options slot;
     # use a non-zero sentinel to prove the slot round-trips.
     sandhi_http_options_tls_policy(opts, 4242);
     assert_eq(sandhi_http_options_get_tls_policy(opts), 4242,
-    "set policy round-trips");
+      "set policy round-trips");
     sandhi_http_options_tls_policy(opts, 0);
     assert_eq(sandhi_http_options_get_tls_policy(opts), 0,
-    "clear policy round-trips");
+      "clear policy round-trips");
     # opts == 0 guard — getter returns 0 so the dispatch path treats a
     # null-opts request as policy-free.
     assert_eq(sandhi_http_options_get_tls_policy(0), 0, "null opts → 0");
@@ -1993,7 +1993,7 @@ fn test_alloc_146_tls_policy_flag_default() {
     # transiently around dispatch and restored after — same shape as
     # `_sandhi_allow_0rtt` / `_sandhi_cred_digest`. Defaults to 0.
     assert_eq(_sandhi_tls_policy_pending, 0,
-    "module-level pending-policy flag defaults to 0");
+      "module-level pending-policy flag defaults to 0");
     return 0;
 }
 

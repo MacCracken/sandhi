@@ -165,7 +165,7 @@ fn main() {
         sandhi_server_options_max_conns(opts, 4);    # 4 worker threads
         sandhi_server_options_idle_ms(opts, 1000);   # slow-peer / silent bound
         sandhi_server_run_pooled_tls(INADDR_LOOPBACK(), port,
-        &sandhi_server_router_handler_c, router, opts);
+          &sandhi_server_router_handler_c, router, opts);
         syscall(60, 0);
     }
 

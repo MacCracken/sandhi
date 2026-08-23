@@ -156,7 +156,7 @@ fn _sandhi_dl_open_drain_a(a, url, headers, opts): i64 {
         }
     }
     var conn = sandhi_conn_open_fully_timed_a(a, addr, sandhi_url_port(u), use_tls,
-    sandhi_url_host(u), eff_connect, read_ms, write_ms);
+      sandhi_url_host(u), eff_connect, read_ms, write_ms);
     if (has_policy == 1) {
         conn = _sandhi_policy_post_open_a(a, conn, policy, 0);
     }

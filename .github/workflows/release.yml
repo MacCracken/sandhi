@@ -96,12 +96,23 @@ jobs:
           fi
 
       - name: Test
+        # All FOUR suites, matching CI and the CLAUDE.md closeout gate.
+        # `alloc` and `rpc` were carved out of `sandhi.tcyr` (1.1.0 / 1.2.8)
+        # and wired into CI, but this workflow was never updated — a release
+        # could ship with either of them red.
         run: |
           cyrius test tests/sandhi.tcyr
           cyrius test tests/h2.tcyr
+          cyrius test tests/alloc.tcyr
+          cyrius test tests/rpc.tcyr
 
-      - name: Regenerate dist bundle
-        run: cyrius distlib
+      - name: Regenerate dist bundles (base + the four profiles)
+        # `--all` (cyrius 6.5.x) = base + every `[lib.<profile>]`, and emits
+        # the per-profile `.deps` sidecars alongside them. This step used to
+        # run bare `cyrius distlib`, which regenerates ONLY dist/sandhi.cyr —
+        # so a release tarball could carry stale profile bundles even though
+        # CI's drift check had passed on the commit.
+        run: cyrius distlib --all
 
       - name: Clean toolchain artifacts
         run: rm -f cyrius-*.tar.gz
@@ -111,6 +122,16 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           git archive --format=tar.gz --prefix="sandhi-${TAG}/" -o "sandhi-${TAG}-src.tar.gz" HEAD
           cp dist/sandhi.cyr "sandhi-${TAG}.cyr"
+          # The four 1.8.0 breakout profiles ship too — a consumer of one
+          # slice pulls a few thousand lines instead of the full ~15k-line
+          # bundle. Each goes out with its `.deps` sidecar.
+          for p in tls server rpc discovery; do
+            cp "dist/sandhi-$p.cyr" "sandhi-${TAG}-$p.cyr"
+            if [ -f "dist/sandhi-$p.deps" ]; then
+              cp "dist/sandhi-$p.deps" "sandhi-${TAG}-$p.deps"
+            fi
+          done
+          cp dist/sandhi.deps "sandhi-${TAG}.deps"
           # Ship prebuilt smoke binaries so consumers can verify
           # link-shape against a known-good build per arch.
           if [ -f build/sandhi-smoke ]; then
@@ -119,7 +140,7 @@ jobs:
           if [ -f build/sandhi-smoke-aarch64 ]; then
             cp build/sandhi-smoke-aarch64 "sandhi-${TAG}-smoke-aarch64-linux"
           fi
-          sha256sum sandhi-*.tar.gz sandhi-*.cyr sandhi-*-linux 2>/dev/null > SHA256SUMS
+          sha256sum sandhi-*.tar.gz sandhi-*.cyr sandhi-*.deps sandhi-*-linux 2>/dev/null > SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
@@ -127,6 +148,7 @@ jobs:
           path: |
             sandhi-*.tar.gz
             sandhi-*.cyr
+            sandhi-*.deps
             sandhi-*-linux
             SHA256SUMS
 
@@ -157,5 +179,6 @@ jobs:
           files: |
             sandhi-*.tar.gz
             sandhi-*.cyr
+            sandhi-*.deps
             sandhi-*-linux
             SHA256SUMS

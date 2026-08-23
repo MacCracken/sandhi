@@ -130,9 +130,9 @@ fn _sandhi_resp_headers_end(buf, blen): i64 {
     var i = 0;
     while (i + 3 < blen) {
         if (load8(buf + i) == 13
-        && load8(buf + i + 1) == 10
-        && load8(buf + i + 2) == 13
-        && load8(buf + i + 3) == 10) {
+          && load8(buf + i + 1) == 10
+          && load8(buf + i + 2) == 13
+          && load8(buf + i + 3) == 10) {
             return i;
         }
         i = i + 1;
@@ -340,8 +340,8 @@ fn _sandhi_resp_merge_trailers_a(a, buf, blen, start, headers): i64 {
         # Find ':' separating name from value.
         var colon = off;
         while (colon < blen && load8(buf + colon) != 58
-        && load8(buf + colon) != 13
-        && load8(buf + colon) != 10) {
+          && load8(buf + colon) != 13
+          && load8(buf + colon) != 10) {
             colon = colon + 1;
         }
         if (colon >= blen || load8(buf + colon) != 58) { return 0; }
@@ -394,12 +394,12 @@ fn _sandhi_resp_is_chunked(headers): i64 {
     var i = 0;
     while (load8(te + i) != 0) {
         if (load8(te + i) == 99
-        && load8(te + i + 1) == 104
-        && load8(te + i + 2) == 117
-        && load8(te + i + 3) == 110
-        && load8(te + i + 4) == 107
-        && load8(te + i + 5) == 101
-        && load8(te + i + 6) == 100) {
+          && load8(te + i + 1) == 104
+          && load8(te + i + 2) == 117
+          && load8(te + i + 3) == 110
+          && load8(te + i + 4) == 107
+          && load8(te + i + 5) == 101
+          && load8(te + i + 6) == 100) {
             return 1;
         }
         i = i + 1;

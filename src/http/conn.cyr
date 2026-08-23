@@ -487,7 +487,7 @@ fn sandhi_conn_open_timed(addr, port, use_tls, sni_host, read_ms, write_ms): i64
 # the open-error classification ride it via the _sandhi_reqctx_*
 # helpers, so concurrent dispatches don't share those words.
 fn _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
-read_ms, write_ms, early_data, early_data_len, ctx): i64 {
+  read_ms, write_ms, early_data, early_data_len, ctx): i64 {
     if (read_ms > 0)  { _sandhi_conn_set_timeout_ms_a(a, fd, read_ms,  _SANDHI_SO_RCVTIMEO); }
     if (write_ms > 0) { _sandhi_conn_set_timeout_ms_a(a, fd, write_ms, _SANDHI_SO_SNDTIMEO); }
 
@@ -602,7 +602,7 @@ read_ms, write_ms, early_data, early_data_len, ctx): i64 {
 # routes cred-digest + open-error through the module globals.
 fn _sandhi_conn_finalize_a(a, fd, use_tls, sni_host, read_ms, write_ms): i64 {
     return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
-    read_ms, write_ms, 0, 0, 0);
+      read_ms, write_ms, 0, 0, 0);
 }
 
 fn _sandhi_conn_finalize(fd, use_tls, sni_host, read_ms, write_ms): i64 {
@@ -663,13 +663,13 @@ fn _sandhi_conn_open_v6_fully_timed_a(a, addr16, port, use_tls, sni_host, connec
 
 fn _sandhi_conn_open_v6_fully_timed(addr16, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
     return _sandhi_conn_open_v6_fully_timed_a(
-    default_alloc(), addr16, port, use_tls, sni_host,
-    connect_ms, read_ms, write_ms, 0);
+      default_alloc(), addr16, port, use_tls, sni_host,
+      connect_ms, read_ms, write_ms, 0);
 }
 
 # 1.3.2 — v6 variant of the early-data-aware open path.
 fn _sandhi_conn_open_v6_fully_timed_with_early_data_a(a, addr16, port,
-use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len, ctx): i64 {
+  use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len, ctx): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     # AGNOS is IPv4-only today (no AF_INET6; SYS_SOCKET / SYS_CONNECT undefined).
     # Fail the v6 early-data path cleanly; the client falls back to v4.
@@ -712,7 +712,7 @@ use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len, ct
         }
     }
     return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
-    read_ms, write_ms, early_data, early_data_len, ctx);
+      read_ms, write_ms, early_data, early_data_len, ctx);
     #endif
 }
 
@@ -722,7 +722,7 @@ use_tls, sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len, ct
 # are byte-identical to pre-1.6.9.
 fn sandhi_conn_open_fully_timed_a(a, addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
     return _sandhi_conn_open_fully_timed_ctx_a(a, addr, port, use_tls, sni_host,
-    connect_ms, read_ms, write_ms, 0);
+      connect_ms, read_ms, write_ms, 0);
 }
 
 # 1.6.9 — ctx-threading v4 timed open. Internal: the buffered dispatch
@@ -765,8 +765,8 @@ fn _sandhi_conn_open_fully_timed_ctx_a(a, addr, port, use_tls, sni_host, connect
 
 fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_ms, write_ms): i64 {
     return sandhi_conn_open_fully_timed_a(
-    default_alloc(), addr, port, use_tls, sni_host,
-    connect_ms, read_ms, write_ms);
+      default_alloc(), addr, port, use_tls, sni_host,
+      connect_ms, read_ms, write_ms);
 }
 
 # 1.3.2 — open with early-data attached. Internal-only; the public
@@ -778,7 +778,7 @@ fn sandhi_conn_open_fully_timed(addr, port, use_tls, sni_host, connect_ms, read_
 # check (`tls_session_get_max_early_data >= len`) happens inside
 # finalize against the cached session.
 fn _sandhi_conn_open_fully_timed_with_early_data_a(a, addr, port, use_tls,
-sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len, ctx): i64 {
+  sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len, ctx): i64 {
     _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_OK);
 
     var sfd_r = tcp_socket();
@@ -810,7 +810,7 @@ sni_host, connect_ms, read_ms, write_ms, early_data, early_data_len, ctx): i64 {
     }
 
     return _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
-    read_ms, write_ms, early_data, early_data_len, ctx);
+      read_ms, write_ms, early_data, early_data_len, ctx);
 }
 
 # Send `len` bytes through the connection. Returns bytes sent, 0 on

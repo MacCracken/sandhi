@@ -128,8 +128,8 @@ fn sandhi_server_find_header_a(a, buf, blen, name): i64 {
     while (line_start < headers_end) {
         var line_end = _hsv_next_nl(buf, line_start, headers_end);
         if (line_start + nlen + 1 <= line_end
-        && _hsv_iceq(buf + line_start, name, nlen) == 1
-        && load8(buf + line_start + nlen) == 58) {
+          && _hsv_iceq(buf + line_start, name, nlen) == 1
+          && load8(buf + line_start + nlen) == 58) {
             var vs = line_start + nlen + 1;
             while (vs < line_end && load8(buf + vs) == 32) { vs = vs + 1; }
             var ve = line_end;
@@ -355,8 +355,8 @@ fn sandhi_server_get_param_a(a, path, name): i64 {
     pi = qmark;
     while (pi < plen) {
         if (pi + nlen + 1 <= plen
-        && memeq(path + pi, name, nlen) == 1
-        && load8(path + pi + nlen) == 61) {
+          && memeq(path + pi, name, nlen) == 1
+          && load8(path + pi + nlen) == 61) {
             var vs = pi + nlen + 1;
             var ve = vs;
             while (ve < plen && load8(path + ve) != 38) { ve = ve + 1; }
@@ -462,7 +462,7 @@ fn sandhi_server_send_response_a(a, cfd, code, msg, content_type, body, body_len
 
 fn sandhi_server_send_response(cfd, code, msg, content_type, body, body_len, extra_headers): i64 {
     return sandhi_server_send_response_a(default_alloc(), cfd, code, msg,
-    content_type, body, body_len, extra_headers);
+      content_type, body, body_len, extra_headers);
 }
 
 # 204 No Content with optional extra headers (CRLF-terminated cstr or 0).
@@ -1011,7 +1011,7 @@ fn _sandhi_server_stop_requested(ptr): i64 {
 fn _sandhi_server_arm_stop_poll(sfd, stop_ptr): i64 {
     if (stop_ptr == 0) { return 0; }
     return _sandhi_conn_set_timeout_ms(sfd, SANDHI_SERVER_STOP_POLL_MS,
-    _SANDHI_SO_RCVTIMEO);
+      _SANDHI_SO_RCVTIMEO);
 }
 
 # Resolve the cap for the server about to start and publish it to `_hsv_req_max`
@@ -2370,7 +2370,7 @@ fn sandhi_server_send_response_c_a(a, conn, code, msg, content_type, body, body_
 
 fn sandhi_server_send_response_c(conn, code, msg, content_type, body, body_len, extra_headers): i64 {
     return sandhi_server_send_response_c_a(default_alloc(), conn, code, msg,
-    content_type, body, body_len, extra_headers);
+      content_type, body, body_len, extra_headers);
 }
 
 fn sandhi_server_send_status_c_a(a, conn, code, msg): i64 {

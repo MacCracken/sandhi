@@ -47,9 +47,10 @@ CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke  # release-parit
 cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr build/sandhi-smoke-libssl  # deprecated libssl opt-in
 cyrius fuzz                                                # fuzz harnesses (fuzz/*.fcyr) — gating in CI
 
-# Regenerate the dist bundles — ALL FIVE, every release. `cyrius distlib`
-# alone does only dist/sandhi.cyr; there is no --all. CI gates on all five.
-for p in "" tls server rpc discovery; do cyrius distlib $p; done
+# Regenerate the dist bundles — ALL FIVE, every release. Bare `cyrius distlib`
+# does only dist/sandhi.cyr; `--all` (cyrius 6.5.x+) does base + every profile.
+cyrius distlib --all
+cyrius lib sync                                            # refresh ./lib from the pin
 ```
 
 > **TLS backend (native is the no-flag default since cyrius 6.1.21 / sandhi 1.4.9):**
@@ -111,11 +112,16 @@ not pending work.)
 
 ### Regenerating the dist bundles — **all five, every release**
 
-`cyrius distlib` regenerates **only** `dist/sandhi.cyr`. Since 1.8.0 there are
-four additional `[lib.<profile>]` breakout bundles, each needing its own
-invocation. There is no `--all`. CI's dist-drift check gates on every one:
+Bare `cyrius distlib` regenerates **only** `dist/sandhi.cyr`. Since 1.8.0 there
+are four additional `[lib.<profile>]` breakout bundles. **`--all` (cyrius 6.5.x+)
+does base + every profile in one invocation** — use it; the per-profile form
+below is the explicit equivalent, and the only form on toolchains before 6.5.x:
 
 ```bash
+cyrius distlib --all          # base + tls + server + rpc + discovery (preferred)
+cyrius distlib --check        # verify all five without writing
+
+# explicit equivalent (pre-6.5.x toolchains):
 cyrius distlib                # dist/sandhi.cyr           (full)
 cyrius distlib tls            # dist/sandhi-tls.cyr
 cyrius distlib server         # dist/sandhi-server.cyr
@@ -123,13 +129,20 @@ cyrius distlib rpc            # dist/sandhi-rpc.cyr
 cyrius distlib discovery      # dist/sandhi-discovery.cyr
 ```
 
-Verify by re-running the five and confirming `git diff dist/` is empty —
-generation is idempotent, so a second pass must be a no-op. Expect **uneven
-diffs**: a change only reaches the profiles whose `[lib.<profile>].modules`
-include the touched file (the 1.9.2 resolver fix moved `rpc` + `discovery` by
-~200 lines each while `tls` + `server` took only the version stamp). A profile
-diff of exactly the version line means the change genuinely isn't in that
-subset — not that regeneration failed.
+**Each bundle now carries a `.deps` sidecar** (cyrius 6.5.x+): `dist/sandhi.deps`
+plus `dist/sandhi-<profile>.deps`, listing the stdlib leaves that slice needs in
+scope. They are tracked generated artifacts and drift exactly like the bundles —
+CI's drift check covers the whole `dist/` tree, including a `git status
+--porcelain dist/` gate, because a newly-emitted sidecar is *untracked* and a
+`git diff` of named paths cannot see it.
+
+Verify by re-running and confirming `git diff dist/` is empty and `git status
+--porcelain dist/` is silent — generation is idempotent, so a second pass must be
+a no-op. Expect **uneven diffs**: a change only reaches the profiles whose
+`[lib.<profile>].modules` include the touched file (the 1.9.2 resolver fix moved
+`rpc` + `discovery` by ~200 lines each while `tls` + `server` took only the
+version stamp). A profile diff of exactly the version line means the change
+genuinely isn't in that subset — not that regeneration failed.
 
 ### Closeout Pass (before minor/major bump)
 
@@ -144,8 +157,22 @@ subset — not that regeneration failed.
 7. `state.md` current — fold status, consumer pins, module line counts
 8. Build clean of **drift and shadow warnings** — a `./lib/` bundle that is not
    in `[deps].stdlib` is never refreshed by `cyrius lib sync` and silently
-   shadows the pinned snapshot's newer copy (four such staleness leftovers,
-   including sandhi shadowing *itself*, were removed at 1.9.2)
+   shadows the pinned snapshot's newer copy. **This recurs**: four such
+   leftovers were removed at 1.9.2, two at 1.9.9, ten at 1.9.11 — sandhi
+   shadowing *itself* every time. **The fix is one command, and it is what CI
+   actually does** (CI starts from an empty `lib/`):
+
+   ```bash
+   rm -rf lib && cyrius deps    # 67 files at the 6.5.35 pin, zero shadows
+   ```
+
+   `lib/` is gitignored and reproducible from the manifest, so this is free.
+   Prefer it over `cyrius lib sync` after a pin bump: **the two resolve
+   different sets** — `lib sync` vendors the declared `[deps].stdlib` subset
+   (60 files; adds `hashmap_fast`, `ws_server`) while `deps` also walks sigil's
+   transitive graph (`bayan`, `ct`, `keccak`, `freelist`, + `result`, `slice`,
+   `sync*`). `deps` is the authoritative set because it is the one CI resolves;
+   a `lib/` built any other way can pass locally and differ in CI
 
 ## Key Principles
 
@@ -179,9 +206,9 @@ subset — not that regeneration failed.
 
 - **Toolchain pin** — `cyrius.cyml [package].cyrius` is the only authority. **Never** create a `.cyrius-toolchain` file.
 - **Release artifacts** — source tarball, **all five** dist bundles (`dist/sandhi.cyr` +
-  `-tls` / `-server` / `-rpc` / `-discovery`, each via its own `cyrius distlib <profile>` —
-  see [Regenerating the dist bundles](#regenerating-the-dist-bundles--all-five-every-release)),
-  SHA256SUMS.
+  `-tls` / `-server` / `-rpc` / `-discovery`, via `cyrius distlib --all` — see
+  [Regenerating the dist bundles](#regenerating-the-dist-bundles--all-five-every-release)),
+  their five `.deps` sidecars, SHA256SUMS.
 - **State sync** — release post-hook bumps `docs/development/state.md`.
 - **Fold-into-stdlib** retires this repo's releases at some point. Track the retirement in `state.md` when it happens.
 

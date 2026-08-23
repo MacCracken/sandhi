@@ -148,7 +148,7 @@ fn _sandhi_client_build_request(method, full_path, host_header, user_headers, bo
 
 fn _sandhi_client_build_request_v(method, full_path, host_header, user_headers, body_len, keep_alive): i64 {
     return _sandhi_client_build_request_va(default_alloc(), method, full_path,
-    host_header, user_headers, body_len, keep_alive);
+      host_header, user_headers, body_len, keep_alive);
 }
 
 fn _sandhi_client_build_request_va(a, method, full_path, host_header, user_headers, body_len, keep_alive): i64 {
@@ -248,10 +248,10 @@ fn _sandhi_client_build_request_va(a, method, full_path, host_header, user_heade
 # Outer trace wrapper — opt-in span via sandhi_trace_enable(1). Span
 # no-op by default; the inner does all the work either way.
 fn _sandhi_http_do_a(a, method, url, user_headers, body, body_len, max_bytes,
-connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
+  connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
     sandhi_trace_begin("sandhi.http");
     var r = _sandhi_http_do_impl_a(a, method, url, user_headers, body, body_len,
-    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx);
+      max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx);
     sandhi_trace_end();
     return r;
 }
@@ -259,9 +259,9 @@ connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
 # Bare wrapper — ctx=0 routes the per-request state (0-RTT / cred /
 # policy / open-err) through the module globals (single-threaded).
 fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes,
-connect_ms, read_ms, write_ms, total_ms, pool): i64 {
+  connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     return _sandhi_http_do_a(default_alloc(), method, url, user_headers, body, body_len,
-    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
+      max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
 }
 
 # 1.3.2 — request-method safety check for TLS 1.3 0-RTT. Per
@@ -354,7 +354,7 @@ fn _sandhi_http_clamp_ms(raw_ms, deadline_ms): i64 {
 # buffer. Pool ops keep using the pool's own allocator (per
 # `_sandhi_pool_alloc`) — pool entries outlive any per-request arena.
 fn _sandhi_http_do_impl_a(a, method, url, user_headers, body, body_len, max_bytes,
-connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
+  connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
     sandhi_prof_reset();
     var u = sandhi_url_parse_a(a, url);
     sandhi_prof_capture(SANDHI_PROF_PHASE_URL_PARSE_END);
@@ -411,7 +411,7 @@ connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
     var full_path = _sandhi_client_full_path_a(a, u);
     var host_hdr = _sandhi_client_host_header_a(a, u);
     var req = _sandhi_client_build_request_va(a, method, full_path, host_hdr,
-    user_headers, body_len, keep_alive);
+      user_headers, body_len, keep_alive);
     sandhi_prof_capture(SANDHI_PROF_PHASE_REQ_BUILD_END);
 
     if (conn == 0) {
@@ -438,11 +438,11 @@ connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
         # for finalize to consider 0-RTT.
         var use_0rtt = 0;
         if (has_policy == 0
-        && _sandhi_reqctx_allow_0rtt(ctx) == 1
-        && use_tls == 1
-        && _sandhi_method_is_replay_safe(method) == 1
-        && tls_supports_early_data() == 1
-        && sandhi_session_cache_enabled() == 1) {
+          && _sandhi_reqctx_allow_0rtt(ctx) == 1
+          && use_tls == 1
+          && _sandhi_method_is_replay_safe(method) == 1
+          && tls_supports_early_data() == 1
+          && sandhi_session_cache_enabled() == 1) {
             use_0rtt = 1;
         }
         var ed_ptr = 0;
@@ -454,18 +454,18 @@ connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
         if (addr6 != 0) {
             if (use_0rtt == 1) {
                 conn = _sandhi_conn_open_v6_fully_timed_with_early_data_a(a, addr6,
-                port, use_tls, host, eff_connect, read_ms, write_ms, ed_ptr, ed_len, ctx);
+                  port, use_tls, host, eff_connect, read_ms, write_ms, ed_ptr, ed_len, ctx);
             } else {
                 conn = _sandhi_conn_open_v6_fully_timed_a(a, addr6, port, use_tls, host,
-                eff_connect, read_ms, write_ms, ctx);
+                  eff_connect, read_ms, write_ms, ctx);
             }
         } else {
             if (use_0rtt == 1) {
                 conn = _sandhi_conn_open_fully_timed_with_early_data_a(a, addr,
-                port, use_tls, host, eff_connect, read_ms, write_ms, ed_ptr, ed_len, ctx);
+                  port, use_tls, host, eff_connect, read_ms, write_ms, ed_ptr, ed_len, ctx);
             } else {
                 conn = _sandhi_conn_open_fully_timed_ctx_a(a, addr, port, use_tls, host,
-                eff_connect, read_ms, write_ms, ctx);
+                  eff_connect, read_ms, write_ms, ctx);
             }
         }
         # 1.4.6 — clear the policy hook override + run the post-handshake
@@ -489,7 +489,7 @@ connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
     var resp = 0;
     if (keep_alive == 1) {
         resp = _sandhi_http_exchange_keepalive_a(a, conn, req, body, body_len, max_bytes,
-        deadline_ms, pool, host, port, use_tls);
+          deadline_ms, pool, host, port, use_tls);
     } else {
         resp = _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms);
     }
@@ -498,9 +498,9 @@ connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
 }
 
 fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
-connect_ms, read_ms, write_ms, total_ms, pool): i64 {
+  connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     return _sandhi_http_do_impl_a(default_alloc(), method, url, user_headers, body, body_len,
-    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
+      max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
 }
 
 # Send request, receive response, close connection. Extracted so the
@@ -605,7 +605,7 @@ fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms): i64
 # allocator (`_sandhi_pool_alloc`) — pool entries outlive any per-
 # request arena, so the put-back path is intentionally arena-skipping.
 fn _sandhi_http_exchange_keepalive_a(a, conn, req, body, body_len, max_bytes,
-deadline_ms, pool, host, port, use_tls): i64 {
+  deadline_ms, pool, host, port, use_tls): i64 {
     if (deadline_ms > 0 && clock_now_ms() >= deadline_ms) {
         sandhi_conn_close(conn);
         return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT);
@@ -683,7 +683,7 @@ deadline_ms, pool, host, port, use_tls): i64 {
     var ek = sandhi_http_err_kind(resp);
     var put_back = 0;
     if (ek == SANDHI_OK && server_sent_close == 0
-    && status >= 200 && status < 400) {
+      && status >= 200 && status < 400) {
         put_back = 1;
     }
     if (put_back == 1) {
@@ -695,9 +695,9 @@ deadline_ms, pool, host, port, use_tls): i64 {
 }
 
 fn _sandhi_http_exchange_keepalive(conn, req, body, body_len, max_bytes,
-deadline_ms, pool, host, port, use_tls): i64 {
+  deadline_ms, pool, host, port, use_tls): i64 {
     return _sandhi_http_exchange_keepalive_a(default_alloc(), conn, req, body, body_len,
-    max_bytes, deadline_ms, pool, host, port, use_tls);
+      max_bytes, deadline_ms, pool, host, port, use_tls);
 }
 
 # ================================================================
@@ -904,7 +904,7 @@ fn _sandhi_is_redirect(status): i64 {
 fn _sandhi_resolve_location_a(a, base_url, location): i64 {
     if (location == 0) { return 0; }
     if (_sandhi_url_sceq(location, "http://", 7) == 1
-    || _sandhi_url_sceq(location, "https://", 8) == 1) {
+      || _sandhi_url_sceq(location, "https://", 8) == 1) {
         var llen = strlen(location);
         var out = alloc_via(a, llen + 1);
         if (out == 0) { return 0; }
@@ -981,7 +981,7 @@ fn _sandhi_url_is_https_downgrade(prev_url, next_url): i64 {
     var nu = sandhi_url_parse(next_url);
     if (pu == 0 || nu == 0) { return 0; }
     if (sandhi_url_scheme(pu) == SANDHI_URL_HTTPS
-    && sandhi_url_scheme(nu) == SANDHI_URL_HTTP) { return 1; }
+      && sandhi_url_scheme(nu) == SANDHI_URL_HTTP) { return 1; }
     return 0;
 }
 
@@ -1031,7 +1031,7 @@ fn _sandhi_strip_sensitive_headers(src): i64 {
 #     the same; matches RFC 7235 §2.2 spirit even though the spec
 #     doesn't mandate.)
 fn _sandhi_http_follow_a(a, method, url, headers, body, body_len, max_hops,
-max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
+  max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
     var m = method;
     var u = url;
     var b = body;
@@ -1039,7 +1039,7 @@ max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
     var h = headers;
     var hops = 0;
     var r = _sandhi_http_do_a(a, m, u, h, b, bl, max_bytes,
-    connect_ms, read_ms, write_ms, total_ms, pool, ctx);
+      connect_ms, read_ms, write_ms, total_ms, pool, ctx);
     while (hops < max_hops) {
         if (_sandhi_is_redirect(sandhi_http_status(r)) == 0) { return r; }
         var loc = sandhi_headers_get(sandhi_http_headers(r), "Location");
@@ -1064,15 +1064,15 @@ max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
         u = next;
         hops = hops + 1;
         r = _sandhi_http_do_a(a, m, u, h, b, bl, max_bytes,
-        connect_ms, read_ms, write_ms, total_ms, pool, ctx);
+          connect_ms, read_ms, write_ms, total_ms, pool, ctx);
     }
     return r;
 }
 
 fn _sandhi_http_follow(method, url, headers, body, body_len, max_hops,
-max_bytes, connect_ms, read_ms, write_ms, total_ms, pool): i64 {
+  max_bytes, connect_ms, read_ms, write_ms, total_ms, pool): i64 {
     return _sandhi_http_follow_a(default_alloc(), method, url, headers, body, body_len,
-    max_hops, max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
+      max_hops, max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
 }
 
 # ================================================================
@@ -1116,10 +1116,10 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts): i64 {
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
         r = _sandhi_http_follow_a(a, method, url, headers, body, body_len, hops,
-        max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx);
+          max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx);
     } else {
         r = _sandhi_http_do_a(a, method, url, headers, body, body_len,
-        max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx);
+          max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx);
     }
     return r;
 }

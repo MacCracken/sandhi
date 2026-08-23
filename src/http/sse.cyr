@@ -274,7 +274,7 @@ fn _sandhi_sse_apply_line_a(a, ctx, buf, line_start, line_end): i64 {
     } elif (streq(name, "data") == 1) {
         var prev_data = load64(ctx + _SANDHI_SSE_CTX_OFF_DATA);
         store64(ctx + _SANDHI_SSE_CTX_OFF_DATA,
-        _sandhi_sse_data_append_a(a, prev_data, value));
+          _sandhi_sse_data_append_a(a, prev_data, value));
     } elif (streq(name, "id") == 1) {
         if (_sandhi_sse_value_has_nul(buf, line_start, line_end) == 0) {
             store64(ctx + _SANDHI_SSE_CTX_OFF_ID, value);
@@ -322,9 +322,9 @@ fn sandhi_sse_parse_a(a, buf, blen, remaining_out): i64 {
                     var d = load64(ctx + _SANDHI_SSE_CTX_OFF_DATA);
                     if (d == 0) { d = _sandhi_sse_dup_a(a, ""); }
                     var ev = sandhi_sse_event_new_a(a,
-                    load64(ctx + _SANDHI_SSE_CTX_OFF_EVENT), d,
-                    load64(ctx + _SANDHI_SSE_CTX_OFF_ID),
-                    load64(ctx + _SANDHI_SSE_CTX_OFF_RETRY));
+                      load64(ctx + _SANDHI_SSE_CTX_OFF_EVENT), d,
+                      load64(ctx + _SANDHI_SSE_CTX_OFF_ID),
+                      load64(ctx + _SANDHI_SSE_CTX_OFF_RETRY));
                     vec_push_a(a, events, ev);
                     _sandhi_sse_ctx_reset_a(a, ctx);
                 }

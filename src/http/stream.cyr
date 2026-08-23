@@ -120,7 +120,7 @@ fn _sandhi_stream_headers_end(sb): i64 {
     var i = 0;
     while (i + 3 < n) {
         if (load8(p + i) == 13 && load8(p + i + 1) == 10
-        && load8(p + i + 2) == 13 && load8(p + i + 3) == 10) {
+          && load8(p + i + 2) == 13 && load8(p + i + 3) == 10) {
             return i + 4;
         }
         i = i + 1;
@@ -303,7 +303,7 @@ fn sandhi_http_stream_opts_a(a, url, method, user_headers, body, body_len, cb, c
         }
     }
     var conn = sandhi_conn_open_fully_timed_a(a, addr, sandhi_url_port(u), use_tls, sandhi_url_host(u),
-    eff_connect, read_ms, write_ms);
+      eff_connect, read_ms, write_ms);
     if (has_policy == 1) {
         conn = _sandhi_policy_post_open_a(a, conn, policy, 0);
     }
@@ -471,8 +471,8 @@ fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ct
 
 fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms): i64 {
     return _sandhi_stream_body_loop_a(
-    default_alloc(), conn, body_sb, scratch, chunked, status,
-    cb, ctx, cap, deadline_ms);
+      default_alloc(), conn, body_sb, scratch, chunked, status,
+      cb, ctx, cap, deadline_ms);
 }
 
 # Decode as many chunked frames as possible out of `in_sb` into

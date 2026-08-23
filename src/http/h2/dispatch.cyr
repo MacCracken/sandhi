@@ -73,8 +73,8 @@ fn sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len): i64 {
     }
 
     var stream_id = sandhi_h2_request_send_a(a, h2c, method, scheme, full_path,
-    authority, user_headers,
-    body, body_len);
+      authority, user_headers,
+      body, body_len);
     if (stream_id < 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL); }
     return sandhi_h2_response_recv_a(a, h2c, stream_id);
 }
@@ -146,10 +146,10 @@ fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool): i64 {
         # (no SANDHI_REQCTX_* in scope), so pass 0 — the ctx==0 fallback, exactly
         # what the IPv4 sibling's public sandhi_conn_open_fully_timed_a defaults to.
         conn = _sandhi_conn_open_v6_fully_timed_a(a, addr6, port, 1, host,
-        connect_ms, read_ms, write_ms, 0);
+          connect_ms, read_ms, write_ms, 0);
     } else {
         conn = sandhi_conn_open_fully_timed_a(a, addr, port, 1, host,
-        connect_ms, read_ms, write_ms);
+          connect_ms, read_ms, write_ms);
     }
     _sandhi_alpn_advertise_h2 = 0;
 
@@ -225,7 +225,7 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts):
     # drives the buffered `_sandhi_http_dispatch_a` path, not this one). The
     # 1.1 fallback reads those globals via do_impl's ctx==0 branch.
     return _sandhi_http_do_a(a, method, url, user_headers, body, body_len,
-    max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
+      max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
 }
 
 fn _sandhi_http_auto_once(method, url, user_headers, body, body_len, opts): i64 {

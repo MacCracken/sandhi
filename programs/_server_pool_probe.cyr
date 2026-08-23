@@ -127,7 +127,7 @@ fn main() {
         sandhi_server_options_max_conns(opts, 4);   # 4 fixed worker threads
         sandhi_server_options_idle_ms(opts, 1000);  # slow-peer bound
         sandhi_server_run_pooled(INADDR_LOOPBACK(), port,
-        &sandhi_server_router_handler, router, opts);
+          &sandhi_server_router_handler, router, opts);
         syscall(60, 0);
     }
 

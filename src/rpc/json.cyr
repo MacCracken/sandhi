@@ -72,9 +72,9 @@ fn _sandhi_json_dup(s): i64 {
 # Append a string field to `o`, allocating the dup'd key + value into `a`.
 fn sandhi_json_add_string_a(a, o, key, value): i64 {
     vec_push_a(a, o, _sandhi_json_entry_new_a(a,
-    _sandhi_json_dup_a(a, key),
-    _sandhi_json_dup_a(a, value),
-    SANDHI_JSON_STRING));
+        _sandhi_json_dup_a(a, key),
+        _sandhi_json_dup_a(a, value),
+        SANDHI_JSON_STRING));
     return 0;
 }
 
@@ -90,9 +90,9 @@ fn sandhi_json_add_int_a(a, o, key, value): i64 {
     memcpy(out, &tmp, n);
     store8(out + n, 0);
     vec_push_a(a, o, _sandhi_json_entry_new_a(a,
-    _sandhi_json_dup_a(a, key),
-    out,
-    SANDHI_JSON_RAW));
+        _sandhi_json_dup_a(a, key),
+        out,
+        SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -104,9 +104,9 @@ fn sandhi_json_add_bool_a(a, o, key, value): i64 {
     var raw = "false";
     if (value == 1) { raw = "true"; }
     vec_push_a(a, o, _sandhi_json_entry_new_a(a,
-    _sandhi_json_dup_a(a, key),
-    _sandhi_json_dup_a(a, raw),
-    SANDHI_JSON_RAW));
+        _sandhi_json_dup_a(a, key),
+        _sandhi_json_dup_a(a, raw),
+        SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -116,9 +116,9 @@ fn sandhi_json_add_bool(o, key, value): i64 {
 
 fn sandhi_json_add_null_a(a, o, key): i64 {
     vec_push_a(a, o, _sandhi_json_entry_new_a(a,
-    _sandhi_json_dup_a(a, key),
-    _sandhi_json_dup_a(a, "null"),
-    SANDHI_JSON_RAW));
+        _sandhi_json_dup_a(a, key),
+        _sandhi_json_dup_a(a, "null"),
+        SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -132,9 +132,9 @@ fn sandhi_json_add_null(o, key): i64 {
 fn sandhi_json_add_object_a(a, o, key, child): i64 {
     var rendered = sandhi_json_build_a(a, child);
     vec_push_a(a, o, _sandhi_json_entry_new_a(a,
-    _sandhi_json_dup_a(a, key),
-    rendered,
-    SANDHI_JSON_RAW));
+        _sandhi_json_dup_a(a, key),
+        rendered,
+        SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -145,9 +145,9 @@ fn sandhi_json_add_object(o, key, child): i64 {
 # Embed a pre-built raw JSON fragment, dup'd into `a`.
 fn sandhi_json_add_raw_a(a, o, key, raw_cstr): i64 {
     vec_push_a(a, o, _sandhi_json_entry_new_a(a,
-    _sandhi_json_dup_a(a, key),
-    _sandhi_json_dup_a(a, raw_cstr),
-    SANDHI_JSON_RAW));
+        _sandhi_json_dup_a(a, key),
+        _sandhi_json_dup_a(a, raw_cstr),
+        SANDHI_JSON_RAW));
     return 0;
 }
 
@@ -260,7 +260,7 @@ fn _sandhi_json_find_key(body, blen, start, key, key_len): i64 {
         if (load8(body + i) == 34) {
             # At a quote — check if it starts the target key.
             if (memeq(body + i + 1, key, key_len) == 1
-            && load8(body + i + 1 + key_len) == 34) {
+              && load8(body + i + 1 + key_len) == 34) {
                 # Skip "key"
                 var p = i + 2 + key_len;
                 # Skip whitespace + colon.

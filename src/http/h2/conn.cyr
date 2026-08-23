@@ -241,7 +241,7 @@ fn sandhi_h2_conn_apply_settings_payload(c, payload, payload_len): i64 {
 
 fn sandhi_h2_conn_send_settings_ack_a(a, c): i64 {
     return sandhi_h2_conn_send_frame_a(a, c,
-    SANDHI_H2_FRAME_SETTINGS, SANDHI_H2_FLAG_ACK, 0, 0, 0);
+      SANDHI_H2_FRAME_SETTINGS, SANDHI_H2_FLAG_ACK, 0, 0, 0);
 }
 
 fn sandhi_h2_conn_send_settings_ack(c): i64 {
