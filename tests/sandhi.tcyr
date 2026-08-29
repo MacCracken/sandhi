@@ -3378,6 +3378,99 @@ fn test_sse_partial_trailing_event() {
     return 0;
 }
 
+# ⚠ THE STREAMING-BOUNDARY LOSS. `sandhi_sse_parse` is called REPEATEDLY by the streaming read loop on
+# a growing buffer, and `remaining_out` tells the caller how many bytes to DROP. The parse context that
+# accumulates an event's fields is created per CALL and thrown away on return — so any byte the parser
+# reports as consumed while an event is still OPEN takes that event's fields with it.
+#
+# A field line that arrives WITH its terminator but WITHOUT the blank line that ends the event is exactly
+# that case, and it is what a TCP read boundary produces several times a minute on a busy stream. The
+# event is then silently LOST: the next call starts at the blank line with a fresh context, sees no
+# fields, and dispatches nothing.
+#
+# Measured downstream before it was understood here: an Anthropic tool-call stream through hoosh lost the
+# `content_block_start` frame carrying a tool's id+name while its `input_json_delta` fragments survived,
+# so the client received arguments belonging to a call with no name — intermittently, depending on where
+# the packet split fell.
+fn test_sse_partial_event_terminated_lines() {
+    # An event whose lines are complete but whose terminating blank line has not arrived yet.
+    var raw = "data: first\n\nevent: block_start\ndata: {\"id\":\"x\"}\n";
+    var rem = alloc(8);
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_eq(vec_len(events), 1, "sse boundary: only the COMPLETE event is emitted");
+    assert_streq(sandhi_sse_event_data(vec_get(events, 0)), "first", "sse boundary: the complete event is the first one");
+    assert_eq(load64(rem), 13, "sse boundary: consumed stops at the event terminator, NOT past the open event's lines");
+    return 0;
+}
+
+# The other half of the same contract: feeding the buffer back in with the blank line appended must
+# produce the second event. This is the loop the streaming client actually runs.
+fn test_sse_resume_after_boundary() {
+    var rem = alloc(8);
+    var chunk1 = "event: block_start\ndata: {\"id\":\"x\"}\n";
+    var ev1 = sandhi_sse_parse(chunk1, strlen(chunk1), rem);
+    assert_eq(vec_len(ev1), 0, "sse resume: an unterminated event yields no event yet");
+    assert_eq(load64(rem), 0, "sse resume: and consumes NOTHING, so the caller keeps its bytes");
+    var chunk2 = "event: block_start\ndata: {\"id\":\"x\"}\n\n";
+    var ev2 = sandhi_sse_parse(chunk2, strlen(chunk2), rem);
+    assert_eq(vec_len(ev2), 1, "sse resume: the event lands once its blank line arrives");
+    assert_streq(sandhi_sse_event_data(vec_get(ev2, 0)), "{\"id\":\"x\"}", "sse resume: with its data intact");
+    assert_streq(sandhi_sse_event_name(vec_get(ev2, 0)), "block_start", "sse resume: and its event name intact");
+    assert_eq(load64(rem), strlen(chunk2), "sse resume: the whole event is consumed once dispatched");
+    return 0;
+}
+
+# The end-to-end proof: drive the parser the way the streaming read loop actually drives it — append a
+# chunk, parse, drop `remaining_out` bytes, repeat — over an Anthropic-shaped tool-call stream split at
+# the worst possible place. Every event must arrive exactly once, in order. Before 1.9.15 the
+# `content_block_start` carrying the tool's id and name vanished here.
+fn test_sse_stream_loop_no_event_lost() {
+    var cap = 1024;
+    var buf = alloc(cap);
+    var blen = 0;
+    var rem = alloc(8);
+    var seen = vec_new();
+
+    # chunk 1: a complete event, then an event whose lines are complete but whose blank line is not here
+    var c1 = "event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: content_block_start\ndata: {\"index\":1,\"name\":\"list_dir\"}\n";
+    var n1 = strlen(c1);
+    memcpy(buf + blen, c1, n1); blen = blen + n1;
+    var e1 = sandhi_sse_parse(buf, blen, rem);
+    var i = 0;
+    while (i < vec_len(e1)) { vec_push(seen, sandhi_sse_event_data(vec_get(e1, i))); i = i + 1; }
+    var used = load64(rem);
+    # drop the consumed prefix, exactly as _sandhi_stream_feed_sse does
+    var k = used;
+    var w = 0;
+    while (k < blen) { store8(buf + w, load8(buf + k)); w = w + 1; k = k + 1; }
+    blen = w;
+
+    # chunk 2: the blank line that finishes the open event, plus one more complete event
+    var c2 = "\nevent: content_block_delta\ndata: {\"partial_json\":\"{}\"}\n\n";
+    var n2 = strlen(c2);
+    memcpy(buf + blen, c2, n2); blen = blen + n2;
+    var e2 = sandhi_sse_parse(buf, blen, rem);
+    i = 0;
+    while (i < vec_len(e2)) { vec_push(seen, sandhi_sse_event_data(vec_get(e2, i))); i = i + 1; }
+
+    assert_eq(vec_len(seen), 3, "sse loop: all three events survive the split (the middle one was LOST before 1.9.15)");
+    assert_streq(vec_get(seen, 0), "{\"type\":\"message_start\"}", "sse loop: event 1 intact");
+    assert_streq(vec_get(seen, 1), "{\"index\":1,\"name\":\"list_dir\"}", "sse loop: the split event keeps its data — this is the tool id+name frame");
+    assert_streq(vec_get(seen, 2), "{\"partial_json\":\"{}\"}", "sse loop: event 3 intact and in order");
+    return 0;
+}
+
+# Comment-only keep-alive traffic must still DRAIN — the fix must not turn a heartbeat into unbounded
+# buffer growth. A comment leaves no pending field state, so it is consumed on sight.
+fn test_sse_comment_keepalive_drains() {
+    var rem = alloc(8);
+    var raw = ": ping\n: ping\n";
+    var events = sandhi_sse_parse(raw, strlen(raw), rem);
+    assert_eq(vec_len(events), 0, "sse keepalive: comments dispatch nothing");
+    assert_eq(load64(rem), strlen(raw), "sse keepalive: but are fully consumed, so the buffer cannot grow without bound");
+    return 0;
+}
+
 fn test_sse_field_without_space_after_colon() {
     # Spec: optional leading SP after colon is stripped; tight form also valid.
     var raw = "data:tight\n\n";
@@ -4228,6 +4321,10 @@ fn main() {
 
     test_group("sse/partial_trailing");
     test_sse_partial_trailing_event();
+    test_sse_partial_event_terminated_lines();
+    test_sse_resume_after_boundary();
+    test_sse_stream_loop_no_event_lost();
+    test_sse_comment_keepalive_drains();
 
     test_group("sse/no_space_after_colon");
     test_sse_field_without_space_after_colon();

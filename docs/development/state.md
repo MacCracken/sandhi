@@ -4,6 +4,51 @@
 
 ## Version
 
+**1.9.15** — 2026-08-27. **SSE: a read boundary could silently DROP a whole
+event.** No pin change (cyrius 6.5.35). **2,866 assertions**, 8/8 fuzz. A
+one-line behaviour change in `sandhi_sse_parse_a`; no signature changes.
+
+`sandhi_sse_parse_a` is called repeatedly by the streaming read loop on a
+growing buffer, and `remaining_out` tells that caller how many bytes it may
+**drop**. The field context that accumulates an event's lines is created **per
+call** and discarded on return — yet `consumed` advanced past every complete
+line, including lines belonging to an event still being built. When a read
+boundary fell after a field line but before the blank line ending the event, the
+caller dropped those bytes and the next call began after them with an empty
+context: it reached the blank line, found no fields, and dispatched **nothing**.
+The event vanished with no error and nothing the caller could detect.
+
+A field line arriving **with** its terminator but **without** its blank line is
+exactly what a TCP read boundary produces, several times a minute on a busy
+stream — so the loss was intermittent and depended only on where the split fell.
+
+⭐ **Found downstream, twice over, before it was understood here.** An Anthropic
+tool-call stream proxied through **hoosh** lost the `content_block_start` frame
+carrying a tool call's `id` and `name` while its `input_json_delta` fragments
+survived, so the consumer received **arguments belonging to a call with no
+name**. **thoth** echoed that call into its conversation, where the provider
+rejects a `tool_use` with an empty id and name — and every later request in that
+conversation returned an empty completion. One dropped SSE frame bricked an
+entire agent session, and the symptom surfaced many rounds after the cause. The
+same loss also cut a call's `arguments` mid-JSON when the frame it took was an
+`input_json_delta`.
+
+A line is now consumed only when it left **no pending event state**, which keeps
+comment-only keep-alive traffic draining (a comment sets no fields, so it is
+consumed on sight and the caller's buffer cannot grow without bound) while a line
+belonging to an open event stays put until its event is dispatched.
+
+Six new assertions, all of which fail on 1.9.14 — including
+`test_sse_stream_loop_no_event_lost`, which drives the parser the way the
+streaming loop does (append chunk → parse → drop `remaining_out` → repeat) over
+an Anthropic-shaped stream split at the worst place.
+
+⚠ **Consumers do not get this by bumping a pin** — post-fold there is none. It
+arrives when a cyrius release re-vendors `lib/sandhi.cyr` from `dist/sandhi.cyr`.
+Every SSE-reading consumer is affected, because the loss is in the shared parser
+rather than in any caller: **hoosh** (provider streaming), **thoth** (its own
+gateway stream and, transitively, what hoosh forwards).
+
 **1.9.14** — 2026-08-23. **Client resolve hook — closes bote's hostname SSRF
 guard.** No pin change (cyrius 6.5.35). **2,851 assertions**, 8/8 fuzz, **nine**
 live gates green. Purely additive: no existing signature changes, no behaviour

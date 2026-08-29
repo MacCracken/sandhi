@@ -2,6 +2,75 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.15] — 2026-08-27
+
+**SSE: a read boundary could silently DROP a whole event.** No pin change (cyrius 6.5.35).
+**2,866 assertions** (was 2,851), 8/8 fuzz. One-line behaviour change in
+`sandhi_sse_parse_a`; no signature changes.
+
+### Fixed — `remaining_out` consumed bytes belonging to an event that had not been dispatched
+
+`sandhi_sse_parse_a` is called repeatedly by the streaming read loop
+(`_sandhi_stream_feed_sse_a`) on a growing buffer, and `remaining_out` tells that caller how
+many bytes it may **drop**. The field context that accumulates an event's `event:` / `data:` /
+`id:` / `retry:` lines is created **per call** and discarded on return.
+
+The parser advanced `consumed` past **every complete line**, including lines belonging to an
+event still being built. So when a read boundary fell after a field line but before the blank
+line that ends the event, the caller dropped those bytes — and the next call began after them
+with a fresh, empty context, reached the blank line, found no fields, and dispatched **nothing**.
+The event was lost with no error, no short read, and nothing the caller could detect.
+
+```
+read 1:  event: content_block_start\n
+         data: {"index":1,"id":"toolu_…","name":"list_dir"}\n     ← consumed, context discarded
+read 2:  \n                                                       ← fresh context: no fields
+         event: content_block_delta\n
+         data: {"partial_json":"{\"path\":"}\n
+         \n                                                       ← this one dispatches fine
+```
+
+A field line arriving **with** its terminator but **without** its event's blank line is exactly
+what a TCP read boundary produces, several times a minute on a busy stream — so this was
+intermittent and depended only on where the packet split fell.
+
+**Found downstream, twice over, before it was understood here.** An Anthropic tool-call stream
+proxied through hoosh lost the `content_block_start` frame carrying a tool call's `id` and
+`name` while its `input_json_delta` fragments survived, so the consumer received **arguments
+belonging to a call with no name**. thoth then echoed that call back into the conversation, where
+the provider rejects a `tool_use` block with an empty id and name — and every subsequent request
+in that conversation returned an empty completion. One dropped SSE frame bricked an entire agent
+session, and the symptom surfaced many rounds later, nowhere near the cause. The same loss also
+cut a tool call's `arguments` mid-JSON when the frame it took was an `input_json_delta`.
+
+A line is now consumed only when it left **no pending event state**. That keeps comment-only
+keep-alive traffic draining (a comment sets no fields, so it is consumed on sight and the
+caller's buffer cannot grow without bound) while a line that belongs to an open event stays put
+until its event is dispatched.
+
+### Tests
+
+Four new assertions plus an end-to-end one, all of which fail on 1.9.14:
+
+- `test_sse_partial_event_terminated_lines` — `consumed` stops at the event terminator, not past
+  an open event's lines.
+- `test_sse_resume_after_boundary` — an unterminated event yields no event and consumes
+  **nothing**, then lands intact once its blank line arrives.
+- `test_sse_stream_loop_no_event_lost` — drives the parser the way the streaming loop does
+  (append chunk → parse → drop `remaining_out` → repeat) over an Anthropic-shaped tool-call
+  stream split at the worst place, and asserts all three events arrive, in order, with their
+  data intact.
+- `test_sse_comment_keepalive_drains` — the fix must not turn a heartbeat into unbounded buffer
+  growth.
+
+### Consumers
+
+Every sandhi consumer that reads Server-Sent Events is affected, because the loss is in the
+shared parser rather than in any caller: **hoosh** (provider streaming), **thoth** (both its own
+gateway stream and, transitively, what hoosh forwards), and anything else using
+`sandhi_http_stream`. No consumer code changes are required — re-vendoring the bundle is the
+whole fix.
+
 ## [1.9.14] — 2026-08-23
 
 **Client resolve hook — closes bote's hostname SSRF guard.** No pin change
