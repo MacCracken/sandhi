@@ -43,8 +43,7 @@ include "src/main.cyr"
 fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
 
 fn try3(addr, port, sni) {
-    var fd_r = tcp_socket();
-    var fd = payload(fd_r);
+    var fd_tag, fd = tcp_socket();
     sock_connect(fd, addr, port);
     say("  [3] tls_available\n");
     var ok = tls_available();
@@ -57,8 +56,7 @@ fn try3(addr, port, sni) {
 }
 
 fn try6(addr, port, use_tls, sni, a, b) {
-    var fd_r = tcp_socket();
-    var fd = payload(fd_r);
+    var fd_tag, fd = tcp_socket();
     sock_connect(fd, addr, port);
     var ok = tls_available();
     if (ok == 0) { sock_close(fd); return 0; }
@@ -71,8 +69,7 @@ fn try6(addr, port, use_tls, sni, a, b) {
 }
 
 fn try7(addr, port, use_tls, sni, a, b, c) {
-    var fd_r = tcp_socket();
-    var fd = payload(fd_r);
+    var fd_tag, fd = tcp_socket();
     sock_connect(fd, addr, port);
     say("  [7] tls_available\n");
     var ok = tls_available();

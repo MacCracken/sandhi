@@ -11,8 +11,10 @@ thread
 fnptr
 async
 chrono
-tagged
 net
 http
 tls
 sigil
+random
+fdlopen
+dynlib

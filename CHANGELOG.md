@@ -2,6 +2,78 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.16] — 2026-09-06
+
+**Migrated to the cyrius 6.6.0 `Result`/`Option`/`Either` value form.** Pin **6.5.35 → 6.6.0**
+(a hard API break). **2,866 assertions** (unchanged), 8/8 fuzz, all five dist bundles
+regenerated. No sandhi API changed: every migrated site is internal, and the public surface
+(`sandhi_conn_send`, `sandhi_server_recv_request`, the serve loops, the resolver) keeps its
+existing plain-`i64` contract.
+
+### Changed — a payload variant is now a register pair, so every receive binds both halves
+
+cyrius 6.6.0 declares `enum Result<T, E>: stack`. `Ok(v)` / `Err(e)` return the tag in `rax`
+and the payload in `rdx` and allocate **zero** bytes; there is no heap box, so there is no
+`tag at +0 / payload at +8` layout. `payload()` and `tagged_new()` are deleted outright —
+`rdx` never reaches a parameter, so no function can take a Result in one argument and read its
+payload. The compiler now refuses a single-variable bind, an assignment, and a `store64` of a
+Result, each as a named error at its own line.
+
+56 declarations migrated — 34 in `src/`, 10 in `programs/`, 12 in `tests/` — and 51 `payload()`
+call sites removed:
+
+```
+var fd_r = udp_socket();               var fd_tag, fd = udp_socket();
+if (is_err_result(fd_r) == 1) { … }  → if (is_err_result(fd_tag) == 1) { … }
+var fd = payload(fd_r);                (the payload IS the bound variable)
+```
+
+- `src/net/resolve.cyr` — both DNS impls (`_sandhi_resolve_ipv4_impl_a` / `_ipv6_impl_a`):
+  socket / connect / send / recv.
+- `src/http/conn.cyr` — both `_sandhi_conn_open_fully_timed_*` paths, plus `sandhi_conn_send`
+  and `sandhi_conn_recv`, whose negative-errno returns (`0 - payload(r)`) become `0 - r`.
+- `src/server/mod.cyr` — all five serve loops (`run_opts` / `run_async` / `run_pooled` /
+  `run_tls` / `run_pooled_tls`), `sandhi_server_recv_request`, `_sandhi_server_drain_refused`,
+  `_sandhi_server_plain_write_all`.
+- `src/discovery/local.cyr` — the two-socket mDNS query and its RX open.
+
+`is_err_result(sock_bind(...))` and friends are left as-is and are **still correct**: a single
+argument receives `rax`, which is the tag. Verified directly against 6.6.0 rather than assumed.
+
+### Fixed — the refusal and 404/405 paths now cost the global bump *nothing*
+
+Four heap-accounting assertions in `tests/sandhi.tcyr` asserted the boxed Result's 16 bytes:
+`600 * 16` for the reject-arena loop, and `used + 16` for the 404, the 405 and the null-router
+404. Those 16 bytes were the one charge on those paths sandhi did not control — `sock_send`
+boxing its `Result` on the no-free global bump, filed upstream as
+`2026-07-28-sock-send-result-allocates-per-call.md`. **6.6.0 is the fix**, so the assertions
+were rewritten to `0`. That is a *stricter* check than the one it replaces, not a weaker one:
+the arena discipline 1.9.6/1.9.7 introduced is now provably the whole story, and any future
+edit that reintroduces a bump allocation on these paths still fails the test.
+
+### Fixed — `alloc/134/evict_oldest_at_max` was passing on an accident of hash order
+
+The LRU test stored three sessions back-to-back and asserted the first was evicted. All three
+land in the same millisecond, so their `last_used_ms` tie, and
+`_sandhi_session_cache_evict_oldest` breaks the tie with a strict `<` over `map_keys()` order —
+i.e. it evicts whichever key the hashmap enumerates first. That was stable only because the
+stdlib hash was an unseeded published constant. cyrius **v6.5.39** gave every process a random
+hash seed (`lib/hashseed.cyr`, the hash-flooding fix), so enumeration order now varies run to
+run, and this test began failing intermittently the moment the pin crossed 6.5.39 — surfacing
+here as a ~40 % flake rate. The sibling test `lookup_touch_promotes_lru` already ticks the
+clock between steps for exactly this reason; `evict_oldest_at_max` simply omitted it. Added
+the same tick, so LRU-by-timestamp is tested against timestamps that actually differ. 8/8
+consecutive runs clean. No assertion changed and none was removed; production code untouched.
+
+### Housekeeping
+
+- `dist/*.deps` sidecars re-derived: **`tagged` dropped** from the `server` / `rpc` /
+  `discovery` profiles — with `payload()` / `tagged_new()` gone, those slices no longer reach
+  `lib/tagged.cyr` at all. `dynlib` and `random` added by distlib's compile-verified
+  leaf-recovery pass.
+- The 1.9.7-history comment in `src/server/mod.cyr` quotes the old, now-illegal loop shape
+  verbatim. Left verbatim: it is a citation of what the code *was*, not live code.
+
 ## [1.9.15] — 2026-08-27
 
 **SSE: a read boundary could silently DROP a whole event.** No pin change (cyrius 6.5.35).

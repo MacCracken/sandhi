@@ -44,7 +44,7 @@ fn main() {
     if (fp_get == 0) { say("ABORT: alpn_selected sym missing\n"); return 3; }
 
     say("[4] tcp_socket + connect 1.1.1.1:443\n");
-    var fd = payload(tcp_socket());
+    var fd_tag, fd = tcp_socket();
     var ip = 1 | (1 << 8) | (1 << 16) | (1 << 24);
     sock_connect(fd, ip, 443);
 

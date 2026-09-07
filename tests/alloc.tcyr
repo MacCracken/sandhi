@@ -1840,8 +1840,24 @@ fn test_alloc_134_evict_oldest_at_max() {
 
     var sz_before = sandhi_session_cache_size();
 
+    # A tick between each store so each last_used_ms is strictly greater than the
+    # last — the same idiom test_alloc_134_lookup_touch_promotes_lru uses below.
+    #
+    # 1.9.16: without these the three stores land in the SAME millisecond, all
+    # three last_used_ms tie, and `_sandhi_session_cache_evict_oldest` (strict `<`
+    # over map_keys order) evicts whichever key the map happens to enumerate
+    # first. That was stable only because the stdlib hash was an unseeded
+    # constant; cyrius v6.5.39 gave every process a random hash seed
+    # (lib/hashseed.cyr, hash-flooding fix), so map_keys order now varies run to
+    # run and this test failed intermittently the moment the pin crossed 6.5.39.
+    # LRU-by-timestamp is only a meaningful contract when the timestamps differ,
+    # so making them differ is what turns this back into a real assertion.
     sandhi_session_cache_store("evict1.example.com", 0, 0, 0x11111111);
+    var te1 = clock_now_ms();
+    while (clock_now_ms() <= te1) { }
     sandhi_session_cache_store("evict2.example.com", 0, 0, 0x22222222);
+    var te2 = clock_now_ms();
+    while (clock_now_ms() <= te2) { }
     sandhi_session_cache_store("evict3.example.com", 0, 0, 0x33333333);
 
     # evict1 was inserted first → smallest last_used_ms → evicted.

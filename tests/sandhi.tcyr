@@ -1589,16 +1589,22 @@ fn test_server_reject_arena_is_flat() {
     }
     var after = alloc_used();
 
-    # 600 sends (200 iterations x 3 statuses). The ONLY global-bump cost left is
-    # `sock_send`'s Result, measured at exactly 16 B per call — the response text
-    # itself is now entirely arena-backed and rewound. Pre-1.9.6 this same loop
-    # also charged the bump ~176 B per response for the str_builder.
+    # 600 sends (200 iterations x 3 statuses). The global-bump cost is now ZERO.
+    # Through 1.9.15 this asserted `600 * 16`: every `sock_send` boxed its
+    # `Result` on the no-free global bump at 16 B a call, the one charge left on
+    # this path that sandhi did not control. cyrius 6.6.0 made `Result` a
+    # `: stack` value form — a payload variant is a register pair that allocates
+    # nothing — so that charge is gone and the whole refusal path is arena-backed
+    # and rewound. The response text itself has been arena-backed since 1.9.6;
+    # pre-1.9.6 this same loop also charged the bump ~176 B per response for the
+    # str_builder.
     #
     # Asserting the exact figure rather than "small" is deliberate: if a future
     # edit reverts one of these calls to a bare `_send_*` wrapper, the number
-    # jumps and this fails, which is the whole point of the test.
-    assert_eq(after - before, 600 * 16,
-      "reject arena: 600 refusals cost ONLY the stdlib sock_send Result, no response-text allocation");
+    # jumps and this fails, which is the whole point of the test. Zero is a
+    # STRICTER form of that same check than 600 * 16 was.
+    assert_eq(after - before, 0,
+      "reject arena: 600 refusals cost the global bump NOTHING — no response-text allocation and no Result box either (cyrius 6.6.0 value form)");
     return 0;
 }
 
@@ -1771,27 +1777,29 @@ fn test_server_req_arena() {
     var used_404 = alloc_used();
     sandhi_router_dispatch_a(a, r, 0, devnull, miss, strlen(miss), &p);
     assert_eq(_g_route_calls, 0, "arena dispatch: unknown path still 404s without invoking");
-    # Exactly 16 bytes, and they are not sandhi's: `sock_send` returns a
-    # `Result` allocated on the global bump by `lib/net.cyr`. Filed as
-    # cyrius `2026-07-28-sock-send-result-allocates-per-call.md` and confirmed
-    # still present on 6.5.0. Everything sandhi controls on this path — the
-    # method/path accessors and the status write — is in the arena, which is
-    # what 1.9.7 changed.
-    assert_eq(alloc_used(), used_404 + 16,
-      "a 404 costs exactly one sock_send Result and nothing else on the bump");
+    # Exactly ZERO bytes. Through 1.9.15 this read `used_404 + 16`, and those 16
+    # were not sandhi's: `sock_send` returned a `Result` boxed on the global bump
+    # by `lib/net.cyr`. Filed as cyrius
+    # `2026-07-28-sock-send-result-allocates-per-call.md`, still present on
+    # 6.5.0, and FIXED by the 6.6.0 `: stack` value form, which returns the pair
+    # in registers and allocates nothing. Everything sandhi controls on this path
+    # — the method/path accessors and the status write — has been in the arena
+    # since 1.9.7, so the 404 arm is now bump-flat end to end.
+    assert_eq(alloc_used(), used_404,
+      "a 404 costs the global bump nothing at all — arena-only, and no Result box (cyrius 6.6.0)");
 
     reset_via(a);
     var wrong = "DELETE /api/notes/1 HTTP/1.1\r\nHost: x\r\n\r\n";
     var used_405 = alloc_used();
     sandhi_router_dispatch_a(a, r, 0, devnull, wrong, strlen(wrong), &p);
-    assert_eq(alloc_used(), used_405 + 16, "likewise the 405 write");
+    assert_eq(alloc_used(), used_405, "likewise the 405 write");
 
     # a null router still answers, through the arena
     reset_via(a);
     var used_null = alloc_used();
     sandhi_router_dispatch_a(a, 0, 0, devnull, req, strlen(req), &p);
-    assert_eq(alloc_used(), used_null + 16,
-      "a null router 404s through the arena as well, paying only that same Result");
+    assert_eq(alloc_used(), used_null,
+      "a null router 404s through the arena as well, and now pays nothing at all");
 
     # the router handler wrapper threads the same way
     reset_via(a);
@@ -1847,9 +1855,8 @@ fn _t_dl_count_sink(ctx, buf, len): i64 { return 1; }
 fn test_download_truncated_body_is_not_ok() {
     var lo = 0x0100007F;
     var lport = 39619;
-    var lr = tcp_socket();
-    if (is_err_result(lr) == 1) { assert_eq(1, 1, "dl trunc: tcp_socket unavailable — skipped"); return 0; }
-    var lfd = payload(lr);
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { assert_eq(1, 1, "dl trunc: tcp_socket unavailable — skipped"); return 0; }
     sock_reuse(lfd);
     if (is_err_result(sock_bind(lfd, lo, lport)) == 1) {
         sock_close(lfd); assert_eq(1, 1, "dl trunc: bind unavailable — skipped"); return 0;
@@ -1857,18 +1864,16 @@ fn test_download_truncated_body_is_not_ok() {
     if (is_err_result(sock_listen(lfd, 4)) == 1) {
         sock_close(lfd); assert_eq(1, 1, "dl trunc: listen unavailable — skipped"); return 0;
     }
-    var cr = tcp_socket();
-    if (is_err_result(cr) == 1) { sock_close(lfd); assert_eq(1, 1, "dl trunc: client socket — skipped"); return 0; }
-    var cfd = payload(cr);
+    var cr_tag, cfd = tcp_socket();
+    if (is_err_result(cr_tag) == 1) { sock_close(lfd); assert_eq(1, 1, "dl trunc: client socket — skipped"); return 0; }
     sock_reuse(cfd);
     if (is_err_result(sock_connect(cfd, lo, lport)) == 1) {
         sock_close(cfd); sock_close(lfd); assert_eq(1, 1, "dl trunc: connect — skipped"); return 0;
     }
-    var ar = sock_accept(lfd);
-    if (is_err_result(ar) == 1) {
+    var ar_tag, sfd = sock_accept(lfd);
+    if (is_err_result(ar_tag) == 1) {
         sock_close(cfd); sock_close(lfd); assert_eq(1, 1, "dl trunc: accept — skipped"); return 0;
     }
-    var sfd = payload(ar);
 
     # Peer sends 5 body bytes then closes, having "declared" 100.
     sock_send(sfd, "ABCDE", 5);
@@ -1899,9 +1904,8 @@ fn test_download_truncated_body_is_not_ok() {
 fn test_download_close_delimited_eof_is_ok() {
     var lo = 0x0100007F;
     var lport = 39620;
-    var lr = tcp_socket();
-    if (is_err_result(lr) == 1) { assert_eq(1, 1, "dl close-delim: skipped"); return 0; }
-    var lfd = payload(lr);
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { assert_eq(1, 1, "dl close-delim: skipped"); return 0; }
     sock_reuse(lfd);
     if (is_err_result(sock_bind(lfd, lo, lport)) == 1) {
         sock_close(lfd); assert_eq(1, 1, "dl close-delim: bind — skipped"); return 0;
@@ -1909,18 +1913,16 @@ fn test_download_close_delimited_eof_is_ok() {
     if (is_err_result(sock_listen(lfd, 4)) == 1) {
         sock_close(lfd); assert_eq(1, 1, "dl close-delim: listen — skipped"); return 0;
     }
-    var cr = tcp_socket();
-    if (is_err_result(cr) == 1) { sock_close(lfd); assert_eq(1, 1, "dl close-delim: skipped"); return 0; }
-    var cfd = payload(cr);
+    var cr_tag, cfd = tcp_socket();
+    if (is_err_result(cr_tag) == 1) { sock_close(lfd); assert_eq(1, 1, "dl close-delim: skipped"); return 0; }
     sock_reuse(cfd);
     if (is_err_result(sock_connect(cfd, lo, lport)) == 1) {
         sock_close(cfd); sock_close(lfd); assert_eq(1, 1, "dl close-delim: connect — skipped"); return 0;
     }
-    var ar = sock_accept(lfd);
-    if (is_err_result(ar) == 1) {
+    var ar_tag, sfd = sock_accept(lfd);
+    if (is_err_result(ar_tag) == 1) {
         sock_close(cfd); sock_close(lfd); assert_eq(1, 1, "dl close-delim: accept — skipped"); return 0;
     }
-    var sfd = payload(ar);
     sock_send(sfd, "ABCDE", 5);
     sock_close(sfd);
 
@@ -2097,9 +2099,8 @@ fn test_server_peer_addr() {
     var lport = 39517;            # listener
     var cport = 39518;            # the client binds here -> the server must report THIS
 
-    var lr = tcp_socket();
-    if (is_err_result(lr) == 1) { assert_eq(1, 1, "peer: tcp_socket unavailable — skipped"); return 0; }
-    var lfd = payload(lr);
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { assert_eq(1, 1, "peer: tcp_socket unavailable — skipped"); return 0; }
     sock_reuse(lfd);              # SO_REUSEADDR — else a TIME_WAIT from the previous run
     # fails the bind and this test silently degrades to a skip
     if (is_err_result(sock_bind(lfd, lo, lport)) == 1) {
@@ -2113,9 +2114,8 @@ fn test_server_peer_addr() {
         return 0;
     }
 
-    var cr = tcp_socket();
-    if (is_err_result(cr) == 1) { sock_close(lfd); assert_eq(1, 1, "peer: client socket — skipped"); return 0; }
-    var cfd = payload(cr);
+    var cr_tag, cfd = tcp_socket();
+    if (is_err_result(cr_tag) == 1) { sock_close(lfd); assert_eq(1, 1, "peer: client socket — skipped"); return 0; }
     sock_reuse(cfd);              # same: the client's bound port lands in TIME_WAIT too
     if (is_err_result(sock_bind(cfd, lo, cport)) == 1) {
         sock_close(cfd); sock_close(lfd);
@@ -2128,13 +2128,12 @@ fn test_server_peer_addr() {
         return 0;
     }
 
-    var ar = sock_accept(lfd);
-    if (is_err_result(ar) == 1) {
+    var ar_tag, sfd = sock_accept(lfd);   # sfd = the server side of the connection
+    if (is_err_result(ar_tag) == 1) {
         sock_close(cfd); sock_close(lfd);
         assert_eq(1, 1, "peer: accept unavailable — skipped");
         return 0;
     }
-    var sfd = payload(ar);        # server side of the connection
 
     # The whole point: the server learns WHO connected.
     assert_eq(sandhi_server_peer_ip(sfd), lo, "peer: ip is 127.0.0.1 (packed 0x0100007F)");
@@ -2935,9 +2934,8 @@ fn _test_mc_send_synth_answer(grp, port, iface): i64 {
     store8(&pkt + 23, 0xC0); store8(&pkt + 24, 0x0C);  # answer name ptr → offset 12
     store8(&pkt + 26, 1); store8(&pkt + 28, 1); store8(&pkt + 32, 60); store8(&pkt + 34, 4);
     store8(&pkt + 35, 10); store8(&pkt + 36, 0); store8(&pkt + 37, 0); store8(&pkt + 38, 1);  # 10.0.0.1
-    var tx_r = udp_socket();
-    if (is_err_result(tx_r) == 1) { return 0 - 1; }
-    var tx = payload(tx_r);
+    var tx_r_tag, tx = udp_socket();
+    if (is_err_result(tx_r_tag) == 1) { return 0 - 1; }
     net_set_multicast_if(tx, iface);
     net_set_multicast_loop(tx, 1);
     sock_connect(tx, grp, port);
@@ -3021,9 +3019,8 @@ fn _test_unicast_send_synth_answer(dst, port): i64 {
     store8(&pkt + 23, 0xC0); store8(&pkt + 24, 0x0C);  # answer name ptr → offset 12
     store8(&pkt + 26, 1); store8(&pkt + 28, 1); store8(&pkt + 32, 60); store8(&pkt + 34, 4);
     store8(&pkt + 35, 10); store8(&pkt + 36, 0); store8(&pkt + 37, 0); store8(&pkt + 38, 1);  # 10.0.0.1
-    var tx_r = udp_socket();
-    if (is_err_result(tx_r) == 1) { return 0 - 1; }
-    var tx = payload(tx_r);
+    var tx_r_tag, tx = udp_socket();
+    if (is_err_result(tx_r_tag) == 1) { return 0 - 1; }
     sock_connect(tx, dst, port);
     sock_send(tx, &pkt, 39);
     sock_close(tx);
@@ -3048,13 +3045,12 @@ fn test_discovery_local_qu_unicast() {
     }
     # TX: bound to `p` (REUSEPORT, alongside RX) + connected to the group — the
     # resolver's exact QU TX. Its presence is what exercises the REUSEPORT dispatch.
-    var tx_r = udp_socket();
-    if (is_err_result(tx_r) == 1) {
+    var tx_r_tag, tx = udp_socket();
+    if (is_err_result(tx_r_tag) == 1) {
         net_drop_multicast(rx, grp, lo); sock_close(rx);
         assert_eq(1, 1, "qu: udp_socket unavailable — skipped");
         return 0;
     }
-    var tx = payload(tx_r);
     sock_reuseport(tx);
     sock_bind(tx, 0, p);
     sock_connect(tx, grp, p);

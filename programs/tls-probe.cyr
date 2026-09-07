@@ -50,11 +50,10 @@ fn main() {
     say("  ipv4 packed: "); fmt_int(ip); say("\n");
 
     say("stage 3: plain TCP socket + connect ...\n");
-    var sfd_r = tcp_socket();
-    if (is_err_result(sfd_r) == 1) { say("  ABORT: socket failed\n"); return 1; }
-    var fd = payload(sfd_r);
-    var cr = sock_connect(fd, ip, 443);
-    if (is_err_result(cr) == 1) { say("  ABORT: connect 443 failed\n"); sock_close(fd); return 1; }
+    var sfd_tag, fd = tcp_socket();
+    if (is_err_result(sfd_tag) == 1) { say("  ABORT: socket failed\n"); return 1; }
+    var cr_tag, cr = sock_connect(fd, ip, 443);
+    if (is_err_result(cr_tag) == 1) { say("  ABORT: connect 443 failed\n"); sock_close(fd); return 1; }
     say("  connected fd="); fmt_int(fd); say("\n");
 
     say("stage 4: tls_connect ...\n");

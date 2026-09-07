@@ -15,8 +15,7 @@ include "lib/tls.cyr"
 fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
 
 fn six(addr, port, use_tls, sni, a, b) {
-    var fd_r = tcp_socket();
-    var fd = payload(fd_r);
+    var fd_tag, fd = tcp_socket();
     sock_connect(fd, addr, port);
     if (tls_available() == 0) { sock_close(fd); return 0; }
     say("  [6] pre tls_connect\n");
@@ -28,8 +27,7 @@ fn six(addr, port, use_tls, sni, a, b) {
 }
 
 fn seven(addr, port, use_tls, sni, a, b, c) {
-    var fd_r = tcp_socket();
-    var fd = payload(fd_r);
+    var fd_tag, fd = tcp_socket();
     sock_connect(fd, addr, port);
     if (tls_available() == 0) { sock_close(fd); return 0; }
     say("  [7] pre tls_connect\n");

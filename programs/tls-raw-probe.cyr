@@ -29,13 +29,12 @@ fn main() {
     if (ok == 0) { say("ABORT: libssl not loadable\n"); return 1; }
 
     say("[2] tcp_socket + sock_connect ...\n");
-    var fd_r = tcp_socket();
-    if (is_err_result(fd_r) == 1) { say("ABORT: socket\n"); return 2; }
-    var fd = payload(fd_r);
+    var fd_tag, fd = tcp_socket();
+    if (is_err_result(fd_tag) == 1) { say("ABORT: socket\n"); return 2; }
     # 1.1.1.1 as IP literal: bytes 1,1,1,1 packed LE = 0x01010101
     var ip = 1 | (1 << 8) | (1 << 16) | (1 << 24);
-    var cr = sock_connect(fd, ip, 443);
-    if (is_err_result(cr) == 1) { say("ABORT: connect\n"); return 3; }
+    var cr_tag, cr = sock_connect(fd, ip, 443);
+    if (is_err_result(cr_tag) == 1) { say("ABORT: connect\n"); return 3; }
     say("  connected fd="); fmt_int(fd); say("\n");
 
     say("[3] tls_connect ...\n");
