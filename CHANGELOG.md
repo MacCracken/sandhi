@@ -6835,3 +6835,14 @@ M2 close. Full HTTP client surface — POST/PUT/DELETE/PATCH/HEAD/GET over HTTP 
 
 ### Added
 - Initial project scaffold
+
+## [Unreleased]
+
+## [1.9.17] - 2026-09-12
+
+### Changed
+
+- **Toolchain `6.6.0` → `6.6.2`.** No source change: this repo was already on the
+  value form, so the flip cost it nothing. Re-verified on every surface it ships —
+  build, tests, and any bench/fuzz/distlib target, including every
+  `[lib.<profile>]` bundle.
