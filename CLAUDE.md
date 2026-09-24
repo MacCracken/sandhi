@@ -159,20 +159,22 @@ genuinely isn't in that subset — not that regeneration failed.
    in `[deps].stdlib` is never refreshed by `cyrius lib sync` and silently
    shadows the pinned snapshot's newer copy. **This recurs**: four such
    leftovers were removed at 1.9.2, two at 1.9.9, ten at 1.9.11 — sandhi
-   shadowing *itself* every time. **The fix is one command, and it is what CI
+   shadowing *itself* every time — and at 1.10.0 `lib/` held 104 files where the
+   pin resolves 70. **The fix is one command, and it is what CI
    actually does** (CI starts from an empty `lib/`):
 
    ```bash
-   rm -rf lib && cyrius deps    # 67 files at the 6.5.35 pin, zero shadows
+   rm -rf lib && cyrius deps    # 70 files at the 6.6.6 pin, zero shadows
    ```
 
    `lib/` is gitignored and reproducible from the manifest, so this is free.
    Prefer it over `cyrius lib sync` after a pin bump: **the two resolve
    different sets** — `lib sync` vendors the declared `[deps].stdlib` subset
-   (60 files; adds `hashmap_fast`, `ws_server`) while `deps` also walks sigil's
-   transitive graph (`bayan`, `ct`, `keccak`, `freelist`, + `result`, `slice`,
-   `sync*`). `deps` is the authoritative set because it is the one CI resolves;
-   a `lib/` built any other way can pass locally and differ in CI
+   (61 files at 6.6.6; adds `hashmap_fast`, `ws_server`) while `deps` also walks
+   sigil's transitive graph (`bayan`, `ct`, `keccak`, `freelist`, + `boxed`,
+   `hashseed`, `result`, `slice`, `sync*`). `deps` is the authoritative set
+   because it is the one CI resolves; a `lib/` built any other way can pass
+   locally and differ in CI
 
 ## Key Principles
 

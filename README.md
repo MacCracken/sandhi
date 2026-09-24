@@ -21,8 +21,8 @@ at 1.0.0 / Cyrius v5.7.0 ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5
 Patches land here first; `dist/sandhi.cyr` is regenerated each release and a
 small cyrius slot re-folds it.
 
-Current: **1.9.14**, pinned to **Cyrius 6.5.35**. **2,851 test assertions green**
-(755 sandhi + 1,691 h2 + 342 alloc + 63 rpc), plus a `cyrius fuzz` harness suite
+Current: **1.10.0**, pinned to **Cyrius 6.6.6**. **2,866 test assertions green**
+(770 sandhi + 1,691 h2 + 342 alloc + 63 rpc), plus a `cyrius fuzz` harness suite
 (8 parser-robustness harnesses) gating in CI. Builds clean for x86_64, aarch64,
 and the **AGNOS** target.
 
@@ -155,12 +155,12 @@ end-to-end on the native backend. The last cyrius-side dependency closed at
 ```sh
 cyrius deps                                                 # resolve stdlib deps
 cyrius build programs/smoke.cyr build/sandhi-smoke          # smoke link proof (native, no flag)
-cyrius test  tests/sandhi.tcyr                              # core (755 assertions)
-cyrius test  tests/h2.tcyr                                  # h2-specific (167 assertions)
+cyrius test  tests/sandhi.tcyr                              # core (770 assertions)
+cyrius test  tests/h2.tcyr                                  # h2-specific (1,691 assertions)
 cyrius test  tests/alloc.tcyr                               # allocator / arena (342 assertions)
 cyrius test  tests/rpc.tcyr                                 # RPC dialects (63 assertions)
 cyrius fuzz                                                 # parser-robustness harnesses (fuzz/*.fcyr)
-cyrius lint  src/*.cyr src/**/*.cyr                         # static checks (warn-as-fail in CI)
+cyrius lint  $(find src -name '*.cyr')                      # static checks (warn-as-fail in CI; recurses into src/http/h2/)
 CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke              # release-parity (native)
 cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr build/sandhi-smoke-libssl   # deprecated libssl opt-out
 cyrius distlib --all                                        # → dist/sandhi.cyr + the four profile bundles

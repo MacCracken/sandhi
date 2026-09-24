@@ -112,3 +112,18 @@ backend's pending retirement.
   no-flag build links clean** (the shipping path, and the one all five live gates
   run against), the CI step stays `continue-on-error`, and the whole step retires
   with the backend at sandhi **2.0**. No sandhi source change; no FFI workaround.
+
+- **2026-09-23 (sandhi 1.10.0 / cyrius `6.6.6`) — re-verified; still open, count
+  unchanged at 14.** Clean `rm -rf lib && cyrius deps` resolve (sigil 3.12.18), then
+  `CYRIUS_DCE=1 cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr` — and the plain
+  non-DCE build — both refuse with **14** reachable-undefined functions: `ct_select`,
+  `thread_local_alloc` / `_get` / `_init` / `_set`, and `u256_add` / `_cmp` / `_copy` /
+  `_eq` / `_from` / `_from_hex` / `_is_zero` / `_limb` / `_sub`. The full undefined set is
+  the 6.5.35 one plus **`sys_uname`** — sigil 3.12.18's `agnosys_uname` now calls stdlib
+  `sys_uname` instead of raw syscall 63; it is unreachable here, as on the native build.
+
+  **Neither requested fix has landed.** (1) the libssl-config reachability is unchanged;
+  (2) `cyrius build --allow-undef …` still fails with `error: cyrius build: unknown option
+  '--allow-undef'` — 6.6.5's CLI flag overhaul did not add it. Disposition unchanged:
+  native (no-flag) links clean and all six live gates pass on it, the CI step stays
+  `continue-on-error`, and the whole step retires with the backend at sandhi **2.0**.

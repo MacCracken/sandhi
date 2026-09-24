@@ -1,18 +1,19 @@
 # 2026-04-24 — hoosh + ifran adopt `sandhi::http` + `sandhi::rpc::json` for LLM-provider routing
 
-**Status**: **PARTIALLY RESOLVED — now an ifran-only item** (re-checked 2026-08-23).
+**Status**: **PARTIALLY RESOLVED — now an ifran-only item** (re-checked 2026-09-23;
+first split 2026-08-23).
 
-- **hoosh @ 2.6.3 — ADOPTED.** Uses `sandhi_http_post`, `sandhi_http_stream` +
+- **hoosh @ 2.6.10 — ADOPTED** (first confirmed @ 2.6.3). Uses `sandhi_http_post`, `sandhi_http_stream` +
   `sandhi_sse_event_data` / `sandhi_stream_err` / `_status` (streaming LLM responses,
   which is exactly the shape this doc proposed), plus `sandhi_headers_*`,
   `sandhi_resolve_ipv4`, `sandhi_net_parse_ipv4` and `sandhi_server_run`.
-- **ifran @ 2.2.0 — NOT adopted.** Zero sandhi verbs in `src/`.
+- **ifran @ 2.2.1 — NOT adopted.** Zero sandhi verbs in `src/` (unchanged since 2.2.0).
 
 The doc deliberately covered both because their needs were identical. They have now
 diverged, which is the condition its own header called out for splitting it. Everything
 below still reads as written for ifran; hoosh's half is done.
 **Reporter**: sandhi post-M3 coordination sweep
-**Target**: hoosh & ifran base-OS modernization pass (pre-sandhi-fold at Cyrius v5.7.0)
+**Target**: ifran-scheduled (the pre-fold window this originally named has passed)
 **Depends on**: sandhi v0.4.0 (shipped)
 
 > hoosh (LLM provider routing) and ifran (same shape as hoosh) have identical sandhi needs, so one doc covers both. If their implementation paths diverge during modernization, split this into two.
@@ -31,7 +32,7 @@ sandhi was scaffolded with "cleaner HTTP client surface for LLM-provider routing
 ## Minimal migration shape
 
 ```cyr
-include "dist/sandhi.cyr"
+include "lib/sandhi.cyr"      # stdlib; add "sandhi" to [deps] stdlib
 
 # Auth + body
 var h = sandhi_headers_new();
@@ -56,12 +57,17 @@ var reply = sandhi_json_get_string(sandhi_http_body(r),
 
 - **HTTPS works end-to-end** — the original libssl-pthread / stdlib-TLS-init blocker resolved upstream (cyrius v5.6.39; native TLS is the no-flag default since 6.1.21), so live HTTPS to production LLM providers works today (see [`archive/2026-04-24-libssl-pthread-deadlock.md`](archive/2026-04-24-libssl-pthread-deadlock.md)).
 - **JSON array navigation** (`path.0.field`) isn't yet in `sandhi_json_get_string`. Consumers handle arrays either by `get_string` + manual substring scan, or by pre-built array fragments. If a second LLM-provider consumer needs array navigation, we'll add it.
-- **Streaming (SSE)** deferred to sandhi M3.5. Chunked responses decode correctly today; SSE-as-iterator-callbacks awaits a consumer explicitly asking.
+- **Streaming (SSE)** shipped at M3.5 — `sandhi_http_stream` + `sandhi_sse_*` — and is what hoosh uses for provider streaming. The 1.9.15 read-boundary event-loss fix (a whole SSE event could vanish when a TCP read split it) reaches consumers only through a cyrius release that re-vendors `lib/sandhi.cyr`.
 
 ## Proposed roadmap entry (drop into both hoosh and ifran)
 
-> **Adopt `sandhi::http` + `sandhi::rpc::json` for provider-routing HTTP traffic.** Replace any direct `lib/http.cyr` usage (GET-only, HTTP/1.0, no HTTPS) with sandhi's full client surface. Use `sandhi::http::headers` for auth / org / user-agent. Pin sandhi via `[deps.sandhi]` during the 5.6.x window; pin retires at the v5.7.0 fold. Reference: `sandhi/docs/issues/2026-04-24-hoosh-ifran-sandhi-http.md`.
+> **Adopt `sandhi::http` + `sandhi::rpc::json` for provider-routing HTTP traffic.** Replace any direct `lib/http.cyr` usage (GET-only, HTTP/1.0, no HTTPS) with sandhi's full client surface; use `sandhi_http_stream` + `sandhi_sse_*` for streamed completions. Use `sandhi::http::headers` for auth / org / user-agent. sandhi ships in stdlib: add `"sandhi"` to `[deps] stdlib` and `include "lib/sandhi.cyr"` — there is no `[deps.sandhi]` pin post-fold. hoosh is the working reference. Reference: `sandhi/docs/development/issues/2026-04-24-hoosh-ifran-sandhi-http.md`.
 
 ## Log
 
 - **2026-04-24** — Filed as part of the sandhi post-M3 coordination sweep. Pairs hoosh + ifran because ADR 0001 + state.md describe them as "same shape". Split when that stops being true.
+- **2026-09-23** (sandhi 1.10.0 issue sweep) — Re-checked: ifran 2.2.1 still has zero sandhi
+  verbs; stays open (hoosh 2.6.10 remains adopted). Not split into two files — renaming would
+  break inbound links and the hoosh half needs no handoff; the status block carries the split.
+  Repaired the pre-fold guidance: `include "lib/sandhi.cyr"` + `[deps] stdlib` instead of
+  `dist/` + a `[deps.sandhi]` pin, and the SSE caveat (shipped, not deferred).

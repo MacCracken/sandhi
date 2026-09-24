@@ -72,9 +72,15 @@ jobs:
         # marked `#skip-lint`). Those lines are sub-`warn`, so the
         # warn-grep below misses them — the dedicated deferral-grep
         # gates them now.
+        #
+        # globstar: without it bash reads `**` as `*`, so `src/**/*.cyr`
+        # stopped one directory down and never reached src/http/h2/ — its
+        # 8 files went unlinted through 1.9.17 (the huffman.cyr allowlist
+        # arm below was unreachable). Same fix in the fmt + security steps.
         run: |
+          shopt -s globstar
           fail=0
-          for f in src/*.cyr src/**/*.cyr; do
+          for f in src/**/*.cyr; do
             [ -f "$f" ] || continue
             case "$f" in
               src/http/h2/huffman.cyr) echo "skip (allowlisted): $f"; continue ;;
@@ -104,8 +110,9 @@ jobs:
         # nothing, so the diff always reported drift on every non-
         # empty file. Read the exit code directly.
         run: |
+          shopt -s globstar
           fail=0
-          for f in src/*.cyr src/**/*.cyr programs/*.cyr tests/*.tcyr; do
+          for f in src/**/*.cyr programs/*.cyr tests/*.tcyr; do
             [ -f "$f" ] || continue
             if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
               echo "needs fmt: $f"
@@ -170,8 +177,9 @@ jobs:
         #
         # NON-GATING (continue-on-error) since cyrius 6.3.5: 6.3.x's linker
         # refuses to emit with reachable-undefined fns, and the libssl config
-        # leaves 4 of sigil's transitive crypto symbols (thread_local_init/set/get,
-        # ct_select) reachable-but-unlinked — a cyrius-side DCE reachability
+        # leaves sigil's transitive crypto symbols reachable-but-unlinked (4 at
+        # 6.3.5; 14 at 6.5.35 and 6.6.6 — ct_select, thread_local_*, u256_*)
+        # — a cyrius-side DCE reachability
         # artifact of the libssl `#ifdef`, NOT a sandhi/sigil source defect (the
         # native no-flag build links them all and is the real link proof). Filed:
         # docs/development/issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md.
@@ -343,6 +351,7 @@ jobs:
         # Matches code lines only — rejects patterns in `#` comments.
         # awk strip-and-check pattern matches yukti's CI shape.
         run: |
+          shopt -s globstar
           FAIL=0
           scan() {
             local label="$1"; shift
@@ -374,7 +383,7 @@ jobs:
             /var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
               match($0, /\[[0-9]+\]/); s=substr($0,RSTART+1,RLENGTH-2); n=s+0;
               if (n >= 65536) print FILENAME":"NR": large stack buffer ("n" bytes): "$0
-            }' src/*.cyr src/**/*.cyr 2>/dev/null | tee /tmp/bigbuf.txt
+            }' src/**/*.cyr 2>/dev/null | tee /tmp/bigbuf.txt
           [ -s /tmp/bigbuf.txt ] && FAIL=1
           echo "security scan complete (fail: $FAIL)"
           exit $FAIL

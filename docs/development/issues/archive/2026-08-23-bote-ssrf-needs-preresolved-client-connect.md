@@ -31,6 +31,8 @@ hop 2 stops the request.
 ⚠ **bote does not get this by bumping a pin.** Post-fold there is no sandhi pin;
 consumers include stdlib's vendored `lib/sandhi.cyr`, so this reaches bote only
 when a cyrius release re-vendors it from `dist/sandhi.cyr`.
+**Update 2026-09-23:** that happened at cyrius **6.5.37** (the sandhi 1.9.15 fold), so the
+hook is available to any consumer pinned at or above 6.5.37.
 
 **Original filing follows, unedited.**
 

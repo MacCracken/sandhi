@@ -9,6 +9,8 @@
 `lib/sandhi.cyr` from `dist/sandhi.cyr`. Bumping a sandhi pin does nothing — there is no
 sandhi pin any more. Verified 2026-08-23: bote 3.3.6 still routes all four transports
 through `sandhi_server_run`, so it stays affected until that re-vendor lands.
+**Update 2026-09-23:** the re-vendor landed — cyrius **6.5.6** folded sandhi 1.9.9, so any
+consumer pinned at or above 6.5.6 has this fix.
 
 ## What was wrong
 

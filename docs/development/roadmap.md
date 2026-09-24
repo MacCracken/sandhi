@@ -6,7 +6,8 @@
 > [`requests/`](requests/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. This file was last
-> swept clean of completed work on **2026-07-11** (after 1.8.1).
+> swept clean of completed work on **2026-09-23** (at 1.10.0: the two prepped pin-bump
+> sections and the SSE boundary item that shipped in 1.9.15 were removed).
 
 ## Context (post-fold)
 
@@ -15,7 +16,7 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.4.49** (1.8.0 latest-cyrius bump; was 6.3.5 at 1.7.0, 6.2.37 across 1.6.9–1.6.13).
+is currently **cyrius 6.6.6** (1.10.0; was 6.6.2 at 1.9.17, 6.4.49 at 1.8.0 — the full trail is in `state.md`).
 The 1.6.9–1.6.13 + 1.7.0 patches (client dispatch thread-safety, the server-TLS
 handshake migration + flat-RSS, the native trust-store verify-fail proof, the QU
 mDNS receive fix, the conn-off fd-collision fix, and the two yeo-cy-test fixes)
@@ -46,10 +47,10 @@ a public verb + a build flag is not a patch):
   blocked item. See `project_libssl_retirement_at_2_0` (memory).
 - **libssl smoke build is non-gating since cyrius 6.3.5 — drop at 2.0.** The
   `-D CYRIUS_TLS_LIBSSL` CI link-proof (`ci.yml`) is now `continue-on-error`:
-  6.3.x's linker refuses reachable-undefined fns, and the libssl config leaves a
-  sigil transitive crypto symbol reachable-but-unlinked (**re-verified 6.4.49,
-  2026-07-11: the original four [`thread_local_init/set/get`, `ct_select`] now link;
-  `sha256` is the sole reachable-undef now**) — a cyrius-side DCE artifact of the libssl `#ifdef`, NOT a
+  6.3.x's linker refuses reachable-undefined fns, and the libssl config leaves
+  sigil's transitive crypto symbols reachable-but-unlinked (**re-verified 6.6.6,
+  2026-09-23: 14 — `ct_select`, `thread_local_*`, `u256_*`; `--allow-undef` still not
+  plumbed through `cyrius build`**) — a cyrius-side DCE artifact of the libssl `#ifdef`, NOT a
   sandhi/sigil source defect (native links them all). Filed cyrius-side:
   [`issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md).
   Delete the CI step entirely as part of the 2.0 libssl removal below; revisit
@@ -110,12 +111,6 @@ deferral:
   accept-error policy do not cover it — the connection is progressing, just
   arbitrarily slowly. Wants a `sandhi_server_options_request_ms` whole-request
   budget checked in both recv loops.
-
-- **SSE events split across a recv boundary can be dropped.**
-  `_sandhi_stream_feed_sse_a` consumes field lines it has not dispatched, so an
-  event whose blank-line terminator lands in the next read is lost rather than
-  held. The 1.6.5 split-CRLF fix addressed the sibling condition in the chunked
-  decoder; this is the SSE-parser half.
 
 ### 1.9.13 repair queue — ✅ shipped
 
@@ -254,18 +249,38 @@ moved to [`requests/`](requests/README.md) instead.
 
 ## Background watches (not slots)
 
+- **CI compiles only smoke + the six live gates — `programs/` rots silently.** At
+  1.10.0 nine probes (`dns-probe`, `tls-probe`, `bootstrap-probe`,
+  `cpu-features-probe`, five `dynlib-*`) had not compiled since `src/obs/prof.cyr`
+  landed (1.2.5); `tls-probe` was even Result-migrated at 1.9.16 without a compile.
+  All nine were repaired at 1.10.0. **Provisional:** a compile-only CI step over
+  `programs/*.cyr` so the next include-list drift fails loudly. Ask before adding.
+- **Whole-surface reachable-undefined proof (provisional CI gate).** `programs/smoke.cyr`
+  references one fn, so its link proves little about the rest of the surface. At
+  1.10.0 a generated probe taking `&fn` of **all 842** sandhi fns linked under
+  `CYRIUS_DCE=1`, with negative controls (adding sigil's `secureboot_sign_module` /
+  `_sigil_random_fill`) refused — so no sandhi fn can reach an undefined stub. Worth
+  a CI step if a future stdlib/sigil bump makes the question live again.
+- **Test-unit include lists are partial by design, and 6.6.6 now says so.**
+  `tests/h2.tcyr` includes `h2/dispatch.cyr` but not `client.cyr`, so it compiles
+  with unreachable undefined refs — **21** reported on 6.6.6 (8 on 6.6.2, same
+  source: 6.6.6 reports them completely); `sandhi.tcyr` / `rpc.tcyr` carry
+  `sandhi_http_request_auto_a`. Not a defect (the refusing linker proves them
+  unreachable), but the noise can hide a new warning. Complete the lists only if
+  it does — watch the per-program fixup cap (architecture/001) when doing so.
 - **`tests/sandhi.tcyr` cap-drift** — if a slot pushes sandhi.tcyr against the
   per-program fixup-cap (architecture/001), carve out another `tests/<name>.tcyr`
   in the same slot (mirroring the 1.2.8 sandhi → rpc split). Don't let it block
-  the ship. (At 1.6.9 the suite is 539 assertions.)
+  the ship. (At 1.10.0 the suite is 770 assertions.)
 - **Fuzz-corpus expansion** — the first `fuzz/*.fcyr` round (7 harnesses over url /
   headers / response+chunked / dns / hpack / sse / json) shipped at **1.8.2** and
   gates in CI (`cyrius fuzz`). Add harnesses opportunistically as new parse surfaces
   land or a consumer's traffic motivates one (candidates: Huffman-decode direct, the
   h2 frame header, WebDriver/Appium/MCP envelope extract). Not a committed slot.
-- **Consumer coordination docs** ([`issues/`](issues/README.md)) — yantra /
-  hoosh+ifran / ark / mela / vidya / daimon (registry + MCP client). sandhi's side
-  is shipped; each opens when its consumer schedules adoption. These stay live in
+- **Consumer coordination docs** ([`issues/`](issues/README.md)) — still open:
+  ifran (hoosh's half adopted), ark, vidya (fetch), daimon (registry producer);
+  yantra / mela / daimon-MCP-client were adopted and archived 2026-08-23. sandhi's
+  side is shipped; each opens when its consumer schedules adoption. These stay live in
   `issues/` (sandhi-side-complete handoffs, not closed defects) rather than the
   archive.
 
@@ -280,6 +295,14 @@ moved to [`requests/`](requests/README.md) instead.
 
 ## Not sandhi's slot (filed so the framing doesn't drift back in)
 
+- **sigil's unreachable undefined `random_bytes` + `sys_uname` in sandhi's own builds.**
+  sigil 3.12.18 (the 6.6.6 snapshot) calls stdlib `sys_uname` (from `agnosys_uname`,
+  reached only via `secureboot_sign_module`) and `random_bytes` (`_sigil_random_fill`)
+  without its bundle pulling `lib/sys.cyr` / `lib/random.cyr`. Proven unreachable from
+  every sandhi fn at 1.10.0 (see the whole-surface proof above); `distlib`'s sidecars
+  already list `sys` + `random` for consumers. Hand-declaring them in sandhi's
+  `[deps]` would re-add sigil's transitive deps, which the 1.8.0 streamline retired —
+  a sigil-packaging matter, not sandhi's.
 - **`tls_connect` native-transport prep audit** — the hook surface
   (`tls_connect`, `tls_connect_with_ctx_hook`, ALPN / SNI / SPKI extraction) is
   owned by stdlib `lib/tls.cyr`. Auditing it for fdlopen-leaning assumptions is a

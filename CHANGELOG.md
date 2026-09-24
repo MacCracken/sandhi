@@ -2,6 +2,181 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+## [1.10.0] — 2026-09-23
+
+**Toolchain `6.6.2` → `6.6.6`, deps re-resolved to the 6.6.6 snapshot, and an issues sweep.**
+No library behaviour change and no public-surface change: the only `src/` edit is one stale
+comment. **2,866 assertions** (770 sandhi / 1,691 h2 / 342 alloc / 63 rpc, unchanged), 8/8
+fuzz, all six CI live gates green, all five dist bundles regenerated and idempotent, aarch64
+and AGNOS cross-builds clean. Proving the bump found four places where verification had
+quietly stopped covering what it claimed. All four are fixed below.
+
+⚠ **Nothing here reaches consumers by itself.** Post-fold there is no sandhi pin; a consumer
+gets sandhi when a cyrius release re-vendors `lib/sandhi.cyr` from `dist/sandhi.cyr`. The
+6.6.3–6.6.6 snapshots vendor 1.9.17, and 1.10.0 changes no behaviour, so a consumer on any of
+them already runs this code.
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.6`.** `lib/` re-resolved from empty (`rm -rf lib && cyrius
+  deps`): **104 → 70 files**, all 70 byte-identical to the 6.6.6 snapshot. The 34 that went
+  were not in the pin's resolved set, and neither `cyrius deps` nor `lib sync` removes such
+  files (the recurrence CLAUDE.md closeout step 8 exists for). Vendored, all from the toolchain
+  snapshot: **sigil 3.12.16 → 3.12.18**, **sakshi 2.5.1 → 2.5.2**, **bayan 1.5.5 → 1.5.6**.
+- **Build diagnostics, measured A/B.** Same source, each toolchain on a clean `lib/`:
+  - New on every build: `warning: undefined function 'sys_uname'`. sigil 3.12.18's
+    `agnosys_uname` now calls stdlib `sys_uname` (`lib/sys.cyr`, which sigil's bundle does not
+    pull) instead of raw syscall 63. It joins the long-standing `random_bytes` line and is the
+    same class. See *Verified* below.
+  - New on every build: `array local over the per-fn frame budget gets STATIC storage` at
+    `lib/sigil.cyr:25118`. This is a new 6.6.x diagnostic on sigil's 256 KiB crypto-bank
+    buffer, which is static by design (per-thread banks index into it). It is sigil's code.
+  - `tests/h2.tcyr`'s unreachable undefined references: **8 → 21**. The source is the same:
+    the unit includes `h2/dispatch.cyr` but not `client.cyr`, and 6.6.6 reports the whole set.
+    It is not a defect; it is recorded as a roadmap background watch.
+  - DCE smoke: 1,070,296 B, with the include-list fix below.
+- **`dist/*.deps`: `sys` added to all five sidecars.** This is distlib's compile-verified
+  leaf recovery picking up sigil's new call, as it picked up `random` for `random_bytes`.
+  sandhi does **not** hand-declare `sys` / `random` in its own `[deps]`: that would re-add
+  sigil's transitive deps, which the 1.8.0 streamline retired.
+- **h2: the `src/http/h2/conn.cyr` header comment** said the module "does NOT yet originate
+  requests (Bite 5b) or interpret response stream lifecycle (Bite 5c)". Both shipped in 0.8.0
+  as `h2/request.cyr` / `h2/response.cyr`. The comment now says so, and the layering recap
+  names those modules instead of a `sandhi_h2_stream` that never existed. It is the only `src/`
+  change, and the one finding the fixed lint glob surfaced.
+
+### Verified — no sandhi function can reach either undefined stub
+
+The prepped 6.6.6 roadmap note flagged `random_bytes` as worth confirming no live path
+reaches. `programs/smoke.cyr` references a single sandhi fn, so its clean link proves little
+about the rest of the surface. A generated probe taking `&fn` of **all 842 functions** in
+`[lib].modules` (public and private) links under `CYRIUS_DCE=1`, and `CYRIUS_DCE_VERBOSE`
+lists `secureboot_sign_module`, `agnosys_uname` and `_sigil_random_fill` as dead.
+
+The negative controls fail as they must. The same probe plus `&secureboot_sign_module`, or
+plus `&_sigil_random_fill`, is refused with `refusing to emit binary with 1 reachable
+undefined function(s)`. The linker check is live, and nothing sandhi exposes reaches either
+stub. A CI gate built from this probe is a provisional roadmap item.
+
+The same note had recorded "identical diagnostics on 6.6.2 and 6.6.6". That was measured
+against the stale 104-file `lib/`, whose sigil predates `sys_uname`, which is a concrete
+instance of why the clean re-resolve comes first.
+
+### Fixed — CI never linted, format-checked or buffer-scanned `src/http/h2/`
+
+`ci.yml` iterated `src/*.cyr src/**/*.cyr` under GitHub's default `bash -e`. Without
+`globstar`, `**` is just `*`, so the glob stopped one directory down. The **8 files in
+`src/http/h2/`** were skipped by three steps:
+
+- the lint step (its `huffman.cyr` allowlist arm was unreachable);
+- the fmt step;
+- the security step's large-stack-buffer scan.
+
+All three now `shopt -s globstar` and glob `src/**/*.cyr`. Run locally the way Actions runs
+them:
+
+- lint: 42 files (7 in h2) plus the allowlisted one, 0 warnings, 0 untracked deferrals once
+  the `conn.cyr` comment was fixed;
+- fmt: clean;
+- buffer scan: 43 files, 0 hits.
+
+The README's lint command had the same glob and now uses `$(find src -name '*.cyr')`.
+
+### Fixed — the smoke link proof skipped two modules
+
+`programs/smoke.cyr` says to keep its include list in sync with `cyrius.cyml [lib].modules`.
+It was missing `src/http/retry.cyr` and `src/http/download.cyr`, so CI's link proof never
+parsed either. Both are now included at their manifest positions, and the list diffs clean
+against `[lib].modules`.
+
+### Fixed — nine probes had not compiled since 1.2.5
+
+CI builds only smoke and the six live gates. Nine probes had include lists that predate
+`src/obs/prof.cyr` (1.2.5) and failed with `undefined variable
+'SANDHI_PROF_PHASE_URL_PARSE_END'`: `dns-probe`, `tls-probe`, `bootstrap-probe`,
+`cpu-features-probe`, and the five `dynlib-*` probes. `tls-probe` was Result-migrated at 1.9.16
+without ever compiling. Each include block now follows the canonical `[lib].modules` order.
+All **34** programs build, and `tls-probe`, `bootstrap-probe` and `cpu-features-probe` run to
+completion.
+
+This also closes the prepped 6.6.5 roadmap item, which had called `dns-probe` "nothing to
+change" without it building. `cyrius run programs/dns-probe.cyr one.one.one.one` now resolves
+`1.1.1.1`, so the host reaches the probe (≤ 6.6.4 dropped it). `http-probe
+https://example.com/` does a real TLS GET (200).
+
+### Fixed — `version-bump.sh` wrote new sections at the bottom of this file
+
+The script inserts `## [X.Y.Z]` after `## [Unreleased]`, and that heading sat on the file's
+**last** line, below 0.1.0. That is how 1.9.17 landed at the bottom. `## [Unreleased]` now sits
+at the top, where Keep a Changelog puts it, and this release's header was the first to land in
+the right place.
+
+### Verified on 6.6.6
+
+- Steps, in order: `cyrius deps` (first), then build (plain and `CYRIUS_DCE=1`), all four
+  suites, lint (all 43 files), `fmt --check` (src + programs + tests), `vet`, `fuzz` (8/8),
+  `distlib --all` twice (second pass byte-identical) plus `distlib --check`, `--aarch64` (a
+  valid aarch64 ELF), and `--agnos`.
+- All six CI live gates are green online:
+  - policy-runtime;
+  - native HTTPS repeated-request (6/6);
+  - high-level policy threading;
+  - server TLS (including 16/16 concurrent handshakes);
+  - SSRF resolver hook;
+  - accept-EMFILE (0 ms on-CPU).
+- The three `regression_network_probe` gates were also run offline (`unshare -rn`). Each skips
+  cleanly with exit 0 in under 5 ms. 6.6.6 changed `lib/regression.cyr` under them
+  (exec-verb deadlines), but `regression_network_probe` is a TCP probe, not an exec verb, and
+  behaves as before.
+- The deprecated `-D CYRIUS_TLS_LIBSSL` build still refuses with 14 reachable-undefined fns.
+  That step is non-gating and retires at 2.0.
+
+### Docs — issues folder swept
+
+- **Nothing was closeable.** All five open docs were re-verified against current evidence:
+  - daimon 2.4.2 still serves only `/v1/*` (no `/services/`);
+  - ifran 2.2.1 and ark 1.4.2 still use no sandhi verb;
+  - vidya 2.8.5 still uses only the server surface;
+  - the libssl issue is unchanged on 6.6.6: 14 reachable-undefined fns, and `cyrius build
+    --allow-undef` is still rejected as an unknown option.
+- **The handoffs were repaired for the post-fold world.**
+  - The four coordination docs still told consumers to pin `[deps.sandhi]` and `include
+    "dist/sandhi.cyr"`. They now say `include "lib/sandhi.cyr"` with `"sandhi"` in `[deps]
+    stdlib`.
+  - The ark / vidya caveats told consumers to wait for streaming or a configurable buffer.
+    They now name `sandhi_http_options_max_response_bytes` and `sandhi_http_download`, both
+    shipped.
+  - The hoosh/ifran SSE caveat now says shipped, not deferred.
+  - The daimon doc's pre-fold "land before the surface freezes" rationale is replaced, and it
+    offers `/v1/services/{name}` as a way through the namespace mismatch.
+  - Every verb in every migration example was checked against the current surface; all exist.
+- **Index.**
+  - Two archived 1.7.0 docs were never in the index and are now listed:
+    `2026-06-28-h2-promote-v6-conn-open-arity` and
+    `2026-06-28-pooled-tls-misleading-concurrency-comment`.
+  - The "consumer still carries the bug until a re-vendor" caveats are resolved. cyrius 6.5.6
+    folded sandhi 1.9.9, which carries the 1.9.8 accept-spin fix. cyrius 6.5.37 folded 1.9.15,
+    which carries the 1.9.12 P1s, bote's 1.9.14 resolver hook and the 1.9.15 SSE fix.
+- **Roadmap swept.**
+  - Removed: the two prepped pin-bump sections (every item is resolved above) and the SSE
+    boundary item that shipped in 1.9.15.
+  - Refreshed: stale pin, libssl-count and consumer facts.
+  - Recorded: three background watches (programs compile rot, the whole-surface proof,
+    partial test include lists) and one not-sandhi's-slot entry (sigil's
+    `sys_uname`/`random_bytes`).
+- CLAUDE.md closeout step 8 and the README snapshot now carry the 6.6.6 numbers.
+
+## [1.9.17] - 2026-09-12
+
+### Changed
+
+- **Toolchain `6.6.0` → `6.6.2`.** No source change: this repo was already on the
+  value form, so the flip cost it nothing. Re-verified on every surface it ships —
+  build, tests, and any bench/fuzz/distlib target, including every
+  `[lib.<profile>]` bundle.
+
 ## [1.9.16] — 2026-09-06
 
 **Migrated to the cyrius 6.6.0 `Result`/`Option`/`Either` value form.** Pin **6.5.35 → 6.6.0**
@@ -6835,14 +7010,3 @@ M2 close. Full HTTP client surface — POST/PUT/DELETE/PATCH/HEAD/GET over HTTP 
 
 ### Added
 - Initial project scaffold
-
-## [Unreleased]
-
-## [1.9.17] - 2026-09-12
-
-### Changed
-
-- **Toolchain `6.6.0` → `6.6.2`.** No source change: this repo was already on the
-  value form, so the flip cost it nothing. Re-verified on every surface it ships —
-  build, tests, and any bench/fuzz/distlib target, including every
-  `[lib.<profile>]` bundle.
