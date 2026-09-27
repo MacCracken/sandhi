@@ -4,6 +4,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.1] — 2026-09-27
+
+**Per-target errnos and a Windows v6 decline.** Toolchain unchanged (`6.6.6`). Found while cyrius
+6.6.7 folded sigil 3.13.3 and yukti 2.3.13, which stopped two other folded libs from supplying
+names sandhi had been borrowing. Required for the cyrius 6.6.7 fold.
+
+### Fixed
+
+- **A read or write deadline on macOS was reported as a broken connection.** `_SANDHI_EAGAIN`
+  was the Linux value `11`, but `sock_recv` / `sock_send` / `sock_accept` return the kernel's own
+  errno, and Darwin's EAGAIN is **35** (its 11 is EDEADLK). So on ecb and ach a 300 ms read timeout
+  made `sandhi_conn_recv` return -35 and `sandhi_conn_recv_all` -1: a CONNECT-class failure
+  instead of `SANDHI_ERR_TIMEOUT`, and an idle stop-enabled listener backed off until it gave up.
+  Linux x86_64, aarch64 and pi were correct. `_SANDHI_EAGAIN` is now 35 under
+  `CYRIUS_TARGET_MACOS` and 11 elsewhere, under a private name on purpose: an enum `EAGAIN` is one
+  program-wide global under "last definition wins", which is how sigil ≤ 3.13.2's `EAGAIN = 11`
+  had been masking this on macOS.
+- **The accept classifier's errno table was Linux-only.** Four values differ on Darwin: with the
+  Linux numbers a macOS ECONNABORTED (53) or EPROTO (100) backed off instead of retrying, and
+  ENOTSOCK (38) / EOPNOTSUPP (102) backed off ~48 s instead of failing at once. The
+  `_SANDHI_ERRNO_*` table now carries the Darwin values under `CYRIUS_TARGET_MACOS` (checked
+  against the host's errno on ecb).
+- **sandhi no longer compiles only by borrowing yukti's socket numbers on Windows.** The two IPv6
+  open paths issued raw `syscall(SYS_SOCKET/SYS_CONNECT, …)`; on PE those names existed only
+  because yukti ≤ 2.3.12 leaked them into every program that included it. They now call
+  `sys_socket` / `sys_connect`, and under `CYRIUS_TARGET_WIN` the v6 path declines cleanly (as it
+  already did on AGNOS) so the client falls back to IPv4. The Windows stdlib peer has no BSD
+  socket fd surface to route them to.
+
+### Added
+
+- `test_conn_read_timeout_is_eagain` — a loopback listener that never sends, a 300 ms read
+  timeout, and an assertion that the error is the platform's EAGAIN and classifies as a timeout.
+- `test_accept_idle_errno_is_retry` — an idle accept is RETRY, not back-off.
+
 ## [1.10.0] — 2026-09-23
 
 **Toolchain `6.6.2` → `6.6.6`, deps re-resolved to the 6.6.6 snapshot, and an issues sweep.**
