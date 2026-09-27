@@ -19,6 +19,7 @@ modernization agent beats routing through sandhi's full repo.
 | [`2026-04-24-hoosh-ifran-sandhi-http.md`](2026-04-24-hoosh-ifran-sandhi-http.md) | ~~hoosh~~ + ifran | consumer | **Half done.** hoosh 2.6.10 adopted (`http_post`, `http_stream` + SSE). ifran 2.2.1 has zero sandhi verbs. Now an ifran-only item. |
 | [`2026-04-24-ark-sandhi-registry-ops.md`](2026-04-24-ark-sandhi-registry-ops.md) | ark | consumer | **Not adopted.** ark 1.4.2, zero sandhi verbs. |
 | [`2026-04-24-vidya-sandhi-fetch.md`](2026-04-24-vidya-sandhi-fetch.md) | vidya | consumer | **Reframed.** vidya 2.8.5 already consumes the *server* surface; the *fetch* ask is unmet (no fetch path of any kind yet). Additive now, not a new dependency. Still low priority. |
+| [`2026-09-25-http-stream-no-idle-hook.md`](2026-09-25-http-stream-no-idle-hook.md) | hoosh | **sandhi** | **Open (filed 2026-09-25).** sandhi-side feature: `sandhi_http_stream` gives the consumer no turn while the upstream is silent, so hoosh cannot send SSE keep-alives on remote streams. Proposes `sandhi_http_options_idle_ms` / `_idle_cb`. |
 
 **Adopted and archived** — these were filed as "not confirmed from this repo";
 each has now been confirmed by reading the consumer's own source:

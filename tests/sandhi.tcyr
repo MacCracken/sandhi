@@ -1946,6 +1946,70 @@ fn test_download_close_delimited_eof_is_ok() {
     return 0;
 }
 
+# 1.10.1 — the would-block errno is the TARGET's, not Linux's.
+#
+# `_SANDHI_EAGAIN` was a flat 11. macOS reports EAGAIN as 35, so a read deadline
+# there came back from `sandhi_conn_recv` as -35, matched no sentinel, and every
+# caller reported a broken connection (CONNECT) instead of SANDHI_ERR_TIMEOUT.
+# These tests take the errno from the REAL kernel on whatever host runs them, so
+# they only discriminate on a host whose EAGAIN is not 11 — which is the point:
+# on macOS they fail against a Linux-only constant. Measured on ecb / ach with
+# the 1.10.0 value: recv = -35, recv_all = -1.
+fn test_conn_read_timeout_is_eagain() {
+    var lo = 0x0100007F;
+    var lport = 39621;
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { assert_eq(1, 1, "read timeout: tcp_socket unavailable — skipped"); return 0; }
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, lo, lport)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "read timeout: bind unavailable — skipped"); return 0;
+    }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "read timeout: listen unavailable — skipped"); return 0;
+    }
+    # Plain conn, 300 ms read deadline. The listener never accepts or sends,
+    # so the first recv can only end by SO_RCVTIMEO firing.
+    var conn = sandhi_conn_open_timed(lo, lport, 0, 0, 300, 0);
+    if (conn == 0) { sock_close(lfd); assert_eq(1, 1, "read timeout: open failed — skipped"); return 0; }
+    var buf = alloc(128);
+    # The kernel's own errno for this condition, straight from the stdlib.
+    var kt, ke = sock_recv(sandhi_conn_fd(conn), buf, 64);
+    assert_eq(is_err_result(kt), 1, "read timeout: raw recv on a silent peer errs");
+    assert_eq(ke, _SANDHI_EAGAIN, "read timeout: _SANDHI_EAGAIN is the kernel's would-block errno");
+    assert_eq(sandhi_conn_recv(conn, buf, 64), 0 - _SANDHI_EAGAIN,
+      "read timeout: sandhi_conn_recv surfaces -_SANDHI_EAGAIN");
+    assert_eq(sandhi_conn_recv_all(conn, buf, 64), 0 - _SANDHI_EAGAIN,
+      "read timeout: recv_all classifies it as a timeout, not a broken conn");
+    sandhi_conn_close(conn);
+    sock_close(lfd);
+    return 0;
+}
+
+# 1.10.1 — the accept classifier sees the kernel's would-block errno as RETRY.
+# A non-blocking listen fd with nothing queued is exactly the idle steady state
+# of `sandhi_server_run_async` and of every stop-enabled loop. With a Linux-only
+# EAGAIN a macOS listener classified it BACKOFF and gave up after ~200 polls.
+fn test_accept_idle_errno_is_retry() {
+    var lo = 0x0100007F;
+    var lport = 39622;
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { assert_eq(1, 1, "idle accept: tcp_socket unavailable — skipped"); return 0; }
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, lo, lport)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "idle accept: bind unavailable — skipped"); return 0;
+    }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "idle accept: listen unavailable — skipped"); return 0;
+    }
+    sock_set_nonblocking(lfd);
+    var at, ae = sock_accept(lfd);
+    assert_eq(is_err_result(at), 1, "idle accept: nothing queued errs");
+    assert_eq(ae, _SANDHI_EAGAIN, "idle accept: the errno is _SANDHI_EAGAIN");
+    assert_eq(_sandhi_accept_action(ae), SANDHI_ACCEPT_RETRY, "idle accept: classified RETRY, never backed off");
+    sock_close(lfd);
+    return 0;
+}
+
 # 1.9.13 P1 — the pool's chunked-completeness walker must cap its chunk size.
 #
 # THIRD copy of the bound the buffered parser has had since 0.9.0 P0 #3 and the
@@ -4383,6 +4447,10 @@ fn main() {
     test_group("download/truncated_body");
     test_download_truncated_body_is_not_ok();
     test_download_close_delimited_eof_is_ok();
+
+    test_group("conn/platform_eagain");
+    test_conn_read_timeout_is_eagain();
+    test_accept_idle_errno_is_retry();
 
     return assert_summary();
 }

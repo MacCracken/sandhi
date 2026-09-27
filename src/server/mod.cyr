@@ -1181,13 +1181,26 @@ enum SandhiAcceptAction {
 # values agree today; the classifier should not depend on that continuing
 # to be true. EAGAIN reuses `_SANDHI_EAGAIN` (src/http/conn.cyr), which is
 # already the module-wide spelling.
+#
+# The values are PER TARGET: accept(2) hands back the kernel's own errno, and
+# four of these differ on Darwin. With the Linux numbers a macOS ECONNABORTED
+# (53) or EPROTO (100) backed off instead of retrying, and ENOTSOCK (38) /
+# EOPNOTSUPP (102) backed off ~48 s instead of failing at once. CHANGELOG [1.10.1].
 var _SANDHI_ERRNO_EINTR        = 4;
 var _SANDHI_ERRNO_EBADF        = 9;
 var _SANDHI_ERRNO_EINVAL       = 22;
+#ifdef CYRIUS_TARGET_MACOS
+var _SANDHI_ERRNO_EPROTO       = 100;
+var _SANDHI_ERRNO_ENOTSOCK     = 38;
+var _SANDHI_ERRNO_EOPNOTSUPP   = 102;
+var _SANDHI_ERRNO_ECONNABORTED = 53;
+#endif
+#ifndef CYRIUS_TARGET_MACOS
 var _SANDHI_ERRNO_EPROTO       = 71;
 var _SANDHI_ERRNO_ENOTSOCK     = 88;
 var _SANDHI_ERRNO_EOPNOTSUPP   = 95;
 var _SANDHI_ERRNO_ECONNABORTED = 103;
+#endif
 
 # Capped exponential backoff: 1 ms doubling to 250 ms, reset on any
 # successful accept. SANDHI_ACCEPT_GIVEUP consecutive backoffs (~48 s once
