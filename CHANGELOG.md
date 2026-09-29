@@ -4,6 +4,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.2] — 2026-09-28
+
+**A stale agnos comment, and the pin to the released cyrius 6.6.9.** Toolchain `6.6.6` → `6.6.9`.
+No behaviour change. Reported by cyrius 6.6.10 bite 13 (its stale-agnos-notes sweep); NOT
+re-vendored into cyrius this release.
+
+### Changed
+
+- **`src/server/mod.cyr`'s agnos note on the listen fd was false.** It said inbound TCP was "agnos
+  Phase B — `sock_listen` already returns Err above, so this fn bails before the cooperative accept
+  loop". cyrius has wired `sock_bind` / `sock_listen` / `sock_accept` to agnos's #56/#57 since
+  v6.2.22, so an agnos listener is real; the comment now says why no fcntl is needed there
+  (sock_accept#57 is itself non-blocking). Comment only — the five dist bundles change by that
+  comment and the version string.
+- **Pin 6.6.6 → 6.6.9** (the latest released cyrius). `lib/` re-resolved from empty (`rm -rf lib &&
+  cyrius deps`: 72 files). 6.6.9's `cyrius distlib` writes leaner `.deps` sidecars — the leaves
+  reached only through sigil's own graph (`sigil`'s `sys` / `random` / `fdlopen` / `dynlib`,
+  `process`, `fnptr`) are no longer listed per profile, and `sandhi-tls.deps` gains `syscalls`;
+  `cyrius distlib --all` is idempotent (a second pass is byte-identical) and `--check` is clean.
+  All four suites green on the new pin (`cyrius test`: 4 passed, 0 failed), `cyrius fuzz` 8/8.
+
 ## [1.10.1] — 2026-09-27
 
 **Per-target errnos and a Windows v6 decline.** Toolchain unchanged (`6.6.6`). Found while cyrius
