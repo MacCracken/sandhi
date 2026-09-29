@@ -588,6 +588,37 @@ fn test_alloc_batch5_resolve_oom() {
     return 0;
 }
 
+# resolve.cyr — the DNS TXID fails CLOSED (cyrius CVE-19). When getrandom
+# yields fewer than 2 bytes there is no TXID and no query: the old
+# clock-ns fallback made the TXID predictable. Both resolvers must refuse
+# before reading resolv.conf, allocating or opening a socket — an arena
+# that stays at 0 bytes proves nothing past the guard ran.
+fn test_alloc_batch5_resolve_txid_fail_closed() {
+    var buf[2];
+    store8(&buf, 0xAB); store8(&buf + 1, 0xCD);
+    assert_eq(_sandhi_resolve_txid_from(2, &buf), 0xABCD,
+      "txid_from: 2 random bytes -> their u16");
+    assert_eq(_sandhi_resolve_txid_from(0, &buf), 0 - 1,
+      "txid_from: getrandom read 0 bytes -> -1, never a clock value");
+    assert_eq(_sandhi_resolve_txid_from(1, &buf), 0 - 1,
+      "txid_from: a 1-byte short read -> -1");
+    assert_eq(_sandhi_resolve_txid_from(0 - 38, &buf), 0 - 1,
+      "txid_from: a -errno (ENOSYS) -> -1");
+    var a = arena_allocator(4096);
+    assert_eq(_sandhi_resolve_ipv4_query_a(a, "example.com", 0 - 1), 0 - 1,
+      "ipv4 query with no TXID -> -1");
+    assert_eq(arena_used(allocator_state(a)), 0,
+      "ipv4: refused before resolv.conf / query alloc");
+    assert_eq(_sandhi_resolve_ipv6_query_a(a, "example.com", 0 - 1), 0,
+      "ipv6 query with no TXID -> 0");
+    assert_eq(arena_used(allocator_state(a)), 0,
+      "ipv6: refused before resolv.conf / query alloc");
+    var r = _sandhi_resolve_random_u16();
+    assert_eq(r >= 0, 1, "random_u16 on a working CSPRNG -> a TXID");
+    assert_eq(r <= 0xFFFF, 1, "random_u16 is a u16");
+    return 0;
+}
+
 # discovery/local.cyr — ctx-bound allocator + qname round-trip.
 fn test_alloc_batch3_local_arena() {
     var a = arena_allocator(2048);
@@ -2101,6 +2132,7 @@ fn main() {
 
     test_group("alloc/batch5/resolve_oom");
     test_alloc_batch5_resolve_oom();
+    test_alloc_batch5_resolve_txid_fail_closed();
 
     test_group("alloc/batch6/options_arena");
     test_alloc_batch6_options_arena();

@@ -4,6 +4,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.3] — 2026-09-29
+
+**The DNS TXID fails closed when getrandom fails (cyrius CVE-19), and the pin to the released
+cyrius 6.6.10.** Toolchain `6.6.9` → `6.6.10`. Reported by cyrius 6.6.11 bite 14; re-vendored
+into cyrius 6.6.11 as `lib/sandhi.cyr`.
+
+### Security
+
+- **A failed getrandom fell back to a clock-derived DNS TXID.** When `sys_getrandom` returned
+  fewer than 2 bytes, `_sandhi_resolve_random_u16` returned `(clock_now_ns() ^ (ns >> 16)) &
+  0xFFFF` and both resolvers sent the query with it. A TXID an off-path attacker can estimate
+  from the query time re-opens the Kaminsky cache-poisoning window the TXID exists to close.
+  cyrius's CVE-19 fix (2026-06-11) changed this to fail closed, but only in cyrius's vendored
+  `lib/sandhi.cyr`; the next re-vendor from this repo brought the clock fallback back, and it
+  has shipped in every sandhi release and every cyrius fold since. The fix is now here, at the
+  source: the helper returns -1 on a short or failed read, and `sandhi_resolve_ipv4[_a]`
+  returns -1 / `sandhi_resolve_ipv6[_a]` returns 0 **before** reading `/etc/resolv.conf`,
+  allocating or opening a socket. On every supported target getrandom yields real entropy, so
+  this arm runs only on a genuine CSPRNG failure — where refusing the lookup is the right
+  answer. No public signature changes.
+
+### Changed
+
+- The TXID mapping is split into `_sandhi_resolve_txid_from(n, buf)` and the two lookups into
+  `_sandhi_resolve_ipv4_query_a` / `_sandhi_resolve_ipv6_query_a(a, host, txid)`, so the
+  failure arm is testable without forcing the kernel CSPRNG to fail. The public `_impl_a`
+  entry points keep their signatures and delegate.
+- **Pin 6.6.9 → 6.6.10** (the latest released cyrius). `lib/` re-resolved from empty (`rm -rf
+  lib && cyrius deps`: 72 files). All five dist bundles regenerated (`cyrius distlib --all`;
+  a second pass is byte-identical, `--check` clean); the `.deps` sidecars are unchanged. The
+  resolver change reaches `sandhi.cyr`, `-rpc` and `-discovery`; `-tls` and `-server` take
+  only the version stamp.
+
+### Added
+
+- `test_alloc_batch5_resolve_txid_fail_closed` (10 assertions): the TXID mapping refuses 0-,
+  1- and -errno-byte reads, and both query paths refuse a missing TXID with an arena that
+  stays at 0 bytes. Each of the three guards was mutation-checked (put the clock fallback
+  back, or drop either caller guard): the test fails every time. **2,883 assertions** (777 /
+  1,691 / 352 / 63), `cyrius fuzz` 8/8.
+
 ## [1.10.2] — 2026-09-28
 
 **A stale agnos comment, and the pin to the released cyrius 6.6.9.** Toolchain `6.6.6` → `6.6.9`.

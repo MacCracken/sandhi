@@ -21,8 +21,8 @@ at 1.0.0 / Cyrius v5.7.0 ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5
 Patches land here first; `dist/sandhi.cyr` is regenerated each release and a
 small cyrius slot re-folds it.
 
-Current: **1.10.0**, pinned to **Cyrius 6.6.6**. **2,866 test assertions green**
-(770 sandhi + 1,691 h2 + 342 alloc + 63 rpc), plus a `cyrius fuzz` harness suite
+Current: **1.10.3**, pinned to **Cyrius 6.6.10**. **2,883 test assertions green**
+(777 sandhi + 1,691 h2 + 352 alloc + 63 rpc), plus a `cyrius fuzz` harness suite
 (8 parser-robustness harnesses) gating in CI. Builds clean for x86_64, aarch64,
 and the **AGNOS** target.
 

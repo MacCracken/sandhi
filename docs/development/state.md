@@ -4,6 +4,15 @@
 
 ## Version
 
+**1.10.3** — 2026-09-29. **The DNS TXID fails closed when getrandom fails (cyrius
+CVE-19), pin 6.6.9 → 6.6.10.** The clock-ns TXID fallback in `src/net/resolve.cyr` had
+been fixed only in cyrius's fold and came back at the next re-vendor; it is now fixed
+here and re-vendored into cyrius 6.6.11. **2,883 assertions** (777 / 1,691 / 352 / 63),
+8/8 fuzz, all five dist bundles regenerated and idempotent.
+
+_(1.10.1 — 2026-09-27 — per-target EAGAIN + accept errnos, Windows v6 decline; 1.10.2 —
+2026-09-28 — a stale agnos comment, pin 6.6.6 → 6.6.9. Detail in CHANGELOG.)_
+
 **1.10.0** — 2026-09-23. **Toolchain 6.6.2 → 6.6.6, deps re-resolved to the 6.6.6
 snapshot, issues sweep.** No library behaviour change and no public-surface change — the
 only `src/` edit is a stale comment in `src/http/h2/conn.cyr`. **2,866 assertions**
