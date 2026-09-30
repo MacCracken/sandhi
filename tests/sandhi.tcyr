@@ -1532,6 +1532,87 @@ fn test_server_accept_surfaces_when_idle() {
     return 0;
 }
 
+# 1.10.4 — the accept that follows a readable poll cannot park either.
+#
+# On macOS `_sandhi_server_accept` polls, then accepts. A peer that resets
+# between the two is dropped from the BSD accept queue, so the accept finds
+# nothing: on a BLOCKING listener it would sleep until the next client, with the
+# stop flag unread. `_sandhi_server_arm_stop_poll` therefore makes the listener
+# O_NONBLOCK on macOS. That race cannot be scheduled from a test, but what it
+# reduces to can: an armed listener with nothing queued, accepted directly. On
+# Linux SO_RCVTIMEO returns EAGAIN after the poll interval; on macOS the
+# non-blocking listener returns it at once. Mutation (measured on ecb and ach):
+# dropping the macOS `sock_set_nonblocking` hangs this row.
+fn test_server_armed_accept_never_parks() {
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { assert_eq(1, 1, "armed accept: tcp_socket unavailable — skipped"); return 0; }
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, INADDR_LOOPBACK(), 0)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "armed accept: bind unavailable — skipped"); return 0;
+    }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "armed accept: listen unavailable — skipped"); return 0;
+    }
+    var flag[8];
+    store64(&flag, 0);
+    _sandhi_server_arm_stop_poll(lfd, &flag);
+    var t0 = clock_now_ns();
+    var at, av = sock_accept(lfd);                  # no poll first: the race's accept
+    var ms = (clock_now_ns() - t0) / 1000000;
+    sock_close(lfd);
+    assert_eq(is_err_result(at), 1, "armed accept: nothing queued, so an error comes back");
+    assert_eq(av, _SANDHI_EAGAIN, "armed accept: the target's EAGAIN, which the policy retries");
+    assert(ms < 5000, "armed accept: returns instead of waiting for the next client");
+    return 0;
+}
+
+# 1.10.4 — a connection accepted from a stop-armed listener is BLOCKING.
+#
+# A BSD accept(2) gives the new socket the listener's O_NONBLOCK, and macOS's
+# armed listener is non-blocking (see above). Every connection handler reads a
+# blocking fd bounded by SO_RCVTIMEO, so an inherited O_NONBLOCK would turn the
+# first slow read into an immediate EAGAIN — a dropped request.
+# `_sandhi_server_accept` clears it. Mutation (measured on ecb and ach):
+# dropping `_sandhi_server_conn_blocking` fails the O_NONBLOCK row.
+fn test_server_armed_accept_hands_out_blocking_fd() {
+    var lo = 0x0100007F;
+    var lport = 39627;
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { assert_eq(1, 1, "armed conn: tcp_socket unavailable — skipped"); return 0; }
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, lo, lport)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "armed conn: bind unavailable — skipped"); return 0;
+    }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "armed conn: listen unavailable — skipped"); return 0;
+    }
+    var flag[8];
+    store64(&flag, 0);
+    _sandhi_server_arm_stop_poll(lfd, &flag);
+    var cr_tag, cfd = tcp_socket();
+    if (is_err_result(cr_tag) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "armed conn: client socket — skipped"); return 0;
+    }
+    if (is_err_result(sock_connect(cfd, lo, lport)) == 1) {
+        sock_close(cfd); sock_close(lfd); assert_eq(1, 1, "armed conn: connect — skipped"); return 0;
+    }
+    var at, sfd = _sandhi_server_accept(lfd, &flag);
+    assert_eq(is_err_result(at), 0, "armed conn: the queued connection is accepted");
+    if (is_err_result(at) == 0) {
+        var fl = sys_fcntl(sfd, 3, 0);              # F_GETFL
+        var nb = 2048;                              # Linux O_NONBLOCK
+        #ifdef CYRIUS_TARGET_MACOS
+        nb = 4;                                     # Darwin O_NONBLOCK
+        #endif
+        assert(fl >= 0, "armed conn: F_GETFL on the accepted fd");
+        assert_eq(fl & nb, 0, "armed conn: the accepted fd is blocking, not the listener's O_NONBLOCK");
+        sock_close(sfd);
+    }
+    sock_close(cfd);
+    sock_close(lfd);
+    return 0;
+}
+
 # The behavioural half: a flag already set when the loop starts must stop it
 # before it serves anything, and the loop must report 0 rather than 1.
 #
@@ -4210,6 +4291,8 @@ fn main() {
     test_server_stop_returns_zero();
     test_server_stop_wakes_blocked_accept();
     test_server_accept_surfaces_when_idle();
+    test_server_armed_accept_never_parks();
+    test_server_armed_accept_hands_out_blocking_fd();
 
     test_group("server/accept_policy/classify");
     test_accept_action_transient();

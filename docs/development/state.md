@@ -7,9 +7,9 @@
 **1.10.4** — 2026-09-30. **Windows never reads a plantable `C:\etc\resolv.conf` (cyrius
 CVE-57); a stop-enabled server wakes on macOS; the suites run on macOS; pin 6.6.10 →
 6.6.11.** On Windows the A lookup is now `net_resolve_ipv4` (getaddrinfo) and the AAAA lookup
-answers 0. XNU's accept ignores `SO_RCVTIMEO`, so the serve loops poll the listener there.
+answers 0. XNU's accept ignores `SO_RCVTIMEO`, so the serve loops poll a non-blocking listener there.
 There is a new `macos-14` CI job, and the four suites were run once on ecb and ach.
-**2,887 assertions** (781 / 1,691 / 352 / 63), all five dist bundles regenerated. Re-vendored
+**2,893 assertions** (787 / 1,691 / 352 / 63), all five dist bundles regenerated. Re-vendored
 into cyrius 6.6.12.
 
 **1.10.3** — 2026-09-29. **The DNS TXID fails closed when getrandom fails (cyrius

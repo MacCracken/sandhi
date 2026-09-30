@@ -47,6 +47,19 @@ into cyrius 6.6.12 as `lib/sandhi.cyr`.
   plain `sock_accept`. New row `test_server_accept_surfaces_when_idle` (4 assertions) needs no
   thread race to fail: with the macOS arm removed it hangs on both ecb and ach (measured,
   killed at 60 s). The threaded test passed on ach (Intel) pre-fix only by luck.
+- **The accept that follows that poll could still park on macOS.** poll reporting the
+  listener readable does not mean a connection is still queued when `accept` runs: a peer
+  that resets in between is dropped from a BSD accept queue, and a blocking accept then
+  sleeps until the next client arrives without re-reading the flag. With a flag configured,
+  `_sandhi_server_arm_stop_poll` now also makes the listen fd `O_NONBLOCK` on macOS, so that
+  accept returns `EAGAIN` (RETRY). A BSD `accept(2)` gives the new socket the listener's
+  `O_NONBLOCK`, and every connection handler reads a blocking fd bounded by `SO_RCVTIMEO`, so
+  `_sandhi_server_accept` puts the accepted fd back in blocking mode before returning it (a
+  failure drops the connection as `ECONNABORTED`, RETRY). Found in cyrius 6.6.12's review of
+  bite 15. Two new rows, mutation-proven on ecb and ach:
+  `test_server_armed_accept_never_parks` accepts an armed idle listener directly (what the
+  race reduces to) and hangs without the `O_NONBLOCK`; `test_server_armed_accept_hands_out_blocking_fd`
+  fails its `O_NONBLOCK` row without the clear.
 
 ### Changed
 
