@@ -1497,6 +1497,41 @@ fn test_server_stop_wakes_blocked_accept() {
     return 0;
 }
 
+# 1.10.4 — a stop-enabled accept on an IDLE listener surfaces on every target.
+#
+# On Linux the listen fd's SO_RCVTIMEO does it. macOS's accept(2) ignores
+# SO_RCVTIMEO, so through 1.10.3 a stop-enabled server parked in accept there
+# never re-read its flag (test_server_stop_wakes_blocked_accept hung on ecb
+# until the runner killed it). `_sandhi_server_accept` polls the listener on
+# macOS instead. Unlike the threaded test above, this one needs no race to
+# fail: nothing ever connects, so the call either comes back EAGAIN or never.
+# Mutation (1.10.4, measured on ecb and ach): dropping the macOS poll arm hangs
+# this row.
+fn test_server_accept_surfaces_when_idle() {
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { assert_eq(1, 1, "idle accept: tcp_socket unavailable — skipped"); return 0; }
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, INADDR_LOOPBACK(), 0)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "idle accept: bind unavailable — skipped"); return 0;
+    }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) {
+        sock_close(lfd); assert_eq(1, 1, "idle accept: listen unavailable — skipped"); return 0;
+    }
+    var flag[8];
+    store64(&flag, 0);
+    _sandhi_server_arm_stop_poll(lfd, &flag);
+    var t0 = clock_now_ns();
+    var at, av = _sandhi_server_accept(lfd, &flag);
+    var ms = (clock_now_ns() - t0) / 1000000;
+    sock_close(lfd);
+    assert_eq(is_err_result(at), 1, "idle accept: no connection, so an error comes back");
+    assert_eq(av, _SANDHI_EAGAIN, "idle accept: the target's EAGAIN (11 Linux / 35 Darwin)");
+    assert_eq(_sandhi_accept_action(av), SANDHI_ACCEPT_RETRY,
+      "idle accept: classified RETRY, so the loop re-reads its flag");
+    assert(ms < 5000, "idle accept: back within the poll interval, not when a peer arrives");
+    return 0;
+}
+
 # The behavioural half: a flag already set when the loop starts must stop it
 # before it serves anything, and the loop must report 0 rather than 1.
 #
@@ -4174,6 +4209,7 @@ fn main() {
     test_server_stop_flag_option();
     test_server_stop_returns_zero();
     test_server_stop_wakes_blocked_accept();
+    test_server_accept_surfaces_when_idle();
 
     test_group("server/accept_policy/classify");
     test_accept_action_transient();

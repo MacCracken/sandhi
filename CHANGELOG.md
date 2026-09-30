@@ -4,6 +4,76 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.4] — 2026-09-30
+
+**Windows never reads a plantable `C:\etc\resolv.conf` (cyrius CVE-57); a stop-enabled
+server wakes on macOS; the suites run on macOS in CI; pin to the released cyrius 6.6.11.**
+Toolchain `6.6.10` → `6.6.11`. Reported by cyrius 6.6.12 bite 15 (SA11, SA6); re-vendored
+into cyrius 6.6.12 as `lib/sandhi.cyr`.
+
+### Security
+
+- **On Windows both resolvers read a drive-relative, plantable resolver file (cyrius
+  CVE-57).** `_sandhi_resolve_read_resolv_conf_a` opened `"/etc/resolv.conf"` on every
+  target, and both lookups fell back to 8.8.8.8 without one. On Windows a rooted path is
+  drive-relative, so that is `C:\etc\resolv.conf`, and any authenticated user may create
+  folders at the root of the system drive. A local user could therefore choose the
+  nameserver every other user's sandhi lookups went to, `sandhi_http_get` included. Since
+  cyrius 6.6.11 gave PE working Winsock UDP, a PE program reached this path end to end. It is
+  the class cyrius CVE-54 closed in the stdlib's own `net_resolve_ipv4` at 6.6.11. Now, on
+  `CYRIUS_TARGET_WIN`:
+  - the A lookup is `net_resolve_ipv4(host)`, i.e. getaddrinfo, which reads the real
+    `%SystemRoot%\System32\drivers\etc\hosts` and the adapters' DNS servers;
+  - the AAAA lookup answers 0, so the client stays on v4 (the only family PE can dial);
+  - the reader returns -1 without opening anything, and 8.8.8.8 is never used.
+  The consumer resolve hook (1.9.14) still runs first. Measured on real Windows (cass) with a
+  planted `nameserver 127.0.9.7`: 1.10.3 read the planted server, and its lookups of the
+  machine's own name and of `localhost` failed against it. 1.10.4 ignores the file, and both
+  names resolve through the system resolver. The behaviour is tested in cyrius by
+  `tests/tcyr/crossos/sandhi_pe_resolver_no_etc_path.tcyr`, which runs on cass at the cyrius
+  release gate. wine cannot show the plant, because it maps a rooted path to the unix root.
+
+### Fixed
+
+- **A stop-enabled server parked in `accept` never woke on macOS.** The four blocking serve
+  loops re-read their stop flag because the listen fd carries
+  `SANDHI_SERVER_STOP_POLL_MS` of `SO_RCVTIMEO`. XNU's `accept(2)` ignores `SO_RCVTIMEO`, so
+  on macOS an idle stop-enabled server slept until a connection arrived and never saw the
+  flag. `test_server_stop_wakes_blocked_accept` hung on ecb (arm64) until the runner killed it
+  after 300 s, on the first macOS run of the suite ever. The loops now accept through
+  `_sandhi_server_accept`. With a flag configured on macOS, it polls the listener for the same
+  interval and reports a timeout as `Err(_SANDHI_EAGAIN)`, which is the error the Linux path
+  gets and which the accept policy retries. Without a flag, and on every other target, it is
+  plain `sock_accept`. New row `test_server_accept_surfaces_when_idle` (4 assertions) needs no
+  thread race to fail: with the macOS arm removed it hangs on both ecb and ach (measured,
+  killed at 60 s). The threaded test passed on ach (Intel) pre-fix only by luck.
+
+### Changed
+
+- The v6 connect paths still decline on Windows, and their comment is corrected. It claimed
+  the PE peer had no socket surface; v4 works through `lib/net.cyr`'s Winsock arms since
+  cyrius 6.6.11. v6 needs a public AF_INET6 socket in cyrius `lib/net.cyr`, which is a feature
+  rather than a sandhi fix.
+- **Pin 6.6.10 → 6.6.11** (the latest released cyrius). `lib/` re-resolved from empty (`rm -rf
+  lib && cyrius deps`: 72 files, `cyrius.lock` re-locked). All five dist bundles regenerated
+  (`cyrius distlib --all`); the `.deps` sidecars are unchanged. The resolver change reaches
+  `sandhi.cyr`, `-rpc` and `-discovery`; the server change reaches `sandhi.cyr` and `-server`;
+  `-tls` takes the conn.cyr comment and the version stamp.
+
+### Added
+
+- **CI: `Test (macOS arm64)`**, a `macos-14` job. It installs the pinned cyrius with the
+  canonical installer and runs the four suites (`sandhi`, `h2`, `alloc`, `rpc`). Through
+  1.10.3 they ran on Linux only. There is no hosted Intel job: GitHub retired `macos-13`, and
+  cyrius gates Intel macOS on a self-hosted machine because hosted Intel jobs sat queued. At
+  this release the four files were run on ecb (arm64) and ach (Intel) with the 6.6.11 release
+  tarballs, and both are green. `release.yml` reuses `ci.yml`, so the job also gates a
+  release.
+- **CI: `Windows never reads POSIX resolver config (cyrius CVE-57)`**, a structural row in the
+  security job. Every `"/etc/..."` literal and every 8.8.8.8 fallback in `src/` must sit
+  inside an `#ifndef CYRIUS_TARGET_WIN` region. Against 1.10.3's `resolve.cyr` it names all
+  three sites.
+
 ## [1.10.3] — 2026-09-29
 
 **The DNS TXID fails closed when getrandom fails (cyrius CVE-19), and the pin to the released

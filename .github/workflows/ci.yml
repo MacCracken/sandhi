@@ -342,6 +342,51 @@ jobs:
           cyrius build programs/_server_accept_emfile_probe.cyr build/_server_accept_emfile_probe
           build/_server_accept_emfile_probe
 
+  macos:
+    # 1.10.4: the four suites on macOS (arm64). Through 1.10.3 they ran on
+    # Linux only, and the first macOS run found a real defect: XNU's accept(2)
+    # ignores SO_RCVTIMEO, so a stop-enabled server parked in accept never
+    # re-read its flag (test_server_stop_wakes_blocked_accept hung until the
+    # runner killed it). The Intel half is not a hosted job: GitHub retired
+    # macos-13, and cyrius itself gates Intel macOS on a self-hosted machine
+    # because hosted Intel jobs sat queued. It is covered by the release
+    # procedure instead, which runs these four files on a real Intel Mac.
+    # release.yml reuses this workflow, so this job gates a release too.
+    name: Test (macOS arm64)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain (the pinned release)
+        # The canonical OS/arch-aware installer from the pinned tag: it fetches
+        # the aarch64-macos tarball, verifies its checksum and ad-hoc codesigns
+        # the binaries. `sed`, not `grep -P`: macOS grep has no -P.
+        run: |
+          set -euo pipefail
+          V="$(sed -n 's/^cyrius = "\(.*\)"/\1/p' cyrius.cyml | head -1)"
+          [ -n "$V" ] || { echo "no cyrius pin in cyrius.cyml"; exit 1; }
+          echo "Installing Cyrius $V"
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/$V/scripts/install.sh" \
+            | CYRIUS_VERSION="$V" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> "$GITHUB_ENV"
+
+      - name: Resolve dependencies
+        run: cyrius deps
+
+      - name: Test (core)
+        run: cyrius test tests/sandhi.tcyr
+
+      - name: Test (h2)
+        run: cyrius test tests/h2.tcyr
+
+      - name: Test (alloc)
+        run: cyrius test tests/alloc.tcyr
+
+      - name: Test (rpc)
+        run: cyrius test tests/rpc.tcyr
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest
@@ -387,6 +432,35 @@ jobs:
           [ -s /tmp/bigbuf.txt ] && FAIL=1
           echo "security scan complete (fail: $FAIL)"
           exit $FAIL
+
+      - name: Windows never reads POSIX resolver config (cyrius CVE-57)
+        # 1.10.4: on Windows a rooted path is DRIVE-RELATIVE, so
+        # "/etc/resolv.conf" opens C:\etc\resolv.conf, which any local user
+        # can plant. Through 1.10.3 both resolvers read it on every target
+        # and fell back to 8.8.8.8, so a PE program's lookups went to a
+        # nameserver another user chose. Windows now resolves through the
+        # stdlib's net_resolve_ipv4 (getaddrinfo). This keeps it that way:
+        # every "/etc/..." literal and every 8.8.8.8 fallback in src/ must sit
+        # inside an `#ifndef CYRIUS_TARGET_WIN` region. The behaviour is
+        # tested on real Windows by cyrius's
+        # tests/tcyr/crossos/sandhi_pe_resolver_no_etc_path.tcyr (wine maps
+        # a rooted path to the unix root and cannot show the plant).
+        run: |
+          shopt -s globstar
+          awk '
+            FNR == 1 { depth = 0; notwin = 0 }
+            /^[[:space:]]*#ifndef[[:space:]]+CYRIUS_TARGET_WIN([[:space:]]|$)/ {
+              depth++; kind[depth] = 1; notwin++; next }
+            /^[[:space:]]*#if(n)?def[[:space:]]/ { depth++; kind[depth] = 0; next }
+            /^[[:space:]]*#endif/ {
+              if (depth > 0) { if (kind[depth] == 1) notwin--; depth-- }
+              next }
+            /^[[:space:]]*#/ { next }
+            (/"\/etc\// || /8 \| \(8 << 8\)/) && notwin == 0 {
+              print FILENAME ":" FNR ": reachable on Windows: " $0; bad = 1 }
+            END { exit bad }
+          ' src/**/*.cyr
+          echo "no POSIX resolver path is reachable on Windows"
 
   docs:
     name: Documentation
