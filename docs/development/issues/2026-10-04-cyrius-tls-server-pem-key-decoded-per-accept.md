@@ -1,6 +1,6 @@
 # 2026-10-04 — the native TLS server decodes a PEM private key on every accept, on the global heap
 
-**Status:** Open — cyrius-side (stdlib `lib/tls_native_hs13.cyr` + sigil `pem_decode_privkey`).
+**Status:** ✅ **Fixed in cyrius 6.6.16** (see *Resolution* at the end; recorded by cyrius 2026-10-05). The doc/probe follow-ups are [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md) item 5. Was: open — cyrius-side (stdlib `lib/tls_native_hs13.cyr` + sigil `pem_decode_privkey`).
 **Severity:** **P3** — unbounded but slow heap growth in a long-running HTTPS server; no correctness or
 security impact. A DER key avoids it entirely.
 **Reporter:** sandhi (found while measuring the 1.10.7 pooled-TLS per-request arena fix).
@@ -46,3 +46,27 @@ Either:
 
 Post-fold note: sandhi composes `tls_accept_alloc_in` and does not decode keys itself (ADR 0001), so this
 is not patched in sandhi; the guide (`docs/guides/server.md`, Options) recommends a DER key meanwhile.
+
+## Resolution — cyrius 6.6.16 (recorded by cyrius, 2026-10-05)
+
+⛔ Do not push or tag a sandhi that pins cyrius 6.6.16 until cyrius 6.6.16 is out.
+
+**Resolved in cyrius 6.6.16 (bite thr-2), entirely cyrius-side; sandhi needs no code change.** cyrius copied
+this filing as `docs/development/issues/2026-10-04-sandhi-tls-server-pem-key-decoded-per-accept.md` and
+archives it at the 6.6.16 close. The native TLS stack decodes a PEM private key once per process per distinct
+key text, not on every accept:
+
+- the first load of a text decodes it and caches sigil's answer on the global heap;
+- every later accept copies that answer into its own ctx, inside the arena `tls_accept_alloc_in` was given.
+
+The cache is keyed on the text, so sandhi's per-accept creds struct on the worker's stack is fine as it is.
+Keys load and are refused exactly as before; at most 32 distinct key texts are cached.
+
+Measured with sandhi's `programs/_server_tls_probe.cyr`, unmodified, built against the 6.6.16 tree: [8] reads
+**0 B/request** where it read 120; `alloc_used()` is identical before and after the 41 requests; all eight
+checks PASS, [4]'s 16 concurrent handshakes included. (The libssl backend is unaffected: it never decoded PEM
+keys and still takes DER keys only.)
+
+Follow-ups (the `docs/guides/server.md` DER-key bullet and tightening probe [8] to `per == 0`) are in
+[`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md). Move this file to `archive/` when they
+land.

@@ -1,6 +1,6 @@
 # 2026-10-04 — arm64 macOS starts real threads but keeps the serial channel
 
-**Status:** Open — cyrius-side (`lib/thread_macos.cyr`). sandhi works around it (1.10.7).
+**Status:** ✅ **Fixed in cyrius 6.6.16** (see *Resolution* at the end; recorded by cyrius 2026-10-05). Open on sandhi's side only until it adopts `CHAN_BLOCKING` — [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md) item 4. Was: open — cyrius-side (`lib/thread_macos.cyr`); sandhi works around it (1.10.7).
 **Severity:** **P2** — any producer/consumer built on `chan_*` across threads is broken on arm64 macOS, and
 on every other target that still uses the serial ring. No error surfaces: the consumer simply sees an
 empty channel.
@@ -55,3 +55,31 @@ Either:
 
 Once a real channel lands, sandhi can key `_sandhi_server_pool_inline` on that capability instead of
 `CYRIUS_TARGET_LINUX`, and macOS gets a parallel pool.
+
+## Resolution — cyrius 6.6.16 (recorded by cyrius, 2026-10-05)
+
+⛔ Do not push or tag a sandhi that pins cyrius 6.6.16 until cyrius 6.6.16 is out.
+
+**Resolved in cyrius 6.6.16 (bite thr-1), and both proposals shipped.** cyrius copied this filing as its own
+`docs/development/issues/2026-10-04-sandhi-macos-chan-serial-under-real-threads.md` and archives it at the
+6.6.16 close.
+
+1. arm64 macOS and Windows have a locked channel whose `chan_recv` blocks until a value arrives (0 once closed
+   and empty), and whose `chan_send` blocks while full (-1 once closed). That is the Linux contract. The ring
+   keeps the same 56-byte header.
+2. Every thread peer exports **`CHAN_BLOCKING`** beside `THREADS_CONCURRENT`: 1 on Linux, arm64 macOS and
+   Windows; 0 on x86 macOS, agnos and cx. (Separately, cyrius 6.6.16 also makes `THREADS_CONCURRENT` read 1
+   on Windows, where `CreateThread` threads were always real.)
+
+**Also fixed — Linux, before 6.6.16:** the pooled server's handoff channel could DEADLOCK on Linux when
+saturated. The Linux channel parked senders and receivers on one futex word with wake-one; once the accept
+loop blocked in `chan_send` on a full channel (all `backlog` slots queued), a worker's `chan_recv` could wake
+another idle worker instead of the accept thread, which then slept for ever with room in the ring. cyrius
+measured it with one producer and three consumers on a cap-1 channel (the producer hung on pi). sandhi floors
+`backlog` to `workers` and defaults it to 128, so the window is the saturated case only. 6.6.16 fixes it in
+the lib — sandhi needs only the pin. If sandhi has an unexplained "pool stopped accepting under load" report
+on Linux, this is a candidate.
+
+What sandhi adopts (`_sandhi_server_pool_inline` keyed on `CHAN_BLOCKING`, then the 1.10.7 macOS row re-run
+with the pool really taken) is in [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md). Move
+this file to `archive/` when that lands.
