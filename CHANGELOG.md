@@ -4,6 +4,179 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.7] — 2026-10-04
+
+**The P1 follow-ups the 1.9.12 sweep left, all closed: a fail-open in concurrent TLS policy
+enforcement, the TLS session cache crossing policies, the client's framing defects, the
+server's missing whole-request deadline, and HTTPS routing growing the heap.** No pin change
+(cyrius 6.6.15).
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+**Behaviour changes a consumer can see:**
+- A server now answers a request that takes longer than 60 s from accept with `408`
+  (`sandhi_server_options_request_ms`; 0 restores the old behaviour).
+- A buffered response that ends before its declared body is `SANDHI_ERR_PROTOCOL` where it was
+  `SANDHI_OK`.
+- HEAD, 204 and 304 responses on a keep-alive connection return at once instead of waiting.
+
+### Security
+
+- **tls_policy: concurrent requests ran under each other's TLS policy (fail-open, P1).**
+  `_sandhi_policy_pre_open_a` armed the policy hook in two process-wide globals, the
+  connection finalize read them during the handshake, and `_sandhi_policy_post_open_a`
+  cleared them. 1.6.9 made the buffered client safe for concurrent requests on separate
+  threads but left this pair, on the reasoning that no consumer drives the policied path
+  concurrently. That reasoning missed the other side: an **unpolicied** request on another
+  thread read whatever hook was armed. Measured on loopback (a pooled sandhi TLS server on a
+  self-signed fixture, one trust-store thread and three no-policy threads, 60 requests each):
+  - no-policy requests accepted the certificate their own default verification rejects in
+    **162–167 of 180** runs;
+  - a policied request could also run under another thread's trust store or client
+    certificate, or lose its own (so a publicly-trusted certificate would have passed a
+    private-CA policy);
+  - only the SPKI pin check was immune, because it reads its own policy argument.
+
+  The fix:
+  - The hook now lives in the per-call request context (`SANDHI_REQCTX_OFF_HOOK_FP` /
+    `_HOOK_CTX`), which is 32 → 48 bytes.
+  - Every internal open takes a zeroed context of its own (`_sandhi_reqctx_new_a`): the
+    buffered dispatch, the SSE stream, the binary download, the h2 auto dispatch and promote
+    open, and `sandhi_conn_open_with_policy`.
+  - The module globals remain only as the `ctx == 0` fallback of the public conn verbs.
+  - `sandhi_conn_open_with_policy` still reports through `sandhi_conn_last_open_err()`.
+  - The stream and download opens now carry their own credential digest instead of the
+    last one any dispatch left in a global.
+
+  Proof:
+  - New check [6] in `programs/_server_tls_probe.cyr` reproduces the measurement: 0 of 90
+    wrong accepts, 30 of 30 trust-store requests. With the hook moved back into the globals it
+    reports 85 of 90.
+  - New row `tls_policy/reqctx_hook` (14 assertions) fails 3 rows under the same mutation.
+- **tls_policy: a policied open no longer uses the TLS session cache.** The cache key is
+  (host, hook function, credential digest). Every policy shares one hook function, so a
+  session made under one policy was offered to the next request to the same host.
+  - **Where it bites:** on the deprecated libssl backend, with the cache enabled
+    (`sandhi_session_cache_enable(1)`; it is off by default), against a TLS 1.2 server that
+    resumes.
+  - **Effects, measured against `openssl s_server`:**
+    - a request whose trust store should reject the server got `200 [Reused]`;
+    - a second mTLS client certificate was reported as the first one's identity;
+    - a request with no client certificate was authenticated as the earlier one.
+  - **Native:** never resumes, so it was not affected.
+  - **The fix:** the connection finalize skips the cache lookup and store whenever a policy
+    hook is armed, as policied connections already skip the pool and 0-RTT.
+  - **Proof:** new check [7] asserts a policied open with the cache on makes no lookup and
+    no store. The 1.10.6 code makes one lookup.
+- **server: a whole-request budget (Slowloris).** `idle_ms` bounds each read, so a peer
+  sending one byte just inside every read timeout held a serve loop or a pooled worker for
+  as long as it liked. The stop flag and the accept-error policy do not cover a connection
+  that is progressing.
+  - **The option:** new `sandhi_server_options_request_ms(opts, ms)` (default **60000**; 0
+    disables), the time from accept to a complete request, the TLS handshake included.
+  - **Plaintext loops:** wait for each read with `fd_wait_ready` against the deadline and
+    answer `408 Request Timeout` (new sentinel `SANDHI_SERVER_ERR_TIMEOUT`, -4).
+  - **TLS loops:** set the deadline on the session with `tls_set_deadline` between
+    `tls_accept_alloc_in` and `tls_accept_complete`. It bounds the handshake and every
+    request read, and is cleared before the handler writes. A timed-out TLS session has
+    failed and is closed without a response.
+  - **Unchanged:** the public `sandhi_server_recv_request{,_c}` keep their unbounded
+    behaviour.
+  - **agnos:** has no poll, so only the TLS half applies there.
+  - **Proof:**
+    - new rows `server/request_budget` (16 assertions): a silent peer, a peer dribbling a
+      byte every 100 ms under a 1 s read timeout, and a pooled server answering 408 end to end;
+    - new check [5] in `programs/_server_tls_probe.cyr`: a client dribbling a TLS record one
+      byte every 300 ms is dropped at about 1.8 s under a 1.5 s budget, and is never dropped
+      with the budget disabled.
+    - Mutations: an ignored deadline fails 7 rows; a worker calling the unbounded reader fails 3.
+
+### Fixed
+
+- **http: a response shorter than its Content-Length was `SANDHI_OK`.**
+  `_sandhi_http_recv_framed` parsed the framing, then returned the byte count on EOF. The
+  response parser's clamp, which cannot tell a short body from a HEAD or 304 response,
+  then reported `Content-Length: 100` with 3 body bytes as status 200 with a 3-byte body.
+  - EOF before a declared Content-Length or chunked body ends is now
+    `_SANDHI_RECV_TRUNCATED`, which both buffered exchanges report as
+    `SANDHI_ERR_PROTOCOL`, as the download path has since 1.9.12.
+  - The public `sandhi_http_response_parse` still clamps: it parses bytes it is handed and
+    cannot know the request method.
+- **http: `Connection: close` bodies were cut at their first NUL byte.**
+  `_sandhi_http_recv_framed` signalled "must close" by returning `0 - 2` in place of the byte
+  count, and both exchanges then re-measured the buffer with `strlen()`. Every binary body on
+  a response carrying `Connection: close` was truncated at its first zero byte; that is the
+  common case for sandhi's non-pooled requests, which send `Connection: close` themselves.
+  Measured 2 of 5 bytes. The flag now goes out through a cell, and the count is kept.
+- **http: HEAD, 204 and 304 responses waited for a body that never comes.**
+  - **Before:** they completed only when the server closed. On a keep-alive server, the read
+    deadline turned a good response into TIMEOUT. Measured 1,500 ms per HEAD against a
+    server holding the connection.
+  - **Now:** the exchanges tell the framing reader when the request was HEAD
+    (`_sandhi_req_is_head`), and HEAD, 204 and 304 complete at the end of the header block
+    (RFC 7230 §3.3.3). Measured 1 ms.
+  - **Why it ships with the truncation fix:** with truncation detection and without this
+    rule, every HEAD would be a false PROTOCOL.
+  - **Proof:** new rows `client/framing_live` (20 assertions) against a canned loopback peer.
+    The three mutations fail 1, 3 and 5 rows.
+- **server: HTTPS routing grew the global heap on every request, and `req_arena` was ignored
+  on TLS.**
+  - **What was wrong:**
+    - `sandhi_router_dispatch_c` took its method / path accessors and its 404/405 writes from
+      the no-free global bump;
+    - `sandhi_server_router_handler_c` never looked for the per-request arena;
+    - `_sandhi_server_pool_tls_worker` never created one, although `run_pooled_tls` has
+      resolved the option since 1.9.7.
+    - Measured with the documented handler shape: **472 B per request**.
+  - **The fix:**
+    - new `sandhi_router_dispatch_c_a` (the mirror of `sandhi_router_dispatch_a`);
+    - the conn handlers (`_c`, and the plaintext `_cp` adapter) route through
+      `sandhi_server_request_arena()`;
+    - the pooled TLS worker creates, publishes and rewinds the arena exactly as the
+      plaintext worker does.
+  - **Result:** 120 B per request remain, all of it the stdlib decoding the PEM server key on
+    every accept. That is filed cyrius-side as
+    `docs/development/issues/2026-10-04-cyrius-tls-server-pem-key-decoded-per-accept.md`; a
+    DER key measures 0.
+  - **Proof:**
+    - new check [8] in `programs/_server_tls_probe.cyr` asserts the TLS handler sees the arena
+      and growth stays within 128 B/request. Without the worker arena it reports 0 and
+      471 B/request.
+    - New row `server/tls/dispatch_c_arena`: 100 routed and 404 dispatches on an arena grow
+      the global heap by 0. With the bare accessors it grows 3,200 B.
+
+### Changed
+
+- **CI: the TLS gates had been skipping.** `.gitignore`'s `*.pem` rule matched the gates'
+  self-signed 127.0.0.1 fixtures (`programs/_tls_fixtures/key.pem`, `cert.pem`). Only
+  `cert.der` was ever committed, so in CI these gates hit their "fixtures missing → SKIP"
+  branch and never ran:
+  - `programs/_server_tls_probe.cyr` (since 1.6.8, including the concurrent-handshake gate);
+  - `programs/_stream_idle_gate.cyr` (1.10.5).
+
+  A narrow exception now tracks them; they must be added to the repository for CI to run the
+  checks.
+- docs:
+  - `guides/server.md`: the Slowloris section covers both bounds; the Options section lists
+    every option (it described two and called `max_conns` unused) and recommends a DER key.
+  - The roadmap drops the "P1 follow-ups from the 1.9.12 sweep" section. It records what the
+    investigations found but did not fix:
+    - the h2 ALPN-advertise global, still shared (protocol choice only);
+    - two libssl-only session-cache quirks (moot at 2.0);
+    - an unverified native TLS 1.2 / Ed25519 interop failure.
+- All five dist bundles regenerated; the `.deps` sidecars are unchanged.
+
+### Verified
+
+- **2,996 assertions** (889 / 1,691 / 353 / 63; sandhi +51), stable across repeated runs.
+- 8/8 fuzz; lint clean; fmt clean.
+- `CYRIUS_DCE=1` smoke; aarch64, AGNOS and Windows (PE) builds link.
+- Every gate passes, online:
+  - `_server_tls_probe` [1]–[8];
+  - stream idle, pooled server, accept back-off, SSRF resolver;
+  - the live TLS-policy runtime, HTTPS loop, policy-threading and authenticated-download gates.
+
 ## [1.10.6] — 2026-10-04
 
 **A client that disconnects no longer kills a sandhi server on macOS; the one-shot response

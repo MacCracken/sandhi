@@ -295,8 +295,10 @@ jobs:
         # and drives it with sandhi's OWN client over real TLS 1.3 handshakes:
         # a trust-store-anchored burst must 200+body, a default-policy client
         # must be REJECTED (cert verify not bypassed), and real requests must
-        # still serve while a worker is pinned (pool isolation). Pure loopback
-        # (no network); skips cleanly if TLS is unavailable or fixtures absent.
+        # still serve while a worker is pinned (pool isolation). 1.10.7 adds [5]:
+        # a client dribbling a TLS record one byte at a time, never tripping the
+        # per-read timeout, must be dropped at the whole-request budget. Pure
+        # loopback (no network); skips cleanly if TLS is unavailable or fixtures absent.
         run: |
           cyrius build programs/_server_tls_probe.cyr build/_server_tls_probe
           build/_server_tls_probe

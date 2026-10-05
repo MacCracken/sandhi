@@ -252,8 +252,7 @@ fn _sandhi_policy_pre_open_a(a, policy, ctx): i64 {
     store64(hook_ctx + 8,  plen);
     store64(hook_ctx + 16, policy);
 
-    _sandhi_tls_hook_override     = &_sandhi_apply_hook;
-    _sandhi_tls_hook_override_ctx = hook_ctx;
+    _sandhi_reqctx_set_hook(ctx, &_sandhi_apply_hook, hook_ctx);
     return 0;
 }
 
@@ -263,8 +262,7 @@ fn _sandhi_policy_pre_open_a(a, policy, ctx): i64 {
 # open-err = TLS — 1.6.9: through `ctx`, or the module global when
 # ctx==0). A NULL / un-pinned policy passes `conn` through.
 fn _sandhi_policy_post_open_a(a, conn, policy, ctx): i64 {
-    _sandhi_tls_hook_override     = 0;
-    _sandhi_tls_hook_override_ctx = 0;
+    _sandhi_reqctx_set_hook(ctx, 0, 0);
     if (conn == 0)   { return 0; }
     if (policy == 0) { return conn; }
 
@@ -289,13 +287,22 @@ fn sandhi_conn_open_with_policy_a(a, addr, port, use_tls, sni_host, policy): i64
         return sandhi_conn_open(addr, port, 1, sni_host);
     }
 
-    if (_sandhi_policy_pre_open_a(a, policy, 0) != 0) {
-        # _sandhi_conn_last_err already set to TLS (fail-closed / OOM)
-        # via the ctx==0 global path.
+    # 1.10.7 — a context of its own, so the policy hook is never visible to
+    # (or replaced by) an open on another thread. The classification is
+    # copied back so `sandhi_conn_last_open_err()` still reports it.
+    var rc = _sandhi_reqctx_new_a(a);
+    if (rc == 0) {
+        _sandhi_conn_last_err = SANDHI_CONN_OPEN_TLS;
         return 0;
     }
-    var conn = sandhi_conn_open(addr, port, 1, sni_host);
-    return _sandhi_policy_post_open_a(a, conn, policy, 0);
+    if (_sandhi_policy_pre_open_a(a, policy, rc) != 0) {
+        _sandhi_conn_last_err = _sandhi_reqctx_err(rc);
+        return 0;
+    }
+    var conn = _sandhi_conn_open_fully_timed_ctx_a(default_alloc(), addr, port, 1, sni_host, 0, 0, 0, rc);
+    conn = _sandhi_policy_post_open_a(a, conn, policy, rc);
+    _sandhi_conn_last_err = _sandhi_reqctx_err(rc);
+    return conn;
 }
 
 fn sandhi_conn_open_with_policy(addr, port, use_tls, sni_host, policy): i64 {

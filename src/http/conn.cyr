@@ -97,12 +97,7 @@ var _sandhi_allow_0rtt = 0;
 # paths still read this global (single-threaded).
 var _sandhi_cred_digest = 0;
 
-# Hook override mechanism. When non-zero, sandhi_conn_open_fully_timed
-# uses these in place of the default ALPN hook. Set by tls_policy/
-# apply.cyr around its policy-aware open so the policy hook can
-# do trust-store / mTLS layering on top of the SSL_CTX. Cleared by
-# the same code immediately after open returns. Single-threaded
-# client model — same justification as _sandhi_alpn_advertise_h2.
+# TLS hook override for `ctx == 0` opens (see SandhiReqCtxOff).
 var _sandhi_tls_hook_override     = 0;  # fn ptr (hook signature) or 0
 var _sandhi_tls_hook_override_ctx = 0;  # opaque hook_ctx ptr or 0
 
@@ -288,13 +283,9 @@ var _SANDHI_EAGAIN = 35;
 var _SANDHI_EAGAIN = 11;
 #endif
 
-# 1.9.3 — `_sandhi_http_recv_framed` sentinel for "the response did not fit
-# inside the caller's max_response_bytes cap". Distinct from the generic
-# `0 - 1` read failure it used to share, so the buffered client can report
-# "too large" instead of misdiagnosing it as a dropped connection. Chosen as
-# 12 so it collides neither with _SANDHI_EAGAIN (11 Linux / 35 Darwin) nor with
-# the `0 - 2` must-close/complete-response sentinel the same function returns.
+# `_sandhi_http_recv_framed` failure sentinels (negated on return).
 var _SANDHI_RECV_CAP_EXCEEDED = 12;
+var _SANDHI_RECV_TRUNCATED    = 13;
 
 # 1.6.2: the raw fcntl/poll/getsockopt socket constants
 # (`_SANDHI_O_NONBLOCK` / `_SANDHI_EINPROGRESS` / `_SANDHI_SO_ERROR` /
@@ -354,18 +345,31 @@ fn sandhi_conn_last_open_err(): i64 {
 # thread one (the public conn-open verbs + `sandhi_conn_last_open_err`,
 # the streaming / download / h2-auto paths, `sandhi_conn_open_with_policy`)
 # fall back to the module globals, which stay correct for any
-# single-threaded caller. The hook-override + alpn-advertise globals
-# are NOT lifted here — they are only armed on the policy / h2-auto
-# paths, which thoth does not drive concurrently (a documented
-# follow-on, not part of this bite).
+# single-threaded caller. 1.10.7 lifts the TLS hook override into the
+# context as well (HOOK_FP / HOOK_CTX) and gives every internal open a
+# context of its own; only the alpn-advertise global is still shared.
 enum SandhiReqCtxOff {
     SANDHI_REQCTX_OFF_ALLOW_0RTT  = 0;
     SANDHI_REQCTX_OFF_CRED_DIGEST = 8;
     SANDHI_REQCTX_OFF_TLS_POLICY  = 16;
     SANDHI_REQCTX_OFF_LAST_ERR    = 24;
+    SANDHI_REQCTX_OFF_HOOK_FP     = 32;
+    SANDHI_REQCTX_OFF_HOOK_CTX    = 40;
 }
 
-var SANDHI_REQCTX_SIZE = 32;
+var SANDHI_REQCTX_SIZE = 48;
+
+# A zeroed per-call request context from `a` (no 0-RTT, no credential
+# digest, no policy, no hook armed, open-error OK), or 0 on OOM. Every
+# internal open takes one (1.10.7), so no open reads another's state.
+fn _sandhi_reqctx_new_a(a): i64 {
+    var ctx = alloc_via(a, SANDHI_REQCTX_SIZE);
+    if (ctx == 0) { return 0; }
+    var i = 0;
+    while (i < SANDHI_REQCTX_SIZE) { store64(ctx + i, 0); i = i + 8; }
+    store64(ctx + SANDHI_REQCTX_OFF_LAST_ERR, SANDHI_CONN_OPEN_OK);
+    return ctx;
+}
 
 # 0-RTT opt-in for this dispatch (ctx==0 -> module global).
 fn _sandhi_reqctx_allow_0rtt(ctx): i64 {
@@ -397,6 +401,38 @@ fn _sandhi_reqctx_err(ctx): i64 {
 fn _sandhi_reqctx_set_err(ctx, e): i64 {
     if (ctx == 0) { _sandhi_conn_last_err = e; return 0; }
     store64(ctx + SANDHI_REQCTX_OFF_LAST_ERR, e);
+    return 0;
+}
+
+# The TLS hook armed for this open, and its ctx (ctx==0 -> module globals).
+#
+# 1.10.7 — through 1.10.6 the policy hook lived ONLY in the two module
+# globals: `_sandhi_policy_pre_open_a` wrote them, the finalize below read
+# them, `_sandhi_policy_post_open_a` cleared them. A dispatch on another
+# thread, policied or not, read whatever was armed at that moment. Measured
+# on loopback: with one trust-store thread and three no-policy threads, a
+# no-policy request accepted a certificate its own default verification
+# rejects in 162-167 of 180 tries (fail-open), and a policied request could
+# lose its trust store or client cert, or run under another thread's. Only
+# the SPKI pin check, which reads its own policy argument, was immune.
+fn _sandhi_reqctx_hook_fp(ctx): i64 {
+    if (ctx == 0) { return _sandhi_tls_hook_override; }
+    return load64(ctx + SANDHI_REQCTX_OFF_HOOK_FP);
+}
+
+fn _sandhi_reqctx_hook_ctx(ctx): i64 {
+    if (ctx == 0) { return _sandhi_tls_hook_override_ctx; }
+    return load64(ctx + SANDHI_REQCTX_OFF_HOOK_CTX);
+}
+
+fn _sandhi_reqctx_set_hook(ctx, fp, hctx): i64 {
+    if (ctx == 0) {
+        _sandhi_tls_hook_override     = fp;
+        _sandhi_tls_hook_override_ctx = hctx;
+        return 0;
+    }
+    store64(ctx + SANDHI_REQCTX_OFF_HOOK_FP, fp);
+    store64(ctx + SANDHI_REQCTX_OFF_HOOK_CTX, hctx);
     return 0;
 }
 
@@ -561,9 +597,18 @@ fn _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
         }
         var hook_fp = 0;
         var hook_ctx = 0;
-        if (_sandhi_tls_hook_override != 0) {
-            hook_fp  = _sandhi_tls_hook_override;
-            hook_ctx = _sandhi_tls_hook_override_ctx;
+        # 1.10.7 — a policy-armed open never touches the session cache. The
+        # key is (host, hook fn, cred digest) and every policy shares one hook
+        # fn, so a session made under one policy was offered to the next: on
+        # the libssl backend with the cache enabled, a TLS 1.2 resumption then
+        # skipped the second policy's trust store and sent the first one's
+        # client identity. (Native never resumes.) Policied connections are
+        # already kept out of the pool and away from 0-RTT for the same reason.
+        var cacheable = 1;
+        if (_sandhi_reqctx_hook_fp(ctx) != 0) {
+            hook_fp  = _sandhi_reqctx_hook_fp(ctx);
+            hook_ctx = _sandhi_reqctx_hook_ctx(ctx);
+            cacheable = 0;
         } else {
             _sandhi_alpn_init_wire();
             hook_ctx = alloc_via(a, 16);
@@ -596,7 +641,10 @@ fn _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
             _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
             return 0;
         }
-        var cached_sess = sandhi_session_cache_lookup(sni_host, hook_fp, _sandhi_reqctx_cred(ctx));
+        var cached_sess = 0;
+        if (cacheable == 1) {
+            cached_sess = sandhi_session_cache_lookup(sni_host, hook_fp, _sandhi_reqctx_cred(ctx));
+        }
         if (cached_sess != 0) {
             tls_set_session(tls_ctx, cached_sess);
         }
@@ -631,7 +679,7 @@ fn _sandhi_conn_finalize_with_early_data_a(a, fd, use_tls, sni_host,
         # is OFF (the default), _store is a no-op that never frees, so an
         # unconditional capture here leaks one SSL_SESSION per connection
         # on the libssl backend. Gate the whole capture on enabled. [1.4.5]
-        if (sandhi_session_cache_enabled() == 1) {
+        if (cacheable == 1 && sandhi_session_cache_enabled() == 1) {
             var fresh_sess = tls_get_session(tls_ctx);
             if (fresh_sess != 0) {
                 sandhi_session_cache_store(sni_host, hook_fp, _sandhi_reqctx_cred(ctx), fresh_sess);

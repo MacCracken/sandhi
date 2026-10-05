@@ -168,16 +168,28 @@ The server exports the common codes: `HTTP_OK`, `HTTP_NO_CONTENT`,
 
 ## Slowloris guard
 
-Each accepted connection gets `SO_RCVTIMEO` applied. A peer that sends a partial
-request then stalls gets dropped — a Slowloris-style hold-the-fd-forever attack
-can't tie up the single-threaded server. Default is 30 s (matches Go's
-`net/http.Server.IdleTimeout`); override via options:
+Two bounds, both on by default:
+
+- **Per read — `idle_ms`** (default 30 s, Go's `net/http.Server.IdleTimeout`):
+  `SO_RCVTIMEO` on each accepted connection. A peer that stops sending is dropped.
+- **Whole request — `request_ms`** (default 60 s, since 1.10.7): from accept to a
+  complete request, the TLS handshake included. A peer that keeps sending one byte
+  just inside every read timeout never trips `idle_ms`, and through 1.10.6 it held
+  a serve loop or a pooled worker indefinitely. Past the budget a plaintext request
+  is answered `408 Request Timeout` and closed; a TLS connection is closed (the
+  session has failed, so nothing can be written on it). `0` disables it.
 
 ```
 var opts = sandhi_server_options_new();
-sandhi_server_options_idle_ms(opts, 10000);  # 10 s per-connection idle
+sandhi_server_options_idle_ms(opts, 10000);     # 10 s per read
+sandhi_server_options_request_ms(opts, 30000);  # 30 s for the whole request
 sandhi_server_run_opts(addr, port, handler_fp, ctx, opts);
 ```
+
+A legitimate client has to deliver its whole request inside `request_ms`, so a
+server that raises `max_request` for large uploads over slow links should raise
+`request_ms` with it. On agnos, which has no poll, only the TLS half of the budget
+applies.
 
 ## Built-in smuggling defenses
 
@@ -193,9 +205,27 @@ never runs. No consumer code needed.
 
 ## Options
 
-Two knobs today:
+`sandhi_server_options_new()` gives every field its default; the `_run_opts` /
+`_run_async` / `_run_pooled` / `_run_tls` / `_run_pooled_tls` loops take the struct.
 
-- `sandhi_server_options_idle_ms(opts, ms)` — per-connection recv timeout (default 30000).
-- `sandhi_server_options_max_conns(opts, n)` — reserved for a future concurrent
-  accept model. Honored as documentation only today; the server is
-  single-threaded (default `128`, has no effect).
+- `sandhi_server_options_idle_ms(opts, ms)` — per-read timeout (default 30000).
+- `sandhi_server_options_request_ms(opts, ms)` — whole-request budget from accept
+  (default 60000; 0 disables). 1.10.7.
+- `sandhi_server_options_max_request(opts, n)` — largest request buffered, headers
+  plus body (default 64 KiB; larger is answered 413). A memory knob: one buffer per
+  pooled worker or in-flight async connection.
+- `sandhi_server_options_max_conns(opts, n)` — worker threads for `_run_pooled` /
+  `_run_pooled_tls`, per-drain cap for `_run_async` (default 128).
+- `sandhi_server_options_backlog(opts, n)` — listen backlog and pooled handoff depth
+  (default 128).
+- `sandhi_server_options_req_arena(opts, n)` — a per-request arena of `n` bytes for
+  each pooled worker, plaintext and (since 1.10.7) TLS, rewound before every
+  request. The router handlers use it automatically; your own handler reaches it
+  through `sandhi_server_request_arena()` and the `_a` helpers. Default 0 (off).
+- `sandhi_server_options_tls(opts, cert, cert_len, key, key_len)` — server
+  credentials for the `_tls` loops. A **DER** key avoids a per-handshake decode: the
+  stdlib decodes a PEM key on every accept and keeps ~120 B of it on the global heap
+  each time (filed cyrius-side).
+- `sandhi_server_options_stop_flag(opts, &flag)` — a word the loops re-read; non-zero
+  stops the server.
+

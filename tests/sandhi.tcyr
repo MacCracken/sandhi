@@ -1732,6 +1732,7 @@ fn test_server_recv_sentinels() {
     assert_eq(SANDHI_SERVER_ERR_RECV, 0 - 1, "sentinel: RECV keeps the pre-1.9.4 -1");
     assert_eq(SANDHI_SERVER_ERR_TOO_LARGE, 0 - 2, "sentinel: TOO_LARGE = -2");
     assert_eq(SANDHI_SERVER_ERR_INCOMPLETE, 0 - 3, "sentinel: INCOMPLETE = -3");
+    assert_eq(SANDHI_SERVER_ERR_TIMEOUT, 0 - 4, "sentinel: TIMEOUT = -4 (1.10.7)");
 
     # Degenerate inputs are rejected before any read is attempted.
     assert_eq(sandhi_server_recv_request(0, 0, 0), SANDHI_SERVER_ERR_RECV,
@@ -1949,6 +1950,209 @@ fn test_server_sigpipe_guard() {
     # Idempotent — re-installing the same disposition still succeeds.
     var rc2 = _sandhi_server_ignore_sigpipe();
     assert_eq(rc2, 0, "server: ignore SIGPIPE is idempotent");
+    return 0;
+}
+
+# 1.10.7 — the TLS policy hook is armed in the dispatch's own request context.
+#
+# Through 1.10.6 `_sandhi_policy_pre_open_a` wrote the hook into two module
+# globals that every concurrent open read, so a no-policy request on another
+# thread ran under whatever policy was armed (measured fail-open in
+# programs/_server_tls_probe.cyr [6]). Mutation: arming the globals again fails
+# the "global untouched" and sibling rows.
+fn test_reqctx_hook_is_per_call() {
+    if (sandhi_tls_policy_enforcement_available() == 0) {
+        assert_eq(1, 1, "reqctx hook: TLS policy enforcement unavailable — skipped");
+        return 0;
+    }
+    var a = default_alloc();
+    var p = sandhi_tls_policy_new_trust_store("programs/_tls_fixtures/cert.pem");
+    var c1 = _sandhi_reqctx_new_a(a);
+    var c2 = _sandhi_reqctx_new_a(a);
+    assert_neq(c1, 0, "reqctx hook: context allocates");
+    assert_eq(_sandhi_reqctx_hook_fp(c1), 0, "reqctx hook: a new context has no hook");
+    assert_eq(_sandhi_reqctx_err(c1), SANDHI_CONN_OPEN_OK, "reqctx hook: and open-error OK");
+    assert_eq(_sandhi_reqctx_cred(c1), 0, "reqctx hook: and no credential digest");
+    assert_eq(_sandhi_policy_pre_open_a(a, p, c1), 0, "reqctx hook: pre_open arms");
+    assert_eq(_sandhi_tls_hook_override, 0, "reqctx hook: the module global is untouched");
+    assert_eq(_sandhi_reqctx_hook_fp(c1), &_sandhi_apply_hook, "reqctx hook: armed in c1");
+    assert_eq(load64(_sandhi_reqctx_hook_ctx(c1) + 16), p, "reqctx hook: carrying c1's own policy");
+    assert_eq(_sandhi_reqctx_hook_fp(c2), 0, "reqctx hook: a sibling context sees nothing");
+    _sandhi_policy_post_open_a(a, 0, p, c2);
+    assert_eq(_sandhi_reqctx_hook_fp(c1), &_sandhi_apply_hook, "reqctx hook: the sibling's post_open does not disarm c1");
+    _sandhi_policy_post_open_a(a, 0, p, c1);
+    assert_eq(_sandhi_reqctx_hook_fp(c1), 0, "reqctx hook: c1's own post_open does");
+    # The ctx == 0 fallback still arms and clears the module globals.
+    assert_eq(_sandhi_policy_pre_open_a(a, p, 0), 0, "reqctx hook: ctx 0 arms");
+    assert_eq(_sandhi_tls_hook_override, &_sandhi_apply_hook, "reqctx hook: ctx 0 uses the global");
+    _sandhi_policy_post_open_a(a, 0, p, 0);
+    assert_eq(_sandhi_tls_hook_override, 0, "reqctx hook: ctx 0 clears it");
+    return 0;
+}
+
+# 1.10.7 — the whole-request budget (Slowloris).
+#
+# idle_ms bounds each read, so a peer that keeps sending one byte inside every
+# read timeout held a serve loop or a pooled worker indefinitely. The budget is
+# measured from accept to a complete request.
+
+fn test_server_request_ms_option() {
+    var o = sandhi_server_options_new();
+    assert_eq(sandhi_server_options_get_request_ms(o), SANDHI_SERVER_DEFAULT_REQUEST_MS,
+      "request_ms: options_new sets the default");
+    assert_eq(SANDHI_SERVER_DEFAULT_REQUEST_MS, 60000, "request_ms: default is 60 s");
+    assert_eq(sandhi_server_options_get_request_ms(0), SANDHI_SERVER_DEFAULT_REQUEST_MS,
+      "request_ms: no options reads the default");
+    sandhi_server_options_request_ms(o, 2500);
+    assert_eq(sandhi_server_options_get_request_ms(o), 2500, "request_ms: round-trips");
+    sandhi_server_options_request_ms(o, 0);
+    assert_eq(sandhi_server_options_get_request_ms(o), 0, "request_ms: 0 disables it");
+    sandhi_server_options_request_ms(o, 0 - 5);
+    assert_eq(sandhi_server_options_get_request_ms(o), 0, "request_ms: a negative reads as disabled");
+    assert_eq(sandhi_server_options_get_stop_flag(o), 0, "request_ms: the stop_flag slot is undisturbed");
+    return 0;
+}
+
+var _t_drip_fd = 0;
+var _t_drip_ms = 0;
+var _t_drip_total_ms = 0;
+
+# Send a request line, then one byte every `_t_drip_ms` until `_t_drip_total_ms`
+# has passed, then close: a Slowloris peer.
+fn _t_dripper(arg) {
+    sock_send_all(_t_drip_fd, "GET / HTTP/1.1\r\n", 16);
+    var t0 = clock_now_ms();
+    while (clock_now_ms() - t0 < _t_drip_total_ms) {
+        sleep_ms(_t_drip_ms);
+        if (sock_send_all(_t_drip_fd, "X", 1) < 0) { sock_close(_t_drip_fd); return 0; }
+    }
+    sock_close(_t_drip_fd);
+    return 0;
+}
+
+# A loopback pair; the server end gets a 1 s SO_RCVTIMEO, which a byte every
+# 100 ms never trips. Returns the server fd, or -1 (and the row skips).
+fn _t_budget_pair(port): i64 {
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { return 0 - 1; }
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, INADDR_LOOPBACK(), port)) == 1) { sock_close(lfd); return 0 - 1; }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) { sock_close(lfd); return 0 - 1; }
+    var cr_tag, cfd = tcp_socket();
+    if (is_err_result(cr_tag) == 1) { sock_close(lfd); return 0 - 1; }
+    if (is_err_result(sock_connect(cfd, INADDR_LOOPBACK(), port)) == 1) {
+        sock_close(cfd); sock_close(lfd); return 0 - 1;
+    }
+    var ar_tag, sfd = sock_accept(lfd);
+    sock_close(lfd);
+    if (is_err_result(ar_tag) == 1) { sock_close(cfd); return 0 - 1; }
+    _sandhi_conn_set_timeout_ms(sfd, 1000, _SANDHI_SO_RCVTIMEO);
+    _t_drip_fd = cfd;
+    return sfd;
+}
+
+# The Slowloris shape: bytes keep arriving, so no read ever times out. Under a
+# 400 ms budget the read ends TIMEOUT well before the peer gives up at 2 s.
+# Mutation: ignoring the deadline reads until the peer closes (INCOMPLETE, ~2 s).
+fn test_server_request_budget_stops_dribbling_peer() {
+    var sfd = _t_budget_pair(39831);
+    if (sfd < 0) { assert_eq(1, 1, "budget dribble: loopback unavailable — skipped"); return 0; }
+    _t_drip_ms = 100;
+    _t_drip_total_ms = 2000;
+    var t = thread_create(&_t_dripper, 0);
+    if (t == 0) { sock_close(sfd); sock_close(_t_drip_fd); assert_eq(1, 1, "budget dribble: no thread — skipped"); return 0; }
+    var buf = alloc(4096);
+    var t0 = clock_now_ms();
+    var n = _sandhi_server_recv_request_dl(sfd, buf, 4000, clock_now_ms() + 400);
+    var ms = clock_now_ms() - t0;
+    sock_close(sfd);
+    thread_join(t);
+    assert_eq(n, SANDHI_SERVER_ERR_TIMEOUT, "budget dribble: a request still arriving at the deadline is TIMEOUT");
+    assert_lt(ms, 1500, "budget dribble: ended at the budget, not when the peer stopped");
+    return 0;
+}
+
+# A peer that sends nothing at all: the budget ends the wait before the 1 s read timeout would.
+fn test_server_request_budget_silent_peer() {
+    var sfd = _t_budget_pair(39832);
+    if (sfd < 0) { assert_eq(1, 1, "budget silent: loopback unavailable — skipped"); return 0; }
+    var buf = alloc(4096);
+    var t0 = clock_now_ms();
+    var n = _sandhi_server_recv_request_dl(sfd, buf, 4000, clock_now_ms() + 200);
+    var ms = clock_now_ms() - t0;
+    sock_close(sfd);
+    sock_close(_t_drip_fd);
+    assert_eq(n, SANDHI_SERVER_ERR_TIMEOUT, "budget silent: nothing sent within the budget is TIMEOUT");
+    assert_lt(ms, 900, "budget silent: before the 1 s read timeout");
+    return 0;
+}
+
+# A complete request inside the budget is read exactly as without one.
+fn test_server_request_budget_complete_request() {
+    var sfd = _t_budget_pair(39833);
+    if (sfd < 0) { assert_eq(1, 1, "budget complete: loopback unavailable — skipped"); return 0; }
+    var req = "GET /x HTTP/1.1\r\nHost: a\r\n\r\n";
+    sock_send_all(_t_drip_fd, req, strlen(req));
+    var buf = alloc(4096);
+    var n = _sandhi_server_recv_request_dl(sfd, buf, 4000, clock_now_ms() + 2000);
+    sock_close(sfd);
+    sock_close(_t_drip_fd);
+    assert_eq(n, strlen(req), "budget complete: the whole request, as before");
+    return 0;
+}
+
+var _t_budget_stop = 0;
+var _t_budget_opts = 0;
+
+fn _t_budget_server(arg) {
+    sandhi_server_run_pooled(INADDR_LOOPBACK(), 39834, &_t_ok_cfd_handler, 0, _t_budget_opts);
+    return 0;
+}
+
+fn _t_ok_cfd_handler(ctx, cfd, buf, blen): i64 {
+    sandhi_server_send_status(cfd, 200, "OK");
+    return 0;
+}
+
+# End to end through a serve loop: a pooled server with a 300 ms budget answers
+# a request that never completes with 408 and frees the worker. Mutation:
+# calling the unbounded reader from the worker leaves the client without an
+# answer until its own 3 s read timeout.
+fn test_server_request_budget_answers_408() {
+    _t_budget_stop = 0;
+    var o = sandhi_server_options_new();
+    sandhi_server_options_max_conns(o, 2);
+    sandhi_server_options_request_ms(o, 300);
+    sandhi_server_options_stop_flag(o, &_t_budget_stop);
+    _t_budget_opts = o;
+    var t = thread_create(&_t_budget_server, 0);
+    if (t == 0) { assert_eq(1, 1, "budget 408: no thread — skipped"); return 0; }
+    sleep_ms(200);
+    var cr_tag, cfd = tcp_socket();
+    var ok = 0;
+    if (is_err_result(cr_tag) == 0) {
+        if (is_err_result(sock_connect(cfd, INADDR_LOOPBACK(), 39834)) == 0) { ok = 1; }
+    }
+    if (ok == 0) {
+        _t_budget_stop = 1;
+        thread_join(t);
+        assert_eq(1, 1, "budget 408: server unreachable — skipped");
+        return 0;
+    }
+    _sandhi_conn_set_timeout_ms(cfd, 3000, _SANDHI_SO_RCVTIMEO);
+    sock_send_all(cfd, "GET / HTTP/1.1\r\nHost: a\r\n", 26);
+    var buf = alloc(256);
+    var t0 = clock_now_ms();
+    var r_tag, n = sock_recv(cfd, buf, 255);
+    var ms = clock_now_ms() - t0;
+    if (is_err_result(r_tag) == 1 || n < 0) { n = 0; }
+    store8(buf + n, 0);
+    sock_close(cfd);
+    _t_budget_stop = 1;
+    thread_join(t);
+    assert_gte(n, 12, "budget 408: the server answered");
+    assert_eq(memeq(buf, "HTTP/1.1 408", 12), 1, "budget 408: with 408 Request Timeout");
+    assert_lt(ms, 2500, "budget 408: at the budget, not at the client's read timeout");
     return 0;
 }
 
@@ -2602,6 +2806,42 @@ fn test_server_dispatch_c() {
     _g_route_calls = 0;
     sandhi_server_router_handler_c(r, dc, req1, strlen(req1));
     assert_eq(_g_route_calls, 1, "handler_c: routes via stack params");
+    return 0;
+}
+
+fn _t_noop_route_c(ctx, conn, buf, blen, params): i64 { return 0; }
+
+# 1.10.7 — conn-path routing on an arena costs the global heap nothing per
+# request. Through 1.10.6 `sandhi_router_dispatch_c` took its method / path /
+# path-only and its 404/405 writes from the no-free global bump on every HTTPS
+# request, arena or not (measured 136 B per routed request, 312 B per 404).
+# Mutation: building with the bare accessors again fails the zero-growth rows.
+fn test_server_dispatch_c_a_is_arena_backed() {
+    var devnull = syscall(2, "/dev/null", 1, 0);
+    var dc = sandhi_server_conn_plain(devnull);
+    var r = sandhi_router_new(0);
+    sandhi_router_add(r, "GET", "/api/notes/:id", &_t_noop_route_c);
+    var p[264];
+    var a = arena_allocator(16384);
+    var hit = "GET /api/notes/7?x=1 HTTP/1.1\r\nHost: x\r\n\r\n";
+    var miss = "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n";
+    # Warm once so any one-time growth is out of the measured window.
+    sandhi_route_params_init(&p);
+    sandhi_router_dispatch_c_a(a, r, 0, dc, hit, strlen(hit), &p);
+    sandhi_router_dispatch_c_a(a, r, 0, dc, miss, strlen(miss), &p);
+    reset_via(a);
+    var before = alloc_used();
+    var i = 0;
+    while (i < 50) {
+        sandhi_route_params_init(&p);
+        sandhi_router_dispatch_c_a(a, r, 0, dc, hit, strlen(hit), &p);
+        sandhi_router_dispatch_c_a(a, r, 0, dc, miss, strlen(miss), &p);
+        reset_via(a);
+        i = i + 1;
+    }
+    var grew = alloc_used() - before;
+    syscall(3, devnull);
+    assert_eq(grew, 0, "dispatch_c_a: 100 routed / 404 requests on an arena grow the global heap by 0");
     return 0;
 }
 
@@ -4010,6 +4250,162 @@ fn test_stream_chunked_split_crlf_roundtrip() {
 }
 
 # ================================================================
+# 1.10.7 — buffered client framing against a live peer
+# ================================================================
+#
+# A canned HTTP/1.1 peer on a thread: it accepts one connection, reads the
+# request header block, writes `resp` (`resp_len` bytes, so a body may hold a
+# NUL), holds the connection open `hold_ms`, then closes. The request goes
+# through `_sandhi_http_dispatch_a`, the path every buffered verb takes.
+
+var _t_cs_lfd = 0;
+var _t_cs_resp = 0;
+var _t_cs_resp_len = 0;
+var _t_cs_hold_ms = 0;
+var _t_cs_elapsed = 0;
+
+fn _t_canned_server(arg) {
+    var at, cfd = sock_accept(_t_cs_lfd);
+    if (is_err_result(at) == 1) { return 0; }
+    var buf = alloc(4096);
+    var have = 0;
+    var done = 0;
+    while (done == 0 && have < 4000) {
+        var n = sys_read(cfd, buf + have, 4000 - have);
+        if (n <= 0) { done = 1; } else {
+            have = have + n;
+            var i = 0;
+            while (i + 3 < have) {
+                if (load8(buf + i) == 13 && load8(buf + i + 1) == 10
+                  && load8(buf + i + 2) == 13 && load8(buf + i + 3) == 10) { done = 1; }
+                i = i + 1;
+            }
+        }
+    }
+    sock_send_all(cfd, _t_cs_resp, _t_cs_resp_len);
+    if (_t_cs_hold_ms > 0) { sleep_ms(_t_cs_hold_ms); }
+    sock_close(cfd);
+    return 0;
+}
+
+# Returns the response, or 0 when the loopback listener could not be set up.
+# The elapsed time of the request alone lands in `_t_cs_elapsed`.
+fn _t_canned_run(port, url, method, resp, resp_len, hold_ms, pooled): i64 {
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { return 0; }
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, INADDR_LOOPBACK(), port)) == 1) { sock_close(lfd); return 0; }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) { sock_close(lfd); return 0; }
+    _t_cs_lfd = lfd;
+    _t_cs_resp = resp;
+    _t_cs_resp_len = resp_len;
+    _t_cs_hold_ms = hold_ms;
+    var t = thread_create(&_t_canned_server, 0);
+    if (t == 0) { sock_close(lfd); return 0; }
+    var opts = sandhi_http_options_new();
+    sandhi_http_options_read_ms(opts, 5000);
+    if (pooled == 1) { sandhi_http_options_pool(opts, sandhi_http_pool_new(2, 10000)); }
+    var t0 = clock_now_ms();
+    var r = _sandhi_http_dispatch_a(default_alloc(), method, url, 0, 0, 0, opts);
+    _t_cs_elapsed = clock_now_ms() - t0;
+    thread_join(t);
+    sock_close(lfd);
+    return r;
+}
+
+# A body shorter than its Content-Length, then EOF: the response parser
+# clamps, and the client used to report SANDHI_OK with the short body.
+# Mutation: returning the byte count on that EOF again fails this row.
+fn test_client_short_content_length_is_protocol() {
+    var resp = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc";
+    var r = _t_canned_run(39811, "http://127.0.0.1:39811/x", "GET", resp, strlen(resp), 0, 0);
+    if (r == 0) { assert_eq(1, 1, "short CL: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_PROTOCOL, "short CL: 3 of 100 declared bytes then EOF is PROTOCOL");
+    return 0;
+}
+
+# The same for a chunked body that never reaches its terminal chunk.
+fn test_client_truncated_chunked_is_protocol() {
+    var resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab";
+    var r = _t_canned_run(39812, "http://127.0.0.1:39812/x", "GET", resp, strlen(resp), 0, 0);
+    if (r == 0) { assert_eq(1, 1, "truncated chunked: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_PROTOCOL, "truncated chunked: EOF mid-chunk is PROTOCOL");
+    return 0;
+}
+
+# A Connection: close response whose body holds a NUL. Both exchanges re-measured
+# the buffer with strlen() on the must-close path and cut the body at the NUL.
+# Mutation: the strlen() re-measure fails the length and byte rows.
+fn test_client_close_body_keeps_nul_bytes() {
+    var head = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n";
+    var hl = strlen(head);
+    var resp = alloc(hl + 8);
+    memcpy(resp, head, hl);
+    memcpy(resp + hl, "ab", 2);
+    store8(resp + hl + 2, 0);
+    memcpy(resp + hl + 3, "cd", 2);
+    var r = _t_canned_run(39813, "http://127.0.0.1:39813/x", "GET", resp, hl + 5, 0, 0);
+    if (r == 0) { assert_eq(1, 1, "NUL body: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_http_err_kind(r), SANDHI_OK, "NUL body: OK");
+    assert_eq(sandhi_http_body_len(r), 5, "NUL body: all 5 bytes, not cut at the NUL");
+    var b = sandhi_http_body(r);
+    assert_eq(load8(b + 2), 0, "NUL body: the NUL is in place");
+    assert_eq(load8(b + 4), 100, "NUL body: and the byte after it arrived");
+    return 0;
+}
+
+# Control: a close-delimited body (no framing declared) ends at EOF and is OK.
+fn test_client_close_delimited_eof_is_ok() {
+    var head = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+    var hl = strlen(head);
+    var resp = alloc(hl + 8);
+    memcpy(resp, head, hl);
+    memcpy(resp + hl, "ab", 2);
+    store8(resp + hl + 2, 0);
+    memcpy(resp + hl + 3, "cd", 2);
+    var r = _t_canned_run(39814, "http://127.0.0.1:39814/x", "GET", resp, hl + 5, 0, 0);
+    if (r == 0) { assert_eq(1, 1, "close-delimited: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_http_err_kind(r), SANDHI_OK, "close-delimited: EOF ends the body, OK");
+    assert_eq(sandhi_http_body_len(r), 5, "close-delimited: all 5 bytes");
+    return 0;
+}
+
+# A HEAD response carries Content-Length but no body. The client waited for the
+# body until the server closed (here held 1500 ms; on a keep-alive server, until
+# read_ms turned it into TIMEOUT). Mutation: dropping the no-body completion
+# fails the elapsed rows.
+fn test_client_head_completes_at_headers() {
+    var resp = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n";
+    var r = _t_canned_run(39815, "http://127.0.0.1:39815/x", "HEAD", resp, strlen(resp), 1500, 0);
+    if (r == 0) { assert_eq(1, 1, "HEAD: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_http_err_kind(r), SANDHI_OK, "HEAD: OK");
+    assert_eq(sandhi_http_body_len(r), 0, "HEAD: no body");
+    assert_lt(_t_cs_elapsed, 1000, "HEAD: done at the header block, not when the server closes");
+    return 0;
+}
+
+# The same for a 304 on a pooled keep-alive connection.
+fn test_client_304_pooled_completes_at_headers() {
+    var resp = "HTTP/1.1 304 Not Modified\r\nContent-Length: 100\r\n\r\n";
+    var r = _t_canned_run(39816, "http://127.0.0.1:39816/x", "GET", resp, strlen(resp), 1500, 1);
+    if (r == 0) { assert_eq(1, 1, "304 pooled: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_http_err_kind(r), SANDHI_OK, "304 pooled: OK");
+    assert_eq(sandhi_http_status(r), 304, "304 pooled: status 304");
+    assert_eq(sandhi_http_body_len(r), 0, "304 pooled: no body");
+    assert_lt(_t_cs_elapsed, 1000, "304 pooled: done at the header block");
+    return 0;
+}
+
+fn test_req_is_head() {
+    assert_eq(_sandhi_req_is_head("HEAD / HTTP/1.1\r\n"), 1, "req_is_head: HEAD request line");
+    assert_eq(_sandhi_req_is_head("GET / HTTP/1.1\r\n"), 0, "req_is_head: GET");
+    assert_eq(_sandhi_req_is_head("HEADX / HTTP/1.1\r\n"), 0, "req_is_head: a longer token is not HEAD");
+    assert_eq(_sandhi_req_is_head("HEA"), 0, "req_is_head: short string");
+    assert_eq(_sandhi_req_is_head(0), 0, "req_is_head: null");
+    return 0;
+}
+
+# ================================================================
 # 1.10.5 — stream body loop against a live peer
 # ================================================================
 #
@@ -4727,6 +5123,19 @@ fn main() {
 
     test_group("server/sigpipe_guard_closed_peer");
     test_server_sigpipe_guard_survives_closed_peer();
+
+    test_group("server/tls/dispatch_c_arena");
+    test_server_dispatch_c_a_is_arena_backed();
+
+    test_group("tls_policy/reqctx_hook");
+    test_reqctx_hook_is_per_call();
+
+    test_group("server/request_budget");
+    test_server_request_ms_option();
+    test_server_request_budget_complete_request();
+    test_server_request_budget_silent_peer();
+    test_server_request_budget_stops_dribbling_peer();
+    test_server_request_budget_answers_408();
     test_server_peer_addr();
     test_server_ip4_str();
 
@@ -4950,6 +5359,15 @@ fn main() {
 
     test_group("stream/event_split_across_reads");
     test_stream_chunked_event_split_across_reads();
+
+    test_group("client/framing_live");
+    test_req_is_head();
+    test_client_short_content_length_is_protocol();
+    test_client_truncated_chunked_is_protocol();
+    test_client_close_body_keeps_nul_bytes();
+    test_client_close_delimited_eof_is_ok();
+    test_client_head_completes_at_headers();
+    test_client_304_pooled_completes_at_headers();
 
     test_group("stream/idle_options");
     test_http_options_idle_defaults();

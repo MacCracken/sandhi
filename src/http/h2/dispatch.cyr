@@ -139,17 +139,18 @@ fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool): i64 {
     var read_ms = sandhi_http_options_get_read_ms(opts);
     var write_ms = sandhi_http_options_get_write_ms(opts);
 
+    # 1.10.7 — a context of its own (no hook armed), so this open never picks
+    # up a policy hook another thread armed and then pools the result.
+    var rc = _sandhi_reqctx_new_a(a);
+    if (rc == 0) { return 0; }
     _sandhi_alpn_advertise_h2 = 1;
     var conn = 0;
     if (addr6 != 0) {
-        # 9th arg is the 1.6.9 per-call request ctx; h2-promote threads none
-        # (no SANDHI_REQCTX_* in scope), so pass 0 — the ctx==0 fallback, exactly
-        # what the IPv4 sibling's public sandhi_conn_open_fully_timed_a defaults to.
         conn = _sandhi_conn_open_v6_fully_timed_a(a, addr6, port, 1, host,
-          connect_ms, read_ms, write_ms, 0);
+          connect_ms, read_ms, write_ms, rc);
     } else {
-        conn = sandhi_conn_open_fully_timed_a(a, addr, port, 1, host,
-          connect_ms, read_ms, write_ms);
+        conn = _sandhi_conn_open_fully_timed_ctx_a(a, addr, port, 1, host,
+          connect_ms, read_ms, write_ms, rc);
     }
     _sandhi_alpn_advertise_h2 = 0;
 
@@ -257,7 +258,7 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts):
     # is exactly what do_impl's `ctx == 0` branch used to read — so those two
     # keep their prior per-dispatch semantics (computed once from the original
     # headers, not recomputed per redirect hop) and only the policy is new.
-    var ctx = alloc_via(a, SANDHI_REQCTX_SIZE);
+    var ctx = _sandhi_reqctx_new_a(a);
     if (ctx == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
     store64(ctx + SANDHI_REQCTX_OFF_ALLOW_0RTT, _sandhi_allow_0rtt);
     store64(ctx + SANDHI_REQCTX_OFF_CRED_DIGEST, _sandhi_cred_digest);

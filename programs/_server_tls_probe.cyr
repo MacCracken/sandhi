@@ -33,8 +33,30 @@
 #       real regression (a sigil/cyrius pin that broke the per-thread lanes, or a
 #       max_conns>1 HTTPS break), NOT a tolerated limitation.
 #
+#   [5] whole-request budget over TLS (1.10.7): a raw client that dribbles a TLS
+#       record one byte every 300 ms never trips the 1 s per-read idle_ms, so
+#       through 1.10.6 it held a worker in the handshake indefinitely. With
+#       request_ms 1500 the server must drop it at about 1.5 s.
+#   [6] policy-hook isolation (1.10.7): one trust-store thread and three
+#       no-policy threads request concurrently. Through 1.10.6 the policy hook
+#       was a process-wide global, so a no-policy request could run under the
+#       trust store another thread armed and ACCEPT the self-signed cert its
+#       own default verification rejects (162-167 of 180 measured). Every
+#       no-policy request must fail; the trust-store requests must succeed.
+#   [7] a policied open never touches the TLS session cache (1.10.7): the key
+#       does not identify the policy, so with the cache enabled a session made
+#       under one policy was offered to the next (a TLS 1.2 resumption on the
+#       libssl backend skipped the trust store). With the cache on, a policied
+#       request must make no lookup and no store.
+#   [8] per-request arena on HTTPS (1.10.7): with `req_arena` set, a TLS
+#       handler sees `sandhi_server_request_arena()` (it was 0: the TLS worker
+#       never created one), and 40 routed requests grow the server's global
+#       heap by at most 128 B each. The remaining ~120 B/accept is the stdlib's
+#       PEM key decode (lib/sigil.cyr pem_decode_privkey); a DER key measures 0.
+#       Through 1.10.6 the documented handler shape grew it 472 B/request.
+#
 # Skip-cleanly (exit 0) if TLS is unavailable or the fixtures are missing.
-# Exit 0 = PASS / clean-SKIP; non-zero = FAIL. All four checks contribute to FAIL.
+# Exit 0 = PASS / clean-SKIP; non-zero = FAIL. All eight checks contribute to FAIL.
 include "lib/thread_local.cyr"
 include "lib/ct.cyr"
 include "lib/keccak.cyr"
@@ -88,11 +110,55 @@ var CERT_PATH = "programs/_tls_fixtures/cert.der";   # DER leaf — native serve
 var KEY_PATH  = "programs/_tls_fixtures/key.pem";    # PEM — Ed25519 key
 var CA_PATH   = "programs/_tls_fixtures/cert.pem";   # PEM — client trust anchor
 
-# Conn route handler (fncall5 shape: ctx, conn, buf, blen, params).
+# Conn route handler (fncall5 shape: ctx, conn, buf, blen, params). Allocates
+# through the per-request arena when the server has one (`req_arena`), which is
+# the shape that keeps a long-running HTTPS server's heap flat.
 fn note_handler(ctx, conn, buf, blen, params): i64 {
-    var id = sandhi_route_param(params, 0);
-    sandhi_server_send_response_c(conn, 200, "OK", "text/plain", id, strlen(id), 0);
+    var a = sandhi_server_request_arena();
+    if (a == 0) { a = default_alloc(); }
+    var id = sandhi_route_param_a(a, params, 0);
+    sandhi_server_send_response_c_a(a, conn, 200, "OK", "text/plain", id, strlen(id), 0);
     return 0;
+}
+
+# [8] "1" when this worker handed the handler a per-request arena, else "0".
+fn arena_handler(ctx, conn, buf, blen, params): i64 {
+    var a = sandhi_server_request_arena();
+    var b = "1";
+    if (a == 0) { b = "0"; a = default_alloc(); }
+    sandhi_server_send_response_c_a(a, conn, 200, "OK", "text/plain", b, 1, 0);
+    return 0;
+}
+
+# [8] the server process's global-heap usage, in decimal, written from a stack buffer.
+fn mem_handler(ctx, conn, buf, blen, params): i64 {
+    var digits[32];
+    var v = alloc_used();
+    var n = 0;
+    var tmp[32];
+    if (v == 0) { store8(&tmp, 48); n = 1; }
+    while (v > 0) { store8(&tmp + n, 48 + (v % 10)); v = v / 10; n = n + 1; }
+    var i = 0;
+    while (i < n) { store8(&digits + i, load8(&tmp + n - 1 - i)); i = i + 1; }
+    var a = sandhi_server_request_arena();
+    if (a == 0) { a = default_alloc(); }
+    sandhi_server_send_response_c_a(a, conn, 200, "OK", "text/plain", &digits, n, 0);
+    return 0;
+}
+
+# GET and return the body as an integer (decimal), or -1.
+fn _https_get_int(url, policy): i64 {
+    var opts = sandhi_http_options_new();
+    sandhi_http_options_tls_policy(opts, policy);
+    var r = sandhi_http_get_opts(url, 0, opts);
+    if (r == 0) { return 0 - 1; }
+    if (sandhi_http_err_kind(r) != SANDHI_OK || sandhi_http_status(r) != 200) { return 0 - 1; }
+    var b = sandhi_http_body(r);
+    var bl = sandhi_http_body_len(r);
+    var v = 0;
+    var i = 0;
+    while (i < bl) { v = v * 10 + (load8(b + i) - 48); i = i + 1; }
+    return v;
 }
 
 # Does the response body contain "55"?
@@ -141,6 +207,32 @@ fn _conc_child(url, trust): i64 {
     return 0;
 }
 
+# [6] workers: each fires `_h6_n` GETs at the shared URL, with the trust-store
+# policy or with none, and counts the 200s.
+var _h6_url = 0;
+var _h6_trust = 0;
+var _h6_n = 30;
+var _h6_trust_ok = 0;
+var _h6_open_ok = 0;
+
+fn _h6_trust_worker(arg) {
+    var i = 0;
+    while (i < _h6_n) {
+        if (_https_get(_h6_url, _h6_trust) == 200) { atomic_fetch_add(&_h6_trust_ok, 1); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _h6_open_worker(arg) {
+    var i = 0;
+    while (i < _h6_n) {
+        if (_https_get(_h6_url, 0) == 200) { atomic_fetch_add(&_h6_open_ok, 1); }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn main() {
     alloc_init();
     say("=== sandhi server-side TLS gate ===\n");
@@ -160,10 +252,14 @@ fn main() {
         # child: pooled TLS server, 4 worker threads, one route.
         var router = sandhi_router_new(0);
         sandhi_router_add(router, "GET", "/notes/:id", &note_handler);
+        sandhi_router_add(router, "GET", "/arena", &arena_handler);
+        sandhi_router_add(router, "GET", "/mem", &mem_handler);
         var opts = sandhi_server_options_new();
         sandhi_server_options_tls(opts, cert, cert_len, key, key_len);
         sandhi_server_options_max_conns(opts, 4);    # 4 worker threads
         sandhi_server_options_idle_ms(opts, 1000);   # slow-peer / silent bound
+        sandhi_server_options_request_ms(opts, 1500);  # whole-request budget, [5]
+        sandhi_server_options_req_arena(opts, 65536);  # per-request arena, [8]
         sandhi_server_run_pooled_tls(INADDR_LOOPBACK(), port,
           &sandhi_server_router_handler_c, router, opts);
         syscall(60, 0);
@@ -239,6 +335,79 @@ fn main() {
         say("    crypto-scratch banking may have regressed on this pin.\n");
         fails = fails + 1;
     }
+
+    # [5] dribble a TLS record header + body one byte every 300 ms. The server
+    # must close the connection at its 1.5 s budget; a send fails soon after.
+    signal_ignore(13);
+    var dfd = 0 - 1;
+    var dt_tag, dsock = tcp_socket();
+    if (is_err_result(dt_tag) == 0) {
+        if (is_err_result(sock_connect(dsock, INADDR_LOOPBACK(), port)) == 0) { dfd = dsock; }
+    }
+    var dropped_ms = 0 - 1;
+    if (dfd >= 0) {
+        var rec = alloc(16);
+        store8(rec, 22); store8(rec + 1, 3); store8(rec + 2, 1); store8(rec + 3, 2); store8(rec + 4, 0);
+        var t0 = clock_now_ms();
+        var k5 = 0;
+        while (dropped_ms < 0 && clock_now_ms() - t0 < 8000) {
+            var b = 0;
+            if (k5 < 5) { b = load8(rec + k5); }
+            var one[8];
+            store8(&one, b);
+            if (sock_send_all(dfd, &one, 1) < 0) { dropped_ms = clock_now_ms() - t0; }
+            k5 = k5 + 1;
+            async_sleep_ms(300);
+        }
+        sock_close(dfd);
+    }
+    say("[5] dribbled handshake dropped after "); fmt_int(dropped_ms);
+    say(" ms (want 0..4000; budget 1500)\n");
+    if (dropped_ms < 0 || dropped_ms > 4000) { fails = fails + 1; }
+
+    # [6] policy-hook isolation under concurrency.
+    _h6_url = url;
+    _h6_trust = trust;
+    _h6_trust_ok = 0;
+    _h6_open_ok = 0;
+    var w0 = thread_create(&_h6_trust_worker, 0);
+    var w1 = thread_create(&_h6_open_worker, 0);
+    var w2 = thread_create(&_h6_open_worker, 0);
+    var w3 = thread_create(&_h6_open_worker, 0);
+    thread_join(w0); thread_join(w1); thread_join(w2); thread_join(w3);
+    say("[6] concurrent hook isolation: no-policy accepted "); fmt_int(_h6_open_ok);
+    say(" / "); fmt_int(3 * _h6_n); say(" (want 0); trust-store 200 ");
+    fmt_int(_h6_trust_ok); say(" / "); fmt_int(_h6_n); say("\n");
+    if (_h6_open_ok != 0) {
+        say("    SECURITY: a no-policy request ran under another thread's policy hook\n");
+        fails = fails + 1;
+    }
+    if (_h6_trust_ok < _h6_n - 1) { fails = fails + 1; }
+
+    # [7] a policied request with the session cache on makes no lookup and no store.
+    sandhi_session_cache_enable(1);
+    sandhi_session_cache_reset_stats();
+    var c7 = _https_get(url, trust);
+    var lookups7 = sandhi_session_cache_hit_count() + sandhi_session_cache_miss_count();
+    var size7 = sandhi_session_cache_size();
+    sandhi_session_cache_enable(0);
+    say("[7] policied open with the session cache on: status "); fmt_int(c7);
+    say(", cache lookups "); fmt_int(lookups7); say(", entries "); fmt_int(size7);
+    say(" (want 200, 0, 0)\n");
+    if (c7 != 200 || lookups7 != 0 || size7 != 0) { fails = fails + 1; }
+
+    # [8] the per-request arena reaches HTTPS handlers, and the heap stays flat.
+    var ar = _https_get_int("https://127.0.0.1:18443/arena", trust);
+    var m0 = _https_get_int("https://127.0.0.1:18443/mem", trust);
+    var k8 = 0;
+    while (k8 < 40) { _https_get(url, trust); k8 = k8 + 1; }
+    var m1 = _https_get_int("https://127.0.0.1:18443/mem", trust);
+    var per = 0 - 1;
+    if (m0 >= 0 && m1 >= m0) { per = (m1 - m0) / 41; }
+    say("[8] per-request arena on HTTPS: handler sees it "); fmt_int(ar);
+    say(" (want 1); server heap growth "); fmt_int(per);
+    say(" B/request (want 0..128: the stdlib PEM key decode)\n");
+    if (ar != 1 || per < 0 || per > 128) { fails = fails + 1; }
 
     sys_kill(pid, 9);
     syscall(61, pid, 0, 0, 0);   # wait4 — reap the child

@@ -317,12 +317,15 @@ fn _sandhi_pool_put(pool, host, port, tls, conn): i64 {
 # responses always close the connection per RFC 7230 §3.3.3 ("connection
 # closed by server"); the caller treats that as no-keep-alive.
 #
-# Returns:
-#   - bytes-read on success (≥ 0)
+# Returns (1.10.7):
+#   - bytes-read on success (≥ 0); `*close_cell` is 1 when the connection
+#     must not be reused (the server sent Connection: close, the body is
+#     close-delimited, or the peer already closed)
 #   - 0 - _SANDHI_EAGAIN on read deadline
-#   - 0 - 1 on protocol error or buffer exhaustion
-#   - 0 - 2 if the response declares Connection: close (caller must
-#         not put back into the pool; we read what we can and stop)
+#   - 0 - _SANDHI_RECV_CAP_EXCEEDED when the response outgrows `cap`
+#   - 0 - _SANDHI_RECV_TRUNCATED when the peer closed before the body its
+#     headers declared (Content-Length or chunked) was complete
+#   - 0 - 1 on a read error or a malformed chunk size
 #
 # Status: this function is the keep-alive correctness boundary.
 # Trailer parsing landed at 0.9.4 in `_sandhi_resp_decode_chunked`
@@ -401,14 +404,31 @@ fn _sandhi_pool_chunked_complete(buf, body_start, blen): i64 {
 # Receive a framed response into a scratch buffer that the caller
 # allocated (`buf`, capacity `cap`). Returns total bytes read, or
 # negative sentinel per top-of-section. `deadline_ms` (0 = none)
-# bounds the total recv loop. Reads in 4 KB chunks for sane progress.
-fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms): i64 {
+# bounds the total recv loop.
+#
+# 1.10.7 — three changes, one root: this function parsed the response's
+# framing and then threw it away.
+#   - `no_body` (the request was HEAD), a 204 and a 304 complete at the end
+#     of the header block (RFC 7230 §3.3.3) whatever Content-Length they
+#     carry. They used to wait for body bytes that never come, until the
+#     server closed or the read deadline turned a good response into TIMEOUT
+#     on a keep-alive connection.
+#   - EOF before a declared Content-Length or chunked body is complete is
+#     _SANDHI_RECV_TRUNCATED. It used to return the byte count, and the
+#     response parser's clamp then reported a short body as SANDHI_OK.
+#   - "must close" goes out through `close_cell` instead of a `0 - 2` return.
+#     That sentinel replaced the byte count, so both callers re-measured the
+#     buffer with strlen() and cut every Connection: close body at its first
+#     NUL byte.
+fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms, no_body, close_cell): i64 {
+    if (close_cell != 0) { store64(close_cell, 0); }
     var have = 0;
     var headers_end = 0 - 1;
     var body_start = 0;
     var content_length = 0 - 1;  # -1 = unparsed sentinel
     var is_chunked = 0;
     var must_close = 0;
+    var body_none = 0;
 
     # Read in whole-TLS-record steps (16384 = TLS_RECORD_MAX_PLAINTEXT) rather than
     # a small sub-record chunk. This is an EFFICIENCY choice, not a correctness
@@ -444,9 +464,15 @@ fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms): i64 {
         if (n == 0 - _SANDHI_EAGAIN) { return 0 - _SANDHI_EAGAIN; }
         if (n < 0) { return 0 - 1; }
         if (n == 0) {
-            # EOF before framing satisfied — could be HTTP/1.0 close-
-            # delimited OR a broken connection. Caller decides.
+            # EOF before framing satisfied. Close-delimited (no framing
+            # declared) is a complete response; a declared Content-Length or
+            # chunked body that has not ended is a truncated one. EOF before the
+            # header block ended is left to the response parser, as before.
             store8(buf + have, 0);
+            if (close_cell != 0) { store64(close_cell, 1); }
+            if (scratch_done == 1 && (is_chunked == 1 || content_length >= 0)) {
+                return 0 - _SANDHI_RECV_TRUNCATED;
+            }
             return have;
         }
         have = have + n;
@@ -466,7 +492,10 @@ fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms): i64 {
                 var hblock_len = headers_end - hstart;
                 if (hblock_len < 0) { hblock_len = 0; }
                 var headers = sandhi_headers_parse(buf + hstart, hblock_len);
-                if (_sandhi_resp_is_chunked(headers) == 1) {
+                var status = _sandhi_resp_status(buf, headers_end);
+                if (no_body == 1 || status == 204 || status == 304) {
+                    body_none = 1;
+                } elif (_sandhi_resp_is_chunked(headers) == 1) {
                     is_chunked = 1;
                 } else {
                     var clv = sandhi_headers_get(headers, "Content-Length");
@@ -494,7 +523,11 @@ fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms): i64 {
         }
 
         if (scratch_done == 1) {
-            if (is_chunked == 1) {
+            if (body_none == 1) {
+                have = body_start;
+                store8(buf + have, 0);
+                going = 0;
+            } elif (is_chunked == 1) {
                 var done = _sandhi_pool_chunked_complete(buf, body_start, have);
                 if (done == 0 - 1) { return 0 - 1; }
                 if (done == 1) { going = 0; }
@@ -507,7 +540,7 @@ fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms): i64 {
             }
         }
     }
-    if (must_close == 1) { return 0 - 2; }
+    if (close_cell != 0) { store64(close_cell, must_close); }
     return have;
 }
 

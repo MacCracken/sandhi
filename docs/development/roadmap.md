@@ -6,8 +6,10 @@
 > [`requests/`](requests/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. This file was last
-> swept clean of completed work on **2026-09-23** (at 1.10.0: the two prepped pin-bump
-> sections and the SSE boundary item that shipped in 1.9.15 were removed).
+> swept clean of completed work on **2026-10-04** (at 1.10.6: the shipped 1.9.13
+> repair-queue narrative, the two sections 1.10.6 emptied, and the sigil
+> undefined-symbol note that cyrius 6.6.15 resolved were removed; at 1.10.7 the
+> whole "P1 follow-ups from the 1.9.12 sweep" section, which 1.10.7 shipped).
 
 ## Context (post-fold)
 
@@ -16,11 +18,7 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.6.15** (1.10.5; was 6.6.6 at 1.10.0, 6.6.2 at 1.9.17, 6.4.49 at 1.8.0 — the full trail is in `state.md`).
-The 1.6.9–1.6.13 + 1.7.0 patches (client dispatch thread-safety, the server-TLS
-handshake migration + flat-RSS, the native trust-store verify-fail proof, the QU
-mDNS receive fix, the conn-off fd-collision fix, and the two yeo-cy-test fixes)
-were all pure sandhi-side; **1.8.0** refreshed the toolchain + streamlined the transitive `[deps]` (cyrius 6.4.x auto-resolves sigil's graph) + formalized the profile breakout bundles (`dist/sandhi-{tls,server,rpc,discovery}.cyr`), and **1.8.1** unblocked concurrent server-TLS (`max_conns > 1`) once sigil's per-thread crypto-scratch banking fixed the handshake race (see CHANGELOG).
+is currently **cyrius 6.6.15** (since 1.10.5; the full trail is in `state.md`).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -28,23 +26,19 @@ evidence justifies it, a second consumer asks, or sit surfaces friction). ONE
 item per slot. Per [`project_sit_adoption_drives_roadmap`] scope is surfaced from
 real signals, not pre-baked; per the no-silent-scope-outs rule every deferral is
 a named entry here (or in [`requests/`](requests/README.md)), not a buried mention.
-The concrete sandhi-capacity patch sequence (1.6.10–1.6.12) shipped; everything
-remaining here is gated (profile evidence, a breaking major, a second consumer, or
-a cyrius primitive).
+Everything here is gated (profile evidence, a breaking major, a second consumer, a
+cyrius primitive, or a measurement first).
 
 ## Batch A — libssl retirement (sandhi 2.0 — breaking)
 
-A1 (native trust-store / mTLS enforcement) **shipped at 1.6.0** over cyrius
-6.2.8: native enforces pinning + trust-store + mTLS via the typed backend-aware
-ctx verbs, so the deprecated libssl backend has **no remaining functional gap**.
-What's left is the breaking removal itself, held for the **2.0** major (dropping
-a public verb + a build flag is not a patch):
+Native enforces pinning, trust-store and mTLS (since 1.6.0), so the deprecated libssl
+backend has no remaining functional role. What's left is the breaking removal itself,
+held for the **2.0** major (dropping a public verb and a build flag is not a patch):
 
 - **Retire the libssl opt-out (2.0).** Drop `sandhi_tls_use_libssl()` (public
   verb) + the `-D CYRIUS_TLS_LIBSSL` build flag + the libssl branches in
   `src/tls_policy/*` and `src/http/conn.cyr`. Breaking → the 2.0 major, not a
-  1.6.x patch. The prerequisite (A1) is met; this is a scheduling decision, not a
-  blocked item. See `project_libssl_retirement_at_2_0` (memory).
+  patch. Nothing blocks it; this is a scheduling decision. See `project_libssl_retirement_at_2_0` (memory).
 - **libssl smoke build is non-gating since cyrius 6.3.5 — drop at 2.0.** The
   `-D CYRIUS_TLS_LIBSSL` CI link-proof (`ci.yml`) is now `continue-on-error`:
   6.3.x's linker refuses reachable-undefined fns, and the libssl config leaves
@@ -56,110 +50,20 @@ a public verb + a build flag is not a patch):
   Delete the CI step entirely as part of the 2.0 libssl removal below; revisit
   sooner only if cyrius fixes the DCE reachability (or plumbs `--allow-undef`
   through `cyrius build`).
+- **libssl session-cache quirks — moot, drop at 2.0** (found by the 1.10.7
+  session-cache investigation). `sandhi_session_cache_supported()` answers 0 on
+  OpenSSL 3, because cyrius's `tls_supports_session_resumption` looks up
+  `SSL_CTX_set_session_cache_mode`, which is a macro and not an exported symbol; the
+  cache still works after `sandhi_session_cache_enable(1)`. And over TLS 1.3 the
+  session is captured right after `SSL_connect`, before the NewSessionTicket
+  arrives, so it never resumes while the hit counter still rises. Neither matters on
+  native, which does not resume; both go with the libssl backend.
 - **libssl `tls_get_peer_spki_der` regression — moot, low priority.** sandhi
   still excludes libssl from `pin_available()` (a single libssl pinned open
   SIGSEGV'd in post-handshake SPKI extraction). Native covers pinning and libssl
   retires at 2.0, so this gates nothing; only revisit if a libssl build is kept
   alive past 2.0 (unlikely). Context:
   [`issues/archive/2026-05-22-cyrius-native-tls-in-6.0.x.md`](issues/archive/2026-05-22-cyrius-native-tls-in-6.0.x.md).
-
-## P1 follow-ups from the 1.9.12 sweep — and the 1.9.13 repair queue
-
-The 1.9.12 P-1 sweep fixed eight defects (see the CHANGELOG). This section holds
-everything from that sweep that did **not** ship in it, so none of it is a buried
-deferral:
-
-- **Confirmed but deliberately not patched** (below) — real, with a stated reason
-  the obvious fix is wrong or too large for a patch.
-- **[The 1.9.13 repair queue](#1913--the-confirmed-repair-queue)** — the findings
-  whose adversarial verifiers were killed mid-run by a spend limit, since
-  **re-verified by hand (2026-08-23)**. Five of six are real, four are P1. That is
-  the next release's worklist, in priority order.
-- **Split verdicts** — one verifier each way; each needs a decision, not a fix.
-
-### Confirmed, but the fix does not belong where the defect is
-
-- **Short `Content-Length` is silently clamped and returned as `SANDHI_OK`.**
-  `_sandhi_resp_frame_a` does `if (body_start + n > blen) { n = blen - body_start; }`,
-  so `Content-Length: 100` with 3 body bytes yields status 200, `err_kind = OK`,
-  `body_len = 3`. Reachable: `_sandhi_http_recv_framed` returns a POSITIVE count
-  on EOF and both consumers treat any positive value as complete.
-  **Why not patched:** `_sandhi_resp_frame_a` receives no request method, and a
-  HEAD response and a 304 legitimately carry a non-zero `Content-Length` with
-  zero body bytes (RFC 7230 §3.3.2, RFC 7232 §4.1). All three shapes are
-  *indistinguishable at that line* — verified by probe during the sweep — so
-  refusing there breaks every HEAD request and every 304. The real fix is to
-  carry "a body was expected, and how much" down from the request layer (or to
-  compare against the `content_length` that `_sandhi_http_recv_framed` already
-  parsed at pool.cyr:444 and discards on the EOF exit). That is a design change,
-  not a patch. **Do not "fix" this by adding a refusal to the clamp.**
-
-- **`Connection: close` responses are re-measured with `strlen()`.**
-  `_sandhi_http_exchange_a` does `if (nread == 0 - 2) { actual_n = strlen(rbuf); }`
-  because `_sandhi_http_recv_framed` signals must-close with a sentinel instead
-  of a byte count. Any body containing a NUL is truncated at the first one —
-  silently, and only on the close-delimited path. **Why not patched:** the fix is
-  to make `_sandhi_http_recv_framed` carry both the count and the must-close flag
-  (an out-param cell, or a packed return like the chunk parser's), which touches
-  every caller of a widely-used internal. Wants its own slot.
-
-### Confirmed, availability rather than correctness
-
-- **No total-request deadline on the server (Slowloris).** `SO_RCVTIMEO` bounds
-  each individual read, so a peer that dribbles one byte per timeout-interval
-  keeps a serve loop alive indefinitely. 1.9.9's stop-flag and 1.9.8's
-  accept-error policy do not cover it — the connection is progressing, just
-  arbitrarily slowly. Wants a `sandhi_server_options_request_ms` whole-request
-  budget checked in both recv loops.
-
-### 1.9.13 repair queue — ✅ shipped
-
-All six items shipped at **1.9.13** (see CHANGELOG): the third chunk-size cap in
-`_sandhi_pool_chunked_complete` (which segfaults, not merely misreads), the h2
-header encoder's unbounded write into a fixed 8 KiB buffer, the half-rebuilt
-HPACK table, `sandhi_http_pool_new_a`'s unchecked maps, the server response
-builders' unchecked `str_builder_build_a`, and h2 PING length validation.
-
-**Two of the queue's own descriptions were wrong and were corrected in flight** —
-both are recorded in the 1.9.13 CHANGELOG rather than quietly amended:
-
-- The pool chunk-size item was described here as answering `1 = "complete"` after
-  an out-of-bounds read. That came from a probe with an off-by-one `body_start`,
-  which made the walker parse a legitimate terminal zero-chunk. The real
-  behaviour is a **segfault**.
-- The HPACK item claimed the name and value vectors could reach **different
-  lengths**, pairing one header's name with another's value. They cannot — they
-  are built in lockstep with same-size back-to-back allocations. The real
-  corruption is that both are truncated together while `CUR_SIZE` is not.
-
-**The lesson worth keeping**: a finding described from a probe is only as good as
-the probe. Both errors were caught by writing the regression test *properly* —
-deriving the body offset instead of hardcoding it, and asserting the invariant
-that actually holds instead of the one assumed. Write the test before believing
-the finding.
-
-**The defect class is still not exhausted.** 1.9.10, 1.9.12 and 1.9.13 are all
-instances of *"an allocation result or an accumulator was stored without its
-guard"*, and 1.9.13 found a **third** copy of a bound that two prior sweeps had
-each fixed one instance of. Before the next release assume there is a fourth:
-grep every `size = size * ` / `n = n * ` accumulator fed from the wire, and every
-`store64(..., <alloc-returning-call>(...))` that skips its zero check.
-
-### Split verdicts — one verifier each way, worth a decision
-
-- **`src/tls_policy/session_cache.cyr:218`** (P2) — the TLS session-cache key omits
-  policy identity, so resumption can cross mTLS client certs and trust stores.
-  1.6.9 added the cred-digest to the key for the credential half of this; the
-  policy half is not covered.
-- **`src/tls_policy/apply.cyr:230`** (P1 claimed) — the policy hook is armed in a
-  process-wide global across the connect+handshake window, so concurrent policied
-  opens could swap enforcement. Verifiers disagreed on whether any supported
-  concurrency mode reaches it; 1.6.9 moved the *dispatch* globals into a per-call
-  context but left the hook override global.
-- **`src/server/mod.cyr:2482 / 2613`** (P2) — two verifiers reached opposite
-  conclusions on whether `run_pooled_tls`'s per-request arena is ever created,
-  i.e. whether HTTPS routing still allocates from the no-free global bump.
-  Settle it by measurement, not by reading.
 
 ## Batch B — profile-justified optimization picks (parked; need prof evidence)
 
@@ -182,11 +86,8 @@ warrants — revisit when there's a reason to measure.
 
 ## Batch C — sit-adoption reshape (filled by what sit surfaces)
 
-Gate cleared (native default since cyrius 6.1.21); sit's AGNOS adoption drove the
-C1/C2 transport work plus the 1.6.11 trust-store-verify-fail proof and the 1.6.12
-QU-mDNS receive fix — all shipped (see CHANGELOG). **No Batch C item is open** —
-further items fill only from real-workload friction sit surfaces, NOT speculatively
-pre-baked ([`project_sit_adoption_drives_roadmap`]).
+No item is open. Items fill only from real-workload friction sit surfaces, never
+speculatively ([`project_sit_adoption_drives_roadmap`]).
 
 ## Backlog — wait for a second consumer (concrete, sandhi-anchored)
 
@@ -218,25 +119,29 @@ moved to [`requests/`](requests/README.md) instead.
   service-to-service common case; fold the recompute into `_sandhi_http_follow_a`'s
   hop loop when a consumer sets cred-bearing headers AND follows cross-authority
   redirects.
+- **`_sandhi_alpn_advertise_h2` is still a process-wide word** (`src/http/conn.cyr`,
+  written by the h2 promotion in `src/http/h2/dispatch.cyr`, read by
+  `_sandhi_policy_pre_open_a` and the connection finalize). 1.10.7 moved the TLS
+  policy hook into the per-call request context; this flag was left, because a
+  collision only changes which ALPN list a concurrent open offers (protocol
+  negotiation, not enforcement). Lift it into a `SANDHI_REQCTX_*` slot when a
+  consumer drives h2 promotion from several threads.
 - **Daimon resolver context: auth token + timeouts** (`src/discovery/daimon.cyr`)
   — the daimon resolver ctx reserves a +8 slot (held 0) for a future auth token /
   per-request timeouts; daimon's registry contract defines no auth surface today.
   Wire it when a consumer needs authenticated / timeout-bounded discovery.
 
-## Unblocked — ready for a slot
-
-None open. Both items 1.10.5 put here shipped at 1.10.6: the macOS server SIGPIPE guard
-(`_sandhi_server_ignore_sigpipe` now composes the stdlib's `signal_ignore`) and the one-shot
-send verbs' discarded write results.
-
-## Wait-for-stdlib-prerequisite
-
-None open. The last entry, the portable `signal_ignore` that the macOS SIGPIPE
-guard waited on, landed in the toolchain, and the guard shipped at 1.10.6.
-
 ## Background watches (not slots)
 
-- **CI compiles only smoke + the six live gates — `programs/` rots silently.** At
+- **The unguarded-accumulator / unguarded-allocation class is not exhausted.**
+  1.9.10, 1.9.12 and 1.9.13 each fixed instances of *"an allocation result or an
+  accumulator was stored without its guard"*, and 1.9.13 found a **third** copy of a
+  bound two earlier sweeps had each fixed once. Assume a fourth: grep every
+  `size = size * ` / `n = n * ` accumulator fed from the wire, and every
+  `store64(..., <alloc-returning-call>(...))` that skips its zero check. Write the
+  regression test before believing a finding (both 1.9.13 descriptions that came from
+  probes were wrong; see that CHANGELOG entry).
+- **CI compiles only smoke + the seven live gates — `programs/` rots silently.** At
   1.10.0 nine probes (`dns-probe`, `tls-probe`, `bootstrap-probe`,
   `cpu-features-probe`, five `dynlib-*`) had not compiled since `src/obs/prof.cyr`
   landed (1.2.5); `tls-probe` was even Result-migrated at 1.9.16 without a compile.
@@ -250,20 +155,25 @@ guard waited on, landed in the toolchain, and the guard shipped at 1.10.6.
   a CI step if a future stdlib/sigil bump makes the question live again.
 - **Test-unit include lists are partial by design, and 6.6.6 now says so.**
   `tests/h2.tcyr` includes `h2/dispatch.cyr` but not `client.cyr`, so it compiles
-  with unreachable undefined refs — **21** reported on 6.6.6 (8 on 6.6.2, same
-  source: 6.6.6 reports them completely); `sandhi.tcyr` / `rpc.tcyr` carry
-  `sandhi_http_request_auto_a`. Not a defect (the refusing linker proves them
+  with unreachable undefined refs — **23** reported on 6.6.15 (21 on 6.6.6, 8 on
+  6.6.2: the newer toolchains report them more completely); `sandhi.tcyr` / `rpc.tcyr`
+  carry one each. Not a defect (the refusing linker proves them
   unreachable), but the noise can hide a new warning. Complete the lists only if
   it does — watch the per-program fixup cap (architecture/001) when doing so.
 - **`tests/sandhi.tcyr` cap-drift** — if a slot pushes sandhi.tcyr against the
   per-program fixup-cap (architecture/001), carve out another `tests/<name>.tcyr`
   in the same slot (mirroring the 1.2.8 sandhi → rpc split). Don't let it block
-  the ship. (At 1.10.0 the suite is 770 assertions.)
+  the ship. (At 1.10.7 the suite is 889 assertions.)
 - **Fuzz-corpus expansion** — the first `fuzz/*.fcyr` round (7 harnesses over url /
   headers / response+chunked / dns / hpack / sse / json) shipped at **1.8.2** and
   gates in CI (`cyrius fuzz`). Add harnesses opportunistically as new parse surfaces
   land or a consumer's traffic motivates one (candidates: Huffman-decode direct, the
   h2 frame header, WebDriver/Appium/MCP envelope extract). Not a committed slot.
+- **Native client vs `openssl s_server -tls1_2` on the Ed25519 fixture — unverified.**
+  The 1.10.7 session-cache investigation saw the native client fail that handshake
+  (`-3`) with the cache off, against OpenSSL's TLS 1.2 server. Not reproduced or
+  root-caused; it may be a native TLS 1.2 + Ed25519 interop gap (cyrius-side) or a
+  probe artifact. Reproduce ground-first before filing anything upstream.
 - **Consumer coordination docs** ([`issues/`](issues/README.md)) — still open:
   ifran (hoosh's half adopted), ark, vidya (fetch), daimon (registry producer);
   yantra / mela / daimon-MCP-client were adopted and archived 2026-08-23. sandhi's
@@ -282,14 +192,6 @@ guard waited on, landed in the toolchain, and the guard shipped at 1.10.6.
 
 ## Not sandhi's slot (filed so the framing doesn't drift back in)
 
-- **sigil's unreachable undefined `random_bytes` + `sys_uname` in sandhi's own builds.**
-  sigil 3.12.18 (the 6.6.6 snapshot) calls stdlib `sys_uname` (from `agnosys_uname`,
-  reached only via `secureboot_sign_module`) and `random_bytes` (`_sigil_random_fill`)
-  without its bundle pulling `lib/sys.cyr` / `lib/random.cyr`. Proven unreachable from
-  every sandhi fn at 1.10.0 (see the whole-surface proof above); `distlib`'s sidecars
-  already list `sys` + `random` for consumers. Hand-declaring them in sandhi's
-  `[deps]` would re-add sigil's transitive deps, which the 1.8.0 streamline retired —
-  a sigil-packaging matter, not sandhi's.
 - **`tls_connect` native-transport prep audit** — the hook surface
   (`tls_connect`, `tls_connect_with_ctx_hook`, ALPN / SNI / SPKI extraction) is
   owned by stdlib `lib/tls.cyr`. Auditing it for fdlopen-leaning assumptions is a

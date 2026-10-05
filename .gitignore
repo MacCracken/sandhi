@@ -10,6 +10,8 @@
 .env
 .env.*
 *.pem
+# The loopback TLS gates' self-signed 127.0.0.1 test fixtures are tracked.
+!programs/_tls_fixtures/*.pem
 *.key
 
 # `lib/` is populated by `cyrius deps` from cyrius.cyml [deps] — a

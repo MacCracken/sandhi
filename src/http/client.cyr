@@ -437,7 +437,8 @@ fn _sandhi_http_do_impl_a(a, method, url, user_headers, body, body_len, max_byte
         var eff_connect = _sandhi_http_clamp_ms(connect_ms, deadline_ms);
         if (eff_connect == 0 - 1) { return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT); }
         # 1.4.6 — install the TLS policy hook before opening. _pre arms
-        # the _sandhi_tls_hook_override (consumed by finalize) when the
+        # the hook in this dispatch's request context (consumed by finalize;
+        # 1.10.7, it was a module global) when the
         # policy demands enforcement; returns -1 fail-closed when
         # enforcement is unavailable. The matching _post (after open)
         # clears the override + runs the SPKI pin check. Both helpers
@@ -522,6 +523,19 @@ fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
       max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, 0);
 }
 
+# 1 when the request bytes `req_data` are a HEAD request. The request line
+# is built by `_sandhi_client_build_request_a` from the method, so the
+# method token is always first. A HEAD response carries no body whatever
+# its Content-Length says (RFC 7230 §3.3.3); recv_framed needs to know.
+fn _sandhi_req_is_head(req_data): i64 {
+    if (req_data == 0) { return 0; }
+    if (load8(req_data) == 72 && load8(req_data + 1) == 69 && load8(req_data + 2) == 65
+      && load8(req_data + 3) == 68 && load8(req_data + 4) == 32) {
+        return 1;
+    }
+    return 0;
+}
+
 # Send request, receive response, close connection. Extracted so the
 # local count in _sandhi_http_do stays small. Returns SANDHI_ERR_TIMEOUT
 # on SO_RCVTIMEO/SO_SNDTIMEO or deadline-exceeded; SANDHI_ERR_CONNECT
@@ -588,10 +602,10 @@ fn _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms)
     # docs/issues/2026-06-03-http-close-path-drains-until-eof.md) otherwise
     # stalls this read until the deadline and we return TIMEOUT despite having
     # the whole response buffered. We close the conn right after regardless, so
-    # the must-close sentinel (0 - 2) simply means "full response received" —
-    # treat it as success. EOF-delimited (HTTP/1.0, no CL/chunked) still works:
-    # recv_framed returns the bytes read at EOF.
-    var nread = _sandhi_http_recv_framed(conn, rbuf, cap, deadline_ms);
+    # the must-close flag is not needed here. EOF-delimited (HTTP/1.0, no
+    # CL/chunked) still works: recv_framed returns the bytes read at EOF.
+    var mc[8];
+    var nread = _sandhi_http_recv_framed(conn, rbuf, cap, deadline_ms, _sandhi_req_is_head(req_data), &mc);
     sandhi_conn_close(conn);
     if (nread == 0 - _SANDHI_EAGAIN) { return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT); }
     # 1.9.3 — the response outgrew `max_response_bytes`. Reported as PROTOCOL
@@ -601,14 +615,15 @@ fn _sandhi_http_exchange_a(a, conn, req, body, body_len, max_bytes, deadline_ms)
     if (nread == 0 - _SANDHI_RECV_CAP_EXCEEDED) {
         return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL);
     }
-    var actual_n = nread;
-    if (nread == 0 - 2) {
-        actual_n = strlen(rbuf);
-    } elif (nread < 0) {
-        return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT);
+    # 1.10.7 — the peer closed before the body its headers declared was
+    # complete. PROTOCOL, as the download path reports the same condition
+    # (1.9.12); this used to come back SANDHI_OK with the short body.
+    if (nread == 0 - _SANDHI_RECV_TRUNCATED) {
+        return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL);
     }
-    sandhi_prof_record_recv(cap, actual_n);
-    return sandhi_http_response_parse_a(a, rbuf, actual_n);
+    if (nread < 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT); }
+    sandhi_prof_record_recv(cap, nread);
+    return sandhi_http_response_parse_a(a, rbuf, nread);
 }
 
 fn _sandhi_http_exchange(conn, req, body, body_len, max_bytes, deadline_ms): i64 {
@@ -670,8 +685,8 @@ fn _sandhi_http_exchange_keepalive_a(a, conn, req, body, body_len, max_bytes,
         sandhi_conn_close(conn);
         return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL);
     }
-    var nread = _sandhi_http_recv_framed(conn, rbuf, cap, deadline_ms);
-    sandhi_prof_record_recv(cap, nread);
+    var mc[8];
+    var nread = _sandhi_http_recv_framed(conn, rbuf, cap, deadline_ms, _sandhi_req_is_head(req_data), &mc);
     if (nread == 0 - _SANDHI_EAGAIN) {
         sandhi_conn_close(conn);
         return _sandhi_resp_err_a(a, SANDHI_ERR_TIMEOUT);
@@ -683,21 +698,17 @@ fn _sandhi_http_exchange_keepalive_a(a, conn, req, body, body_len, max_bytes,
         sandhi_conn_close(conn);
         return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL);
     }
-    if (nread < 0 && nread != 0 - 2) {
-        # 0 - 2 is the must-close sentinel — we still got the response.
+    if (nread == 0 - _SANDHI_RECV_TRUNCATED) {
+        sandhi_conn_close(conn);
+        return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL);
+    }
+    if (nread < 0) {
         sandhi_conn_close(conn);
         return _sandhi_resp_err_a(a, SANDHI_ERR_CONNECT);
     }
-    var server_sent_close = 0;
-    var actual_n = nread;
-    if (nread == 0 - 2) {
-        # Server told us close; read whatever we have, then close.
-        # _sandhi_http_recv_framed null-terminates buf at the bytes
-        # actually read; recompute via strlen-style scan up to cap.
-        actual_n = strlen(rbuf);
-        server_sent_close = 1;
-    }
-    var resp = sandhi_http_response_parse_a(a, rbuf, actual_n);
+    sandhi_prof_record_recv(cap, nread);
+    var server_sent_close = load64(&mc);
+    var resp = sandhi_http_response_parse_a(a, rbuf, nread);
     var status = sandhi_http_status(resp);
     var ek = sandhi_http_err_kind(resp);
     var put_back = 0;
@@ -1162,9 +1173,10 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts): i64 {
     # the whole redirect-follow hop chain, so the cred-digest is still
     # computed once per top-level dispatch — same semantics as the prior
     # save/restore (the "per-hop cred-digest recompute on cross-authority
-    # redirect-follow" wait-for-consumer item is unchanged). A 32-byte OOM
-    # is a fatal per-request failure -> INTERNAL.
-    var ctx = alloc_via(a, SANDHI_REQCTX_SIZE);
+    # redirect-follow" wait-for-consumer item is unchanged). An OOM here
+    # is a fatal per-request failure -> INTERNAL. 1.10.7: the context also
+    # carries this dispatch's TLS hook, zeroed by `_sandhi_reqctx_new_a`.
+    var ctx = _sandhi_reqctx_new_a(a);
     if (ctx == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
     store64(ctx + SANDHI_REQCTX_OFF_ALLOW_0RTT, sandhi_http_options_get_allow_0rtt(opts));
     store64(ctx + SANDHI_REQCTX_OFF_CRED_DIGEST, _sandhi_compute_cred_digest(headers));
