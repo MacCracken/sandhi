@@ -3573,6 +3573,93 @@ enum SandhiPoolWorkerOff {
 }
 var SANDHI_POOL_WORKER_ARG_SIZE = 32;
 
+# Serve one accepted plaintext connection for the pool: rewind the arenas, arm
+# idle_ms, read under the request budget, refuse or dispatch, close. Called by
+# every worker, and by the accept thread itself where the pool runs inline
+# (`_sandhi_server_pool_inline`). 1.10.7: extracted from the worker loop.
+fn _sandhi_server_pool_serve(fp, ctx, idle_ms, cfd, reqbuf, max_req, rarena, harena): i64 {
+    reset_via(rarena);
+    # Rewound before the request, not after: a handler that stashed a
+    # pointer still sees live bytes until the next request begins, which is
+    # the same lifetime the reject arena already promises.
+    if (harena != 0) { reset_via(harena); }
+    if (idle_ms > 0) {
+        _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO);
+    }
+    var n = _sandhi_server_recv_request_dl(cfd, reqbuf, max_req - 1, _sandhi_server_request_deadline());
+    if (n == SANDHI_SERVER_ERR_TOO_LARGE) {
+        sandhi_server_send_status_a(rarena, cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
+        _sandhi_server_drain_refused(cfd, reqbuf, max_req);
+    } elif (n == SANDHI_SERVER_ERR_INCOMPLETE) {
+        sandhi_server_send_status_a(rarena, cfd, HTTP_BAD_REQUEST, "Bad Request");
+    } elif (n == SANDHI_SERVER_ERR_TIMEOUT) {
+        sandhi_server_send_status_a(rarena, cfd, HTTP_REQUEST_TIMEOUT, "Request Timeout");
+    } elif (n > 0) {
+        if (sandhi_server_request_has_cl_te_conflict(reqbuf, n) == 1) {
+            sandhi_server_send_status_a(rarena, cfd, 400, "Bad Request");
+        } elif (sandhi_server_request_has_dup_smuggling_header(reqbuf, n) == 1) {
+            sandhi_server_send_status_a(rarena, cfd, 400, "Bad Request");
+        } elif (sandhi_server_request_has_unsupported_te(reqbuf, n) == 1) {
+            sandhi_server_send_status_a(rarena, cfd, HTTP_NOT_IMPLEMENTED, "Not Implemented");  #skip-lint: HTTP 501 status code — inbound transfer-coding decoding deferred, see CHANGELOG 1.9.4
+            _sandhi_server_drain_refused(cfd, reqbuf, max_req);
+        } else {
+            fncall4(fp, ctx, cfd, reqbuf, n);
+        }
+    }
+    sock_close(cfd);
+    return 0;
+}
+
+# 1 when this target's `chan_*` cannot hand an accepted connection from the
+# accept thread to a worker thread, so the pooled loops must serve inline.
+#
+# 1.10.7 — only `lib/thread.cyr`'s Linux body has a channel whose `chan_recv`
+# blocks and whose ring is locked. The macOS, Windows and agnos peers keep the
+# serial ring (no lock, a `chan_recv` that answers 0 when empty, a `chan_send`
+# that fails when full), even on arm64 macOS where `thread_create` starts real
+# pthreads (THREADS_CONCURRENT = 1). A pooled worker reads that 0 as "channel
+# closed" and exits, so through 1.10.6 `run_pooled` / `run_pooled_tls` started
+# and accepted on macOS but never served a request. The stdlib exposes no
+# channel capability, hence the target test; filed cyrius-side
+# (docs/development/issues/2026-10-04-cyrius-macos-chan-serial-under-real-threads.md).
+fn _sandhi_server_pool_inline(): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    if (THREADS_CONCURRENT == 1) { return 0; }
+    #endif
+    return 1;
+}
+
+# The plaintext pool where it must run inline: one worker's resources on the
+# accept thread, each accepted connection served before the next accept. The
+# same per-request contract as a worker (budget, refusals, arenas, request
+# arena published in this thread's slot), without the parallelism.
+fn _sandhi_server_pool_run_inline(sfd, fp, ctx, idle_ms, stop_ptr): i64 {
+    var max_req = _hsv_req_max;
+    var reqbuf  = alloc_via(default_alloc(), max_req);
+    var rarena  = arena_allocator(SANDHI_SERVER_REJECT_ARENA_CAP);
+    var ast     = _sandhi_accept_state_new();
+    if (reqbuf == 0 || rarena == 0 || ast == 0) { sock_close(sfd); return 1; }
+    var harena = 0;
+    if (_hsv_req_arena_cap > 0 && _sandhi_req_arena_slot >= 0) {
+        harena = arena_allocator(_hsv_req_arena_cap);
+        if (harena == 0) { sock_close(sfd); return 1; }
+        thread_local_set(_sandhi_req_arena_slot, harena);
+    }
+    while (1 == 1) {
+        if (_sandhi_server_stop_requested(stop_ptr) == 1) { sock_close(sfd); return 0; }
+        var cr_tag, cr = _sandhi_server_accept(sfd, stop_ptr);
+        if (is_err_result(cr_tag) == 1) {
+            var act = _sandhi_accept_step(ast, cr);
+            if (act == SANDHI_ACCEPT_FATAL) { sock_close(sfd); return 1; }
+            if (act == SANDHI_ACCEPT_BACKOFF) { sleep_ms(_sandhi_accept_state_delay(ast)); }
+        } else {
+            _sandhi_accept_state_reset(ast);
+            _sandhi_server_pool_serve(fp, ctx, idle_ms, cr, reqbuf, max_req, rarena, harena);
+        }
+    }
+    return 0;
+}
+
 # One worker thread: pull a cfd off the channel, recv (SO_RCVTIMEO-bounded),
 # smuggling-reject (the same fns the sync loop uses), dispatch to the handler,
 # close. The recv buffer is per-worker (allocated once, reused) — the
@@ -3609,35 +3696,7 @@ fn _sandhi_server_pool_worker(arg): i64 {
     while (1 == 1) {
         var cfd = chan_recv(ch);
         if (cfd == 0) { return 0; }          # channel closed
-        reset_via(rarena);
-        # Rewound before the request, not after: a handler that stashed a
-        # pointer still sees live bytes until the next request begins, which is
-        # the same lifetime the reject arena already promises.
-        if (harena != 0) { reset_via(harena); }
-        if (idle_ms > 0) {
-            _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO);
-        }
-        var n = _sandhi_server_recv_request_dl(cfd, reqbuf, max_req - 1, _sandhi_server_request_deadline());
-        if (n == SANDHI_SERVER_ERR_TOO_LARGE) {
-            sandhi_server_send_status_a(rarena, cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large");
-            _sandhi_server_drain_refused(cfd, reqbuf, max_req);
-        } elif (n == SANDHI_SERVER_ERR_INCOMPLETE) {
-            sandhi_server_send_status_a(rarena, cfd, HTTP_BAD_REQUEST, "Bad Request");
-        } elif (n == SANDHI_SERVER_ERR_TIMEOUT) {
-            sandhi_server_send_status_a(rarena, cfd, HTTP_REQUEST_TIMEOUT, "Request Timeout");
-        } elif (n > 0) {
-            if (sandhi_server_request_has_cl_te_conflict(reqbuf, n) == 1) {
-                sandhi_server_send_status_a(rarena, cfd, 400, "Bad Request");
-            } elif (sandhi_server_request_has_dup_smuggling_header(reqbuf, n) == 1) {
-                sandhi_server_send_status_a(rarena, cfd, 400, "Bad Request");
-            } elif (sandhi_server_request_has_unsupported_te(reqbuf, n) == 1) {
-                sandhi_server_send_status_a(rarena, cfd, HTTP_NOT_IMPLEMENTED, "Not Implemented");  #skip-lint: HTTP 501 status code — inbound transfer-coding decoding deferred, see CHANGELOG 1.9.4
-                _sandhi_server_drain_refused(cfd, reqbuf, max_req);
-            } else {
-                fncall4(fp, ctx, cfd, reqbuf, n);
-            }
-        }
-        sock_close(cfd);
+        _sandhi_server_pool_serve(fp, ctx, idle_ms, cfd, reqbuf, max_req, rarena, harena);
     }
     return 0;
 }
@@ -3688,6 +3747,10 @@ fn sandhi_server_run_pooled(addr, port, handler_fp, ctx, opts): i64 {
 
     # 1.9.9 — no-op unless a stop flag is configured.
     _sandhi_server_arm_stop_poll(sfd, stop_ptr);
+
+    if (_sandhi_server_pool_inline() == 1) {
+        return _sandhi_server_pool_run_inline(sfd, handler_fp, ctx, idle_ms, stop_ptr);
+    }
 
     # Bounded handoff channel sized to `backlog`: when `backlog` connections are
     # already queued the accept loop blocks (backpressure / load-shed) until a
@@ -4318,6 +4381,50 @@ enum SandhiPoolTlsWorkerOff {
 }
 var SANDHI_POOL_TLS_WORKER_ARG_SIZE = 64;
 
+# Serve one accepted connection for the TLS pool: handshake under the request
+# budget, serve, tear down, rewind the per-connection arena. Called by every TLS
+# worker, and by the accept thread where the pool runs inline. 1.10.7.
+fn _sandhi_server_pool_tls_serve(fp, ctx, idle_ms, cfd, cert, cert_len, key, key_len, reqbuf, tarena, harena): i64 {
+    if (harena != 0) { reset_via(harena); }
+    if (idle_ms > 0) { _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO); }
+    var tdl = _sandhi_server_request_deadline();
+    var shim = _sandhi_server_tls_handshake_a(tarena, cfd, cert, cert_len, key, key_len, tdl);
+    if (shim != 0) {
+        _sandhi_server_tls_serve_one(tarena, fp, ctx, shim, cfd, reqbuf, tdl);
+        tls_close(shim);
+    }
+    sock_close(cfd);
+    reset_via(tarena);                       # rewind → flat per-worker RSS
+    return 0;
+}
+
+# The TLS pool where it must run inline (see `_sandhi_server_pool_inline`).
+fn _sandhi_server_pool_tls_run_inline(sfd, fp, ctx, idle_ms, stop_ptr, cert, cert_len, key, key_len): i64 {
+    var reqbuf = alloc_via(default_alloc(), _hsv_req_max);
+    var tarena = arena_allocator(SANDHI_SERVER_TLS_ARENA_CAP);
+    var ast    = _sandhi_accept_state_new();
+    if (reqbuf == 0 || tarena == 0 || ast == 0) { sock_close(sfd); return 1; }
+    var harena = 0;
+    if (_hsv_req_arena_cap > 0 && _sandhi_req_arena_slot >= 0) {
+        harena = arena_allocator(_hsv_req_arena_cap);
+        if (harena == 0) { sock_close(sfd); return 1; }
+        thread_local_set(_sandhi_req_arena_slot, harena);
+    }
+    while (1 == 1) {
+        if (_sandhi_server_stop_requested(stop_ptr) == 1) { sock_close(sfd); return 0; }
+        var cr_tag, cr = _sandhi_server_accept(sfd, stop_ptr);
+        if (is_err_result(cr_tag) == 1) {
+            var act = _sandhi_accept_step(ast, cr);
+            if (act == SANDHI_ACCEPT_FATAL) { sock_close(sfd); return 1; }
+            if (act == SANDHI_ACCEPT_BACKOFF) { sleep_ms(_sandhi_accept_state_delay(ast)); }
+        } else {
+            _sandhi_accept_state_reset(ast);
+            _sandhi_server_pool_tls_serve(fp, ctx, idle_ms, cr, cert, cert_len, key, key_len, reqbuf, tarena, harena);
+        }
+    }
+    return 0;
+}
+
 fn _sandhi_server_pool_tls_worker(arg): i64 {
     var ch       = load64(arg + SANDHI_POOL_TW_CHAN);
     var fp       = load64(arg + SANDHI_POOL_TW_FP);
@@ -4348,16 +4455,7 @@ fn _sandhi_server_pool_tls_worker(arg): i64 {
     while (1 == 1) {
         var cfd = chan_recv(ch);
         if (cfd == 0) { return 0; }          # channel closed
-        if (harena != 0) { reset_via(harena); }
-        if (idle_ms > 0) { _sandhi_conn_set_timeout_ms(cfd, idle_ms, _SANDHI_SO_RCVTIMEO); }
-        var tdl = _sandhi_server_request_deadline();
-        var shim = _sandhi_server_tls_handshake_a(tarena, cfd, cert, cert_len, key, key_len, tdl);
-        if (shim != 0) {
-            _sandhi_server_tls_serve_one(tarena, fp, ctx, shim, cfd, reqbuf, tdl);
-            tls_close(shim);
-        }
-        sock_close(cfd);
-        reset_via(tarena);                   # rewind → flat per-worker RSS
+        _sandhi_server_pool_tls_serve(fp, ctx, idle_ms, cfd, cert, cert_len, key, key_len, reqbuf, tarena, harena);
     }
     return 0;
 }
@@ -4397,6 +4495,11 @@ fn sandhi_server_run_pooled_tls(addr, port, handler_fp, ctx, opts): i64 {
 
     # 1.9.9 — no-op unless a stop flag is configured.
     _sandhi_server_arm_stop_poll(sfd, stop_ptr);
+
+    if (_sandhi_server_pool_inline() == 1) {
+        return _sandhi_server_pool_tls_run_inline(sfd, handler_fp, ctx, idle_ms, stop_ptr,
+          cert, cert_len, key, key_len);
+    }
 
     var ch = chan_new(backlog);
     if (ch == 0) { sock_close(sfd); return 1; }

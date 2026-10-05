@@ -146,6 +146,33 @@ Post-fold, none of this reaches a consumer until a cyrius release re-vendors
     - New row `server/tls/dispatch_c_arena`: 100 routed and 404 dispatches on an arena grow
       the global heap by 0. With the bare accessors it grows 3,200 B.
 
+- **server: `run_pooled` / `run_pooled_tls` served nothing on macOS.** Found by this
+  release's first macOS CI run: `test_server_request_budget_answers_408` was the first
+  macOS row that needs a pooled server to answer, and it failed. Reproduced on ecb (arm64,
+  cyrius 6.6.15): a complete request to a pooled server went unanswered until the client's
+  3 s timeout, whether the server ran in a thread or a forked child, with or without a stop
+  flag. The handler was never reached.
+  - **Cause (stdlib):** arm64 macOS `thread_create` starts real pthreads, but
+    `lib/thread_macos.cyr` keeps the serial channel. Its `chan_recv` answers 0 when empty
+    instead of blocking. Every worker read that 0 as "channel closed" and exited at start-up;
+    the accept loop kept accepting into a channel nobody read. x86 macOS, Windows and agnos
+    (serial threads, serial channel) end the same way.
+  - **Fix:** `_sandhi_server_pool_inline()` is 1 on every target but Linux with
+    `THREADS_CONCURRENT == 1`, and there the pooled entry points serve each accepted
+    connection on the accept thread. The per-connection bodies are extracted
+    (`_sandhi_server_pool_serve`, `_sandhi_server_pool_tls_serve`) so the worker loops and the
+    inline loops share them. Correct but unparallelised, as the stdlib's own serial backends
+    are.
+  - **Filed** cyrius-side as
+    `docs/development/issues/2026-10-04-cyrius-macos-chan-serial-under-real-threads.md`.
+  - **Proof on ecb:**
+    - all four suites pass;
+    - forcing the old channel handoff reproduces exactly the three CI failures;
+    - `programs/_server_tls_probe.cyr` passes [1]–[8] on macOS for the first time.
+  - Rows whose peer must run while the test waits (canned server, stream writer, dribbler,
+    pooled server) skip when `THREADS_CONCURRENT == 0`. On a serial backend the peer runs
+    inside `thread_create` and would finish, or block, before the test starts.
+
 ### Changed
 
 - **CI: the TLS gates had been skipping.** `.gitignore`'s `*.pem` rule matched the gates'
@@ -176,6 +203,7 @@ Post-fold, none of this reaches a consumer until a cyrius release re-vendors
   - `_server_tls_probe` [1]–[8];
   - stream idle, pooled server, accept back-off, SSRF resolver;
   - the live TLS-policy runtime, HTTPS loop, policy-threading and authenticated-download gates.
+- macOS arm64 (ecb): the four suites and `_server_tls_probe` [1]–[8] pass.
 
 ## [1.10.6] — 2026-10-04
 

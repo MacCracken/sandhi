@@ -1990,6 +1990,16 @@ fn test_reqctx_hook_is_per_call() {
     return 0;
 }
 
+# 1 when `thread_create` starts a second thread. On a serial backend (x86 macOS,
+# Windows, agnos, cx) a thread body runs to completion inside `thread_create`, so a
+# row whose peer must make progress WHILE the caller waits cannot run there: the
+# peer would finish, or block forever, before the caller starts. Guarded by the
+# stdlib's capability, never by target name.
+fn _t_threads_concurrent(): i64 {
+    if (THREADS_CONCURRENT == 1) { return 1; }
+    return 0;
+}
+
 # 1.10.7 — the whole-request budget (Slowloris).
 #
 # idle_ms bounds each read, so a peer that keeps sending one byte inside every
@@ -2055,6 +2065,7 @@ fn _t_budget_pair(port): i64 {
 # 400 ms budget the read ends TIMEOUT well before the peer gives up at 2 s.
 # Mutation: ignoring the deadline reads until the peer closes (INCOMPLETE, ~2 s).
 fn test_server_request_budget_stops_dribbling_peer() {
+    if (_t_threads_concurrent() == 0) { assert_eq(1, 1, "budget dribble: no concurrent threads — skipped"); return 0; }
     var sfd = _t_budget_pair(39831);
     if (sfd < 0) { assert_eq(1, 1, "budget dribble: loopback unavailable — skipped"); return 0; }
     _t_drip_ms = 100;
@@ -2119,6 +2130,7 @@ fn _t_ok_cfd_handler(ctx, cfd, buf, blen): i64 {
 # calling the unbounded reader from the worker leaves the client without an
 # answer until its own 3 s read timeout.
 fn test_server_request_budget_answers_408() {
+    if (_t_threads_concurrent() == 0) { assert_eq(1, 1, "budget 408: no concurrent threads — skipped"); return 0; }
     _t_budget_stop = 0;
     var o = sandhi_server_options_new();
     sandhi_server_options_max_conns(o, 2);
@@ -4291,6 +4303,7 @@ fn _t_canned_server(arg) {
 # Returns the response, or 0 when the loopback listener could not be set up.
 # The elapsed time of the request alone lands in `_t_cs_elapsed`.
 fn _t_canned_run(port, url, method, resp, resp_len, hold_ms, pooled): i64 {
+    if (_t_threads_concurrent() == 0) { return 0; }
     var lr_tag, lfd = tcp_socket();
     if (is_err_result(lr_tag) == 1) { return 0; }
     sock_reuse(lfd);
@@ -4319,7 +4332,7 @@ fn _t_canned_run(port, url, method, resp, resp_len, hold_ms, pooled): i64 {
 fn test_client_short_content_length_is_protocol() {
     var resp = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc";
     var r = _t_canned_run(39811, "http://127.0.0.1:39811/x", "GET", resp, strlen(resp), 0, 0);
-    if (r == 0) { assert_eq(1, 1, "short CL: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "short CL: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_PROTOCOL, "short CL: 3 of 100 declared bytes then EOF is PROTOCOL");
     return 0;
 }
@@ -4328,7 +4341,7 @@ fn test_client_short_content_length_is_protocol() {
 fn test_client_truncated_chunked_is_protocol() {
     var resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab";
     var r = _t_canned_run(39812, "http://127.0.0.1:39812/x", "GET", resp, strlen(resp), 0, 0);
-    if (r == 0) { assert_eq(1, 1, "truncated chunked: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "truncated chunked: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_PROTOCOL, "truncated chunked: EOF mid-chunk is PROTOCOL");
     return 0;
 }
@@ -4345,7 +4358,7 @@ fn test_client_close_body_keeps_nul_bytes() {
     store8(resp + hl + 2, 0);
     memcpy(resp + hl + 3, "cd", 2);
     var r = _t_canned_run(39813, "http://127.0.0.1:39813/x", "GET", resp, hl + 5, 0, 0);
-    if (r == 0) { assert_eq(1, 1, "NUL body: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "NUL body: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_http_err_kind(r), SANDHI_OK, "NUL body: OK");
     assert_eq(sandhi_http_body_len(r), 5, "NUL body: all 5 bytes, not cut at the NUL");
     var b = sandhi_http_body(r);
@@ -4364,7 +4377,7 @@ fn test_client_close_delimited_eof_is_ok() {
     store8(resp + hl + 2, 0);
     memcpy(resp + hl + 3, "cd", 2);
     var r = _t_canned_run(39814, "http://127.0.0.1:39814/x", "GET", resp, hl + 5, 0, 0);
-    if (r == 0) { assert_eq(1, 1, "close-delimited: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "close-delimited: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_http_err_kind(r), SANDHI_OK, "close-delimited: EOF ends the body, OK");
     assert_eq(sandhi_http_body_len(r), 5, "close-delimited: all 5 bytes");
     return 0;
@@ -4377,7 +4390,7 @@ fn test_client_close_delimited_eof_is_ok() {
 fn test_client_head_completes_at_headers() {
     var resp = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n";
     var r = _t_canned_run(39815, "http://127.0.0.1:39815/x", "HEAD", resp, strlen(resp), 1500, 0);
-    if (r == 0) { assert_eq(1, 1, "HEAD: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "HEAD: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_http_err_kind(r), SANDHI_OK, "HEAD: OK");
     assert_eq(sandhi_http_body_len(r), 0, "HEAD: no body");
     assert_lt(_t_cs_elapsed, 1000, "HEAD: done at the header block, not when the server closes");
@@ -4388,7 +4401,7 @@ fn test_client_head_completes_at_headers() {
 fn test_client_304_pooled_completes_at_headers() {
     var resp = "HTTP/1.1 304 Not Modified\r\nContent-Length: 100\r\n\r\n";
     var r = _t_canned_run(39816, "http://127.0.0.1:39816/x", "GET", resp, strlen(resp), 1500, 1);
-    if (r == 0) { assert_eq(1, 1, "304 pooled: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "304 pooled: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_http_err_kind(r), SANDHI_OK, "304 pooled: OK");
     assert_eq(sandhi_http_status(r), 304, "304 pooled: status 304");
     assert_eq(sandhi_http_body_len(r), 0, "304 pooled: no body");
@@ -4460,6 +4473,7 @@ fn _t_st_reset() {
 # Run one stream against the writer script. Returns the stream result, or 0
 # when the loopback pair could not be set up (the row then skips).
 fn _t_stream_run(port, part1, gap_ms, part2, tail_ms, ctx, deadline_ms, opts): i64 {
+    if (_t_threads_concurrent() == 0) { return 0; }
     var lr_tag, lfd = tcp_socket();
     if (is_err_result(lr_tag) == 1) { return 0; }
     sock_reuse(lfd);
@@ -4511,7 +4525,7 @@ fn test_stream_chunked_event_split_across_reads() {
     var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n7\r\ndata: a\r\n";
     var tail = "2\r\n\n\n\r\n0\r\n\r\n";
     var r = _t_stream_run(39731, head, 150, tail, 0, 0, 0, 0);
-    if (r == 0) { assert_eq(1, 1, "stream split: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "stream split: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_stream_err(r), SANDHI_OK, "stream split: the stream ends cleanly");
     assert_eq(sandhi_stream_events(r), 1, "stream split: the event split across two reads is delivered");
     assert_eq(_t_st_events, 1, "stream split: and reaches the callback once");
@@ -4564,7 +4578,7 @@ fn test_stream_idle_turns_during_silence() {
     var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n9\r\ndata: 1\n\n\r\n";
     var tail = "9\r\ndata: 2\n\n\r\n0\r\n\r\n";
     var r = _t_stream_run(39732, head, 450, tail, 0, 4242, 0, _t_idle_opts(100, 5000));
-    if (r == 0) { assert_eq(1, 1, "stream idle: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "stream idle: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_stream_err(r), SANDHI_OK, "stream idle: the stream ends cleanly");
     assert_eq(sandhi_stream_events(r), 2, "stream idle: both events arrive");
     assert_eq(sandhi_stream_stopped(r), 0, "stream idle: not stopped by a callback");
@@ -4581,7 +4595,7 @@ fn test_stream_idle_read_ms_bounds_silence() {
     _t_st_reset();
     var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: 1\n\n";
     var r = _t_stream_run(39733, head, 0, 0, 900, 0, 0, _t_idle_opts(100, 300));
-    if (r == 0) { assert_eq(1, 1, "stream idle bound: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "stream idle bound: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_stream_err(r), SANDHI_ERR_TIMEOUT, "stream idle bound: silence past read_ms is TIMEOUT");
     assert_eq(sandhi_stream_events(r), 1, "stream idle bound: the event before the silence was delivered");
     assert_gte(_t_idle_calls, 1, "stream idle bound: a turn came before the bound");
@@ -4596,7 +4610,7 @@ fn test_stream_idle_cb_zero_stops() {
     _t_idle_ret = 0;
     var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: 1\n\n";
     var r = _t_stream_run(39734, head, 0, 0, 600, 0, 0, _t_idle_opts(100, 0));
-    if (r == 0) { assert_eq(1, 1, "stream idle stop: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "stream idle stop: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_stream_err(r), SANDHI_OK, "stream idle stop: a stop is not an error");
     assert_eq(sandhi_stream_stopped(r), 1, "stream idle stop: stopped = 1");
     assert_eq(_t_idle_calls, 1, "stream idle stop: exactly one turn, the one that stopped it");
@@ -4610,7 +4624,7 @@ fn test_stream_idle_deadline_still_bounds() {
     var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: 1\n\n";
     var deadline = clock_now_ms() + 300;
     var r = _t_stream_run(39735, head, 0, 0, 900, 0, deadline, _t_idle_opts(100, 0));
-    if (r == 0) { assert_eq(1, 1, "stream idle deadline: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "stream idle deadline: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_stream_err(r), SANDHI_ERR_TIMEOUT, "stream idle deadline: the deadline still ends the stream");
     assert_gte(_t_idle_calls, 1, "stream idle deadline: turns ran until then");
     return 0;
@@ -4624,7 +4638,7 @@ fn test_stream_idle_off_is_unchanged() {
     sandhi_http_options_idle_cb(o, &_t_st_idle_cb);
     var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: 1\n\n";
     var r = _t_stream_run(39736, head, 300, "data: 2\n\n", 0, 0, 0, o);
-    if (r == 0) { assert_eq(1, 1, "stream idle off: loopback unavailable — skipped"); return 0; }
+    if (r == 0) { assert_eq(1, 1, "stream idle off: loopback or concurrent threads unavailable — skipped"); return 0; }
     assert_eq(sandhi_stream_err(r), SANDHI_OK, "stream idle off: clean end");
     assert_eq(sandhi_stream_events(r), 2, "stream idle off: both events");
     assert_eq(_t_idle_calls, 0, "stream idle off: idle_cb without idle_ms never runs");
