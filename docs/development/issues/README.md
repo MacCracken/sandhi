@@ -42,9 +42,13 @@ put on its roadmap.
 
 ## Sandhi-side defects
 
-**Open: none.**
+**Open:**
 
-The last one — [`archive/2026-07-30-accept-loop-unguarded-spin.md`](archive/2026-07-30-accept-loop-unguarded-spin.md)
+| Doc | Reporter | Severity | Summary |
+|-----|----------|----------|---------|
+| [`2026-10-03-chunked-response-verbs-discard-send-result.md`](2026-10-03-chunked-response-verbs-discard-send-result.md) | agnostic (agnosai and bote affected today) | P2 | `sandhi_server_send_chunked_start_a`, `sandhi_server_send_chunk` and `sandhi_server_send_chunked_end` discard every `sock_send` result and return 0, so a streaming handler cannot tell its client has gone (`EPIPE`) and a short write breaks the chunk framing. Reproduced on cyrius 6.6.14 (sandhi 1.10.4): 0, 0, where `sock_send_all` on the same fd returns -32. Proposed fix: send through `sock_send_all` and return its result. |
+
+The last one closed — [`archive/2026-07-30-accept-loop-unguarded-spin.md`](archive/2026-07-30-accept-loop-unguarded-spin.md)
 (bote 3.2.1; all five serve loops spun a core forever on any persistent accept error)
 — shipped at **1.9.8** and was archived 2026-08-23. Its doc had sat at
 `Status: fixed, [Unreleased]` for three releases.
