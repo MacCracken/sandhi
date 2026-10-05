@@ -21,8 +21,8 @@ at 1.0.0 / Cyrius v5.7.0 ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5
 Patches land here first; `dist/sandhi.cyr` is regenerated each release and a
 small cyrius slot re-folds it.
 
-Current: **1.10.5**, pinned to **Cyrius 6.6.15**. **2,935 test assertions green**
-(829 sandhi + 1,691 h2 + 352 alloc + 63 rpc) on Linux and macOS, plus a `cyrius fuzz`
+Current: **1.10.6**, pinned to **Cyrius 6.6.15**. **2,945 test assertions green**
+(838 sandhi + 1,691 h2 + 353 alloc + 63 rpc) on Linux and macOS, plus a `cyrius fuzz`
 harness suite (8 parser-robustness harnesses) gating in CI. Builds clean for x86_64,
 aarch64, and the **AGNOS** target.
 
@@ -91,7 +91,7 @@ is in [`cyrius.cyml`](cyrius.cyml) `[deps].stdlib`.
 | `src/discovery/*` | Service discovery: chain composition, daimon-backed resolver, mDNS — QU-bit unicast (default) + opt-in multicast (QM) resolver `sandhi_discovery_local_mc_resolver` (1.5.5, over Cyrius 6.2.7 multicast primitives) |
 | `src/tls_policy/*` | Cert pinning (SPKI, constant-time compare), mTLS, trust store, ALPN, backend selection. Enforcement is live + **native on every mode** (1.6.0 / Batch A1): pinning + trust-store + mTLS all enforce on the native default backend; high-level threading via `sandhi_http_options_tls_policy` (1.4.6); fail-closed |
 | `src/tls_policy/session_cache.cyr` | TLS 1.3/1.2 client session-resumption cache — TTL + max-size LRU eviction, cred-strip-aware keying (1.3.1–1.4.0) |
-| `src/server/mod.cyr` | HTTP/1.1 **+ HTTPS** server — sync `sandhi_server_run` / `_run_opts`, epoll-cooperative `sandhi_server_run_async` (1.4.9), thread-pool `sandhi_server_run_pooled` (true multi-core, 1.6.7), and **server-side TLS** `sandhi_server_run_tls` / `_run_pooled_tls` (1.6.8; concurrent handshakes safe at `max_conns > 1` since 1.8.1); method+path **routing** with `:name` params (`sandhi_router_*` / `route_match`, 1.6.7); SIGPIPE-guarded (1.6.6); built-in CL+TE / dup-header smuggling guards |
+| `src/server/mod.cyr` | HTTP/1.1 **+ HTTPS** server — sync `sandhi_server_run` / `_run_opts`, epoll-cooperative `sandhi_server_run_async` (1.4.9), thread-pool `sandhi_server_run_pooled` (true multi-core, 1.6.7), and **server-side TLS** `sandhi_server_run_tls` / `_run_pooled_tls` (1.6.8; concurrent handshakes safe at `max_conns > 1` since 1.8.1); method+path **routing** with `:name` params (`sandhi_router_*` / `route_match`, 1.6.7); SIGPIPE-guarded (1.6.6; macOS since 1.10.6); built-in CL+TE / dup-header smuggling guards |
 | `src/net/resolve.cyr` | Native UDP DNS resolver — A + AAAA, randomized TXID + answer-name verification, RFC 1035 |
 | `src/obs/trace.cyr` · `prof.cyr` | Opt-in sakshi spans at HTTP / RPC / DNS boundaries; opt-in per-request per-phase profiling |
 

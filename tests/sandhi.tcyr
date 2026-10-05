@@ -1941,13 +1941,115 @@ fn test_server_sigpipe_guard() {
     # malformed struct sigaction would return a negative errno. A 0 here
     # proves the per-arch number + the 32-byte {sa_handler=SIG_IGN, 0, 0,
     # 0} struct + sigsetsize=8 are valid — so a peer that disconnects
-    # mid-response can no longer kill the process via SIGPIPE. (On
-    # non-Linux targets the helper is a no-op that also returns 0.)
+    # mid-response can no longer kill the process via SIGPIPE. Since 1.10.6
+    # the helper is the stdlib `signal_ignore`: BSD sigaction on macOS, a
+    # no-op returning 0 on Windows / agnos / cx.
     var rc = _sandhi_server_ignore_sigpipe();
     assert_eq(rc, 0, "server: ignore SIGPIPE install succeeds");
     # Idempotent — re-installing the same disposition still succeeds.
     var rc2 = _sandhi_server_ignore_sigpipe();
     assert_eq(rc2, 0, "server: ignore SIGPIPE is idempotent");
+    return 0;
+}
+
+# 1.10.6 — the SIGPIPE guard holds on every target, macOS included.
+#
+# Through 1.10.5 `_sandhi_server_ignore_sigpipe` was a raw Linux
+# `rt_sigaction` and a no-op on macOS, so a client that disconnected
+# mid-response killed a macOS server. It now composes the stdlib's
+# `signal_ignore`. The write runs in a forked child with SIGPIPE first put back
+# to its default (an earlier test may have ignored it), so a guard that does
+# not take kills only the child, and the parent reports it as a failure
+# instead of the whole suite dying. Mutation: making the helper a no-op kills
+# the child with signal 13 on Linux, and the 1.10.5 helper does so on macOS.
+fn test_server_sigpipe_guard_survives_closed_peer() {
+    var fds[8];
+    store64(&fds, 0);
+    if (sys_socketpair(1, 1, 0, &fds) != 0) {
+        assert_eq(1, 1, "sigpipe guard: socketpair unavailable — skipped");
+        return 0;
+    }
+    var pair = load64(&fds);
+    var srv = pair & 0xFFFFFFFF;
+    var cli = (pair >> 32) & 0xFFFFFFFF;
+    sys_close(cli);
+    var pid = sys_fork();
+    if (pid < 0) {
+        sys_close(srv);
+        assert_eq(1, 1, "sigpipe guard: fork unavailable — skipped");
+        return 0;
+    }
+    if (pid == 0) {
+        signal_default(13);
+        _sandhi_server_ignore_sigpipe();
+        if (sock_send_all(srv, "x", 1) < 0) { sys_exit(0); }
+        sys_exit(2);
+    }
+    sys_close(srv);
+    var st[8];
+    store64(&st, 0);
+    sys_waitpid(pid, &st, 0);
+    var status = load64(&st) & 0xFFFFFFFF;
+    assert_eq(status & 127, 0, "sigpipe guard: a write to a closed peer does not kill the process");
+    assert_eq((status >> 8) & 255, 0, "sigpipe guard: the write reports an error instead");
+    return 0;
+}
+
+# 1.10.6 — the one-shot response verbs report their write results, as the
+# chunked verbs have since 1.10.5. Through 1.10.5 `sandhi_server_send_status`,
+# `_send_response` and `_send_204` returned 0 whatever the write did, so a
+# short write left a response shorter than its own Content-Length and nobody
+# was told. Same AF_UNIX shape as the chunked rows. Mutation: restoring the
+# discarded results fails the three closed-peer rows.
+fn test_server_oneshot_verbs_report_closed_peer() {
+    signal_ignore(13);
+    var fds[8];
+    store64(&fds, 0);
+    if (sys_socketpair(1, 1, 0, &fds) != 0) {
+        assert_eq(1, 1, "oneshot closed peer: socketpair unavailable — skipped");
+        return 0;
+    }
+    var pair = load64(&fds);
+    var srv = pair & 0xFFFFFFFF;
+    var cli = (pair >> 32) & 0xFFFFFFFF;
+    sys_close(cli);
+    assert_lt(sandhi_server_send_status(srv, 404, "Not Found"), 0,
+      "oneshot closed peer: send_status reports the failed write");
+    assert_lt(sandhi_server_send_response(srv, 200, "OK", "text/plain", "hi", 2, 0), 0,
+      "oneshot closed peer: send_response reports the failed write");
+    assert_lt(sandhi_server_send_204(srv, 0), 0,
+      "oneshot closed peer: send_204 reports the failed write");
+    sys_close(srv);
+    return 0;
+}
+
+fn test_server_oneshot_verbs_live_peer() {
+    var fds[8];
+    store64(&fds, 0);
+    if (sys_socketpair(1, 1, 0, &fds) != 0) {
+        assert_eq(1, 1, "oneshot live peer: socketpair unavailable — skipped");
+        return 0;
+    }
+    var pair = load64(&fds);
+    var srv = pair & 0xFFFFFFFF;
+    var cli = (pair >> 32) & 0xFFFFFFFF;
+    assert_eq(sandhi_server_send_status(srv, 404, "Not Found"), 0, "oneshot live peer: send_status answers 0");
+    assert_eq(sandhi_server_send_response(srv, 200, "OK", "text/plain", "hi", 2, 0), 0,
+      "oneshot live peer: send_response answers 0");
+    assert_eq(sandhi_server_send_204(srv, 0), 0, "oneshot live peer: send_204 answers 0");
+    sys_close(srv);
+    var buf = alloc(512);
+    var have = 0;
+    var going = 1;
+    while (going == 1 && have < 511) {
+        var n = sys_read(cli, buf + have, 511 - have);
+        if (n <= 0) { going = 0; } else { have = have + n; }
+    }
+    store8(buf + have, 0);
+    sys_close(cli);
+    assert_streq(buf,
+      "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhiHTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+      "oneshot live peer: exact wire bytes");
     return 0;
 }
 
@@ -4618,6 +4720,13 @@ fn main() {
     test_group("server/chunked_send_results");
     test_server_chunked_verbs_live_peer();
     test_server_chunked_verbs_report_closed_peer();
+
+    test_group("server/oneshot_send_results");
+    test_server_oneshot_verbs_live_peer();
+    test_server_oneshot_verbs_report_closed_peer();
+
+    test_group("server/sigpipe_guard_closed_peer");
+    test_server_sigpipe_guard_survives_closed_peer();
     test_server_peer_addr();
     test_server_ip4_str();
 

@@ -116,12 +116,11 @@ Acceptance:
   the stdlib's `signal_ignore`, so it also runs on the macOS CI job.
 - `docs/guides/server.md` "Chunked / streaming" checks each result and stops on a negative one.
 
-**macOS caveat.** The serve loops still ignore SIGPIPE on Linux only (`_sandhi_server_ignore_sigpipe`),
-so on macOS a write to a client that has gone raises SIGPIPE and kills the process before the handler
-sees `-EPIPE`. The stdlib prerequisite for closing that (`signal_ignore`, portable to macOS) has
-landed in the toolchain; the roadmap's *macOS server SIGPIPE guard* entry tracks the switch.
+**Follow-ups, both shipped in 1.10.6.**
 
-**Not changed:** the one-shot verbs (`sandhi_server_send_response{,_a}`, `_send_status{,_a}`,
-`_send_204{,_a}`) still discard their `sock_send` results. That is outside this filing; it is tracked
-in the roadmap.
-
+- *macOS SIGPIPE.* At 1.10.5 the serve loops ignored SIGPIPE on Linux only, so on macOS a write
+  to a client that had gone killed the process before the handler saw `-EPIPE`.
+  `_sandhi_server_ignore_sigpipe` now composes the stdlib's `signal_ignore`, which covers macOS.
+- *The one-shot verbs.* `sandhi_server_send_response{,_a}`, `_send_status{,_a}` and
+  `_send_204{,_a}` discarded their send results the same way. They now write through
+  `sock_send_all` and return 0 or its negative result.

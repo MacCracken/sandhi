@@ -4,6 +4,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.6] — 2026-10-04
+
+**A client that disconnects no longer kills a sandhi server on macOS; the one-shot response
+verbs report their write results.** These are the two server items 1.10.5 left on the roadmap. No pin
+change (cyrius 6.6.15).
+
+Post-fold, neither fix reaches a consumer until a cyrius release re-vendors `lib/sandhi.cyr`
+from this `dist/sandhi.cyr`.
+
+### Security
+
+- **server: the SIGPIPE guard now covers macOS.** `_sandhi_server_ignore_sigpipe`, which every
+  serve loop calls at startup, was sandhi's own raw `rt_sigaction` and a no-op off Linux. On
+  macOS a write to a client that had disconnected mid-response raised SIGPIPE and terminated the
+  server: the unauthenticated remote DoS 1.6.6 closed on Linux. It now composes the stdlib's
+  `signal_ignore` (cyrius 6.4.51): `rt_sigaction` on Linux, BSD `sigaction` on macOS, and a no-op
+  on Windows, agnos and cx, which have no SIGPIPE. The raw syscall and its 32-byte struct are
+  gone. This also completes 1.10.5's chunked fix on macOS, where a streaming handler could not
+  see `-EPIPE` because the signal killed the process first. New row
+  `server/sigpipe_guard_closed_peer` puts SIGPIPE back to its default in a forked child, installs
+  the guard and writes to a closed peer. The child must survive and see the error, and the
+  parent reports a child killed by the signal as a failure instead of the suite dying. Mutation:
+  a no-op helper kills the child with signal 13 on Linux. On macOS the proof is the same row on
+  CI's `macos-14` job, which fails on the 1.10.5 helper. It was not run on ecb or ach: neither has
+  cyrius 6.6.13+ installed, and this change does not install toolchains on them.
+
+### Fixed
+
+- **server: the one-shot response verbs discarded their write results.**
+  `sandhi_server_send_status{,_a}`, `sandhi_server_send_response{,_a}` and
+  `sandhi_server_send_204{,_a}` returned 0 whatever `sock_send` did, so a short write left a
+  response shorter than its own `Content-Length` and nobody was told. This is the defect 1.10.5 fixed for the
+  chunked verbs. Each now writes through `sock_send_all` and returns 0, or its negative result:
+  `-errno`, or `-1` for an out-of-memory head as before. `send_response` sends no body after a failed
+  head. Callers that ignore the result are unaffected; none inside sandhi checks it. New rows
+  `server/oneshot_send_results` cover a live peer (0 each, exact wire bytes) and a closed peer
+  (negative each, mutation-proven). `tests/alloc.tcyr`'s arena round-trip sent to fd -1 and asserted 0
+  because "our impl ignores" the write. It now asserts the reported `EBADF`, distinct from the OOM
+  `-1`.
+
+### Changed
+
+- docs: `guides/server.md` documents the one-shot verbs' results and drops the macOS SIGPIPE
+  caveat. The roadmap's *Unblocked* section is empty, since both items shipped. Its one-shot entry
+  also said each `sock_send` boxed a 16-byte `Result` on the global allocator, which has not been
+  true since cyrius 6.6.0 made `Result` a register pair. The archived chunked-verbs issue records
+  both follow-ups as done.
+- All five dist bundles regenerated. The server change reaches `sandhi.cyr` and `-server`; the
+  other three profiles take only the version stamp. The `.deps` sidecars are unchanged.
+
+### Verified
+
+- **2,945 assertions** (838 / 1,691 / 353 / 63; sandhi +9, alloc +1). 8/8 fuzz. Lint clean
+  across `src/`; fmt clean; `CYRIUS_DCE=1` smoke; aarch64, AGNOS and Windows (PE) cross-builds
+  link. The loopback gates pass: server TLS, pooled server, accept back-off, the SSRF resolver
+  and stream idle.
+
 ## [1.10.5] — 2026-10-04
 
 **A stream consumer gets a turn while the upstream is silent (hoosh); the chunked stream path

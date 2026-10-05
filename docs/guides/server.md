@@ -91,6 +91,14 @@ its result.
 
 ## Responses
 
+Every response verb returns `0` once all of its bytes are written, and a negative
+value otherwise: `-errno` from the write (`-EPIPE` when the client has gone), or
+`-1` if building the response ran out of memory. Writes go through `sock_send_all`,
+so a short write is completed rather than leaving a response shorter than its own
+`Content-Length`. For a one-shot response there is usually nothing left to do on
+failure but return; for a stream, see [Chunked / streaming](#chunked--streaming).
+(Since 1.10.6; the chunked verbs since 1.10.5. Before that they always returned 0.)
+
 ### Simple status-only
 
 ```
@@ -139,16 +147,16 @@ sandhi_server_send_chunked_end(cfd);
 Each `send_chunk` emits `<hex-len>\r\n<data>\r\n` on the wire.
 `send_chunked_end` emits the terminal `0\r\n\r\n`.
 
-All three return `0` once every byte is written, and a negative value otherwise:
-`-errno` from the write (`-EPIPE` when the client has gone), or `-1` if building the
-head ran out of memory. Check the result and stop streaming on a negative one. A
+All three return `0` once every byte is written, and a negative value otherwise
+(see [Responses](#responses)). Check the result and stop streaming on a negative one. A
 loop that feeds a stream from a subscription or a long job is otherwise held open,
 with its connection, until its own source ends. Writes go through `sock_send_all`,
 so a short write is completed rather than breaking the chunk framing (since 1.10.5;
 before that all three always returned 0).
 
-On Linux the serve loops ignore SIGPIPE, so a write to a closed client returns
-`-EPIPE`. On macOS they do not yet, and that write raises SIGPIPE.
+Every serve loop ignores SIGPIPE (Linux and macOS; Windows and agnos have no
+SIGPIPE), so a write to a client that has gone returns `-EPIPE` instead of
+terminating the server. macOS has been covered since 1.10.6.
 
 ## Status constants
 

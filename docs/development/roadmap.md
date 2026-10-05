@@ -225,33 +225,14 @@ moved to [`requests/`](requests/README.md) instead.
 
 ## Unblocked — ready for a slot
 
-- **macOS server SIGPIPE guard** (`src/server/mod.cyr`) — the 1.6.6 SIGPIPE fix is
-  Linux-only (`_sandhi_server_ignore_sigpipe`: raw `rt_sigaction`, x86_64 13 /
-  aarch64 134); on macOS it is a documented no-op, so a sandhi server there is still
-  killed by SIGPIPE when a client disconnects mid-response. **The prerequisite has
-  landed:** stdlib `signal_ignore(signum)` (`lib/syscalls.cyr`) is portable to macOS
-  (BSD `sigaction` through ESYSXLAT) and is present in the 6.6.15 snapshot (verified
-  2026-10-04; filed cyrius-side 2026-07-11 as
-  `2026-07-11-sandhi-signal-ignore-stdlib-gap.md`). The fix is to call it from
-  `_sandhi_server_ignore_sigpipe` and drop the raw syscall. Ground-first: prove it on
-  a macOS box (ecb / ach) with a client that disconnects mid-stream, not just the CI
-  suites. More pressing since 1.10.5: the chunked verbs now return `-EPIPE`, which a
-  macOS handler never sees because the signal kills the process first.
-- **The one-shot server send verbs discard their send results**
-  (`src/server/mod.cyr`) — `sandhi_server_send_response{,_a}`,
-  `sandhi_server_send_status{,_a}` and `sandhi_server_send_204{,_a}` still call
-  `sock_send` and return 0 whatever it returned. This is the class 1.10.5 fixed for the chunked verbs
-  (issue `archive/2026-10-03-chunked-response-verbs-discard-send-result.md`), outside
-  that filing's scope. The stakes are lower: a handler returns right after these, so
-  `-EPIPE` changes nothing it would do. But a short write still truncates a response
-  below its own `Content-Length`. Each `sock_send` also boxes a 16-byte `Result` from
-  the global allocator. Fix: send through `sock_send_all` and return its result, as
-  the chunked verbs now do.
+None open. Both items 1.10.5 put here shipped at 1.10.6: the macOS server SIGPIPE guard
+(`_sandhi_server_ignore_sigpipe` now composes the stdlib's `signal_ignore`) and the one-shot
+send verbs' discarded write results.
 
 ## Wait-for-stdlib-prerequisite
 
 None open. The last entry, the portable `signal_ignore` that the macOS SIGPIPE
-guard waited on, landed in the toolchain; that guard moved to *Unblocked* above.
+guard waited on, landed in the toolchain, and the guard shipped at 1.10.6.
 
 ## Background watches (not slots)
 
