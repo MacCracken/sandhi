@@ -341,7 +341,7 @@ fn sandhi_http_stream_opts_a(a, url, method, user_headers, body, body_len, cb, c
     var req = _sandhi_client_build_request_a(a, method, full_path, host_hdr, hs, body_len);
 
     var cap = sandhi_http_options_bytes(opts);
-    return _sandhi_stream_run_a(a, conn, req, body, body_len, cb, ctx, cap, deadline_ms);
+    return _sandhi_stream_run_a(a, conn, req, body, body_len, cb, ctx, cap, deadline_ms, opts);
 }
 
 fn sandhi_http_stream_opts(url, method, user_headers, body, body_len, cb, ctx, opts): i64 {
@@ -353,7 +353,8 @@ fn sandhi_http_stream_opts(url, method, user_headers, body, body_len, cb, ctx, o
 # (SO_RCVTIMEO / SO_SNDTIMEO) to SANDHI_ERR_TIMEOUT; any other I/O
 # fail maps to SANDHI_ERR_CONNECT. deadline_ms (0 = none) bounds the
 # overall stream lifetime — body-loop checks it between event reads.
-fn _sandhi_stream_run_a(a, conn, req, body, body_len, cb, ctx, cap, deadline_ms): i64 {
+# `opts` (0 = none) carries the idle-turn options to the body loop.
+fn _sandhi_stream_run_a(a, conn, req, body, body_len, cb, ctx, cap, deadline_ms, opts): i64 {
     var req_data = str_data(req);
     var req_len = strlen(req_data);
     var sw = sandhi_conn_send_all(conn, req_data, req_len);
@@ -376,18 +377,18 @@ fn _sandhi_stream_run_a(a, conn, req, body, body_len, cb, ctx, cap, deadline_ms)
             return _sandhi_stream_result_a(a, 0, 0, SANDHI_ERR_CONNECT, 0);
         }
     }
-    var out = _sandhi_stream_read_loop_a(a, conn, cb, ctx, cap, deadline_ms);
+    var out = _sandhi_stream_read_loop_a(a, conn, cb, ctx, cap, deadline_ms, opts);
     sandhi_conn_close(conn);
     return out;
 }
 
-fn _sandhi_stream_run(conn, req, body, body_len, cb, ctx, cap, deadline_ms): i64 {
-    return _sandhi_stream_run_a(default_alloc(), conn, req, body, body_len, cb, ctx, cap, deadline_ms);
+fn _sandhi_stream_run(conn, req, body, body_len, cb, ctx, cap, deadline_ms, opts): i64 {
+    return _sandhi_stream_run_a(default_alloc(), conn, req, body, body_len, cb, ctx, cap, deadline_ms, opts);
 }
 
 # Read loop: drain headers, then feed body bytes through SSE parser.
 # Returns stream-result. Handles chunked or close-delimited bodies.
-fn _sandhi_stream_read_loop_a(a, conn, cb, ctx, cap, deadline_ms): i64 {
+fn _sandhi_stream_read_loop_a(a, conn, cb, ctx, cap, deadline_ms, opts): i64 {
     var header_sb = _sandhi_sb_new_a(a, cap);
     var scratch = alloc_via(a, _SANDHI_STREAM_READ_CHUNK);
     if (header_sb == 0 || scratch == 0) {
@@ -437,16 +438,74 @@ fn _sandhi_stream_read_loop_a(a, conn, cb, ctx, cap, deadline_ms): i64 {
         _sandhi_sb_append(body_sb, hp + header_end, total - header_end);
     }
 
-    return _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms);
+    return _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms, opts);
 }
 
-fn _sandhi_stream_read_loop(conn, cb, ctx, cap, deadline_ms): i64 {
-    return _sandhi_stream_read_loop_a(default_alloc(), conn, cb, ctx, cap, deadline_ms);
+fn _sandhi_stream_read_loop(conn, cb, ctx, cap, deadline_ms, opts): i64 {
+    return _sandhi_stream_read_loop_a(default_alloc(), conn, cb, ctx, cap, deadline_ms, opts);
+}
+
+# Idle-wait outcomes.
+var _SANDHI_STREAM_WAIT_READ    = 0;
+var _SANDHI_STREAM_WAIT_STOP    = 1;
+var _SANDHI_STREAM_WAIT_TIMEOUT = 2;
+
+# Before a body read, give the consumer its idle turns (1.10.5,
+# `sandhi_http_options_idle_ms` / `_idle_cb`). Waits for the socket to become
+# readable; each time another `idle_ms` passes with nothing to read it calls
+# `idle_cb(ctx, silent_ms)`, where `silent_ms` is the time since `last_ms`, when
+# the last byte arrived. Returns _SANDHI_STREAM_WAIT_READ to go on and read,
+# _WAIT_STOP when idle_cb answered 0, or _WAIT_TIMEOUT once the silence reaches
+# `read_ms` or the stream's deadline passes. Without both options it answers
+# READ at once, so the loop is the pre-1.10.5 one.
+#
+# The wait is `fd_wait_ready` on the connection's socket, never a shorter
+# SO_RCVTIMEO: native TLS reports an expired SO_RCVTIMEO as TLS_ERR_IO and
+# fails the ctx for good, and a record read cut off mid-record cannot resume.
+# Waiting for readiness consumes nothing at either layer. Plaintext the TLS
+# layer could hold back from the socket's view never arises here: the body loop
+# reads _SANDHI_STREAM_READ_CHUNK (16384) bytes, a whole maximum-size record.
+# A wait error other than EINTR (agnos has no poll and answers -38) falls
+# through to the read, which then behaves exactly as it did before 1.10.5.
+fn _sandhi_stream_idle_wait(conn, opts, ctx, last_ms, deadline_ms): i64 {
+    var idle_ms = sandhi_http_options_get_idle_ms(opts);
+    var idle_cb = sandhi_http_options_get_idle_cb(opts);
+    if (idle_ms <= 0 || idle_cb == 0) { return _SANDHI_STREAM_WAIT_READ; }
+    var read_ms = sandhi_http_options_get_read_ms(opts);
+    var fd = sandhi_conn_fd(conn);
+    var next_tick = last_ms + idle_ms;
+    while (1 == 1) {
+        var now = clock_now_ms();
+        if (read_ms > 0 && now - last_ms >= read_ms) { return _SANDHI_STREAM_WAIT_TIMEOUT; }
+        if (deadline_ms > 0 && now >= deadline_ms) { return _SANDHI_STREAM_WAIT_TIMEOUT; }
+        if (now >= next_tick) {
+            if (fncall2(idle_cb, ctx, now - last_ms) == 0) { return _SANDHI_STREAM_WAIT_STOP; }
+            next_tick = next_tick + idle_ms;
+            if (next_tick <= now) { next_tick = now + idle_ms; }
+            continue;
+        }
+        var wait = next_tick - now;
+        if (read_ms > 0 && last_ms + read_ms - now < wait) { wait = last_ms + read_ms - now; }
+        if (deadline_ms > 0 && deadline_ms - now < wait) { wait = deadline_ms - now; }
+        var r = fd_wait_ready(fd, 0, wait);
+        if (r == 1) { return _SANDHI_STREAM_WAIT_READ; }
+        if (r < 0 && r != 0 - 4) { return _SANDHI_STREAM_WAIT_READ; }
+    }
+    return _SANDHI_STREAM_WAIT_READ;
 }
 
 # Body-loop: alternate "read more" + "decode + dispatch". Kept
 # compact — per-iteration work lives in helpers.
-fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms): i64 {
+#
+# 1.10.5 — the chunked path decodes into ONE buffer for the life of the
+# stream. Through 1.10.4 it took a fresh `cap`-sized buffer on every pass, so
+# the unterminated tail of an event that `sandhi_sse_parse` leaves unconsumed
+# was dropped at the next read: an event whose bytes arrived in two reads was
+# lost (the 1.9.15 parser fix could not help, because the bytes it kept were
+# thrown away by this loop), and each pass reserved another `cap` bytes from an
+# allocator that never frees. An event that fills the whole buffer can never
+# complete, which is PROTOCOL, as a full body buffer is on the plain path.
+fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms, opts): i64 {
     var total_events_cell = alloc_via(a, 8);
     var stop_cell = alloc_via(a, 8);
     if (total_events_cell == 0 || stop_cell == 0) {
@@ -456,15 +515,17 @@ fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ct
     store64(stop_cell, 0);
     var chunk_state = _sandhi_chunk_state_new_a(a);
     if (chunk_state == 0) { return _sandhi_stream_result_a(a, status, 0, SANDHI_ERR_INTERNAL, 0); }
+    var decoded = 0;
+    if (chunked == 1) {
+        decoded = _sandhi_sb_new_a(a, cap);
+        if (decoded == 0) { return _sandhi_stream_result_a(a, status, 0, SANDHI_ERR_INTERNAL, 0); }
+    }
+    var last_ms = clock_now_ms();
 
     var going = 1;
     while (going == 1) {
         # Process whatever's already in body_sb.
         if (chunked == 1) {
-            var decoded = _sandhi_sb_new_a(a, cap);
-            if (decoded == 0) {
-                return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_INTERNAL, 0);
-            }
             # 1.9.12 P1 — refuse a malformed chunk header instead of decoding on.
             if (_sandhi_stream_decode_chunked_into(body_sb, chunk_state, decoded) != 0) {
                 return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_PROTOCOL, 0);
@@ -474,6 +535,9 @@ fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ct
                 if (load64(stop_cell) == 1) { going = 0; }
             }
             if (_sandhi_chunk_done(chunk_state) == 1) { going = 0; }
+            if (going == 1 && _sandhi_sb_len(decoded) >= cap) {
+                return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_PROTOCOL, 0);
+            }
         } else {
             _sandhi_stream_feed_sse_a(a, body_sb, cb, ctx, total_events_cell, stop_cell);
             if (load64(stop_cell) == 1) { going = 0; }
@@ -483,15 +547,27 @@ fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ct
             if (deadline_ms > 0 && clock_now_ms() >= deadline_ms) {
                 return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_TIMEOUT, 0);
             }
-            var n = sandhi_conn_recv(conn, scratch, _SANDHI_STREAM_READ_CHUNK);
-            if (n == 0 - _SANDHI_EAGAIN) {
+            var w = _sandhi_stream_idle_wait(conn, opts, ctx, last_ms, deadline_ms);
+            if (w == _SANDHI_STREAM_WAIT_TIMEOUT) {
                 return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_TIMEOUT, 0);
             }
-            if (n < 0) { return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_CONNECT, 0); }
-            if (n == 0) { going = 0; }
-            else {
-                if (_sandhi_sb_append(body_sb, scratch, n) < 0) {
-                    return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_PROTOCOL, 0);
+            if (w == _SANDHI_STREAM_WAIT_STOP) {
+                store64(stop_cell, 1);
+                going = 0;
+            } else {
+                var n = sandhi_conn_recv(conn, scratch, _SANDHI_STREAM_READ_CHUNK);
+                if (n == 0 - _SANDHI_EAGAIN) {
+                    return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_TIMEOUT, 0);
+                }
+                if (n < 0) {
+                    return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_CONNECT, 0);
+                }
+                if (n == 0) { going = 0; }
+                else {
+                    last_ms = clock_now_ms();
+                    if (_sandhi_sb_append(body_sb, scratch, n) < 0) {
+                        return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_ERR_PROTOCOL, 0);
+                    }
                 }
             }
         }
@@ -500,15 +576,15 @@ fn _sandhi_stream_body_loop_a(a, conn, body_sb, scratch, chunked, status, cb, ct
     return _sandhi_stream_result_a(a, status, load64(total_events_cell), SANDHI_OK, load64(stop_cell));
 }
 
-fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms): i64 {
+fn _sandhi_stream_body_loop(conn, body_sb, scratch, chunked, status, cb, ctx, cap, deadline_ms, opts): i64 {
     return _sandhi_stream_body_loop_a(
       default_alloc(), conn, body_sb, scratch, chunked, status,
-      cb, ctx, cap, deadline_ms);
+      cb, ctx, cap, deadline_ms, opts);
 }
 
 # Decode as many chunked frames as possible out of `in_sb` into
 # `out_sb`. Advances chunk_state. Stops when a complete frame can't
-# be parsed or the terminal 0-chunk is seen.
+# be parsed, `out_sb` is full, or the terminal 0-chunk is seen.
 fn _sandhi_stream_decode_chunked_into(in_sb, chunk_state, out_sb): i64 {
     var going = 1;
     while (going == 1) {
@@ -536,6 +612,12 @@ fn _sandhi_stream_decode_chunked_into(in_sb, chunk_state, out_sb): i64 {
             if (avail == 0) { return 0; }
             var take = rem;
             if (take > avail) { take = avail; }
+            # 1.10.5 — never past `out_sb`'s room: the stream loop keeps an
+            # event's unparsed tail in it across reads. The rest stays in
+            # `in_sb` for the next pass.
+            var room = _sandhi_sb_cap(out_sb) - _sandhi_sb_len(out_sb);
+            if (take > room) { take = room; }
+            if (take <= 0) { return 0; }
             _sandhi_sb_append(out_sb, _sandhi_sb_ptr(in_sb), take);
             _sandhi_sb_consume(in_sb, take);
             var new_rem = rem - take;

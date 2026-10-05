@@ -130,14 +130,25 @@ sandhi_server_send_204(cfd, my_extra); # 204 with extra headers
 For SSE, large bodies, or any long-running response:
 
 ```
-sandhi_server_send_chunked_start(cfd, 200, "text/event-stream", 0);
-sandhi_server_send_chunk(cfd, "data: hello\n\n", 13);
-sandhi_server_send_chunk(cfd, "data: world\n\n", 13);
+if (sandhi_server_send_chunked_start(cfd, 200, "text/event-stream", 0) < 0) { return 0; }
+if (sandhi_server_send_chunk(cfd, "data: hello\n\n", 13) < 0) { return 0; }
+if (sandhi_server_send_chunk(cfd, "data: world\n\n", 13) < 0) { return 0; }
 sandhi_server_send_chunked_end(cfd);
 ```
 
 Each `send_chunk` emits `<hex-len>\r\n<data>\r\n` on the wire.
 `send_chunked_end` emits the terminal `0\r\n\r\n`.
+
+All three return `0` once every byte is written, and a negative value otherwise:
+`-errno` from the write (`-EPIPE` when the client has gone), or `-1` if building the
+head ran out of memory. Check the result and stop streaming on a negative one. A
+loop that feeds a stream from a subscription or a long job is otherwise held open,
+with its connection, until its own source ends. Writes go through `sock_send_all`,
+so a short write is completed rather than breaking the chunk framing (since 1.10.5;
+before that all three always returned 0).
+
+On Linux the serve loops ignore SIGPIPE, so a write to a closed client returns
+`-EPIPE`. On macOS they do not yet, and that write raises SIGPIPE.
 
 ## Status constants
 

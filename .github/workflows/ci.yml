@@ -301,6 +301,19 @@ jobs:
           cyrius build programs/_server_tls_probe.cyr build/_server_tls_probe
           build/_server_tls_probe
 
+      - name: Stream idle-turn gate (1.10.5)
+        # 1.10.5: `sandhi_http_options_idle_ms` / `_idle_cb` give a stream
+        # consumer a turn while the upstream is silent (hoosh's SSE keep-alive).
+        # Forks a pooled TLS server (the same fixtures) that sends one event,
+        # stays silent, then sends a second, and streams it with sandhi's own
+        # client: turns during the silence, both events over the same TLS ctx,
+        # TIMEOUT at read_ms, and the idle-off path unchanged. 100 ms unit
+        # (~11 s); `build/_stream_idle_gate 1000` runs the issue's literal
+        # 15 s / 40 s figures. Pure loopback; skips cleanly without TLS.
+        run: |
+          cyrius build programs/_stream_idle_gate.cyr build/_stream_idle_gate
+          build/_stream_idle_gate
+
       - name: Client resolve-hook gate (1.9.14 — SSRF / redirect hop)
         # 1.9.14: `sandhi_client_set_resolver` lets a consumer vet the address
         # the client is about to dial, and REFUSE it. Filed by bote, whose

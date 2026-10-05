@@ -4,6 +4,101 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.5] — 2026-10-04
+
+**A stream consumer gets a turn while the upstream is silent (hoosh); the chunked stream path
+no longer loses an event split across two reads; the chunked-response server verbs report
+their write results (agnostic); pin to cyrius 6.6.15.** Toolchain `6.6.11` → `6.6.15`.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`. hoosh, agnosai, bote and agnostic filed or
+are affected by these fixes, and there is no sandhi pin for them to bump.
+
+### Added
+
+- **http: idle turns on a stream** (issue `2026-09-25-http-stream-no-idle-hook`, hoosh).
+  `sandhi_http_options_idle_ms(opts, ms)` and `sandhi_http_options_idle_cb(opts, fp)`, plus
+  `sandhi_http_options_get_idle_ms` / `_get_idle_cb`. With both set, `sandhi_http_stream_opts`
+  (and so `sandhi_rpc_mcp_stream`) calls `fp(ctx, silent_ms)` each time another `idle_ms` of
+  silence passes. `ctx` is the event callback's and `silent_ms` is the time since the last byte
+  arrived. Nonzero keeps waiting; `0` stops the stream as a `0` from the event callback does
+  (`SANDHI_OK`, `stopped = 1`). Any received byte resets the silence. `read_ms` keeps its
+  meaning, the longest silence accepted, and ends the stream with `SANDHI_ERR_TIMEOUT`;
+  `total_ms` still bounds the whole stream. Either option at 0 (the default) is the old loop.
+  The options struct grows 80 → 96 bytes. hoosh uses it to write `: keep-alive` to its own
+  client on remote (TLS) streams, which a proxy's idle timeout otherwise cuts while a reasoning
+  model thinks.
+  - **The mechanism is a readiness wait, not the filing's shorter SO_RCVTIMEO.** Native TLS
+    reports an expired SO_RCVTIMEO as `TLS_ERR_IO` and fails the ctx for good (6.6.13's read
+    error table), and a record read cut off mid-record cannot resume, so a timed-out read can
+    never be retried on TLS. The body loop instead waits for the socket to become readable with
+    `fd_wait_ready` (cyrius 6.6.13: poll, or WSAPoll on Windows) for at most `idle_ms` before
+    each read. Nothing is consumed at either layer while it waits, so no read is cut short and
+    the libssl bridge is never asked to retry. The loop reads 16384 bytes, a whole maximum-size
+    record, so the TLS layer never holds plaintext out of the socket's view. agnos has no poll
+    (`fd_wait_ready` answers -38) and reads exactly as before.
+  - New gate **`programs/_stream_idle_gate.cyr`** (wired into CI). It forks a pooled sandhi TLS
+    server on the Ed25519 fixtures, which sends one event, stays silent and sends a second, and
+    streams it with sandhi's own client. Times are in units of `argv(1)` ms: 100 in CI (~11 s), and run once at
+    `1000`, the issue's literal figures. Idle 15 s, read 300 s, 40 s silence: turns at 15015 ms
+    and 30015 ms, both events over the same TLS ctx, `SANDHI_OK`. Read 20 s: `SANDHI_ERR_TIMEOUT`
+    after one turn. Idle 0: no turn, both events. The libssl build of the gate does not link at
+    this pin (the open cyrius DCE issue, now 15 symbols).
+
+### Fixed
+
+- **http: the chunked stream path lost an SSE event whose bytes arrived in two reads.**
+  `_sandhi_stream_body_loop_a` decoded each pass into a fresh buffer. `sandhi_sse_parse`
+  correctly leaves an unterminated event unconsumed (the 1.9.15 fix), but the loop then threw
+  those bytes away before the rest arrived. On a `Transfer-Encoding: chunked` stream an event
+  split by a read boundary was silently dropped: 0 events, `SANDHI_OK`. That is the symptom
+  hoosh measured before 1.9.15 (a tool call's `content_block_start` vanishing), and it was still
+  present on chunked streams. Each pass also reserved another `max_response_bytes` (256 KiB by
+  default) from an allocator that never frees. The loop now keeps one decode buffer for the
+  life of the stream; an event that fills it can never complete and is `SANDHI_ERR_PROTOCOL`, as
+  a full body buffer already is on the plain path. `_sandhi_stream_decode_chunked_into` never
+  writes past its output buffer's room and leaves the rest for the next pass; it used to drop it
+  silently. The download path resets that buffer every pass, so it is unaffected. Found while
+  implementing the idle turn.
+- **server: the chunked-response verbs discarded every send result** (issue
+  `2026-10-03-chunked-response-verbs-discard-send-result`, agnostic; agnosai and bote affected).
+  `sandhi_server_send_chunked_start{,_a}`, `sandhi_server_send_chunk` and
+  `sandhi_server_send_chunked_end` returned 0 whatever `sock_send` returned. A streaming handler
+  could not tell its client had gone (agnosai's crew stream held its loop, subscription and
+  connection until the crew finished), and a short write left a length line promising bytes that
+  never arrived. Each now writes through `sock_send_all` and returns 0, or its negative result
+  (`-EPIPE` for a peer that has gone; `-1` for an out-of-memory head, as before).
+  `sandhi_server_send_chunk` stops at the first failed write. Callers that ignore the result are
+  unaffected. On macOS the serve loops still do not ignore SIGPIPE, so a write to a closed client
+  kills the process before the handler sees `-EPIPE`. The stdlib `signal_ignore` that closes
+  this has landed, and the switch is on the roadmap (*Unblocked*).
+
+### Changed
+
+- **Pin 6.6.11 → 6.6.15.** `lib/` re-resolved from empty (`rm -rf lib && cyrius deps`): 73 files
+  (`tls_hostid` new), `cyrius.lock` re-locked; sigil 3.13.9, sakshi 2.5.6, bayan 1.5.11. All
+  five dist bundles regenerated (`cyrius distlib --all`). The `.deps` sidecars are unchanged. The
+  stream change reaches `sandhi.cyr` and `-rpc`; the options change reaches `sandhi.cyr`, `-rpc`
+  and `-discovery`; the server change reaches `sandhi.cyr` and `-server`; `-tls` takes only the
+  version stamp.
+- **`cyrius.cyml` is configuration only.** Its comment prose (project history, module-ordering
+  notes, dependency rationale) is removed; that material lives in this CHANGELOG, `state.md` and
+  `docs/architecture/`.
+- docs: `guides/server.md` "Chunked / streaming" checks each result and stops on a negative one;
+  `guides/timeouts.md` documents the idle turn. Both issues archived. The roadmap's *macOS server
+  SIGPIPE guard* moves to *Unblocked*, and the one-shot send verbs (`send_response` / `_status` /
+  `_204`, which also discard their send results) get an entry there.
+
+### Verified
+
+- **2,935 assertions** (829 / 1,691 / 352 / 63; sandhi +42). Mutation-proven: restoring the
+  per-pass decode buffer fails the split-event rows, removing the idle wait fails 10 idle rows,
+  dropping the decoder's room cap fails its 4 rows, and restoring the discarded send results fails
+  the 3 closed-peer rows. The closed-peer test ignores SIGPIPE through stdlib `signal_ignore`, so
+  it also runs on the macOS CI job.
+- 8/8 fuzz; lint 0 warnings across `src/`; fmt clean; `CYRIUS_DCE=1` smoke; aarch64, AGNOS and
+  Windows (PE) cross-builds link; the dist bundles are idempotent (`cyrius distlib --check`).
+
 ## [1.10.4] — 2026-09-30
 
 **Windows never reads a plantable `C:\etc\resolv.conf` (cyrius CVE-57); a stop-enabled

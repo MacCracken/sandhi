@@ -95,3 +95,35 @@ apply normally — they're set on the fd. `total_ms` still bounds the outer loop
   `connect_ms` tight so a DNS/SYN black-hole still fails fast.
 - **Never-stall server-sent events stream**: use `sandhi_http_stream_opts` with
   the same option shape — `total_ms` bounds the whole stream lifetime, not per-event.
+
+## Idle turns on a stream (1.10.5)
+
+`read_ms` on a stream is the longest silence it accepts. Between two upstream
+events the consumer otherwise gets no control at all. A relay that must write
+something to its own client while the upstream is quiet (an SSE keep-alive past a
+proxy's idle timeout) sets an idle turn:
+
+```cyrius
+fn on_idle(ctx, silent_ms) {
+    # write ": keep-alive\n\n" to your own client; return 0 if it has gone
+    return 1;
+}
+
+var opts = sandhi_http_options_new();
+sandhi_http_options_read_ms(opts, 300000);       # give up after 5 min of silence
+sandhi_http_options_idle_ms(opts, 15000);        # a turn every 15 s of silence
+sandhi_http_options_idle_cb(opts, &on_idle);
+var r = sandhi_http_stream_opts(url, "POST", hdrs, body, body_len, &on_event, ctx, opts);
+```
+
+- `on_idle(ctx, silent_ms)` gets the same `ctx` as the event callback and the time
+  since the last byte arrived. Nonzero keeps waiting; `0` stops the stream
+  (`SANDHI_OK`, `sandhi_stream_stopped(r) == 1`), as a `0` from the event callback does.
+- Any received byte resets the silence. Once it reaches `read_ms` the stream ends
+  with `SANDHI_ERR_TIMEOUT`; `total_ms` still bounds the whole stream.
+- Either option at `0` (the default) leaves the stream loop exactly as before.
+- Only the streaming verbs (`sandhi_http_stream_opts`, and so `sandhi_rpc_mcp_stream`)
+  honour these. The turn applies to the body; the header block is read as before.
+- The wait is a readiness poll, never a shorter socket timeout, so it is safe on TLS:
+  no record is ever abandoned half-read. agnos has no poll, so the turn never comes
+  there.

@@ -16,7 +16,7 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.6.6** (1.10.0; was 6.6.2 at 1.9.17, 6.4.49 at 1.8.0 — the full trail is in `state.md`).
+is currently **cyrius 6.6.15** (1.10.5; was 6.6.6 at 1.10.0, 6.6.2 at 1.9.17, 6.4.49 at 1.8.0 — the full trail is in `state.md`).
 The 1.6.9–1.6.13 + 1.7.0 patches (client dispatch thread-safety, the server-TLS
 handshake migration + flat-RSS, the native trust-store verify-fail proof, the QU
 mDNS receive fix, the conn-off fd-collision fix, and the two yeo-cy-test fixes)
@@ -48,9 +48,9 @@ a public verb + a build flag is not a patch):
 - **libssl smoke build is non-gating since cyrius 6.3.5 — drop at 2.0.** The
   `-D CYRIUS_TLS_LIBSSL` CI link-proof (`ci.yml`) is now `continue-on-error`:
   6.3.x's linker refuses reachable-undefined fns, and the libssl config leaves
-  sigil's transitive crypto symbols reachable-but-unlinked (**re-verified 6.6.6,
-  2026-09-23: 14 — `ct_select`, `thread_local_*`, `u256_*`; `--allow-undef` still not
-  plumbed through `cyrius build`**) — a cyrius-side DCE artifact of the libssl `#ifdef`, NOT a
+  sigil's transitive crypto symbols reachable-but-unlinked (**re-verified 6.6.15,
+  2026-10-04: 15 — `ct_select`, `thread_local_*`, `u256_*`, `random_bytes`; was 14 at
+  6.6.6**) — a cyrius-side DCE artifact of the libssl `#ifdef`, NOT a
   sandhi/sigil source defect (native links them all). Filed cyrius-side:
   [`issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md).
   Delete the CI step entirely as part of the 2.0 libssl removal below; revisit
@@ -223,29 +223,35 @@ moved to [`requests/`](requests/README.md) instead.
   per-request timeouts; daimon's registry contract defines no auth surface today.
   Wire it when a consumer needs authenticated / timeout-bounded discovery.
 
+## Unblocked — ready for a slot
+
+- **macOS server SIGPIPE guard** (`src/server/mod.cyr`) — the 1.6.6 SIGPIPE fix is
+  Linux-only (`_sandhi_server_ignore_sigpipe`: raw `rt_sigaction`, x86_64 13 /
+  aarch64 134); on macOS it is a documented no-op, so a sandhi server there is still
+  killed by SIGPIPE when a client disconnects mid-response. **The prerequisite has
+  landed:** stdlib `signal_ignore(signum)` (`lib/syscalls.cyr`) is portable to macOS
+  (BSD `sigaction` through ESYSXLAT) and is present in the 6.6.15 snapshot (verified
+  2026-10-04; filed cyrius-side 2026-07-11 as
+  `2026-07-11-sandhi-signal-ignore-stdlib-gap.md`). The fix is to call it from
+  `_sandhi_server_ignore_sigpipe` and drop the raw syscall. Ground-first: prove it on
+  a macOS box (ecb / ach) with a client that disconnects mid-stream, not just the CI
+  suites. More pressing since 1.10.5: the chunked verbs now return `-EPIPE`, which a
+  macOS handler never sees because the signal kills the process first.
+- **The one-shot server send verbs discard their send results**
+  (`src/server/mod.cyr`) — `sandhi_server_send_response{,_a}`,
+  `sandhi_server_send_status{,_a}` and `sandhi_server_send_204{,_a}` still call
+  `sock_send` and return 0 whatever it returned. This is the class 1.10.5 fixed for the chunked verbs
+  (issue `archive/2026-10-03-chunked-response-verbs-discard-send-result.md`), outside
+  that filing's scope. The stakes are lower: a handler returns right after these, so
+  `-EPIPE` changes nothing it would do. But a short write still truncates a response
+  below its own `Content-Length`. Each `sock_send` also boxes a 16-byte `Result` from
+  the global allocator. Fix: send through `sock_send_all` and return its result, as
+  the chunked verbs now do.
+
 ## Wait-for-stdlib-prerequisite
 
-- **Portable `signal_ignore` / `sock_send` `MSG_NOSIGNAL`** — the proper home for
-  the 1.6.6 SIGPIPE guard, and the one move that also closes the **macOS server
-  SIGPIPE guard** below. sandhi installs `SIG_IGN(SIGPIPE)` via a raw
-  `rt_sigaction` because `net.cyr`'s `sock_send` is a flagsless `sys_write` (can't
-  pass `MSG_NOSIGNAL`, and forking it is forbidden) and stdlib exposes no
-  signal-disposition helper (SIGPIPE isn't even in the `Signal` enum). A stdlib
-  `signal_ignore(signum)` (portable across Linux/macOS/agnos) **or** a
-  `MSG_NOSIGNAL`-aware `sock_send` would let sandhi drop the raw syscall.
-  **Re-verified absent on cyrius 6.4.49** (grep `net.cyr` / `syscalls.cyr`:
-  `sock_send(fd,buf,len)` still flagsless, no stdlib signal-disposition helper).
-  **Filed cyrius-side 2026-07-11**: `cyrius docs/development/issues/2026-07-11-sandhi-signal-ignore-stdlib-gap.md`
-  (requests a portable `signal_ignore(signum)` or a `MSG_NOSIGNAL`-aware `sock_send`;
-  flags the macOS server-SIGPIPE DoS that has no consumer workaround). Revisit when
-  either lands.
-- **macOS server SIGPIPE guard** (`src/server/mod.cyr`) — the 1.6.6 SIGPIPE fix is
-  Linux-only (`rt_sigaction`, x86_64 13 / aarch64 134); macOS is a documented
-  no-op (the ESYSXLAT whitelist doesn't cover `sigaction`). Wiring it needs the BSD
-  `sigaction` ABI (or per-socket `SO_NOSIGNAL`) **and a macOS box to verify**
-  (ground-first) — OR the stdlib `signal_ignore` above, which closes it portably in
-  one move. Until then a sandhi server on macOS is still SIGPIPE-vulnerable; flagged
-  so it isn't silently assumed covered.
+None open. The last entry, the portable `signal_ignore` that the macOS SIGPIPE
+guard waited on, landed in the toolchain; that guard moved to *Unblocked* above.
 
 ## Background watches (not slots)
 

@@ -19,7 +19,6 @@ modernization agent beats routing through sandhi's full repo.
 | [`2026-04-24-hoosh-ifran-sandhi-http.md`](2026-04-24-hoosh-ifran-sandhi-http.md) | ~~hoosh~~ + ifran | consumer | **Half done.** hoosh 2.6.10 adopted (`http_post`, `http_stream` + SSE). ifran 2.2.1 has zero sandhi verbs. Now an ifran-only item. |
 | [`2026-04-24-ark-sandhi-registry-ops.md`](2026-04-24-ark-sandhi-registry-ops.md) | ark | consumer | **Not adopted.** ark 1.4.2, zero sandhi verbs. |
 | [`2026-04-24-vidya-sandhi-fetch.md`](2026-04-24-vidya-sandhi-fetch.md) | vidya | consumer | **Reframed.** vidya 2.8.5 already consumes the *server* surface; the *fetch* ask is unmet (no fetch path of any kind yet). Additive now, not a new dependency. Still low priority. |
-| [`2026-09-25-http-stream-no-idle-hook.md`](2026-09-25-http-stream-no-idle-hook.md) | hoosh | **sandhi** | **Open (filed 2026-09-25).** sandhi-side feature: `sandhi_http_stream` gives the consumer no turn while the upstream is silent, so hoosh cannot send SSE keep-alives on remote streams. Proposes `sandhi_http_options_idle_ms` / `_idle_cb`. |
 
 **Adopted and archived** — these were filed as "not confirmed from this repo";
 each has now been confirmed by reading the consumer's own source:
@@ -42,13 +41,16 @@ put on its roadmap.
 
 ## Sandhi-side defects
 
-**Open:**
+**Open:** none.
 
-| Doc | Reporter | Severity | Summary |
-|-----|----------|----------|---------|
-| [`2026-10-03-chunked-response-verbs-discard-send-result.md`](2026-10-03-chunked-response-verbs-discard-send-result.md) | agnostic (agnosai and bote affected today) | P2 | `sandhi_server_send_chunked_start_a`, `sandhi_server_send_chunk` and `sandhi_server_send_chunked_end` discard every `sock_send` result and return 0, so a streaming handler cannot tell its client has gone (`EPIPE`) and a short write breaks the chunk framing. Reproduced on cyrius 6.6.14 (sandhi 1.10.4): 0, 0, where `sock_send_all` on the same fd returns -32. Proposed fix: send through `sock_send_all` and return its result. |
+The last two closed together at **1.10.5** — [`archive/2026-10-03-chunked-response-verbs-discard-send-result.md`](archive/2026-10-03-chunked-response-verbs-discard-send-result.md)
+(the chunked-response verbs discarded every send result) and the hoosh feature gap
+[`archive/2026-09-25-http-stream-no-idle-hook.md`](archive/2026-09-25-http-stream-no-idle-hook.md)
+(no consumer turn during a silent upstream), which also surfaced a lost-event defect in the
+chunked stream loop. Neither has reached consumers until a cyrius release re-vendors
+`lib/sandhi.cyr` from the 1.10.5 `dist/sandhi.cyr`.
 
-The last one closed — [`archive/2026-07-30-accept-loop-unguarded-spin.md`](archive/2026-07-30-accept-loop-unguarded-spin.md)
+Before those, the last one closed — [`archive/2026-07-30-accept-loop-unguarded-spin.md`](archive/2026-07-30-accept-loop-unguarded-spin.md)
 (bote 3.2.1; all five serve loops spun a core forever on any persistent accept error)
 — shipped at **1.9.8** and was archived 2026-08-23. Its doc had sat at
 `Status: fixed, [Unreleased]` for three releases.
@@ -90,7 +92,7 @@ as `YYYY-MM-DD-kebab-case.md` and move to `archive/` when fully closed.
 
 | Doc | Repo | Severity | Summary |
 |-----|------|----------|---------|
-| [`2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md) | cyrius | low (deprecated path) | The `-D CYRIUS_TLS_LIBSSL` smoke build hard-fails on reachable-undefined crypto symbols (cyrius on-demand-link artifact: the native crypto path that force-links them is `#ifdef`'d out under libssl). **Re-verified 2026-09-23 on cyrius `6.6.6` (sandhi 1.10.0):** still **14** reachable-undefined, and `cyrius build` still rejects `--allow-undef` ("unknown option"), so neither requested fix has landed. **2026-08-22 on `6.5.35` (sandhi 1.9.11):** count **widened to 14** — essentially all of sigil's transitive crypto surface (`u256_*`, `base64_encode`, `bayan_json_get`, `_keccak_*`, `shake256`, `fl_alloc`/`_free`, `ct_eq_bytes*`, `ct_select`, `thread_local_*`, `random_bytes`). **Not a regression from the 6.5.20 → 6.5.35 bump** — a clean resolve on both pins reports the same 14. Earlier counts in this table (4, then 1) were snapshots of their own dates. NOT a sandhi/sigil source defect (native links clean and is what all five live gates run against). libssl CI step non-gating; drops at the 2.0 retirement. |
+| [`2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md) | cyrius | low (deprecated path) | The `-D CYRIUS_TLS_LIBSSL` smoke build hard-fails on reachable-undefined crypto symbols (cyrius on-demand-link artifact: the native crypto path that force-links them is `#ifdef`'d out under libssl). **Re-verified 2026-10-04 on cyrius `6.6.15` (sandhi 1.10.5):** **15** reachable-undefined (the same crypto surface; `random_bytes` among them). **2026-09-23 on `6.6.6` (sandhi 1.10.0):** **14** reachable-undefined, and `cyrius build` still rejects `--allow-undef` ("unknown option"), so neither requested fix has landed. **2026-08-22 on `6.5.35` (sandhi 1.9.11):** count **widened to 14** — essentially all of sigil's transitive crypto surface (`u256_*`, `base64_encode`, `bayan_json_get`, `_keccak_*`, `shake256`, `fl_alloc`/`_free`, `ct_eq_bytes*`, `ct_select`, `thread_local_*`, `random_bytes`). **Not a regression from the 6.5.20 → 6.5.35 bump** — a clean resolve on both pins reports the same 14. Earlier counts in this table (4, then 1) were snapshots of their own dates. NOT a sandhi/sigil source defect (native links clean and is what all five live gates run against). libssl CI step non-gating; drops at the 2.0 retirement. |
 
 Otherwise, all filed upstream dependencies to date are **resolved and archived** —
 the `lib/tls.cyr` native-TLS swap off the fdlopen-libssl bridge (✅ cyrius 6.2.8 /
@@ -105,6 +107,8 @@ stdlib primitive are tracked in [`../roadmap.md`](../roadmap.md)
 
 | Doc | Closed at | Summary |
 |-----|-----------|---------|
+| [`archive/2026-10-03-chunked-response-verbs-discard-send-result.md`](archive/2026-10-03-chunked-response-verbs-discard-send-result.md) | sandhi 1.10.5 | agnostic (agnosai and bote affected): `sandhi_server_send_chunked_start{,_a}` / `_send_chunk` / `_send_chunked_end` discarded every `sock_send` result and returned 0, so a streaming handler could not see `-EPIPE` from a client that had gone, and a short write broke the chunk framing. **Fixed**: each writes through `sock_send_all` and returns 0 or its negative result; `send_chunk` stops at the first failed write. Mutation-proven closed-peer rows. The macOS serve loops still lack the SIGPIPE guard (roadmap). |
+| [`archive/2026-09-25-http-stream-no-idle-hook.md`](archive/2026-09-25-http-stream-no-idle-hook.md) | sandhi 1.10.5 | hoosh: `sandhi_http_stream` gave the consumer no turn while the upstream was silent, so remote SSE keep-alives were impossible. **Resolved** with `sandhi_http_options_idle_ms` / `_idle_cb`, implemented as a readiness wait (`fd_wait_ready`) rather than the proposed shorter SO_RCVTIMEO, which native TLS turns into a permanently failed ctx. Gated over real TLS by `programs/_stream_idle_gate.cyr` (also run once at the issue's literal 15 s / 40 s figures). Also fixed: the chunked stream path lost an SSE event split across two reads, and reserved a fresh 256 KiB buffer per read. |
 | [`archive/2026-08-23-bote-ssrf-needs-preresolved-client-connect.md`](archive/2026-08-23-bote-ssrf-needs-preresolved-client-connect.md) | sandhi 1.9.14 | bote's `web_fetch` MCP tool could apply its SSRF classifier only to IP-literal URLs: for a hostname the sole available shape was **resolve-then-fetch**, i.e. two independent resolutions with an attacker-controlled gap — a DNS-rebinding hole, which bote correctly refused to ship. **Resolved** with a client resolve hook (`sandhi_client_set_resolver` / `_clear_resolver` / `_resolver_installed`), `lookup_fn(ctx, host, family) -> addr`, `0` to refuse. Fires per redirect hop and for IP literals, so it is a single choke point with no bypass; `Host:`/SNI still derive from the URL. Additive — no signature changes. Also corrected the upstream mis-filing: the cyrius `getaddrinfo_hosts` request open since 2026-05-10 was the wrong shape *and* the wrong repo. |
 | [`archive/2026-07-30-accept-loop-unguarded-spin.md`](archive/2026-07-30-accept-loop-unguarded-spin.md) | sandhi 1.9.8 | bote 3.2.1: all five serve-loop accept sites re-issued `accept(2)` immediately and forever on a persistent error — 100% of one core, no backoff, no bound, no diagnostic; under EMFILE the pending connection is never dequeued so the same connection is re-raced at full speed. **Fixed** with an errno classifier + capped 1→250 ms backoff + a 200-failure give-up bound; measured 1000 ms → 0 ms of CPU per 1 s EMFILE window, gated by `programs/_server_accept_emfile_probe.cyr`. Archived 2026-08-23 (the doc had sat at `[Unreleased]` since 1.9.8). Reached consumers at **cyrius 6.5.6** (sandhi 1.9.9 fold) — any bote pin ≥ 6.5.6 has the fix. |
 | [`archive/2026-04-24-yantra-sandhi-rpc.md`](archive/2026-04-24-yantra-sandhi-rpc.md) | adopted; archived 2026-08-23 | Coordination doc — would yantra adopt `sandhi::rpc` for WebDriver + Appium backends? **Yes.** yantra 1.0.3 includes `lib/sandhi.cyr` in 11 files and uses 35 sandhi verbs, including the full `sandhi_wd_*` surface M3 shipped to unblock it and the 1.6.3 endpoint-keyed TLS-policy registry. Cross-repo scheduling — the only item this doc tracked — is done. |

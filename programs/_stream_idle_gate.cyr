@@ -1,0 +1,187 @@
+# programs/_stream_idle_gate.cyr — 1.10.5 live gate for the stream idle turn
+# (`sandhi_http_options_idle_ms` / `_idle_cb`) over real TLS.
+#
+# Acceptance from docs/development/issues/archive/2026-09-25-http-stream-no-idle-hook.md
+# (hoosh): a local TLS SSE server sends one event, stays silent, then sends a
+# second event and closes. Forks a pooled sandhi TLS server (the Ed25519 test
+# fixtures in programs/_tls_fixtures/) and streams from it with sandhi's own
+# client, trust-anchored on the fixture cert. Times are in units of U ms:
+# U = 100 by default (CI), and `argv(1) = 1000` runs the issue's literal
+# 15 s / 40 s / 300 s / 20 s figures.
+#   [1] idle_ms 15U, read_ms 300U, silence 40U → idle_cb runs at ~15U and
+#       ~30U, both events reach cb, result SANDHI_OK. The second event is read
+#       over the SAME TLS ctx after the turns, which is what proves the wait
+#       never disturbed the record layer.
+#   [2] idle_ms 15U, read_ms 20U → SANDHI_ERR_TIMEOUT after one idle_cb.
+#   [3] idle_ms 0 (idle_cb still set) → no turn, both events, SANDHI_OK:
+#       the pre-1.10.5 loop.
+#
+# Skip-cleanly (exit 0) if TLS is unavailable or the fixtures are missing.
+# Exit 0 = PASS / clean SKIP; 1 = FAIL.
+include "lib/thread_local.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+include "lib/sigil.cyr"
+include "src/version_str.cyr"
+include "src/error.cyr"
+include "src/obs/trace.cyr"
+include "src/obs/prof.cyr"
+include "src/http/headers.cyr"
+include "src/http/url.cyr"
+include "src/tls_policy/session_cache.cyr"
+include "src/http/conn.cyr"
+include "src/tls_policy/policy.cyr"
+include "src/tls_policy/fingerprint.cyr"
+include "src/tls_policy/apply.cyr"
+include "src/http/response.cyr"
+include "src/net/resolve.cyr"
+include "src/http/client.cyr"
+include "src/http/pool.cyr"
+include "src/http/h2/huffman.cyr"
+include "src/http/h2/hpack.cyr"
+include "src/http/h2/frame.cyr"
+include "src/http/h2/conn.cyr"
+include "src/http/h2/request.cyr"
+include "src/http/h2/response.cyr"
+include "src/http/h2/pool_glue.cyr"
+include "src/http/h2/dispatch.cyr"
+include "src/http/sse.cyr"
+include "src/http/stream.cyr"
+include "src/http/download.cyr"
+include "src/tls_policy/alpn.cyr"
+include "src/tls_policy/mod.cyr"
+include "src/rpc/json.cyr"
+include "src/rpc/dispatch.cyr"
+include "src/rpc/webdriver.cyr"
+include "src/rpc/appium.cyr"
+include "src/rpc/mcp.cyr"
+include "src/rpc/mod.cyr"
+include "src/discovery/service.cyr"
+include "src/discovery/chain.cyr"
+include "src/discovery/daimon.cyr"
+include "src/discovery/local.cyr"
+include "src/discovery/register.cyr"
+include "src/discovery/mod.cyr"
+include "src/server/mod.cyr"
+include "src/main.cyr"
+
+fn say(m) { syscall(1, 1, m, strlen(m)); return 0; }
+
+var CERT_PATH = "programs/_tls_fixtures/cert.der";
+var KEY_PATH  = "programs/_tls_fixtures/key.pem";
+var CA_PATH   = "programs/_tls_fixtures/cert.pem";
+
+var U = 100;
+
+# Server: one SSE response over TLS — event 1, a silence of 40U, event 2, end.
+fn sse_handler(ctx, conn, buf, blen, params): i64 {
+    var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n";
+    if (sandhi_server_conn_write(conn, head, strlen(head)) < 0) { return 0; }
+    var ev1 = "Connection: close\r\n\r\n9\r\ndata: 1\n\n\r\n";
+    if (sandhi_server_conn_write(conn, ev1, strlen(ev1)) < 0) { return 0; }
+    sleep_ms(40 * U);
+    var tail = "9\r\ndata: 2\n\n\r\n0\r\n\r\n";
+    sandhi_server_conn_write(conn, tail, strlen(tail));
+    return 0;
+}
+
+var g_events = 0;
+var g_idle_calls = 0;
+var g_idle_ctx = 0;
+
+fn on_event(ctx, ev): i64 { g_events = g_events + 1; return 1; }
+
+fn on_idle(ctx, silent_ms): i64 {
+    g_idle_calls = g_idle_calls + 1;
+    g_idle_ctx = ctx;
+    say("    idle_cb at "); fmt_int(silent_ms); say(" ms of silence\n");
+    return 1;
+}
+
+# Stream the SSE route once. Returns the stream result.
+fn run_stream(url, trust, idle_ms, read_ms): i64 {
+    g_events = 0;
+    g_idle_calls = 0;
+    g_idle_ctx = 0;
+    var opts = sandhi_http_options_new();
+    sandhi_http_options_tls_policy(opts, trust);
+    sandhi_http_options_read_ms(opts, read_ms);
+    sandhi_http_options_idle_ms(opts, idle_ms);
+    sandhi_http_options_idle_cb(opts, &on_idle);
+    return sandhi_http_stream_opts(url, "GET", 0, 0, 0, &on_event, 77, opts);
+}
+
+fn report(r): i64 {
+    say("    err "); fmt_int(sandhi_stream_err(r));
+    say(", events "); fmt_int(sandhi_stream_events(r));
+    say(", idle turns "); fmt_int(g_idle_calls); say("\n");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    args_init();
+    say("=== sandhi stream idle-turn gate (TLS) ===\n");
+    if (argc() >= 2) {
+        var u = atoi(argv(1));
+        if (u > 0) { U = u; }
+    }
+    say("unit "); fmt_int(U); say(" ms\n");
+
+    if (tls_available() == 0) { say("SKIP (TLS unavailable)\n"); return 0; }
+    var cert = alloc(8192);
+    var key  = alloc(8192);
+    var cert_len = file_read_all(CERT_PATH, cert, 8192);
+    var key_len  = file_read_all(KEY_PATH, key, 8192);
+    if (cert_len <= 0 || key_len <= 0) { say("SKIP (TLS fixtures missing)\n"); return 0; }
+
+    var port = 18447;
+    var pid = sys_fork();
+    if (pid == 0) {
+        var router = sandhi_router_new(0);
+        sandhi_router_add(router, "GET", "/sse", &sse_handler);
+        var so = sandhi_server_options_new();
+        sandhi_server_options_tls(so, cert, cert_len, key, key_len);
+        sandhi_server_options_max_conns(so, 4);
+        sandhi_server_options_idle_ms(so, 5000);
+        sandhi_server_run_pooled_tls(INADDR_LOOPBACK(), port,
+          &sandhi_server_router_handler_c, router, so);
+        syscall(60, 0);
+    }
+    sleep_ms(500);
+
+    var url = "https://127.0.0.1:18447/sse";
+    var trust = sandhi_tls_policy_new_trust_store(CA_PATH);
+    var fails = 0;
+
+    say("[1] idle 15U, read 300U, silence 40U\n");
+    var r1 = run_stream(url, trust, 15 * U, 300 * U);
+    report(r1);
+    if (sandhi_stream_err(r1) != SANDHI_OK) { say("    FAIL: want SANDHI_OK\n"); fails = fails + 1; }
+    if (sandhi_stream_events(r1) != 2) { say("    FAIL: want both events\n"); fails = fails + 1; }
+    if (g_idle_calls < 2) { say("    FAIL: want two idle turns\n"); fails = fails + 1; }
+    if (g_idle_ctx != 77) { say("    FAIL: idle_cb did not get the stream ctx\n"); fails = fails + 1; }
+
+    say("[2] idle 15U, read 20U\n");
+    var r2 = run_stream(url, trust, 15 * U, 20 * U);
+    report(r2);
+    if (sandhi_stream_err(r2) != SANDHI_ERR_TIMEOUT) { say("    FAIL: want SANDHI_ERR_TIMEOUT\n"); fails = fails + 1; }
+    if (g_idle_calls != 1) { say("    FAIL: want exactly one idle turn\n"); fails = fails + 1; }
+
+    say("[3] idle 0, read 300U\n");
+    var r3 = run_stream(url, trust, 0, 300 * U);
+    report(r3);
+    if (sandhi_stream_err(r3) != SANDHI_OK) { say("    FAIL: want SANDHI_OK\n"); fails = fails + 1; }
+    if (sandhi_stream_events(r3) != 2) { say("    FAIL: want both events\n"); fails = fails + 1; }
+    if (g_idle_calls != 0) { say("    FAIL: want no idle turn\n"); fails = fails + 1; }
+
+    sys_kill(pid, 9);
+    syscall(61, pid, 0, 0, 0);
+
+    if (fails == 0) { say("PASS\n"); return 0; }
+    say("FAIL ("); fmt_int(fails); say(" checks failed)\n");
+    return 1;
+}
+
+var ec = main();
+syscall(60, ec);

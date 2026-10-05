@@ -1,6 +1,6 @@
 # 2026-10-03 — the chunked-response verbs discard every send result: a streaming handler cannot tell its client has gone
 
-**Status:** Open — sandhi-side defect.
+**Status:** Resolved in sandhi **1.10.5** (2026-10-04). Reaches agnosai, bote and agnostic only when a cyrius release re-vendors `lib/sandhi.cyr` from `dist/sandhi.cyr`; there is no sandhi pin to bump.
 **Severity:** **P2** — nothing crashes or corrupts inside sandhi. A server streaming to a client that has
 disconnected keeps streaming, and keeps the connection and whatever feeds it, until its own source ends.
 A short write silently breaks the chunk framing.
@@ -99,3 +99,29 @@ Post-fold, consumers receive the fix only when a cyrius release re-vendors `lib/
   `sandhi_server_send_chunk` and `sandhi_server_send_chunked_end` each return a negative errno.
 - The guide's SSE example (`docs/guides/server.md`, "Chunked / streaming") checks the result and stops on a
   negative one.
+
+## Resolution (sandhi 1.10.5)
+
+Fixed as proposed. `sandhi_server_send_chunked_start{,_a}`, `sandhi_server_send_chunk` and
+`sandhi_server_send_chunked_end` write through `sock_send_all` and return `0` once every byte is
+written, or its negative result: `-errno` (`-EPIPE` for a peer that has gone), or `-1` when building
+the head runs out of memory, as before. `sandhi_server_send_chunk` stops at the first failed write, so
+no payload follows a failed length line. A short write is finished instead of truncating the frame.
+
+Acceptance:
+
+- `tests/sandhi.tcyr` `server/chunked_send_results`: on an AF_UNIX pair whose peer has closed, all three
+  verbs return a negative value. Mutation: restoring the discarded results fails exactly those three
+  rows. A live-pair row checks they return 0 and the exact wire bytes. The test ignores SIGPIPE through
+  the stdlib's `signal_ignore`, so it also runs on the macOS CI job.
+- `docs/guides/server.md` "Chunked / streaming" checks each result and stops on a negative one.
+
+**macOS caveat.** The serve loops still ignore SIGPIPE on Linux only (`_sandhi_server_ignore_sigpipe`),
+so on macOS a write to a client that has gone raises SIGPIPE and kills the process before the handler
+sees `-EPIPE`. The stdlib prerequisite for closing that (`signal_ignore`, portable to macOS) has
+landed in the toolchain; the roadmap's *macOS server SIGPIPE guard* entry tracks the switch.
+
+**Not changed:** the one-shot verbs (`sandhi_server_send_response{,_a}`, `_send_status{,_a}`,
+`_send_204{,_a}`) still discard their `sock_send` results. That is outside this filing; it is tracked
+in the roadmap.
+

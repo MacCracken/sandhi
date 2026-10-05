@@ -1951,6 +1951,72 @@ fn test_server_sigpipe_guard() {
     return 0;
 }
 
+# 1.10.5 — the chunked-response verbs report their write results.
+#
+# Through 1.10.4 `sandhi_server_send_chunked_start`, `_send_chunk` and
+# `_send_chunked_end` discarded every `sock_send` result and returned 0, so a
+# streaming handler could not tell its client had gone (agnosai's crew stream
+# held its loop, subscription and connection until the crew finished). An
+# AF_UNIX pair, because a write to one whose peer has closed fails at once
+# (TCP takes a second write after the RST). SIGPIPE is ignored first through
+# the stdlib's `signal_ignore`, which also covers macOS. Mutation: restoring
+# the discarded results fails the three closed-peer rows.
+fn test_server_chunked_verbs_report_closed_peer() {
+    signal_ignore(13);
+    var fds[8];
+    store64(&fds, 0);
+    if (sys_socketpair(1, 1, 0, &fds) != 0) {
+        assert_eq(1, 1, "chunked closed peer: socketpair unavailable — skipped");
+        return 0;
+    }
+    var pair = load64(&fds);
+    var srv = pair & 0xFFFFFFFF;
+    var cli = (pair >> 32) & 0xFFFFFFFF;
+    sys_close(cli);
+    assert_lt(sandhi_server_send_chunked_start(srv, 200, "text/event-stream", 0), 0,
+      "chunked closed peer: send_chunked_start reports the failed write");
+    assert_lt(sandhi_server_send_chunk(srv, "data: x\n\n", 9), 0,
+      "chunked closed peer: send_chunk reports the failed write");
+    assert_lt(sandhi_server_send_chunked_end(srv), 0,
+      "chunked closed peer: send_chunked_end reports the failed write");
+    sys_close(srv);
+    return 0;
+}
+
+# The same three verbs on a live pair answer 0, and the wire bytes are exactly
+# the head, one framed chunk and the terminator.
+fn test_server_chunked_verbs_live_peer() {
+    var fds[8];
+    store64(&fds, 0);
+    if (sys_socketpair(1, 1, 0, &fds) != 0) {
+        assert_eq(1, 1, "chunked live peer: socketpair unavailable — skipped");
+        return 0;
+    }
+    var pair = load64(&fds);
+    var srv = pair & 0xFFFFFFFF;
+    var cli = (pair >> 32) & 0xFFFFFFFF;
+    assert_eq(sandhi_server_send_chunked_start(srv, 200, "text/event-stream", 0), 0,
+      "chunked live peer: send_chunked_start answers 0");
+    assert_eq(sandhi_server_send_chunk(srv, "data: x\n\n", 9), 0,
+      "chunked live peer: send_chunk answers 0");
+    assert_eq(sandhi_server_send_chunked_end(srv), 0,
+      "chunked live peer: send_chunked_end answers 0");
+    sys_close(srv);
+    var buf = alloc(512);
+    var have = 0;
+    var going = 1;
+    while (going == 1 && have < 511) {
+        var n = sys_read(cli, buf + have, 511 - have);
+        if (n <= 0) { going = 0; } else { have = have + n; }
+    }
+    store8(buf + have, 0);
+    sys_close(cli);
+    assert_streq(buf,
+      "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n9\r\ndata: x\n\n\r\n0\r\n\r\n",
+      "chunked live peer: exact wire bytes");
+    return 0;
+}
+
 # Counting sink for the download truncation test — accepts everything.
 fn _t_dl_count_sink(ctx, buf, len): i64 { return 1; }
 
@@ -3842,6 +3908,233 @@ fn test_stream_chunked_split_crlf_roundtrip() {
 }
 
 # ================================================================
+# 1.10.5 — stream body loop against a live peer
+# ================================================================
+#
+# A loopback TCP pair whose server end is driven by a writer thread: it sends
+# `part1`, sleeps `gap_ms`, sends `part2` (if any), sleeps `tail_ms`, closes.
+# The client end is wrapped in a plain conn and handed to
+# `_sandhi_stream_read_loop_a`, the loop `sandhi_http_stream_opts` runs. No
+# SO_RCVTIMEO is armed on it, so any TIMEOUT a row sees comes from the idle
+# wait's own silence accounting.
+
+var _t_sw_fd = 0;
+var _t_sw_part1 = 0;
+var _t_sw_part2 = 0;
+var _t_sw_gap_ms = 0;
+var _t_sw_tail_ms = 0;
+
+fn _t_stream_writer(arg) {
+    sock_send_all(_t_sw_fd, _t_sw_part1, strlen(_t_sw_part1));
+    if (_t_sw_gap_ms > 0) { sleep_ms(_t_sw_gap_ms); }
+    if (_t_sw_part2 != 0) { sock_send_all(_t_sw_fd, _t_sw_part2, strlen(_t_sw_part2)); }
+    if (_t_sw_tail_ms > 0) { sleep_ms(_t_sw_tail_ms); }
+    sock_close(_t_sw_fd);
+    return 0;
+}
+
+var _t_st_events = 0;
+fn _t_st_event_cb(ctx, ev): i64 { _t_st_events = _t_st_events + 1; return 1; }
+
+var _t_idle_calls = 0;
+var _t_idle_first = 0;
+var _t_idle_last = 0;
+var _t_idle_ctx = 0;
+var _t_idle_ret = 1;
+fn _t_st_idle_cb(ctx, silent_ms): i64 {
+    _t_idle_calls = _t_idle_calls + 1;
+    if (_t_idle_calls == 1) { _t_idle_first = silent_ms; }
+    _t_idle_last = silent_ms;
+    _t_idle_ctx = ctx;
+    return _t_idle_ret;
+}
+
+fn _t_st_reset() {
+    _t_st_events = 0;
+    _t_idle_calls = 0;
+    _t_idle_first = 0;
+    _t_idle_last = 0;
+    _t_idle_ctx = 0;
+    _t_idle_ret = 1;
+    return 0;
+}
+
+# Run one stream against the writer script. Returns the stream result, or 0
+# when the loopback pair could not be set up (the row then skips).
+fn _t_stream_run(port, part1, gap_ms, part2, tail_ms, ctx, deadline_ms, opts): i64 {
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { return 0; }
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, INADDR_LOOPBACK(), port)) == 1) { sock_close(lfd); return 0; }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) { sock_close(lfd); return 0; }
+    var cr_tag, cfd = tcp_socket();
+    if (is_err_result(cr_tag) == 1) { sock_close(lfd); return 0; }
+    if (is_err_result(sock_connect(cfd, INADDR_LOOPBACK(), port)) == 1) {
+        sock_close(cfd); sock_close(lfd); return 0;
+    }
+    var ar_tag, sfd = sock_accept(lfd);
+    if (is_err_result(ar_tag) == 1) { sock_close(cfd); sock_close(lfd); return 0; }
+    _t_sw_fd = sfd;
+    _t_sw_part1 = part1;
+    _t_sw_part2 = part2;
+    _t_sw_gap_ms = gap_ms;
+    _t_sw_tail_ms = tail_ms;
+    var a = default_alloc();
+    var conn = alloc_via(a, SANDHI_CONN_STRUCT_SIZE);
+    store64(conn + SANDHI_CONN_OFF_KIND, SANDHI_CONN_PLAIN);
+    store64(conn + SANDHI_CONN_OFF_FD, cfd);
+    store64(conn + SANDHI_CONN_OFF_TLS_CTX, 0);
+    store64(conn + SANDHI_CONN_OFF_ALPN_DATA, 0);
+    store64(conn + SANDHI_CONN_OFF_0RTT_STATUS, 0);
+    var t = thread_create(&_t_stream_writer, 0);
+    if (t == 0) { sock_close(sfd); sock_close(cfd); sock_close(lfd); return 0; }
+    var r = _sandhi_stream_read_loop_a(a, conn, &_t_st_event_cb, ctx, 65536, deadline_ms, opts);
+    thread_join(t);
+    sock_close(cfd);
+    sock_close(lfd);
+    return r;
+}
+
+fn _t_idle_opts(idle_ms, read_ms): i64 {
+    var o = sandhi_http_options_new();
+    sandhi_http_options_idle_ms(o, idle_ms);
+    sandhi_http_options_idle_cb(o, &_t_st_idle_cb);
+    sandhi_http_options_read_ms(o, read_ms);
+    return o;
+}
+
+# The chunked path lost an SSE event whose bytes arrived in two reads. It
+# decoded each pass into a fresh buffer, so the open event's first half (which
+# `sandhi_sse_parse` correctly leaves unconsumed) was dropped before the second
+# half arrived: 0 events, SANDHI_OK. Mutation: decoding into a per-pass buffer
+# again fails this row.
+fn test_stream_chunked_event_split_across_reads() {
+    _t_st_reset();
+    var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n7\r\ndata: a\r\n";
+    var tail = "2\r\n\n\n\r\n0\r\n\r\n";
+    var r = _t_stream_run(39731, head, 150, tail, 0, 0, 0, 0);
+    if (r == 0) { assert_eq(1, 1, "stream split: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_stream_err(r), SANDHI_OK, "stream split: the stream ends cleanly");
+    assert_eq(sandhi_stream_events(r), 1, "stream split: the event split across two reads is delivered");
+    assert_eq(_t_st_events, 1, "stream split: and reaches the callback once");
+    return 0;
+}
+
+# The decoder never writes past the output buffer's room; what does not fit
+# stays in the input for the next pass. Without the cap the append failed
+# silently and the bytes were consumed anyway.
+fn test_stream_chunk_decode_respects_out_room() {
+    var in_sb = _sandhi_sb_new(64);
+    var out_sb = _sandhi_sb_new(8);
+    var state = _sandhi_chunk_state_new();
+    _sandhi_sb_append(out_sb, "abcde", 5);
+    var p = "6\r\nfghijk\r\n0\r\n\r\n";
+    _sandhi_sb_append(in_sb, p, strlen(p));
+    _sandhi_stream_decode_chunked_into(in_sb, state, out_sb);
+    assert_eq(_sandhi_sb_len(out_sb), 8, "chunk room: fills the output exactly");
+    assert_eq(_sandhi_chunk_rem(state), 3, "chunk room: 3 bytes of the chunk still owed");
+    _sandhi_sb_consume(out_sb, 8);
+    _sandhi_stream_decode_chunked_into(in_sb, state, out_sb);
+    assert_eq(_sandhi_sb_len(out_sb), 3, "chunk room: the rest decodes on the next pass");
+    var pp = _sandhi_sb_ptr(out_sb);
+    store8(pp + 3, 0);
+    assert_streq(pp, "ijk", "chunk room: nothing lost at the boundary");
+    assert_eq(_sandhi_chunk_done(state), 1, "chunk room: terminal chunk seen");
+    return 0;
+}
+
+fn test_http_options_idle_defaults() {
+    var o = sandhi_http_options_new();
+    assert_eq(sandhi_http_options_get_idle_ms(o), 0, "idle opts: idle_ms defaults to 0");
+    assert_eq(sandhi_http_options_get_idle_cb(o), 0, "idle opts: idle_cb defaults to 0");
+    sandhi_http_options_idle_ms(o, 15000);
+    sandhi_http_options_idle_cb(o, &_t_st_idle_cb);
+    assert_eq(sandhi_http_options_get_idle_ms(o), 15000, "idle opts: idle_ms round-trips");
+    assert_eq(sandhi_http_options_get_idle_cb(o), &_t_st_idle_cb, "idle opts: idle_cb round-trips");
+    assert_eq(sandhi_http_options_get_tls_policy(o), 0, "idle opts: the tls_policy slot is undisturbed");
+    assert_eq(sandhi_http_options_get_idle_ms(0), 0, "idle opts: null opts reads idle_ms 0");
+    assert_eq(sandhi_http_options_get_idle_cb(0), 0, "idle opts: null opts reads idle_cb 0");
+    return 0;
+}
+
+# The hoosh shape: one event, a silence, a second event. With idle_ms set the
+# consumer gets turns during the silence, with its own ctx and a growing
+# silence, and both events still arrive. Timing is asserted only from below: a
+# loaded box adds turns, it cannot remove them.
+fn test_stream_idle_turns_during_silence() {
+    _t_st_reset();
+    var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n9\r\ndata: 1\n\n\r\n";
+    var tail = "9\r\ndata: 2\n\n\r\n0\r\n\r\n";
+    var r = _t_stream_run(39732, head, 450, tail, 0, 4242, 0, _t_idle_opts(100, 5000));
+    if (r == 0) { assert_eq(1, 1, "stream idle: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_stream_err(r), SANDHI_OK, "stream idle: the stream ends cleanly");
+    assert_eq(sandhi_stream_events(r), 2, "stream idle: both events arrive");
+    assert_eq(sandhi_stream_stopped(r), 0, "stream idle: not stopped by a callback");
+    assert_gte(_t_idle_calls, 2, "stream idle: the consumer got turns during the 450 ms silence");
+    assert_eq(_t_idle_ctx, 4242, "stream idle: idle_cb receives the stream callback's ctx");
+    assert_gte(_t_idle_first, 100, "stream idle: the first turn comes after idle_ms of silence");
+    assert_gt(_t_idle_last, _t_idle_first, "stream idle: silent_ms grows across turns");
+    return 0;
+}
+
+# read_ms keeps its meaning, the longest silence accepted: the turns stop and
+# the stream ends TIMEOUT once the silence reaches it, before the peer's close.
+fn test_stream_idle_read_ms_bounds_silence() {
+    _t_st_reset();
+    var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: 1\n\n";
+    var r = _t_stream_run(39733, head, 0, 0, 900, 0, 0, _t_idle_opts(100, 300));
+    if (r == 0) { assert_eq(1, 1, "stream idle bound: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_stream_err(r), SANDHI_ERR_TIMEOUT, "stream idle bound: silence past read_ms is TIMEOUT");
+    assert_eq(sandhi_stream_events(r), 1, "stream idle bound: the event before the silence was delivered");
+    assert_gte(_t_idle_calls, 1, "stream idle bound: a turn came before the bound");
+    assert_lte(_t_idle_calls, 2, "stream idle bound: and none past it");
+    return 0;
+}
+
+# An idle_cb answering 0 stops the stream the way a 0 from the event callback
+# does: SANDHI_OK with stopped = 1.
+fn test_stream_idle_cb_zero_stops() {
+    _t_st_reset();
+    _t_idle_ret = 0;
+    var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: 1\n\n";
+    var r = _t_stream_run(39734, head, 0, 0, 600, 0, 0, _t_idle_opts(100, 0));
+    if (r == 0) { assert_eq(1, 1, "stream idle stop: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_stream_err(r), SANDHI_OK, "stream idle stop: a stop is not an error");
+    assert_eq(sandhi_stream_stopped(r), 1, "stream idle stop: stopped = 1");
+    assert_eq(_t_idle_calls, 1, "stream idle stop: exactly one turn, the one that stopped it");
+    assert_eq(sandhi_stream_events(r), 1, "stream idle stop: the earlier event was delivered");
+    return 0;
+}
+
+# total_ms still bounds the whole stream while the idle turns run.
+fn test_stream_idle_deadline_still_bounds() {
+    _t_st_reset();
+    var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: 1\n\n";
+    var deadline = clock_now_ms() + 300;
+    var r = _t_stream_run(39735, head, 0, 0, 900, 0, deadline, _t_idle_opts(100, 0));
+    if (r == 0) { assert_eq(1, 1, "stream idle deadline: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_stream_err(r), SANDHI_ERR_TIMEOUT, "stream idle deadline: the deadline still ends the stream");
+    assert_gte(_t_idle_calls, 1, "stream idle deadline: turns ran until then");
+    return 0;
+}
+
+# With idle_ms 0 the loop is the pre-1.10.5 one: a callback set alone never
+# runs, and a quiet stretch shorter than any bound simply passes.
+fn test_stream_idle_off_is_unchanged() {
+    _t_st_reset();
+    var o = sandhi_http_options_new();
+    sandhi_http_options_idle_cb(o, &_t_st_idle_cb);
+    var head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: 1\n\n";
+    var r = _t_stream_run(39736, head, 300, "data: 2\n\n", 0, 0, 0, o);
+    if (r == 0) { assert_eq(1, 1, "stream idle off: loopback unavailable — skipped"); return 0; }
+    assert_eq(sandhi_stream_err(r), SANDHI_OK, "stream idle off: clean end");
+    assert_eq(sandhi_stream_events(r), 2, "stream idle off: both events");
+    assert_eq(_t_idle_calls, 0, "stream idle off: idle_cb without idle_ms never runs");
+    return 0;
+}
+
+
+# ================================================================
 # download (binary body-sink streaming) — non-network unit coverage
 # ================================================================
 
@@ -4321,6 +4614,10 @@ fn main() {
 
     test_group("server/sigpipe_guard");
     test_server_sigpipe_guard();
+
+    test_group("server/chunked_send_results");
+    test_server_chunked_verbs_live_peer();
+    test_server_chunked_verbs_report_closed_peer();
     test_server_peer_addr();
     test_server_ip4_str();
 
@@ -4538,6 +4835,22 @@ fn main() {
 
     test_group("stream/chunked_split_crlf");
     test_stream_chunked_split_crlf_roundtrip();
+
+    test_group("stream/chunk_decode_out_room");
+    test_stream_chunk_decode_respects_out_room();
+
+    test_group("stream/event_split_across_reads");
+    test_stream_chunked_event_split_across_reads();
+
+    test_group("stream/idle_options");
+    test_http_options_idle_defaults();
+
+    test_group("stream/idle_turns");
+    test_stream_idle_turns_during_silence();
+    test_stream_idle_read_ms_bounds_silence();
+    test_stream_idle_cb_zero_stops();
+    test_stream_idle_deadline_still_bounds();
+    test_stream_idle_off_is_unchanged();
 
     test_group("download/headers");
     test_download_headers_reach_request_bytes();

@@ -1,6 +1,6 @@
 # 2026-09-25 — `sandhi_http_stream` gives the consumer no turn while the upstream is silent (SSE keep-alive unreachable)
 
-**Status:** Open — feature gap, sandhi side.
+**Status:** Resolved in sandhi **1.10.5** (2026-10-04). Reaches hoosh only when a cyrius release re-vendors `lib/sandhi.cyr` from `dist/sandhi.cyr`; there is no sandhi pin to bump.
 **Severity:** **P2** — nothing breaks inside sandhi. A proxy between a gateway and its client can drop a
 stream that is healthy but quiet, which is common with reasoning models and cold model loads.
 **Reporter:** hoosh (AI inference gateway, 2.7.0 — remote provider streaming).
@@ -11,7 +11,7 @@ stream that is healthy but quiet, which is common with reasoning models and cold
 ## Premise check
 
 Checked before filing, because
-[`archive/2026-07-03-rpc-mcp-call-no-custom-request-headers.md`](archive/2026-07-03-rpc-mcp-call-no-custom-request-headers.md)
+[`archive/2026-07-03-rpc-mcp-call-no-custom-request-headers.md`](2026-07-03-rpc-mcp-call-no-custom-request-headers.md)
 was withdrawn for missing an existing variant:
 
 - `sandhi_http_options_*` has connect, read, write and total timeouts, max bytes, pool, redirects and the
@@ -83,7 +83,7 @@ response, which it does after the upstream answers.
   record split across the 15 s boundary must resume, not desync.
 - **The libssl bridge.** The same retry on the libssl path (`SSL_read` after `SSL_ERROR_WANT_READ`) is
   standard, but it goes through the bridge that
-  [`archive/2026-06-09-https-repeated-request-segfault.md`](archive/2026-06-09-https-repeated-request-segfault.md)
+  [`archive/2026-06-09-https-repeated-request-segfault.md`](2026-06-09-https-repeated-request-segfault.md)
   hardened.
 - **h2.** The same option would be useful on h2 streams if and when `sandhi_http_stream` gains an h2
   path.
@@ -107,3 +107,54 @@ Once shipped and folded into a cyrius release, hoosh sets `idle_ms` / `idle_cb` 
 options. Its callback writes `: keep-alive\n\n` to the client with the same `http_sse_comment` the local
 path uses, and returns 0 when the client is gone. hoosh records the gap as a known non-port in
 `docs/development/rust-old-retirement.md`.
+
+## Resolution (sandhi 1.10.5)
+
+Shipped as proposed at the API level: `sandhi_http_options_idle_ms(opts, ms)` and
+`sandhi_http_options_idle_cb(opts, fp)`, with `fp(ctx, silent_ms)` (nonzero continues, 0 stops
+with `stopped = 1`), plus the getters `sandhi_http_options_get_idle_ms` / `_get_idle_cb`. The
+options struct grew 80 → 96 bytes. `read_ms` keeps its meaning (the longest silence accepted),
+`total_ms` still bounds the stream, and either option at 0 is the old loop.
+
+**The mechanism differs from the proposal, and the "Things to verify" section is why.** The
+proposal armed SO_RCVTIMEO at `idle_ms` and retried after `-EAGAIN`. Against cyrius 6.6.15 that
+cannot work on TLS:
+
+- native TLS reports an expired SO_RCVTIMEO as `TLS_ERR_IO`, and every negative read **fails the
+  ctx for good** (`lib/tls_native_conn.cyr`, the read-path error table, 6.6.13). The retry would
+  read `TLS_ERR_IO` forever;
+- a record read cut off mid-record cannot resume (the record reader loops `read(2)` until the
+  record is complete);
+- `sandhi_conn_recv` collapses every negative `tls_read` to `-1`, so a TLS timeout was never
+  `-_SANDHI_EAGAIN` in the first place.
+
+So the body loop instead **waits for readability** with `fd_wait_ready` (cyrius 6.6.13: poll on
+Linux and macOS, WSAPoll on Windows) for at most `idle_ms` before each read. A wait consumes
+nothing at either layer, so no read is cut short and the TLS ctx is never touched. Plaintext the
+TLS layer could hold out of the socket's view never arises: the loop reads 16384 bytes, a whole
+maximum-size record. agnos has no poll (`fd_wait_ready` answers -38), so the turn does not come
+there and the loop reads exactly as before. The silence is measured on the monotonic clock from the
+last received byte. Both "partial TLS record" and "libssl bridge" concerns are therefore moot: no
+read is ever retried after a failure.
+
+Acceptance, as specified: `programs/_stream_idle_gate.cyr`, a forked pooled sandhi TLS server on
+the Ed25519 fixtures, run in CI at a 100 ms unit and once locally at the literal figures
+(`build/_stream_idle_gate 1000`):
+
+- idle 15 s, read 300 s, 40 s silence: `idle_cb` at 15015 ms and 30015 ms, both events, SANDHI_OK;
+- read 20 s: SANDHI_ERR_TIMEOUT after one `idle_cb` (15015 ms);
+- idle 0: no turn, both events, SANDHI_OK.
+
+The libssl build of the gate does not link at this pin. That is the open cyrius DCE issue
+([`../2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](../2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md)),
+and the readiness wait does not depend on the backend.
+
+**Found on the way, fixed in the same release:** the chunked path of the same loop decoded each pass
+into a fresh buffer, so the unterminated tail of an SSE event (which the 1.9.15 parser fix correctly
+leaves unconsumed) was thrown away at the next read. An event whose bytes arrived in two reads was
+**lost**, the same symptom hoosh reported before 1.9.15, still present on chunked streams. Each pass
+also reserved another `max_response_bytes` (256 KiB by default) from an allocator that never frees.
+Fixed by keeping one decode buffer for the life of the stream.
+
+h2 is unchanged: `sandhi_http_stream` has no h2 path.
+

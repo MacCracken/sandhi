@@ -522,10 +522,19 @@ fn sandhi_server_send_204(cfd, extra_headers): i64 {
 # ================================================================
 # Use this for SSE, large bodies, or any long-running response.
 # Sequence:
-#   sandhi_server_send_chunked_start(cfd, 200, "text/event-stream", 0);
-#   sandhi_server_send_chunk(cfd, "data: hello\n\n", 13);
-#   sandhi_server_send_chunk(cfd, "data: world\n\n", 13);
+#   if (sandhi_server_send_chunked_start(cfd, 200, "text/event-stream", 0) < 0) { return 0; }
+#   if (sandhi_server_send_chunk(cfd, "data: hello\n\n", 13) < 0) { return 0; }
+#   if (sandhi_server_send_chunk(cfd, "data: world\n\n", 13) < 0) { return 0; }
 #   sandhi_server_send_chunked_end(cfd);
+#
+# All three return 0 once every byte is written and a negative value
+# otherwise: -errno from the write (-EPIPE once the client has gone; the
+# serve loops ignore SIGPIPE on Linux, so this is the only signal a
+# streaming handler gets), or -1 when building the head ran out of memory. Each
+# write goes through `sock_send_all`, so a short write is finished rather
+# than leaving a length line that promises bytes that never arrive.
+# After a failure the connection is unusable for framed data: stop
+# streaming. CHANGELOG [1.10.5]
 
 # Begin a chunked / SSE response. Sends the HTTP/1.1 status line plus
 # Transfer-Encoding: chunked. Follow with repeated sandhi_server_send_chunk calls
@@ -544,7 +553,8 @@ fn sandhi_server_send_chunked_start_a(a, cfd, code, content_type, extra_headers)
     var _bld = str_builder_build_a(a, sb);
     if (_bld == 0) { return 0 - 1; }
     var head = str_data(_bld);
-    sock_send(cfd, head, strlen(head));
+    var w = sock_send_all(cfd, head, strlen(head));
+    if (w < 0) { return w; }
     return 0;
 }
 
@@ -579,16 +589,22 @@ fn sandhi_server_send_chunk(cfd, data, len): i64 {
     }
     store8(&hexbuf + hi, 13);
     store8(&hexbuf + hi + 1, 10);
-    sock_send(cfd, &hexbuf, hi + 2);
-    if (len > 0) { sock_send(cfd, data, len); }
-    sock_send(cfd, "\r\n", 2);
+    var w = sock_send_all(cfd, &hexbuf, hi + 2);
+    if (w < 0) { return w; }
+    if (len > 0) {
+        w = sock_send_all(cfd, data, len);
+        if (w < 0) { return w; }
+    }
+    w = sock_send_all(cfd, "\r\n", 2);
+    if (w < 0) { return w; }
     return 0;
 }
 
 # Terminate a chunked-transfer response. Sends the zero-length chunk
 # that tells the client the body is complete ("0\r\n\r\n").
 fn sandhi_server_send_chunked_end(cfd): i64 {
-    sock_send(cfd, "0\r\n\r\n", 5);
+    var w = sock_send_all(cfd, "0\r\n\r\n", 5);
+    if (w < 0) { return w; }
     return 0;
 }
 
