@@ -242,6 +242,16 @@ jobs:
         # WebDriver URL helpers, and MCP envelope shape.
         run: cyrius test tests/rpc.tcyr
 
+      - name: Test (raw include of dist/sandhi.cyr)
+        # 1.10.8 (cyrius 6.6.18): every dist bundle carries a compile-verified
+        # `# Requires` block, so `include "dist/sandhi.cyr"` alone compiles.
+        # `--no-deps` skips the `[deps] stdlib` auto-prepend that `cyrius test`
+        # does, which would otherwise mask a missing block.
+        run: |
+          mkdir -p build
+          cyrius build --no-deps tests/sandhi_raw_include.tcyr build/sandhi-raw-include
+          ./build/sandhi-raw-include
+
       - name: Fuzz harnesses (parser robustness)
         # 1.8.x: `cyrius fuzz` runs fuzz/*.fcyr — hand-authored adversarial
         # harnesses over the untrusted-input parsers (URL, header block, DNS
@@ -401,6 +411,12 @@ jobs:
 
       - name: Test (rpc)
         run: cyrius test tests/rpc.tcyr
+
+      - name: Test (raw include of dist/sandhi.cyr)
+        run: |
+          mkdir -p build
+          cyrius build --no-deps tests/sandhi_raw_include.tcyr build/sandhi-raw-include
+          ./build/sandhi-raw-include
 
   security:
     name: Security Scan

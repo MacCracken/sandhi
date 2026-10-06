@@ -1,0 +1,26 @@
+# sandhi raw-include test — `include "dist/sandhi.cyr"` ALONE must compile.
+#
+# Since cyrius 6.6.18 every dist bundle opens with a compile-verified
+# `# Requires` block (one `include "lib/<leaf>.cyr"` per dist/sandhi.deps
+# leaf), so a consumer can raw-include the bundle without declaring
+# sandhi's stdlib leaves itself. The bundle is included here with NOTHING
+# else from sandhi or the stdlib except the assert framework; CI builds it
+# with `--no-deps` (no `[deps] stdlib` auto-prepend), which is the build
+# that would fail if the requires block went missing. The pre-6.6.18
+# bundle (1.10.7) fails to compile this file. CHANGELOG [1.10.8].
+
+include "lib/assert.cyr"
+include "dist/sandhi.cyr"
+
+fn main() {
+    test_group("dist/raw_include");
+    var o = sandhi_json_obj_new();
+    sandhi_json_add_string(o, "name", "sandhi");
+    sandhi_json_add_int(o, "ok", 1);
+    var got = sandhi_json_build(o);
+    assert_streq(got, "{\"name\":\"sandhi\",\"ok\":1}", "raw include: json build via dist/sandhi.cyr");
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
