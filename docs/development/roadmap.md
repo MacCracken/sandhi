@@ -226,6 +226,20 @@ moved to [`requests/`](requests/README.md) instead.
 
 ---
 
+## Recorded by cyrius 6.6.19 (2026-10-06) — for the next cyrius pin move
+
+⛔ **Needs cyrius >= 6.6.19 — do not bump the pin until 6.6.19 is tagged and out.** Docs-only note from the cyrius
+6.6.19 lanes; each item is this repo's to adopt when it pins ≥ 6.6.19. Nothing here gates a cyrius release.
+
+- **`_sandhi_server_pool_inline` can test `CHAN_BLOCKING` instead of `CYRIUS_TARGET_LINUX`.** Since cyrius 6.6.19
+  (T1) x86 macOS runs real threads (`THREADS_CONCURRENT` = `CHAN_BLOCKING` = 1 on both Mach-O arches), so x86
+  macOS pools can run on real threads; test the capability, not the OS (agnos is still serial).
+- **The stop-flag idle path can use `async_await_readable_ms(sfd, SANDHI_SERVER_STOP_POLL_MS)` instead of
+  `sleep_ms` on every target.** Since 6.6.19 (A1 / A2) the bounded wait exists on macOS (one BSD `poll`),
+  Windows (`WSAPoll`, sockets only) and agnos (a readiness stash in the socket adapter), not only Linux, and the
+  legacy `async_await_readable` really waits there — the cooperative server's non-blocking accept → EAGAIN →
+  `async_await_readable(sfd)` no longer spins at 100 % CPU on macOS, Windows or agnos.
+
 See [ADR 0001](../adr/0001-sandhi-is-a-composer-not-a-reimplementer.md) (naming +
 compose-don't-reimplement thesis), [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)
 (the shipped fold), and [ADR 0005](../adr/0005-public-surface-freeze-at-0-9-2.md)
