@@ -215,7 +215,10 @@ never runs. No consumer code needed.
   plus body (default 64 KiB; larger is answered 413). A memory knob: one buffer per
   pooled worker or in-flight async connection.
 - `sandhi_server_options_max_conns(opts, n)` — worker threads for `_run_pooled` /
-  `_run_pooled_tls`, per-drain cap for `_run_async` (default 128).
+  `_run_pooled_tls`, per-drain cap for `_run_async` (default 128). The workers are
+  real threads on Linux, macOS and Windows (macOS and Windows since 1.10.9). On
+  agnos, whose stdlib channel cannot hand a connection to another thread, the
+  pooled loops serve each connection on the accept thread instead.
 - `sandhi_server_options_backlog(opts, n)` — listen backlog and pooled handoff depth
   (default 128).
 - `sandhi_server_options_req_arena(opts, n)` — a per-request arena of `n` bytes for

@@ -2168,6 +2168,74 @@ fn test_server_request_budget_answers_408() {
     return 0;
 }
 
+var _t_par_stop = 0;
+var _t_par_opts = 0;
+
+fn _t_par_server(arg) {
+    sandhi_server_run_pooled(INADDR_LOOPBACK(), 39835, &_t_ok_cfd_handler, 0, _t_par_opts);
+    return 0;
+}
+
+# 1.10.9 — a pooled server is parallel wherever the stdlib's channel blocks.
+# Connection A sends half a request and holds; connection B then sends a whole
+# one. A real pool answers B at once from its second worker. The inline path,
+# which macOS and Windows took through 1.10.8, is still inside A's read, so B
+# waits for A's 1.5 s budget to run out. Mutation: `_sandhi_server_pool_inline`
+# returning 1 fails the latency row on every target.
+fn test_server_pool_serves_in_parallel() {
+    if (_t_threads_concurrent() == 0) { assert_eq(1, 1, "pool parallel: no concurrent threads — skipped"); return 0; }
+    _t_par_stop = 0;
+    var o = sandhi_server_options_new();
+    sandhi_server_options_max_conns(o, 2);
+    sandhi_server_options_request_ms(o, 1500);
+    sandhi_server_options_stop_flag(o, &_t_par_stop);
+    _t_par_opts = o;
+    var t = thread_create(&_t_par_server, 0);
+    if (t == 0) { assert_eq(1, 1, "pool parallel: no thread — skipped"); return 0; }
+    sleep_ms(200);
+    var a_tag, afd = tcp_socket();
+    var ok = 0;
+    if (is_err_result(a_tag) == 0) {
+        if (is_err_result(sock_connect(afd, INADDR_LOOPBACK(), 39835)) == 0) { ok = 1; }
+    }
+    if (ok == 0) {
+        _t_par_stop = 1;
+        thread_join(t);
+        assert_eq(1, 1, "pool parallel: server unreachable — skipped");
+        return 0;
+    }
+    sock_send_all(afd, "GET / HTTP/1.1\r\nHost: a\r\n", 26);
+    sleep_ms(100);                       # A is accepted, and its read under way, first
+    var b_tag, bfd = tcp_socket();
+    ok = 0;
+    if (is_err_result(b_tag) == 0) {
+        if (is_err_result(sock_connect(bfd, INADDR_LOOPBACK(), 39835)) == 0) { ok = 1; }
+    }
+    if (ok == 0) {
+        sock_close(afd);
+        _t_par_stop = 1;
+        thread_join(t);
+        assert_eq(1, 1, "pool parallel: second connect failed — skipped");
+        return 0;
+    }
+    _sandhi_conn_set_timeout_ms(bfd, 3000, _SANDHI_SO_RCVTIMEO);
+    var t0 = clock_now_ms();
+    sock_send_all(bfd, "GET / HTTP/1.1\r\nHost: a\r\n\r\n", 28);
+    var buf = alloc(256);
+    var r_tag, n = sock_recv(bfd, buf, 255);
+    var ms = clock_now_ms() - t0;
+    if (is_err_result(r_tag) == 1 || n < 0) { n = 0; }
+    store8(buf + n, 0);
+    sock_close(bfd);
+    sock_close(afd);
+    _t_par_stop = 1;
+    thread_join(t);
+    assert_gte(n, 12, "pool parallel: the second connection was answered");
+    assert_eq(memeq(buf, "HTTP/1.1 200", 12), 1, "pool parallel: with the handler's 200");
+    assert_lt(ms, 1000, "pool parallel: while the first connection is still being read");
+    return 0;
+}
+
 # 1.10.6 — the SIGPIPE guard holds on every target, macOS included.
 #
 # Through 1.10.5 `_sandhi_server_ignore_sigpipe` was a raw Linux
@@ -5152,6 +5220,9 @@ fn main() {
     test_server_request_budget_answers_408();
     test_server_peer_addr();
     test_server_ip4_str();
+
+    test_group("server/pool_parallel");
+    test_server_pool_serves_in_parallel();
 
     test_group("server/routing/match");
     test_route_match();

@@ -2146,19 +2146,14 @@ fn _sandhi_server_pool_serve(fp, ctx, idle_ms, cfd, reqbuf, max_req, rarena, har
 # 1 when this target's `chan_*` cannot hand an accepted connection from the
 # accept thread to a worker thread, so the pooled loops must serve inline.
 #
-# 1.10.7 — only `lib/thread.cyr`'s Linux body has a channel whose `chan_recv`
-# blocks and whose ring is locked. The macOS, Windows and agnos peers keep the
-# serial ring (no lock, a `chan_recv` that answers 0 when empty, a `chan_send`
-# that fails when full), even on arm64 macOS where `thread_create` starts real
-# pthreads (THREADS_CONCURRENT = 1). A pooled worker reads that 0 as "channel
-# closed" and exits, so through 1.10.6 `run_pooled` / `run_pooled_tls` started
-# and accepted on macOS but never served a request. The stdlib exposes no
-# channel capability, hence the target test; filed cyrius-side
-# (docs/development/issues/2026-10-04-cyrius-macos-chan-serial-under-real-threads.md).
+# Keys on the stdlib's channel capability, `CHAN_BLOCKING` (cyrius 6.6.16): 1
+# where `chan_recv` parks and the ring is locked, which also means the threads
+# are real. That is Linux, macOS (arm64 since 6.6.16, x86_64 since 6.6.19) and
+# Windows; agnos and cx keep the serial ring, whose `chan_recv` answers 0 when
+# empty, and a pooled worker would read that 0 as "channel closed" and exit.
+# CHANGELOG [1.10.7] (the inline path), [1.10.9] (the capability)
 fn _sandhi_server_pool_inline(): i64 {
-    #ifdef CYRIUS_TARGET_LINUX
-    if (THREADS_CONCURRENT == 1) { return 0; }
-    #endif
+    if (CHAN_BLOCKING == 1) { return 0; }
     return 1;
 }
 
