@@ -50,10 +50,12 @@
 #       request must make no lookup and no store.
 #   [8] per-request arena on HTTPS (1.10.7): with `req_arena` set, a TLS
 #       handler sees `sandhi_server_request_arena()` (it was 0: the TLS worker
-#       never created one), and 40 routed requests grow the server's global
-#       heap by at most 128 B each. The remaining ~120 B/accept is the stdlib's
-#       PEM key decode (lib/sigil.cyr pem_decode_privkey); a DER key measures 0.
-#       Through 1.10.6 the documented handler shape grew it 472 B/request.
+#       never created one), and 40 routed requests leave the server's global
+#       heap exactly where it was. Through 1.10.6 the documented handler shape
+#       grew it 472 B/request. Through 1.10.8 the check allowed 128 B/request
+#       for the stdlib's per-accept PEM key decode, which cyrius 6.6.16 made
+#       once per process; it now requires 0, so a regression of either the
+#       per-request arena or that decode-once cache fails here.
 #
 # Skip-cleanly (exit 0) if TLS is unavailable or the fixtures are missing.
 # Exit 0 = PASS / clean-SKIP; non-zero = FAIL. All eight checks contribute to FAIL.
@@ -402,12 +404,12 @@ fn main() {
     var k8 = 0;
     while (k8 < 40) { _https_get(url, trust); k8 = k8 + 1; }
     var m1 = _https_get_int("https://127.0.0.1:18443/mem", trust);
-    var per = 0 - 1;
-    if (m0 >= 0 && m1 >= m0) { per = (m1 - m0) / 41; }
+    var grew = 0 - 1;
+    if (m0 >= 0 && m1 >= m0) { grew = m1 - m0; }
     say("[8] per-request arena on HTTPS: handler sees it "); fmt_int(ar);
-    say(" (want 1); server heap growth "); fmt_int(per);
-    say(" B/request (want 0..128: the stdlib PEM key decode)\n");
-    if (ar != 1 || per < 0 || per > 128) { fails = fails + 1; }
+    say(" (want 1); server heap growth over 41 requests "); fmt_int(grew);
+    say(" B (want 0)\n");
+    if (ar != 1 || grew != 0) { fails = fails + 1; }
 
     sys_kill(pid, 9);
     syscall(61, pid, 0, 0, 0);   # wait4 — reap the child

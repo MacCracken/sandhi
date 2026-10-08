@@ -226,9 +226,10 @@ never runs. No consumer code needed.
   request. The router handlers use it automatically; your own handler reaches it
   through `sandhi_server_request_arena()` and the `_a` helpers. Default 0 (off).
 - `sandhi_server_options_tls(opts, cert, cert_len, key, key_len)` — server
-  credentials for the `_tls` loops. A **DER** key avoids a per-handshake decode: the
-  stdlib decodes a PEM key on every accept and keeps ~120 B of it on the global heap
-  each time (filed cyrius-side).
+  credentials for the `_tls` loops. PEM or DER keys both serve at 0 B per request:
+  since cyrius 6.6.16 the stdlib decodes a PEM key once per process (on cyrius ≤
+  6.6.15 it decoded it on every accept and kept ~120 B of it on the global heap
+  each time).
 - `sandhi_server_options_stop_flag(opts, &flag)` — a word the loops re-read; non-zero
   stops the server.
 
