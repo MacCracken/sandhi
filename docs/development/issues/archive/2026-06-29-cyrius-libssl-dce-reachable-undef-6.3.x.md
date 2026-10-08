@@ -1,6 +1,6 @@
 # 2026-06-29 — cyrius 6.3.x linker drops sigil's `ct`/`thread_local` symbols under `-D CYRIUS_TLS_LIBSSL`
 
-**Status:** open (cyrius-side).
+**Status:** resolved — the libssl smoke links on cyrius 6.7.5; archived at sandhi 1.10.9 (2026-10-08).
 **Severity:** low — affects only the **deprecated** libssl backend build, which
 retires at sandhi 2.0. The native (no-flag) default — the shipping path — is
 unaffected. Worked around sandhi-side by making the libssl CI step non-gating
@@ -127,3 +127,10 @@ backend's pending retirement.
   '--allow-undef'` — 6.6.5's CLI flag overhaul did not add it. Disposition unchanged:
   native (no-flag) links clean and all six live gates pass on it, the CI step stays
   `continue-on-error`, and the whole step retires with the backend at sandhi **2.0**.
+
+- **2026-10-08 (sandhi 1.10.9 / cyrius `6.7.5`) — resolved; archived.** Clean
+  `rm -rf lib && cyrius deps` resolve, then `CYRIUS_DCE=1 cyrius build -D CYRIUS_TLS_LIBSSL
+  programs/smoke.cyr` and the plain non-DCE build both link (`OK`), and the binary runs
+  (`sandhi smoke: all modules linked clean`). The last recorded refusal was **15**
+  reachable-undefined at 6.6.15. The CI step is gating again (`continue-on-error` dropped) until
+  it retires with the backend at sandhi **2.0**.

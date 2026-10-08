@@ -39,25 +39,21 @@ held for the **2.0** major (dropping a public verb and a build flag is not a pat
   verb) + the `-D CYRIUS_TLS_LIBSSL` build flag + the libssl branches in
   `src/tls_policy/*` and `src/http/conn.cyr`. Breaking → the 2.0 major, not a
   patch. Nothing blocks it; this is a scheduling decision. See `project_libssl_retirement_at_2_0` (memory).
-- **libssl smoke build is non-gating since cyrius 6.3.5 — drop at 2.0.** The
-  `-D CYRIUS_TLS_LIBSSL` CI link-proof (`ci.yml`) is now `continue-on-error`:
-  6.3.x's linker refuses reachable-undefined fns, and the libssl config leaves
-  sigil's transitive crypto symbols reachable-but-unlinked (**re-verified 6.6.15,
-  2026-10-04: 15 — `ct_select`, `thread_local_*`, `u256_*`, `random_bytes`; was 14 at
-  6.6.6**) — a cyrius-side DCE artifact of the libssl `#ifdef`, NOT a
-  sandhi/sigil source defect (native links them all). Filed cyrius-side:
-  [`issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md).
-  Delete the CI step entirely as part of the 2.0 libssl removal below; revisit
-  sooner only if cyrius fixes the DCE reachability (or plumbs `--allow-undef`
-  through `cyrius build`).
-- **libssl session-cache quirks — moot, drop at 2.0** (found by the 1.10.7
-  session-cache investigation). `sandhi_session_cache_supported()` answers 0 on
-  OpenSSL 3, because cyrius's `tls_supports_session_resumption` looks up
-  `SSL_CTX_set_session_cache_mode`, which is a macro and not an exported symbol; the
-  cache still works after `sandhi_session_cache_enable(1)`. And over TLS 1.3 the
-  session is captured right after `SSL_connect`, before the NewSessionTicket
-  arrives, so it never resumes while the hit counter still rises. Neither matters on
-  native, which does not resume; both go with the libssl backend.
+- **Drop the libssl smoke CI step at 2.0.** The `-D CYRIUS_TLS_LIBSSL` link proof
+  (`ci.yml`) was `continue-on-error` from cyrius 6.3.5 through sandhi 1.10.8, while the
+  toolchain refused that config (sigil's transitive crypto reachable but unlinked);
+  on cyrius 6.7.5 it links and the step gates again (1.10.9;
+  [`issues/archive/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](issues/archive/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md)).
+  It goes with the backend.
+- **libssl session cache — moot, drops at 2.0.** The 1.10.7 investigation found two
+  quirks. The first is fixed upstream: since cyrius 6.6.16
+  `tls_supports_session_resumption` probes `SSL_CTX_ctrl`, so
+  `sandhi_session_cache_supported()` reads 1 on OpenSSL 3 under the libssl backend
+  (it read 0, because `SSL_CTX_set_session_cache_mode` is a macro). The second, a
+  TLS 1.3 session captured right after `SSL_connect`, before the NewSessionTicket
+  arrives, was not re-checked. An end-to-end resumption test on the libssl backend
+  was offered by cyrius at 6.6.16 and **declined** at 1.10.9: the cache paths it would
+  exercise retire with the backend. Native does not resume.
 - **libssl `tls_get_peer_spki_der` regression — moot, low priority.** sandhi
   still excludes libssl from `pin_available()` (a single libssl pinned open
   SIGSEGV'd in post-handshake SPKI extraction). Native covers pinning and libssl
