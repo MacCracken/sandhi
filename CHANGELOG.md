@@ -4,6 +4,117 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.9] — 2026-10-08
+
+**Pin → cyrius 6.7.5. The pooled servers run on worker threads on macOS and Windows, a stop
+flag stops a serving loop on Windows, and `run_async`'s stop-enabled idle wait wakes for a
+connection.** Also closes the cyrius 6.6.16 adoption list. Part of the W2 stdlib wave.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+**Behaviour changes a consumer can see:**
+- On macOS (arm64 and x86_64) and Windows, `sandhi_server_run_pooled` and
+  `sandhi_server_run_pooled_tls` serve on `max_conns` worker threads. Through 1.10.8 they
+  served each connection on the accept thread there, so one slow client held up every other
+  one. agnos keeps the inline path.
+- On Windows, a server with a stop flag now stops. The blocking loops (`run_opts`,
+  `run_pooled`, `run_tls`, `run_pooled_tls`) never left `accept` to re-read the flag.
+- `sandhi_server_run_async` with a stop flag accepts a connection that arrives while it is
+  idle at once. It used to sleep out the rest of a 100 ms interval first.
+
+### Fixed
+
+- **server: a stop flag never stopped a blocking serve loop on Windows.** Found by this
+  release's first run of the suites on real Windows (cass). Winsock's `accept`, like XNU's,
+  ignores the listener's `SO_RCVTIMEO`, which is how the stop flag gets re-read on Linux. So a
+  stop-enabled loop parked in `accept` until the next client arrived. On cass five rows hung
+  until killed at 30 s: `stop_wakes_blocked_accept`, `accept_surfaces_when_idle`,
+  `armed_accept_never_parks`, `request_budget_answers_408` and `pool_serves_in_parallel`. It
+  is the Windows twin of the macOS defect 1.10.4 fixed.
+  - **The fix:** `_sandhi_server_accept_polls()` names the two targets. On both, a stop-armed
+    listener is made non-blocking, and `_sandhi_server_accept` waits for it with the stdlib's
+    `fd_wait_ready` for `SANDHI_SERVER_STOP_POLL_MS`. That is WSAPoll on Windows, and on macOS
+    the same BSD poll the raw `syscall(7)` made. A timeout reads as EAGAIN, which the
+    accept-error policy retries.
+  - **Proof:** all five rows pass on cass, and the suites and `_server_tls_probe` [1]–[8] pass
+    unchanged on Linux, ecb and ach.
+  - **`test_server_armed_accept_hands_out_blocking_fd`** gains a Windows arm. Windows cannot
+    read a socket's blocking mode back, so the row checks that an empty read waits out a
+    300 ms timeout. On cass a non-blocking accepted socket fails it.
+
+### Changed
+
+- **server: the pooled loops key on `CHAN_BLOCKING`.** `_sandhi_server_pool_inline` tested
+  `CYRIUS_TARGET_LINUX && THREADS_CONCURRENT`, because through cyrius 6.6.15 only Linux had a
+  channel whose `chan_recv` parks. The stdlib exports that capability as `CHAN_BLOCKING`, set
+  on arm64 macOS and Windows since 6.6.16 and on x86_64 macOS since 6.6.19.
+  - New row `server/pool_parallel`: connection A sends half a request and holds, then
+    connection B sends a whole one. A real pool answers B in under 1 s; the inline path answers
+    only after A's 1.5 s budget runs out.
+  - With the inline path forced, the row fails on Linux, ecb and ach. With the pool it passes
+    on Linux, ecb, ach and cass.
+  - `test_server_request_budget_answers_408` passes with the pool path on the same four hosts.
+- **server: `run_async`'s stop-enabled idle wait is `async_await_readable_ms`, not a
+  sleep.** Since cyrius 6.6.19 every target has the bounded wait: WSAPoll on Windows, BSD poll
+  on macOS and the readiness stash on agnos. The stale 1.9.9 comment goes.
+  - New row `server/async_idle_wake`: with the interval raised to 2 s, a connection made
+    300 ms into the idle wait is answered in under 1 s.
+  - With the sleep restored it takes about 1.7 s, and the row fails.
+- **server: `_sandhi_server_conn_blocking` is gone.** Since cyrius 6.6.16 `sock_accept`
+  returns a blocking socket on macOS and Windows, whatever the listener's mode. On a failed
+  reset it closes the socket and returns the error to the accept policy. The
+  `armed_accept_hands_out_blocking_fd` row stays, as the contract check on the stdlib.
+- **server: the duplicate `var SANDHI_CONN_PLAIN` / `SANDHI_CONN_TLS` is gone.** It repeated
+  `src/http/conn.cyr`'s `SandhiConnKind` enum (same values), shadowed it, and would make a
+  later `const` of either name a hard error.
+- **Comments only:**
+  - The SIGPIPE guard's comments state cyrius 6.6.16's premise: a socket write cannot raise
+    SIGPIPE. The guard stays, for a handler that writes to a pipe.
+  - The ALPN read's comment names the 40-byte tls ctx and the typed `tls_get_alpn_selected`
+    read. It described a 24-byte ctx and the pre-.82 raw `SSL*` read.
+- **Server TLS gate: probe [8] requires zero heap growth.** It allowed 128 B/request for the
+  stdlib's per-accept PEM key decode, which cyrius 6.6.16 made once per process. The
+  measurement is now exactly 0, so the old bound would have hidden any regression under 128 B.
+  A 48 B/request leak injected into the routed handler fails it (1,920 B over 41 requests).
+  `docs/guides/server.md` drops its "use a DER key" advice: PEM and DER both serve at 0 B per
+  request.
+- **CI: the libssl smoke link proof gates again.** On cyrius 6.7.5 the
+  `-D CYRIUS_TLS_LIBSSL` build links, with and without `CYRIUS_DCE`, and runs. From cyrius 6.3.5
+  through sandhi 1.10.8 it refused (15 reachable-undefined fns at 6.6.15), so the step ran
+  `continue-on-error`. It still retires with the backend at 2.0.
+- **cyrius pin 6.6.18 → 6.7.5** (`cyrius.cyml`). `cyrius.lock` was re-resolved by `cyrius deps`
+  (74 rows, `deps --verify` clean). `dist/` regenerated byte-identical under the new pin before
+  any source change.
+- **cyrius security ids renumbered** per cyrius's 2026-10-08 ledger
+  (`docs/audit/2026-10-08-security-ledger.md` there). CVE-57 → CYRIUS-2026-0014, CVE-54 →
+  CYRIUS-2026-0012, CVE-18 → CYRIUS-2026-0003 and CVE-74 → CYRIUS-2026-0025. CVE-19 was
+  withdrawn and is now "the entropy-fallback hardening item". This covers comments, this
+  CHANGELOG, `state.md` and a CI step name. curl's CVE-2025-0167 references are unchanged.
+- **docs:**
+  - **Issues archived:** the libssl DCE issue, the macOS serial-channel and per-accept PEM
+    decode issues (both fixed in cyrius 6.6.16), and the 6.6.16 adoption file. The adoption
+    file now records each item's disposition. Its offer of an end-to-end libssl resumption
+    test is declined, because the libssl backend retires at 2.0.
+  - **Roadmap:** the pin line now reads 6.7.5, and the adopted "Recorded by cyrius 6.6.19"
+    notes are gone. Batch A is corrected. A new "cyrius 6.7.x language adoption" section
+    places the later items: a `loop` sweep, private `const`, bool predicates at 2.0, traits
+    after `dyn`, and the Windows suite gap.
+- All five dist bundles regenerated. The `.deps` sidecars are unchanged.
+
+### Tests
+
+- **3,003 assertions** (895 / 1,691 / 353 / 63 / 1; sandhi +6). `cyrius fuzz` 8/8. Lint,
+  fmt and vet are clean.
+- **Live gates:** `_server_tls_probe` [1]–[8] passes on Linux, ecb and ach.
+- **Cross-OS:**
+  - **ecb (arm64 macOS) and ach (x86_64 macOS):** the four suites pass, using the 6.7.5
+    release tarballs in a throwaway `CYRIUS_HOME`.
+  - **cass (Windows), the first run there:** the `h2`, `alloc` and `rpc` suites pass.
+    `sandhi.tcyr` passes 870 of 883. The 13 failures come from the test harness, not the
+    library: a raw `/dev/null` open, a `/tmp` path, the VERSION path, and a canned server
+    that reads its socket with `sys_read`. They are placed on the roadmap.
+
 ## [1.10.8] — 2026-10-06
 
 **Pin → cyrius 6.6.18; `dist/` regenerated by the 6.6.18 distlib.** No `src/` change beyond
