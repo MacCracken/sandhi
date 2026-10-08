@@ -224,13 +224,12 @@ fn _sandhi_alpn_hook(hook_ctx, ssl_ctx): i64 {
 
 # Post-handshake: extract the negotiated ALPN protocol (if any) and
 # return a freshly-alloc'd NUL-terminated cstr. 0 if ALPN didn't
-# select anything or the get0 symbol isn't available.
+# select anything.
 #
-# `tls_ctx` is the stdlib tls_connect ctx (24-byte struct: ssl_ctx /
-# ssl / sock at offsets 0/8/16). We pull the SSL handle from offset
-# 8 and call SSL_get0_alpn_selected(ssl, &out, &outlen). The bytes
-# at *out are owned by libssl and freed when SSL is freed, so we
-# copy into our own buffer.
+# `tls_ctx` is the stdlib tls_connect ctx (a 40-byte struct on both
+# backends; its layout is lib/tls.cyr's). The protocol is read through
+# the stdlib's typed `tls_get_alpn_selected` into scratch and copied,
+# so nothing here depends on that layout.
 # Read the negotiated ALPN protocol into `a`. The two scratch cells
 # (out_p / out_l) are short-lived; the returned cstr lives on the
 # conn struct, so it inherits the conn's lifetime — when the conn was
