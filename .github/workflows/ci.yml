@@ -460,7 +460,7 @@ jobs:
           echo "security scan complete (fail: $FAIL)"
           exit $FAIL
 
-      - name: Windows never reads POSIX resolver config (cyrius CVE-57)
+      - name: Windows never reads POSIX resolver config (CYRIUS-2026-0014)
         # 1.10.4: on Windows a rooted path is DRIVE-RELATIVE, so
         # "/etc/resolv.conf" opens C:\etc\resolv.conf, which any local user
         # can plant. Through 1.10.3 both resolvers read it on every target

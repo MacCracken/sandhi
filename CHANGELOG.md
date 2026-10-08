@@ -401,21 +401,21 @@ are affected by these fixes, and there is no sandhi pin for them to bump.
 
 ## [1.10.4] — 2026-09-30
 
-**Windows never reads a plantable `C:\etc\resolv.conf` (cyrius CVE-57); a stop-enabled
+**Windows never reads a plantable `C:\etc\resolv.conf` (CYRIUS-2026-0014); a stop-enabled
 server wakes on macOS; the suites run on macOS in CI; pin to the released cyrius 6.6.11.**
 Toolchain `6.6.10` → `6.6.11`. Reported by cyrius 6.6.12 bite 15 (SA11, SA6); re-vendored
 into cyrius 6.6.12 as `lib/sandhi.cyr`.
 
 ### Security
 
-- **On Windows both resolvers read a drive-relative, plantable resolver file (cyrius
-  CVE-57).** `_sandhi_resolve_read_resolv_conf_a` opened `"/etc/resolv.conf"` on every
-  target, and both lookups fell back to 8.8.8.8 without one. On Windows a rooted path is
+- **On Windows both resolvers read a drive-relative, plantable resolver file
+  (CYRIUS-2026-0014).** `_sandhi_resolve_read_resolv_conf_a` opened `"/etc/resolv.conf"` on
+  every target, and both lookups fell back to 8.8.8.8 without one. On Windows a rooted path is
   drive-relative, so that is `C:\etc\resolv.conf`, and any authenticated user may create
   folders at the root of the system drive. A local user could therefore choose the
   nameserver every other user's sandhi lookups went to, `sandhi_http_get` included. Since
   cyrius 6.6.11 gave PE working Winsock UDP, a PE program reached this path end to end. It is
-  the class cyrius CVE-54 closed in the stdlib's own `net_resolve_ipv4` at 6.6.11. Now, on
+  the class CYRIUS-2026-0012 closed in the stdlib's own `net_resolve_ipv4` at 6.6.11. Now, on
   `CYRIUS_TARGET_WIN`:
   - the A lookup is `net_resolve_ipv4(host)`, i.e. getaddrinfo, which reads the real
     `%SystemRoot%\System32\drivers\etc\hosts` and the adapters' DNS servers;
@@ -477,15 +477,15 @@ into cyrius 6.6.12 as `lib/sandhi.cyr`.
   this release the four files were run on ecb (arm64) and ach (Intel) with the 6.6.11 release
   tarballs, and both are green. `release.yml` reuses `ci.yml`, so the job also gates a
   release.
-- **CI: `Windows never reads POSIX resolver config (cyrius CVE-57)`**, a structural row in the
+- **CI: `Windows never reads POSIX resolver config (CYRIUS-2026-0014)`**, a structural row in the
   security job. Every `"/etc/..."` literal and every 8.8.8.8 fallback in `src/` must sit
   inside an `#ifndef CYRIUS_TARGET_WIN` region. Against 1.10.3's `resolve.cyr` it names all
   three sites.
 
 ## [1.10.3] — 2026-09-29
 
-**The DNS TXID fails closed when getrandom fails (cyrius CVE-19), and the pin to the released
-cyrius 6.6.10.** Toolchain `6.6.9` → `6.6.10`. Reported by cyrius 6.6.11 bite 14; re-vendored
+**The DNS TXID fails closed when getrandom fails (cyrius's entropy-fallback hardening item),
+and the pin to the released cyrius 6.6.10.** Toolchain `6.6.9` → `6.6.10`. Reported by cyrius 6.6.11 bite 14; re-vendored
 into cyrius 6.6.11 as `lib/sandhi.cyr`.
 
 ### Security
@@ -494,8 +494,8 @@ into cyrius 6.6.11 as `lib/sandhi.cyr`.
   fewer than 2 bytes, `_sandhi_resolve_random_u16` returned `(clock_now_ns() ^ (ns >> 16)) &
   0xFFFF` and both resolvers sent the query with it. A TXID an off-path attacker can estimate
   from the query time re-opens the Kaminsky cache-poisoning window the TXID exists to close.
-  cyrius's CVE-19 fix (2026-06-11) changed this to fail closed, but only in cyrius's vendored
-  `lib/sandhi.cyr`; the next re-vendor from this repo brought the clock fallback back, and it
+  cyrius's entropy-fallback hardening fix (2026-06-11) changed this to fail closed, but only
+  in cyrius's vendored `lib/sandhi.cyr`; the next re-vendor from this repo brought the clock fallback back, and it
   has shipped in every sandhi release and every cyrius fold since. The fix is now here, at the
   source: the helper returns -1 on a short or failed read, and `sandhi_resolve_ipv4[_a]`
   returns -1 / `sandhi_resolve_ipv6[_a]` returns 0 **before** reading `/etc/resolv.conf`,
@@ -3245,7 +3245,7 @@ enforcing path was libssl-`SSL_CTX_*`-only. +2 assertions (1003 total).
   doesn't sign the server → handshake rejects) needs a CA PEM fixture + the
   cyrius CA-bundle replace-vs-append semantics; flagged as a live check (see
   roadmap). Chain-verify correctness itself is cyrius's tested responsibility
-  (the CVE-18 fail-closed `tls_native_connect`).
+  (the CYRIUS-2026-0003 fail-closed `tls_native_connect`).
 
 ## [1.5.5] — 2026-06-15
 

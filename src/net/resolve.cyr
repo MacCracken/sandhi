@@ -17,7 +17,7 @@
 #   - Windows is the exception to all of the above: there the A lookup is
 #     the stdlib's `net_resolve_ipv4` (getaddrinfo, the system resolver),
 #     the AAAA lookup answers 0, and resolv.conf is never opened. See
-#     `_sandhi_resolve_read_resolv_conf_a` for why (cyrius CVE-57).
+#     `_sandhi_resolve_read_resolv_conf_a` for why (CYRIUS-2026-0014).
 #
 # All RFC 1035 packet building + parsing is inline — it's tight, and
 # pulling in a generic DNS library would inflate the fold-into-stdlib
@@ -68,9 +68,10 @@ var _SANDHI_RR_AAAA = 28;
 # both resolvers then refuse the lookup before building a query. NEVER
 # restore a clock fallback. A monotonic-clock-ns TXID is predictable to an
 # off-path attacker who can estimate the query time, so it re-opens the
-# very window the TXID exists to close (cyrius CVE-19). That fail-closed
-# fix was once applied only to cyrius's vendored lib/sandhi.cyr and was
-# lost at the next re-vendor, which is why it lives here now (1.10.3).
+# very window the TXID exists to close (cyrius's entropy-fallback hardening
+# item). That fail-closed fix was once applied only to cyrius's vendored
+# lib/sandhi.cyr and was lost at the next re-vendor, which is why it lives
+# here now (1.10.3).
 fn _sandhi_resolve_random_u16(): i64 {
     var buf[2];
     store8(&buf + 0, 0);
@@ -148,8 +149,8 @@ fn sandhi_net_parse_ipv4(host): i64 {
 # DRIVE-RELATIVE: "/etc/resolv.conf" opens C:\etc\resolv.conf, and any
 # authenticated user may create folders at the root of the system drive.
 # So an unprivileged local user could plant a nameserver that every
-# other user's sandhi lookups were sent to (cyrius CVE-57, the class
-# cyrius CVE-54 closed in the stdlib's own net_resolve_ipv4 at 6.6.11).
+# other user's sandhi lookups were sent to (CYRIUS-2026-0014, the class
+# CYRIUS-2026-0012 closed in the stdlib's own net_resolve_ipv4 at 6.6.11).
 # The 8.8.8.8 fallback is no answer there either: it bypasses the
 # machine's configured resolver and hosts file. CHANGELOG [1.10.4]
 fn _sandhi_resolve_read_resolv_conf_a(a): i64 {
@@ -649,7 +650,7 @@ fn _sandhi_resolve_ipv6_impl_a(a, host): i64 {
 
 # The AAAA lookup with a caller-supplied TXID. A negative txid means
 # getrandom failed: refuse (0) before touching resolv.conf, the allocator
-# or a socket — see _sandhi_resolve_random_u16 (CVE-19, fail closed).
+# or a socket — see _sandhi_resolve_random_u16 (fail closed).
 #
 # Windows: answers 0 (no AAAA), so the client stays on v4, which is all
 # the PE socket surface can dial anyway (see conn.cyr's v6 open). No
@@ -711,12 +712,12 @@ fn _sandhi_resolve_ipv4_impl_a(a, host): i64 {
 
 # The A lookup with a caller-supplied TXID. A negative txid means
 # getrandom failed: refuse (-1) before touching resolv.conf, the allocator
-# or a socket — see _sandhi_resolve_random_u16 (CVE-19, fail closed).
+# or a socket — see _sandhi_resolve_random_u16 (fail closed).
 #
 # Windows: the stdlib's net_resolve_ipv4 — getaddrinfo, i.e. the real
 # %SystemRoot%\System32\drivers\etc\hosts and the adapters' DNS
 # servers. No resolv.conf, no 8.8.8.8 — see
-# _sandhi_resolve_read_resolv_conf_a (cyrius CVE-57).
+# _sandhi_resolve_read_resolv_conf_a (CYRIUS-2026-0014).
 fn _sandhi_resolve_ipv4_query_a(a, host, txid): i64 {
     if (host == 0) { return 0 - 1; }
     if (txid < 0) { return 0 - 1; }

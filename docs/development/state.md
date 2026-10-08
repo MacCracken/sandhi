@@ -58,17 +58,17 @@ aarch64 / AGNOS / Windows cross-builds clean. `cyrius.cyml` stripped to configur
 comment prose removed). `lib/` re-resolved from empty: **73** files (`tls_hostid` new); sigil
 **3.13.9**, sakshi **2.5.6**, bayan **1.5.11**. Not yet re-vendored into a cyrius release.
 
-**1.10.4** — 2026-09-30. **Windows never reads a plantable `C:\etc\resolv.conf` (cyrius
-CVE-57); a stop-enabled server wakes on macOS; the suites run on macOS; pin 6.6.10 →
-6.6.11.** On Windows the A lookup is now `net_resolve_ipv4` (getaddrinfo) and the AAAA lookup
+**1.10.4** — 2026-09-30. **Windows never reads a plantable `C:\etc\resolv.conf`
+(CYRIUS-2026-0014); a stop-enabled server wakes on macOS; the suites run on macOS; pin
+6.6.10 → 6.6.11.** On Windows the A lookup is now `net_resolve_ipv4` (getaddrinfo) and the AAAA lookup
 answers 0. XNU's accept ignores `SO_RCVTIMEO`, so the serve loops poll a non-blocking listener there.
 There is a new `macos-14` CI job, and the four suites were run once on ecb and ach.
 **2,893 assertions** (787 / 1,691 / 352 / 63), all five dist bundles regenerated. Re-vendored
 into cyrius 6.6.12.
 
-**1.10.3** — 2026-09-29. **The DNS TXID fails closed when getrandom fails (cyrius
-CVE-19), pin 6.6.9 → 6.6.10.** The clock-ns TXID fallback in `src/net/resolve.cyr` had
-been fixed only in cyrius's fold and came back at the next re-vendor; it is now fixed
+**1.10.3** — 2026-09-29. **The DNS TXID fails closed when getrandom fails (cyrius's
+entropy-fallback hardening item), pin 6.6.9 → 6.6.10.** The clock-ns TXID fallback in
+`src/net/resolve.cyr` had been fixed only in cyrius's fold and came back at the next re-vendor; it is now fixed
 here and re-vendored into cyrius 6.6.11. **2,883 assertions** (777 / 1,691 / 352 / 63),
 8/8 fuzz, all five dist bundles regenerated and idempotent.
 

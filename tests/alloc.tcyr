@@ -588,9 +588,10 @@ fn test_alloc_batch5_resolve_oom() {
     return 0;
 }
 
-# resolve.cyr — the DNS TXID fails CLOSED (cyrius CVE-19). When getrandom
-# yields fewer than 2 bytes there is no TXID and no query: the old
-# clock-ns fallback made the TXID predictable. Both resolvers must refuse
+# resolve.cyr — the DNS TXID fails CLOSED (cyrius's entropy-fallback
+# hardening item). When getrandom yields fewer than 2 bytes there is no
+# TXID and no query: the old clock-ns fallback made the TXID predictable.
+# Both resolvers must refuse
 # before reading resolv.conf, allocating or opening a socket — an arena
 # that stays at 0 bytes proves nothing past the guard ran.
 fn test_alloc_batch5_resolve_txid_fail_closed() {
