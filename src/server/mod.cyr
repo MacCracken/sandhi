@@ -2353,8 +2353,6 @@ enum SandhiServerConnOff {
     SANDHI_SRVCONN_OFF_FD     = 16;
 }
 var SANDHI_CONN_SIZE  = 24;
-var SANDHI_CONN_PLAIN = 0;
-var SANDHI_CONN_TLS   = 1;
 
 # 1.6.10 — per-connection TLS arena cap. One arena per serve loop / worker,
 # reset_via'd per connection so RSS stays flat (the native server ctx + the whole
