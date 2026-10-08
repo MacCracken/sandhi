@@ -1237,11 +1237,12 @@ var _SANDHI_SIGPIPE = 13;
 # Ignore SIGPIPE for the whole process. Every serve loop calls this once at
 # startup, and it is idempotent.
 #
-# `net.cyr`'s `sock_send` is a bare `write(2)` with no `MSG_NOSIGNAL`, so a
-# write to a peer that has closed the connection raises SIGPIPE, whose default
-# disposition terminates the process: a client that disconnects mid-response
-# would kill the whole server (yeo-cy-test, 1.6.6). With SIGPIPE ignored that
-# write fails with EPIPE instead, which the send verbs report to the handler.
+# Since cyrius 6.6.16 a write to a socket cannot raise SIGPIPE: `net.cyr`'s
+# writers pass `MSG_NOSIGNAL` on Linux and set `SO_NOSIGPIPE` on macOS. Through
+# 6.6.15 `sock_send` was a bare `write(2)`, so a client that disconnected
+# mid-response killed the whole server (yeo-cy-test, 1.6.6). The guard stays: it
+# still covers a handler that writes to a pipe, and costs one syscall per start.
+# A failed write reports EPIPE, which the send verbs hand to the handler.
 #
 # Composes the stdlib's `signal_ignore` (cyrius 6.4.51): `rt_sigaction` on
 # Linux, BSD `sigaction` on macOS, and a no-op on Windows, agnos and cx, which
@@ -1446,7 +1447,7 @@ fn sandhi_server_run(addr, port, handler_fp, ctx): i64 {
 # but not honored today — server stays single-threaded until 0.8.0.
 fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts): i64 {
     # 1.6.6 security fix: ignore SIGPIPE so a peer that disconnects
-    # mid-response can't kill the process (sock_send is MSG_NOSIGNAL-less).
+    # mid-response can't kill the process (see _sandhi_server_ignore_sigpipe).
     _sandhi_server_ignore_sigpipe();
 
     # _hsv_req_buf is a process-wide singleton shared across every
