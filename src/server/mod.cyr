@@ -1776,25 +1776,14 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
             rt = async_new_in(arena);   # fresh arena-backed runtime for the next batch
             if (rt == 0) { sock_close(sfd); return 1; }
         } else {
-            # 1.9.9 — the idle wait is where a stop flag would otherwise be
-            # invisible: `async_await_readable` calls `sys_epoll_wait` with a
-            # hardcoded -1 (`lib/async.cyr:823`), so an idle server parks there
-            # forever and never re-reads the flag.
-            #
-            # With a flag configured, poll instead. This deliberately does NOT
-            # fork a timeout-capable `async_await_readable` into sandhi —
-            # CLAUDE.md's "compose, don't reimplement" makes a missing stdlib
-            # primitive a cyrius patch, not a sandhi feature — so the bounded
-            # sleep composes what already exists and the stdlib gap is filed
-            # upstream instead.
-            #
-            # Costs an idle stop-enabled async server ~10 wakeups/sec, the same
-            # trade the other four loops make, and only when the caller opts in.
-            # Without a flag this is byte-for-byte the pre-1.9.9 blocking wait.
+            # Empty queue: wait for the listener. `async_await_readable` waits
+            # without limit, so with a stop flag the wait is bounded by
+            # SANDHI_SERVER_STOP_POLL_MS and the flag is re-read; a connection
+            # that arrives sooner ends the wait at once. CHANGELOG [1.10.9]
             if (stop_ptr == 0) {
-                async_await_readable(sfd);   # empty queue — block until a conn
+                async_await_readable(sfd);
             } else {
-                sleep_ms(SANDHI_SERVER_STOP_POLL_MS);
+                async_await_readable_ms(sfd, SANDHI_SERVER_STOP_POLL_MS);
             }
         }
     }

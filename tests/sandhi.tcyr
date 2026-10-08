@@ -2236,6 +2236,66 @@ fn test_server_pool_serves_in_parallel() {
     return 0;
 }
 
+var _t_idle_stop = 0;
+var _t_idle_opts = 0;
+
+fn _t_idle_server(arg) {
+    sandhi_server_run_async(INADDR_LOOPBACK(), 39836, &_t_ok_cfd_handler, 0, _t_idle_opts);
+    return 0;
+}
+
+# 1.10.9 — an idle stop-enabled async server wakes for a connection at once.
+# Through 1.10.8 its idle wait was a plain sleep of SANDHI_SERVER_STOP_POLL_MS,
+# so a connection arriving mid-sleep waited out the rest of it. It now waits for
+# the listener with `async_await_readable_ms`, bounded by the same interval. The
+# interval is raised to 2 s here so the difference is unmistakable. Mutation:
+# restoring the sleep fails the latency row (~1.7 s).
+fn test_server_async_idle_wakes_for_connection() {
+    if (_t_threads_concurrent() == 0) { assert_eq(1, 1, "async idle: no concurrent threads — skipped"); return 0; }
+    var saved = SANDHI_SERVER_STOP_POLL_MS;
+    SANDHI_SERVER_STOP_POLL_MS = 2000;
+    _t_idle_stop = 0;
+    var o = sandhi_server_options_new();
+    sandhi_server_options_max_conns(o, 2);
+    sandhi_server_options_stop_flag(o, &_t_idle_stop);
+    _t_idle_opts = o;
+    var t = thread_create(&_t_idle_server, 0);
+    if (t == 0) {
+        SANDHI_SERVER_STOP_POLL_MS = saved;
+        assert_eq(1, 1, "async idle: no thread — skipped");
+        return 0;
+    }
+    sleep_ms(300);                       # the loop has drained an empty queue and is waiting
+    var c_tag, cfd = tcp_socket();
+    var ok = 0;
+    if (is_err_result(c_tag) == 0) {
+        if (is_err_result(sock_connect(cfd, INADDR_LOOPBACK(), 39836)) == 0) { ok = 1; }
+    }
+    if (ok == 0) {
+        _t_idle_stop = 1;
+        thread_join(t);
+        SANDHI_SERVER_STOP_POLL_MS = saved;
+        assert_eq(1, 1, "async idle: server unreachable — skipped");
+        return 0;
+    }
+    _sandhi_conn_set_timeout_ms(cfd, 5000, _SANDHI_SO_RCVTIMEO);
+    var t0 = clock_now_ms();
+    sock_send_all(cfd, "GET / HTTP/1.1\r\nHost: a\r\n\r\n", 28);
+    var buf = alloc(256);
+    var r_tag, n = sock_recv(cfd, buf, 255);
+    var ms = clock_now_ms() - t0;
+    if (is_err_result(r_tag) == 1 || n < 0) { n = 0; }
+    store8(buf + n, 0);
+    sock_close(cfd);
+    _t_idle_stop = 1;
+    thread_join(t);
+    SANDHI_SERVER_STOP_POLL_MS = saved;
+    assert_gte(n, 12, "async idle: the connection was answered");
+    assert_eq(memeq(buf, "HTTP/1.1 200", 12), 1, "async idle: with the handler's 200");
+    assert_lt(ms, 1000, "async idle: at once, not when the idle interval ends");
+    return 0;
+}
+
 # 1.10.6 — the SIGPIPE guard holds on every target, macOS included.
 #
 # Through 1.10.5 `_sandhi_server_ignore_sigpipe` was a raw Linux
@@ -5223,6 +5283,9 @@ fn main() {
 
     test_group("server/pool_parallel");
     test_server_pool_serves_in_parallel();
+
+    test_group("server/async_idle_wake");
+    test_server_async_idle_wakes_for_connection();
 
     test_group("server/routing/match");
     test_route_match();
