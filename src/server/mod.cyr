@@ -1142,59 +1142,66 @@ fn _sandhi_server_stop_requested(ptr): i64 {
 # so the loop poll-spins there exactly as it did before and the flag is still
 # honoured on every pass.
 #
-# ⚠ macOS: this arming is NOT enough there, because XNU's accept(2) ignores
-# SO_RCVTIMEO and sleeps until a connection arrives. `_sandhi_server_accept`
-# bounds the wait itself on that target with poll(2), and the listen fd is made
-# O_NONBLOCK here as well: poll reporting the listener readable does not
-# guarantee a connection is still queued when accept runs (a peer that resets
-# in between is dropped from a BSD accept queue), and a BLOCKING accept would
-# then sleep until the next client arrived without re-reading the flag.
-# Non-blocking, that accept returns EAGAIN, which the policy retries.
-# CHANGELOG [1.10.4]
+# ⚠ macOS and Windows: this arming is NOT enough there, because XNU's and
+# Winsock's accept ignore SO_RCVTIMEO and sleep until a connection arrives.
+# `_sandhi_server_accept` bounds the wait itself on those targets
+# (`_sandhi_server_accept_polls`), and the listen fd is made non-blocking here
+# as well: a readable listener does not guarantee a connection is still queued
+# when accept runs (a peer that resets in between is dropped from the accept
+# queue), and a BLOCKING accept would then sleep until the next client arrived
+# without re-reading the flag. Non-blocking, that accept returns EAGAIN, which
+# the policy retries. CHANGELOG [1.10.4] (macOS), [1.10.9] (Windows)
 fn _sandhi_server_arm_stop_poll(sfd, stop_ptr): i64 {
     if (stop_ptr == 0) { return 0; }
-    #ifdef CYRIUS_TARGET_MACOS
-    sock_set_nonblocking(sfd);
-    #endif
+    if (_sandhi_server_accept_polls() == 1) { sock_set_nonblocking(sfd); }
     return _sandhi_conn_set_timeout_ms(sfd, SANDHI_SERVER_STOP_POLL_MS,
       _SANDHI_SO_RCVTIMEO);
+}
+
+# 1 on the targets whose accept ignores the listener's SO_RCVTIMEO, so a
+# stop-armed listener must be polled instead: macOS (measured on ecb and ach at
+# 1.10.4) and Windows (measured on cass at 1.10.9).
+fn _sandhi_server_accept_polls(): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 1;
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return 1;
+    #endif
+    return 0;
 }
 
 # `sock_accept` for the four blocking serve loops, which must surface every
 # SANDHI_SERVER_STOP_POLL_MS to re-read a configured stop flag.
 #
 # On Linux the listen fd's SO_RCVTIMEO (see `_sandhi_server_arm_stop_poll`)
-# makes accept return EAGAIN when the interval passes. On macOS it does not:
-# XNU's accept(2) waits with no timeout whatever SO_RCVTIMEO says. Measured on
-# ecb (arm64) and ach (x86_64) at 1.10.4: a listener armed with 100 ms never
-# returned, and `test_server_stop_wakes_blocked_accept` hung in
-# `sandhi_server_run_pooled` until the test runner killed it. So on macOS, with
-# a flag configured, wait for the listener with poll(2) for the same interval
-# and report a timeout as Err(_SANDHI_EAGAIN), the error the Linux path gets.
-# The accept-error policy classifies that as RETRY, so the loop re-reads the
-# flag without walking toward SANDHI_ACCEPT_GIVEUP. A poll error is handed to
-# the same policy as its errno (EINTR retries; EBADF / EINVAL are fatal).
+# makes accept return EAGAIN when the interval passes. On macOS and Windows it
+# does not: XNU's accept(2) and Winsock's accept wait with no timeout whatever
+# SO_RCVTIMEO says. Measured at 1.10.4 on ecb (arm64) and ach (x86_64), and at
+# 1.10.9 on cass: a listener armed with 100 ms never returned, and
+# `test_server_stop_wakes_blocked_accept` hung in `sandhi_server_run_pooled`
+# until the runner killed it. So there, with a flag configured, wait for the
+# listener with the stdlib's `fd_wait_ready` (poll(2) on macOS, WSAPoll on
+# Windows) for the same interval and report a timeout as Err(_SANDHI_EAGAIN),
+# the error the Linux path gets. The accept-error policy classifies that as
+# RETRY, so the loop re-reads the flag without walking toward
+# SANDHI_ACCEPT_GIVEUP. A wait error is handed to the same policy as its errno
+# (EINTR retries; EBADF is fatal).
 #
-# The listener is O_NONBLOCK on macOS once armed (see
-# `_sandhi_server_arm_stop_poll`), so the accept after a readable poll cannot
-# park either. A BSD accept(2) hands the new socket the LISTENER's O_NONBLOCK,
-# and every connection handler reads with a blocking fd bounded by SO_RCVTIMEO;
-# `sock_accept` clears it (cyrius 6.6.16), and on a failed reset closes the
-# socket and returns the fcntl errno, which the accept-error policy classifies.
+# The listener is non-blocking there once armed (see
+# `_sandhi_server_arm_stop_poll`), so the accept after a readable wait cannot
+# park either. The accepted socket would inherit that mode, and every
+# connection handler reads with a blocking fd bounded by SO_RCVTIMEO;
+# `sock_accept` resets it (cyrius 6.6.16), and on a failed reset closes the
+# socket and returns the error, which the accept-error policy classifies.
 #
 # Without a flag this is exactly `sock_accept`, blocking. CHANGELOG [1.10.4]
 fn _sandhi_server_accept(sfd, stop_ptr) : Result {
-    #ifdef CYRIUS_TARGET_MACOS
-    if (stop_ptr != 0) {
-        var pfd[8];
-        store32(&pfd, sfd);
-        store16(&pfd + 4, 1);                            # POLLIN
-        store16(&pfd + 6, 0);                            # revents
-        var pr = syscall(7, &pfd, 1, SANDHI_SERVER_STOP_POLL_MS);  # poll: 7 -> 230 on Darwin
-        if (pr == 0) { return Err(_SANDHI_EAGAIN); }
-        if (pr < 0) { return Err(0 - pr); }
+    if (stop_ptr != 0 && _sandhi_server_accept_polls() == 1) {
+        var wr = fd_wait_ready(sfd, 0, SANDHI_SERVER_STOP_POLL_MS);
+        if (wr == 0) { return Err(_SANDHI_EAGAIN); }
+        if (wr < 0) { return Err(0 - wr); }
     }
-    #endif
     return sock_accept(sfd);
 }
 

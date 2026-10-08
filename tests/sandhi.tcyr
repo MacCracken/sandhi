@@ -1503,10 +1503,11 @@ fn test_server_stop_wakes_blocked_accept() {
 # SO_RCVTIMEO, so through 1.10.3 a stop-enabled server parked in accept there
 # never re-read its flag (test_server_stop_wakes_blocked_accept hung on ecb
 # until the runner killed it). `_sandhi_server_accept` polls the listener on
-# macOS instead. Unlike the threaded test above, this one needs no race to
-# fail: nothing ever connects, so the call either comes back EAGAIN or never.
-# Mutation (1.10.4, measured on ecb and ach): dropping the macOS poll arm hangs
-# this row.
+# macOS instead, and since 1.10.9 on Windows, whose accept ignores SO_RCVTIMEO
+# too. Unlike the threaded test above, this one needs no race to fail: nothing
+# ever connects, so the call either comes back EAGAIN or never. Mutation
+# (measured on ecb and ach at 1.10.4, on cass at 1.10.9): dropping the poll
+# arm hangs this row.
 fn test_server_accept_surfaces_when_idle() {
     var lr_tag, lfd = tcp_socket();
     if (is_err_result(lr_tag) == 1) { assert_eq(1, 1, "idle accept: tcp_socket unavailable — skipped"); return 0; }
@@ -1540,9 +1541,10 @@ fn test_server_accept_surfaces_when_idle() {
 # stop flag unread. `_sandhi_server_arm_stop_poll` therefore makes the listener
 # O_NONBLOCK on macOS. That race cannot be scheduled from a test, but what it
 # reduces to can: an armed listener with nothing queued, accepted directly. On
-# Linux SO_RCVTIMEO returns EAGAIN after the poll interval; on macOS the
-# non-blocking listener returns it at once. Mutation (measured on ecb and ach):
-# dropping the macOS `sock_set_nonblocking` hangs this row.
+# Linux SO_RCVTIMEO returns EAGAIN after the poll interval; on macOS and
+# Windows the non-blocking listener returns it at once. Mutation (measured on
+# ecb and ach at 1.10.4, on cass at 1.10.9): leaving that listener blocking
+# hangs this row.
 fn test_server_armed_accept_never_parks() {
     var lr_tag, lfd = tcp_socket();
     if (is_err_result(lr_tag) == 1) { assert_eq(1, 1, "armed accept: tcp_socket unavailable — skipped"); return 0; }
@@ -1600,6 +1602,19 @@ fn test_server_armed_accept_hands_out_blocking_fd() {
     var at, sfd = _sandhi_server_accept(lfd, &flag);
     assert_eq(is_err_result(at), 0, "armed conn: the queued connection is accepted");
     if (is_err_result(at) == 0) {
+        #ifdef CYRIUS_TARGET_WIN
+        # Windows cannot read a socket's blocking mode back, so test what it does:
+        # with nothing to read, a blocking socket waits out its receive timeout
+        # and a non-blocking one fails at once. Mutation (measured on cass,
+        # 1.10.9): making the accepted socket non-blocking fails this row.
+        _sandhi_conn_set_timeout_ms(sfd, 300, _SANDHI_SO_RCVTIMEO);
+        var rb[8];
+        var t0 = clock_now_ms();
+        sock_recv(sfd, &rb, 8);
+        var waited = clock_now_ms() - t0;
+        assert(waited >= 150, "armed conn: the accepted fd is blocking — an empty read waits for its timeout");
+        #endif
+        #ifndef CYRIUS_TARGET_WIN
         var fl = sys_fcntl(sfd, 3, 0);              # F_GETFL
         var nb = 2048;                              # Linux O_NONBLOCK
         #ifdef CYRIUS_TARGET_MACOS
@@ -1607,6 +1622,7 @@ fn test_server_armed_accept_hands_out_blocking_fd() {
         #endif
         assert(fl >= 0, "armed conn: F_GETFL on the accepted fd");
         assert_eq(fl & nb, 0, "armed conn: the accepted fd is blocking, not the listener's O_NONBLOCK");
+        #endif
         sock_close(sfd);
     }
     sock_close(cfd);
