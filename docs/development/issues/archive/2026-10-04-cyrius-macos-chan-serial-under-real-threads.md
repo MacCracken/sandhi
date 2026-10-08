@@ -1,6 +1,6 @@
 # 2026-10-04 — arm64 macOS starts real threads but keeps the serial channel
 
-**Status:** ✅ **Fixed in cyrius 6.6.16** (see *Resolution* at the end; recorded by cyrius 2026-10-05). Open on sandhi's side only until it adopts `CHAN_BLOCKING` — [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md) item 4. Was: open — cyrius-side (`lib/thread_macos.cyr`); sandhi works around it (1.10.7).
+**Status:** ✅ **Closed** — fixed in cyrius 6.6.16, adopted in sandhi **1.10.9** (2026-10-08): `_sandhi_server_pool_inline` keys on `CHAN_BLOCKING`, so the macOS (both arches) and Windows pools run on worker threads. Archived with [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md). Was: open — cyrius-side (`lib/thread_macos.cyr`); sandhi worked around it (1.10.7).
 **Severity:** **P2** — any producer/consumer built on `chan_*` across threads is broken on arm64 macOS, and
 on every other target that still uses the serial ring. No error surfaces: the consumer simply sees an
 empty channel.
@@ -83,3 +83,11 @@ on Linux, this is a candidate.
 What sandhi adopts (`_sandhi_server_pool_inline` keyed on `CHAN_BLOCKING`, then the 1.10.7 macOS row re-run
 with the pool really taken) is in [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md). Move
 this file to `archive/` when that lands.
+
+## Adoption — sandhi 1.10.9 (2026-10-08, cyrius 6.7.5 pin)
+
+`_sandhi_server_pool_inline()` is `CHAN_BLOCKING == 1 ? 0 : 1`. Linux, macOS (arm64 and x86_64) and Windows
+run the pooled loops on worker threads; agnos keeps the inline path. New row `server/pool_parallel` (a
+connection holding a half request must not delay a second one) fails with the inline path on ecb and ach and
+passes with the pool on Linux, ecb, ach and cass; `test_server_request_budget_answers_408` passes with the
+pool path on the same four.

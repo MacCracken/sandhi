@@ -41,7 +41,7 @@ put on its roadmap.
 
 ## Sandhi-side defects
 
-**Open:** none. (Adoption work, not a defect: [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md) — five items for the release that pins cyrius 6.6.16.)
+**Open:** none.
 
 The last two closed together at **1.10.5** — [`archive/2026-10-03-chunked-response-verbs-discard-send-result.md`](archive/2026-10-03-chunked-response-verbs-discard-send-result.md)
 (the chunked-response verbs discarded every send result) and the hoosh feature gap
@@ -88,15 +88,11 @@ as `YYYY-MM-DD-kebab-case.md` and move to `archive/` when fully closed.
 
 ## Upstream dependencies (sandhi is blocked on stdlib / toolchain)
 
-**Open:**
+**Open:** none.
 
-| Doc | Repo | Severity | Summary |
-|-----|------|----------|---------|
-| [`2026-10-04-cyrius-macos-chan-serial-under-real-threads.md`](2026-10-04-cyrius-macos-chan-serial-under-real-threads.md) | cyrius | P2 | **✅ Fixed in cyrius 6.6.16** (both proposals: a blocking channel on arm64 macOS + Windows, and `CHAN_BLOCKING`); adoption is item 4 of [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md), then archive. arm64 macOS `thread_create` starts real pthreads (`THREADS_CONCURRENT = 1`) but `lib/thread_macos.cyr` keeps the serial, lock-free ring: `chan_recv` answers 0 when empty, `chan_send` fails when full. sandhi's pooled-server workers read the 0 as "closed" and exited, so `run_pooled` / `run_pooled_tls` never served on macOS. sandhi 1.10.7 serves inline on every target without a real blocking channel. Fix: a real channel on arm64 macOS, or a `CHAN_BLOCKING` capability. |
-| [`2026-10-04-cyrius-tls-server-pem-key-decoded-per-accept.md`](2026-10-04-cyrius-tls-server-pem-key-decoded-per-accept.md) | cyrius | P3 | **✅ Fixed in cyrius 6.6.16** (decoded once per key text; probe [8] measures 0 B/request); the guide/probe follow-ups are item 5 of [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md), then archive. The native TLS server decodes a PEM private key on every accept (`_tn_load_privkey` → sigil `pem_decode_privkey`), and the decoder allocates `pem_len` bytes from the never-freeing global heap: 120 B per HTTPS request with the Ed25519 fixture, measured by `programs/_server_tls_probe.cyr` [8] once sandhi 1.10.7 made everything else rewindable. A DER key measures 0 and is the consumer workaround. Fix: decode into the handshake's arena, or once per credential set. |
-
-Otherwise, all filed upstream dependencies to date are **resolved and archived** —
-the `lib/tls.cyr` native-TLS swap off the fdlopen-libssl bridge (✅ cyrius 6.2.8 /
+All filed upstream dependencies to date are **resolved and archived** — most recently
+the three closed at 1.10.9 (the libssl smoke link, the macOS serial channel and the per-accept
+PEM decode), and before them the `lib/tls.cyr` native-TLS swap off the fdlopen-libssl bridge (✅ cyrius 6.2.8 /
 sandhi 1.6.0) and the daimon `serve_async` max-conns enforcement (sandhi-side
 ✅ 1.4.9) both closed and moved to `archive/` in the 2026-06-23 sweep. New
 upstream blockers land here as `YYYY-MM-DD-kebab-case.md` and move to `archive/`
@@ -108,6 +104,9 @@ stdlib primitive are tracked in [`../roadmap.md`](../roadmap.md)
 
 | Doc | Closed at | Summary |
 |-----|-----------|---------|
+| [`archive/2026-10-05-adopt-cyrius-6616.md`](archive/2026-10-05-adopt-cyrius-6616.md) | sandhi 1.10.9 | cyrius 6.6.16's five adoption items, recorded by cyrius 2026-10-05: the SIGPIPE comments, `_sandhi_server_conn_blocking` dropped, `CHAN_BLOCKING` for the pool, the PEM-key caveats (guide + probe [8] `== 0`) taken; the libssl end-to-end resumption test declined (the backend retires at 2.0). The cass run for item 4 also found that a stop-enabled blocking serve loop never left `accept` on Windows; fixed in the same release. |
+| [`archive/2026-10-04-cyrius-macos-chan-serial-under-real-threads.md`](archive/2026-10-04-cyrius-macos-chan-serial-under-real-threads.md) | cyrius 6.6.16 / sandhi 1.10.9 | Upstream: arm64 macOS started real threads but kept the serial channel, so pooled workers exited and `run_pooled` / `run_pooled_tls` never served there (1.10.7 served inline off Linux). 6.6.16 gave macOS and Windows the blocking channel and exported `CHAN_BLOCKING`; 1.10.9 keys the pool on it. |
+| [`archive/2026-10-04-cyrius-tls-server-pem-key-decoded-per-accept.md`](archive/2026-10-04-cyrius-tls-server-pem-key-decoded-per-accept.md) | cyrius 6.6.16 / sandhi 1.10.9 | Upstream: the native TLS server decoded a PEM key on every accept, on the global heap (~120 B/request). 6.6.16 decodes it once per process; 1.10.9 drops the DER-key advice and makes probe [8] require 0 B. |
 | [`archive/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](archive/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md) | cyrius 6.7.5 / sandhi 1.10.9 | Upstream: from cyrius 6.3.5 the `-D CYRIUS_TLS_LIBSSL` smoke build refused to link — sigil's transitive crypto (4 symbols at 6.3.5, 14–15 through 6.6.15) reachable but not linked under the libssl `#ifdef`. On 6.7.5 the DCE and plain builds both link; the CI step is gating again until the 2.0 libssl retirement. |
 | [`archive/2026-10-03-chunked-response-verbs-discard-send-result.md`](archive/2026-10-03-chunked-response-verbs-discard-send-result.md) | sandhi 1.10.5 | agnostic (agnosai and bote affected): `sandhi_server_send_chunked_start{,_a}` / `_send_chunk` / `_send_chunked_end` discarded every `sock_send` result and returned 0, so a streaming handler could not see `-EPIPE` from a client that had gone, and a short write broke the chunk framing. **Fixed**: each writes through `sock_send_all` and returns 0 or its negative result; `send_chunk` stops at the first failed write. Mutation-proven closed-peer rows. Both follow-ups shipped at **1.10.6**: the serve loops ignore SIGPIPE on macOS too (stdlib `signal_ignore`), and the one-shot verbs (`send_response` / `_status` / `_204`) report their results the same way. |
 | [`archive/2026-09-25-http-stream-no-idle-hook.md`](archive/2026-09-25-http-stream-no-idle-hook.md) | sandhi 1.10.5 | hoosh: `sandhi_http_stream` gave the consumer no turn while the upstream was silent, so remote SSE keep-alives were impossible. **Resolved** with `sandhi_http_options_idle_ms` / `_idle_cb`, implemented as a readiness wait (`fd_wait_ready`) rather than the proposed shorter SO_RCVTIMEO, which native TLS turns into a permanently failed ctx. Gated over real TLS by `programs/_stream_idle_gate.cyr` (also run once at the issue's literal 15 s / 40 s figures). Also fixed: the chunked stream path lost an SSE event split across two reads, and reserved a fresh 256 KiB buffer per read. |

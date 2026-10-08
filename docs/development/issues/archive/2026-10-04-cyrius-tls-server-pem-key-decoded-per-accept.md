@@ -1,6 +1,6 @@
 # 2026-10-04 — the native TLS server decodes a PEM private key on every accept, on the global heap
 
-**Status:** ✅ **Fixed in cyrius 6.6.16** (see *Resolution* at the end; recorded by cyrius 2026-10-05). The doc/probe follow-ups are [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md) item 5. Was: open — cyrius-side (stdlib `lib/tls_native_hs13.cyr` + sigil `pem_decode_privkey`).
+**Status:** ✅ **Closed** — fixed in cyrius 6.6.16; sandhi's follow-ups shipped in **1.10.9** (2026-10-08): `docs/guides/server.md` drops the DER-key advice and `_server_tls_probe` [8] requires 0 B of heap growth. Archived with [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md). Was: open — cyrius-side (stdlib `lib/tls_native_hs13.cyr` + sigil `pem_decode_privkey`).
 **Severity:** **P3** — unbounded but slow heap growth in a long-running HTTPS server; no correctness or
 security impact. A DER key avoids it entirely.
 **Reporter:** sandhi (found while measuring the 1.10.7 pooled-TLS per-request arena fix).
@@ -70,3 +70,8 @@ keys and still takes DER keys only.)
 Follow-ups (the `docs/guides/server.md` DER-key bullet and tightening probe [8] to `per == 0`) are in
 [`2026-10-05-adopt-cyrius-6616.md`](2026-10-05-adopt-cyrius-6616.md). Move this file to `archive/` when they
 land.
+
+## Adoption — sandhi 1.10.9 (2026-10-08, cyrius 6.7.5 pin)
+
+Probe [8] measures 0 B over 41 requests with the PEM fixture on Linux, ecb and ach, and now requires exactly 0
+(it allowed 128 B/request). A 48 B/request leak injected into the routed handler fails it.
