@@ -6,10 +6,9 @@
 > [`requests/`](requests/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. This file was last
-> swept clean of completed work on **2026-10-04** (at 1.10.6: the shipped 1.9.13
-> repair-queue narrative, the two sections 1.10.6 emptied, and the sigil
-> undefined-symbol note that cyrius 6.6.15 resolved were removed; at 1.10.7 the
-> whole "P1 follow-ups from the 1.9.12 sweep" section, which 1.10.7 shipped).
+> swept clean of completed work on **2026-10-08** (at 1.10.9: the "Recorded by
+> cyrius 6.6.19" notes, both adopted, and the libssl smoke bullet's stale
+> non-gating premise; earlier sweeps at 1.10.6 and 1.10.7).
 
 ## Context (post-fold)
 
@@ -18,7 +17,7 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.6.15** (since 1.10.5; the full trail is in `state.md`).
+is currently **cyrius 6.7.5** (since 1.10.9; the full trail is in `state.md`).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -127,6 +126,31 @@ moved to [`requests/`](requests/README.md) instead.
   per-request timeouts; daimon's registry contract defines no auth surface today.
   Wire it when a consumer needs authenticated / timeout-bounded discovery.
 
+## cyrius 6.7.x language adoption (later; the pin is already 6.7.5)
+
+Placed here by the W2 stdlib wave (2026-10-08), which took only the defects. Each is
+an ordinary patch unless marked; none changes behaviour.
+
+- **`loop { … break; }` sweep.** The W2 survey counted 32 candidate sites: the 20
+  `while (1 == 1)` loops in `src/` (12 of them in `src/server/mod.cyr`) plus
+  flag-driven loops that emulate `break`. Mechanical; one bite per file.
+- **Private `const`.** Underscore-prefixed knobs that are never written
+  (`_SANDHI_SIGPIPE`, the per-target `_SANDHI_ERRNO_*` set) can become `const`.
+  **Public** consts wait: `HTTP_OK` / `HTTP_NOT_FOUND` share their names with
+  `lib/http.cyr`'s vars, and a `const` beside a same-name `var` is a hard error, so
+  they need a cyrius-side plan first.
+- **`: bool` predicates — 2.0.** The public `sandhi_*_is_*` / `_has_*` predicates
+  change kind, so they go with the 2.0 major (Batch A); private ones may move sooner.
+- **Traits after `dyn`.** The discovery resolver chain and the server handler
+  signatures are the natural trait seams once cyrius ships `dyn` (later in v6.7.x).
+- **`tests/sandhi.tcyr` on Windows.** First run on cass at 1.10.9: the `h2`,
+  `alloc` and `rpc` suites pass, and `sandhi.tcyr` passes 870 of 883 rows. The 13
+  failures are the harness, not the library: `test_server_conn_seam` opens
+  `/dev/null` with raw syscall 2, `test_download_fd_sink` writes a `/tmp` path, the
+  VERSION row reads `./VERSION` from the run directory, and `_t_canned_server` reads
+  its socket with `sys_read` (the client framing rows). Make them portable, then
+  consider a Windows CI leg like cyrius's own cass gate.
+
 ## Background watches (not slots)
 
 - **The unguarded-accumulator / unguarded-allocation class is not exhausted.**
@@ -221,20 +245,6 @@ moved to [`requests/`](requests/README.md) instead.
   — add only when a second consumer needs the same pattern.
 
 ---
-
-## Recorded by cyrius 6.6.19 (2026-10-06) — for the next cyrius pin move
-
-⛔ **Needs cyrius >= 6.6.19 — do not bump the pin until 6.6.19 is tagged and out.** Docs-only note from the cyrius
-6.6.19 lanes; each item is this repo's to adopt when it pins ≥ 6.6.19. Nothing here gates a cyrius release.
-
-- **`_sandhi_server_pool_inline` can test `CHAN_BLOCKING` instead of `CYRIUS_TARGET_LINUX`.** Since cyrius 6.6.19
-  (T1) x86 macOS runs real threads (`THREADS_CONCURRENT` = `CHAN_BLOCKING` = 1 on both Mach-O arches), so x86
-  macOS pools can run on real threads; test the capability, not the OS (agnos is still serial).
-- **The stop-flag idle path can use `async_await_readable_ms(sfd, SANDHI_SERVER_STOP_POLL_MS)` instead of
-  `sleep_ms` on every target.** Since 6.6.19 (A1 / A2) the bounded wait exists on macOS (one BSD `poll`),
-  Windows (`WSAPoll`, sockets only) and agnos (a readiness stash in the socket adapter), not only Linux, and the
-  legacy `async_await_readable` really waits there — the cooperative server's non-blocking accept → EAGAIN →
-  `async_await_readable(sfd)` no longer spins at 100 % CPU on macOS, Windows or agnos.
 
 See [ADR 0001](../adr/0001-sandhi-is-a-composer-not-a-reimplementer.md) (naming +
 compose-don't-reimplement thesis), [ADR 0002](../adr/0002-clean-break-fold-at-cyrius-v5-7-0.md)
