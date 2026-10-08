@@ -1571,9 +1571,10 @@ fn test_server_armed_accept_never_parks() {
 # A BSD accept(2) gives the new socket the listener's O_NONBLOCK, and macOS's
 # armed listener is non-blocking (see above). Every connection handler reads a
 # blocking fd bounded by SO_RCVTIMEO, so an inherited O_NONBLOCK would turn the
-# first slow read into an immediate EAGAIN — a dropped request.
-# `_sandhi_server_accept` clears it. Mutation (measured on ecb and ach):
-# dropping `_sandhi_server_conn_blocking` fails the O_NONBLOCK row.
+# first slow read into an immediate EAGAIN — a dropped request. Through 1.10.8
+# sandhi cleared it itself (`_sandhi_server_conn_blocking`, mutation-measured on
+# ecb and ach); since 1.10.9 the stdlib's `sock_accept` does (cyrius 6.6.16), and
+# this row is the contract check that it still does.
 fn test_server_armed_accept_hands_out_blocking_fd() {
     var lo = 0x0100007F;
     var lport = 39627;
