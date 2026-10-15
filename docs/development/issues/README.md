@@ -41,7 +41,11 @@ put on its roadmap.
 
 ## Sandhi-side defects
 
-**Open:** none.
+**Open:**
+
+| Doc | Reporter | State |
+|-----|----------|-------|
+| [`2026-10-15-bote-server-run-failures-return-bare-1.md`](2026-10-15-bote-server-run-failures-return-bare-1.md) | bote 3.4.0 | **Open.** All five serve entry points return a bare `1` for every failure: the `EADDRINUSE` from bind is in a local and discarded. `_run_opts` and `_run_async` also leak the listen socket on a failed bind / listen (probe: next fd 4 → 9 over five failed starts). Proposed: close `sfd` (four lines), plus an additive per-thread `sandhi_server_last_failure(step, errno)`. |
 
 The last two closed together at **1.10.5** — [`archive/2026-10-03-chunked-response-verbs-discard-send-result.md`](archive/2026-10-03-chunked-response-verbs-discard-send-result.md)
 (the chunked-response verbs discarded every send result) and the hoosh feature gap
