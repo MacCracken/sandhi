@@ -910,6 +910,101 @@ fn test_pool_options_attach() {
     return 0;
 }
 
+# 1.13.0 — one pool shared by threads. Each of four threads does 5,000
+# put-then-take cycles on the same route with its own unique connections (no
+# eviction, no staleness: nothing is ever closed). After the joins the pool is
+# drained. With the pool's lock, every connection comes out exactly once: the
+# takes plus the drain equal the puts, each connection's take count is 1, and the
+# idle count ends at 0. Mutation: making `_sandhi_pool_lock` / `_unlock` no-ops
+# loses or duplicates connections here (or crashes on a torn vector).
+var _t_ps_pool   = 0;
+var _t_ps_conns  = 0;
+var _t_ps_counts = 0;
+
+fn _t_ps_iters() { return 5000; }
+fn _t_ps_threads() { return 4; }
+
+fn _t_ps_worker(arg) {
+    var t = arg;
+    var n = _t_ps_iters();
+    var base = t * n;
+    var takes = 0;
+    var i = 0;
+    while (i < n) {
+        _sandhi_pool_put(_t_ps_pool, "pool.test", 80, 0, load64(_t_ps_conns + (base + i) * 8));
+        var got = _sandhi_pool_take(_t_ps_pool, "pool.test", 80, 0);
+        if (got != 0) {
+            takes = takes + 1;
+            store64(got + SANDHI_CONN_OFF_0RTT_STATUS, load64(got + SANDHI_CONN_OFF_0RTT_STATUS) + 1);
+        }
+        i = i + 1;
+    }
+    store64(_t_ps_counts + t * 8, takes);
+    return 0;
+}
+
+fn test_pool_shared_by_threads() {
+    if (_t_threads_concurrent() == 0) { assert_eq(1, 1, "pool threads: no concurrent threads — skipped"); return 0; }
+    var nt = _t_ps_threads();
+    var n = _t_ps_iters();
+    var total = nt * n;
+    _t_ps_pool = sandhi_http_pool_new(0x40000000, 0x40000000);
+    _t_ps_conns = alloc(total * 8);
+    _t_ps_counts = alloc(nt * 8);
+    var k = 0;
+    while (k < total) {
+        var c = alloc(SANDHI_CONN_STRUCT_SIZE);
+        store64(c + SANDHI_CONN_OFF_KIND, SANDHI_CONN_PLAIN);
+        store64(c + SANDHI_CONN_OFF_FD, 0 - 1);
+        store64(c + SANDHI_CONN_OFF_TLS_CTX, 0);
+        store64(c + SANDHI_CONN_OFF_ALPN_DATA, 0);
+        store64(c + SANDHI_CONN_OFF_0RTT_STATUS, 0);
+        store64(_t_ps_conns + k * 8, c);
+        k = k + 1;
+    }
+    var th = alloc(nt * 8);
+    var t = 0;
+    while (t < nt) {
+        store64(_t_ps_counts + t * 8, 0);
+        store64(th + t * 8, thread_create(&_t_ps_worker, t));
+        t = t + 1;
+    }
+    t = 0;
+    while (t < nt) {
+        if (load64(th + t * 8) != 0) { thread_join(load64(th + t * 8)); }
+        t = t + 1;
+    }
+    var taken = 0;
+    t = 0;
+    while (t < nt) { taken = taken + load64(_t_ps_counts + t * 8); t = t + 1; }
+    var idle_before = sandhi_http_pool_idle_count(_t_ps_pool);
+    var drained = 0;
+    loop {
+        var got = _sandhi_pool_take(_t_ps_pool, "pool.test", 80, 0);
+        if (got == 0) { break; }
+        drained = drained + 1;
+        store64(got + SANDHI_CONN_OFF_0RTT_STATUS, load64(got + SANDHI_CONN_OFF_0RTT_STATUS) + 1);
+    }
+    var once = 0;
+    var twice = 0;
+    var never = 0;
+    k = 0;
+    while (k < total) {
+        var tc = load64(load64(_t_ps_conns + k * 8) + SANDHI_CONN_OFF_0RTT_STATUS);
+        if (tc == 1) { once = once + 1; }
+        elif (tc == 0) { never = never + 1; }
+        else { twice = twice + 1; }
+        k = k + 1;
+    }
+    assert_eq(taken + drained, total, "pool threads: takes plus the drain equal the 20,000 puts");
+    assert_eq(idle_before, drained, "pool threads: the idle count matched what was left");
+    assert_eq(once, total, "pool threads: every connection came out exactly once");
+    assert_eq(twice, 0, "pool threads: no connection came out twice");
+    assert_eq(never, 0, "pool threads: no connection was lost");
+    assert_eq(sandhi_http_pool_idle_count(_t_ps_pool), 0, "pool threads: the pool ends empty");
+    return 0;
+}
+
 fn test_pool_chunked_complete_detector() {
     # Buffer with header + complete chunked body: "5\r\nhello\r\n0\r\n\r\n"
     # body_start=0 in the test (we're testing the detector in isolation).
@@ -5749,6 +5844,9 @@ fn main() {
 
     test_group("http/pool/put_then_take");
     test_pool_put_then_take_returns_same_conn();
+
+    test_group("http/pool/shared_by_threads");
+    test_pool_shared_by_threads();
 
     test_group("http/pool/routes_isolated");
     test_pool_routes_isolated();

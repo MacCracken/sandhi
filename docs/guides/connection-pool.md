@@ -100,6 +100,22 @@ is not walked by the generic close for build-order reasons.
 
 ## Threading
 
-Pools are **single-threaded** today. Sharing a pool across threads would need a
-per-pool mutex; when a consumer reports a real need, that lands. For now,
-one pool per thread or per event loop.
+Since 1.13.0 a pool may be **shared across threads**. Each pool owns a mutex
+(`lib/sync.cyr`), held only while it updates its route map and idle lists: taking a
+connection, returning one, checking for an idle one, and the HTTP/2 helpers
+(`sandhi_http_pool_take_h2` / `_put_h2` / `_close_h2_conns`). An HTTP/1.1 connection
+is handed to exactly one caller and belongs to that thread until it is put back.
+Connections are closed (an evicted one, a stale one, or all of them in
+`sandhi_http_pool_close`) after the lock is released, so a slow TLS close never holds up
+another thread.
+
+⚠ **HTTP/2 is the exception.** The pool keeps one HTTP/2 connection per route and hands
+the *same* connection to every caller (`sandhi_http_pool_take_h2` does not remove it):
+that is how h2 multiplexes. Running two requests on one HTTP/2 connection from two
+threads at once is **not** safe yet: its stream ids, writes and response reads are not
+serialised. A multi-threaded client that uses the h2-capable `_auto` dispatch with a
+shared pool should keep h2 traffic to one thread, or give each thread its own pool, until
+that lands (roadmap 1.13.x).
+
+One pool per thread still works everywhere and avoids any contention, if that suits the
+program better.

@@ -4,6 +4,90 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-10-15
+
+**A client connection pool may be shared across threads: each pool owns a mutex.**
+Through 1.12.4 two threads sharing one pool could be handed the same connection, or lose
+one. No pin change (6.7.12). Opens the roadmap's 1.13.x line (client concurrency and
+HTTP/2 completeness).
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+**Visible to a consumer:**
+- **A pool is now safe to share across threads** for HTTP/1.1. Before, the route map, its
+  idle lists and the idle counter were unguarded.
+- **`SANDHI_POOL_STRUCT_SIZE` is 56 (was 48),** with the mutex pointer at the new
+  `SANDHI_POOL_OFF_MUTEX` (48). Pools come only from `sandhi_http_pool_new{,_a}`; a
+  struct built by hand to the old layout is used unlocked, as before.
+- **One HTTP/2 connection is still not safe to use from two threads at once.** The pool
+  hands the same h2 connection to every caller for a route (that is the multiplexing),
+  and nothing yet serialises two requests on it. The pool guide says so, and it is a new
+  1.13.x roadmap item (below).
+
+### Fixed
+
+- **http/pool: concurrent take / put corrupted the pool.** The pool's state (the
+  `host:port:tls` map, each route's idle vector, `total_idle`) had no lock. Measured with
+  the new row and the lock removed, on three runs of four threads × 5,000 put-then-take
+  cycles:
+  - 922 to 2,274 connections came out **twice**, so one socket was handed to two requests
+    at once;
+  - 193 to 370 were **lost**;
+  - the idle count went **negative** (−471 to −1,233).
+- **The fix:** each pool owns a `lib/sync.cyr` mutex, created by `sandhi_http_pool_new_a`
+  (no mutex, no pool: the same fail-closed rule as its two maps).
+  - **Held for the map and vector work only** in `_sandhi_pool_take`,
+    `_sandhi_pool_put`, `_sandhi_pool_has_idle` and `sandhi_http_pool_close`, and in the
+    HTTP/2 helpers `sandhi_http_pool_take_h2`, `_put_h2` and `_close_h2_conns`.
+  - **`put` allocates under it:** its idle-conn wrapper comes from the pool's allocator,
+    which may be a non-thread-safe arena.
+  - **Every close runs after the lock is released:** the conn evicted at the cap, a stale
+    conn found by `take`, and every conn torn down by the two close-all calls (collected
+    under the lock, closed after). A TLS close sends close_notify and can block.
+  - `take` pops one connection per lock hold, so closing a stale one never holds the
+    lock.
+  - The lock is the stdlib's: a futex on Linux, `__ulock` on macOS, SRWLOCK on Windows,
+    and a no-op on agnos and cx, whose threads run serially.
+
+### Changed
+
+- **docs:** `docs/guides/connection-pool.md`'s Threading section said pools were
+  single-threaded. It now says what the lock covers, and that an HTTP/2 connection
+  shared by threads is not yet safe.
+- **Roadmap:** the per-pool mutex leaves the 1.13.x line. A new item joins it: one HTTP/2
+  connection used by several threads at once (`sandhi_h2_request_a` on a shared conn).
+  Serialise per connection first, or demultiplex by stream id. The maintenance pointer
+  moves to 1.13.x.
+
+### Verification
+
+- **New row `http/pool/shared_by_threads`, 6 assertions:** four threads share one pool
+  and one route. Each does 5,000 put-then-take cycles with unique hand-built connections
+  (no eviction, no staleness), then the pool is drained.
+  - Every connection comes out exactly once.
+  - Takes plus the drain equal the 20,000 puts, and the idle count ends at 0.
+  - It passes on three consecutive runs. Without the lock it fails all six assertions on
+    each of three runs (the numbers above).
+- **3,120 assertions** (1,012 / 1,691 / 353 / 63 / 1), 8/8 fuzz. `fmt` and lint are clean.
+  `tests/alloc.tcyr`'s pool OOM rows pass unchanged (the mutex comes from the global
+  allocator, not the pool's).
+- **Windows under wine:** all four suites pass with no failure (999 / 1,691 / 353 / 63).
+  The shared-pool row ran there on SRWLOCK.
+- **aarch64 under qemu:** all four suites pass with no failure (1,012 / 1,691 / 353 / 63).
+  The shared-pool row ran there on the futex lock.
+- **The full Linux gate:**
+  - Builds: the `CYRIUS_DCE=1` smoke builds, native and libssl, and the aarch64
+    cross-build.
+  - Live gates: all seven pass.
+  - CI scripts: the whole-surface link check (880 fns; control refused) and the programs
+    sweep (35 programs) pass.
+  - dist: all five bundles regenerated and idempotent. **`.deps` sidecars:** the full,
+    `rpc` and `discovery` bundles gain `sync` (the three profiles that include
+    `src/http/pool.cyr`); `tls` and `server` are unchanged.
+- The AGNOS and Windows smoke cross-builds link.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.12.4] — 2026-10-15
 
 **The client connection's transport is a trait: `sandhi_conn_send`, `_recv` and `_close`

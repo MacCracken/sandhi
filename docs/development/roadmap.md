@@ -6,12 +6,10 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.12.4: the 1.12.x line is complete (1.12.0
-> the `loop` sweep, 1.12.1 private `const`, 1.12.2 private `bool`, 1.12.3 – 1.12.4
-> the server and client transport traits), so its section is gone, as 1.11.x's
-> went at 1.12.0. The traits item was re-scoped at 1.12.3 from the resolver /
-> handler seams to the transport seam (why: CHANGELOG [1.12.3] and the 2.0 item).
-> History is in the CHANGELOG.
+> completed work on **2026-10-15** at 1.13.0: the per-pool mutex shipped, and the
+> shared-HTTP/2-connection gap it exposed joined the 1.13.x line. The 1.11.x and
+> 1.12.x lines are complete and their sections are gone (the 1.12.x traits item was
+> re-scoped to the transport seam: CHANGELOG [1.12.3]). History is in the CHANGELOG.
 
 ## Context (post-fold)
 
@@ -27,8 +25,8 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
   within a line ship in the order listed, one item per patch (single focus per
   patch). The lines run in order; a line opens when the previous one has shipped.
 - **Maintenance lands on the open line.** Pin bumps and consumer-filed fixes ship
-  as patches on whichever line is open (1.12.x until 1.13.0 opens 1.13.x) and do
-  not wait for a line of their own.
+  as patches on whichever line is open (1.13.x since 1.13.0) and do not wait for a
+  line of their own.
 - A consumer-filed defect or real-workload friction (sit, bote, …) takes the next
   patch on whatever line is open; it does not wait for its "own" line.
 - Every new public verb still ships permanently into stdlib's `lib/sandhi.cyr`, so
@@ -39,10 +37,8 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 
 ## 1.13.x — Client concurrency and HTTP/2 completeness
 
-- **1.13.0 — client connection-pool thread-safety (per-pool mutex)**
-  (`src/http/pool.cyr`). 1.6.9 made the *buffered dispatch* path thread-safe (a
-  per-call request context) for fresh-connection concurrency; a multi-threaded
-  client sharing a pooled-connection cache still needs a per-pool mutex.
+Shipped so far: 1.13.0, the per-pool mutex (a pool may be shared across threads).
+
 - **`_sandhi_alpn_advertise_h2` into the request context** (`src/http/conn.cyr`,
   written by the h2 promotion in `src/http/h2/dispatch.cyr`, read by
   `_sandhi_policy_pre_open_a` and the connection finalize). 1.10.7 moved the TLS
@@ -50,6 +46,15 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
   because a collision only changes which ALPN list a concurrent open offers
   (negotiation, not enforcement). Lift it into a `SANDHI_REQCTX_*` slot. Pairs with
   the pool mutex; it also clears the ground for the 1.14 ALPN proposal.
+- **One HTTP/2 connection used by several threads at once** (`src/http/h2/conn.cyr`,
+  `request.cyr`, `response.cyr`; found at 1.13.0). The pool hands the same h2
+  connection to every caller for a route (that is the multiplexing), and the `_auto`
+  dispatch runs `sandhi_h2_request_a` on it. Nothing serialises two threads doing so:
+  `next_stream_id`, the frame writes and the response read share the connection's
+  state. Serialise per connection (a lock around one request's write-and-read, the
+  simple first step), or demultiplex responses by stream id for real concurrency.
+  Until then `docs/guides/connection-pool.md` tells a multi-threaded client to keep h2
+  traffic to one thread or to give each thread its own pool.
 - **Per-hop cred-digest recompute on cross-authority redirect-follow**
   (`src/http/client.cyr`). The 1.3.3 session-cache cred-digest is computed once per
   top-level dispatch (stored in the 1.6.9 request context), so an A→B redirect
@@ -183,8 +188,8 @@ move a sandhi pin.
   cap (architecture/001).
 - **`tests/sandhi.tcyr` cap-drift.** If a patch pushes `sandhi.tcyr` against the
   per-program fixup cap (architecture/001), carve out another `tests/<name>.tcyr` in
-  the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 1,006
-  assertions on Linux at 1.12.4.
+  the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 1,012
+  assertions on Linux at 1.13.0.
 - **Fuzz-corpus expansion.** Add harnesses as new parse surfaces land; each
   proposal above that parses wire input (batch responses, merge-patch documents,
   `Set-Cookie`, the CONNECT response) brings its own `fuzz/*.fcyr`. Other
