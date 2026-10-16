@@ -4,6 +4,88 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.11.1] — 2026-10-15
+
+**A pooled server waits for its workers to report ready before it accepts. A pool whose
+worker threads start but then all exit (out of memory) now fails to start instead of
+hanging.** No pin change (6.7.12). The second item of the roadmap's 1.11.x line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+**Behaviour changes a consumer can see:**
+- `sandhi_server_run_pooled` / `_run_pooled_tls` return `1` with
+  `SANDHI_SERVER_FAIL_ALLOC` when worker threads start but none can allocate its buffers.
+  Through 1.11.0 they accepted connections and then hung.
+- A pooled server's start now waits until every worker has reported, up to
+  `SANDHI_SERVER_POOL_START_MS` (5 s). What it waits for is a thread start and a few
+  allocations per worker.
+- The degraded-pool WARN counts *ready* workers, and its text changes from 1.11.0's
+  `some worker threads did not start` to `worker pool degraded, not every worker
+  started` (with `started=<ready>/<max_conns>`). It now also covers workers that started
+  and exited. 1.11.0 has not been re-vendored, so no consumer has seen the old text.
+
+### Fixed
+
+- **server: workers that started and then exited still counted as started.** 1.11.0
+  counted `thread_create` successes. A worker that cannot allocate its request buffer,
+  reject arena or request arena exits at start-up (and logs a WARN since 1.11.0), so a
+  pool whose workers all exited that way accepted into a channel nothing read and parked
+  in `chan_send`, the hang 1.11.0 fixed for failed spawns.
+  - **The handshake:** each worker gets its own 8-byte start-up slot, pending until the
+    worker stores READY (its allocations done) or FAILED (it is about to exit). The
+    accept thread marks FAILED itself for a spawn that failed.
+    - It then waits, polling every 1 ms, until no slot is pending or
+      `SANDHI_SERVER_POOL_START_MS` passes. A worker still pending at the bound counts as
+      not ready: if it starts later it serves, or finds the channel closed and exits.
+    - Each slot has a single writer, and an aligned 8-byte store is single-copy atomic on
+      every target, so this takes no lock and no `lib/atomic.cyr` (the stop flag's
+      reasoning).
+  - **The decision**, on ready workers rather than spawns:
+    - none ready: the start fails with `THREAD` if no thread could be created, `ALLOC` if
+      threads started but none could allocate;
+    - fewer than `max_conns`: it serves and logs the degraded WARN;
+    - all ready: no change.
+  - **Ordering:** a worker that exits logs its WARN before it reports FAILED, so the
+    warning is written before a failed start returns. A first draft reported first; the
+    suite's mutation run showed the warning could then land after the caller had moved
+    on.
+  - **Rows** (`server/pool_startup`, +9 assertions):
+    - **`test_server_pool_workers_exit_fails`** sets a 4 GiB `max_request`. That is past
+      the stdlib's 2 GiB `ALLOC_MAX` on every target, so each worker's buffer
+      allocation fails for real; no test seam is involved.
+    - Both pooled loops return 1 and record ALLOC with errno 0. Each worker logs its
+      exit (2 + 2), no degraded warning is logged, and the listen sockets are closed.
+    - The 1.11.0 rows (no thread; 1 of 3; 2 of 4) pass unchanged on the new path.
+  - **Mutation check:** counting spawns instead of ready reports (1.11.0's behaviour)
+    fails six rows, and the loops return 0 from their pre-set stop flag instead of
+    hanging.
+  - **Windows:** the suite built for Windows passes under wine, 959 of 962. The 3
+    failures are the known `test_server_conn_seam` `/dev/null` harness rows. Not yet run
+    on cass.
+
+### Changed
+
+- **server: the pooled worker arguments grow by the start-up slot:** 32 → 40 bytes
+  (plaintext), 64 → 72 (TLS). They are private and allocated per start.
+- **docs:** `docs/guides/server.md` describes the start-up wait and which step a failed
+  start records.
+- **Roadmap:** the start-up handshake leaves the 1.11.x line. Next on it: the portable
+  Windows harness rows and a Windows CI leg.
+
+### Verification
+
+- **3,089 assertions** (981 / 1,691 / 353 / 63 / 1) on Linux, green on three
+  consecutive runs; 8/8 fuzz. lint, fmt and vet are clean.
+- **Builds:** the `CYRIUS_DCE=1` smoke builds, native and libssl. The aarch64, AGNOS and
+  Windows (PE) cross-builds link. The Windows suite was run under wine (see Fixed).
+- **Live gates:** all seven pass. `_server_tls_probe` [1]–[8] starts the TLS pool through
+  the handshake on four real workers, with no warning logged.
+- **dist:** all five bundles regenerated, and `cyrius distlib --check` is idempotent. The
+  `.deps` sidecars are unchanged. `server` and the full bundle carry the change; `tls`,
+  `rpc` and `discovery` take only the version stamp.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.11.0] — 2026-10-15
 
 **The pooled servers check that their worker threads started. A pool that starts none

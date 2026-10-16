@@ -6,9 +6,10 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.11.0: its `thread_create` check shipped.
-> At 1.10.11 the Windows accept-errno item shipped, the empty sit-adoption batch
-> was dropped, and the remaining work was reorganized into the lines below.
+> completed work on **2026-10-15** at 1.11.1: the start-up handshake shipped (and
+> the `thread_create` check at 1.11.0). At 1.10.11 the Windows accept-errno item
+> shipped, the empty sit-adoption batch was dropped, and the remaining work was
+> reorganized into the lines below.
 
 ## Context (post-fold)
 
@@ -36,26 +37,19 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 
 ## 1.11.x — Server hardening and Windows parity
 
-1.11.0 shipped the pooled loops' `thread_create` check (no worker fails the start
-with `SANDHI_SERVER_FAIL_THREAD`; a short pool serves and logs a sakshi WARN).
+Shipped so far: 1.11.0, the pooled loops' `thread_create` check (no worker fails
+the start with `SANDHI_SERVER_FAIL_THREAD`; a short pool serves and logs a sakshi
+WARN); 1.11.1, the start-up handshake (the accept thread waits for each worker's
+ready / failed report, so workers that start and then exit count as not ready).
 
-- **Workers that start and then exit** (`_sandhi_server_pool_worker`,
-  `_sandhi_server_pool_tls_worker`). A worker that cannot allocate its buffers
-  exits at start-up; since 1.11.0 it logs a WARN, but the accept thread still
-  counts it as started. If every worker exits that way, the accept thread fills
-  the handoff channel and parks in `chan_send`, as a pool with no thread did
-  before 1.11.0. Fix with a start-up handshake: each worker reports ready or
-  failed (an atomic count), and the accept thread waits for all of them, bounded,
-  before it accepts; zero ready fails the start (THREAD or ALLOC), fewer than
-  asked warns as today.
 - **`tests/sandhi.tcyr` portable on Windows, then a Windows CI leg.** First run on
   cass at 1.10.9: the `h2`, `alloc` and `rpc` suites pass, and `sandhi.tcyr` passed
   870 of 883 rows. The 13 failures are the harness, not the library:
   `test_server_conn_seam` opens `/dev/null` with raw syscall 2,
   `test_download_fd_sink` writes a `/tmp` path, the VERSION row reads `./VERSION`
   from the run directory, and `_t_canned_server` reads its socket with `sys_read`
-  (the client framing rows). Under wine at 1.10.11 only the three
-  `test_server_conn_seam` rows fail (938 of 941). Make them portable, re-run on
+  (the client framing rows). Under wine, from 1.10.11 on, only the three
+  `test_server_conn_seam` rows fail (959 of 962 at 1.11.1). Make them portable, re-run on
   cass, then add a CI leg: wine on the Linux runner is cheap, and cyrius gates
   real Windows on cass.
 - **Compile-only CI step over `programs/*.cyr`** (ask before adding). CI compiles
@@ -235,8 +229,8 @@ move a sandhi pin.
   cap (architecture/001).
 - **`tests/sandhi.tcyr` cap-drift.** If a patch pushes `sandhi.tcyr` against the
   per-program fixup cap (architecture/001), carve out another `tests/<name>.tcyr` in
-  the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 972
-  assertions at 1.11.0.
+  the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 981
+  assertions at 1.11.1.
 - **Fuzz-corpus expansion.** Add harnesses as new parse surfaces land; each
   proposal above that parses wire input (batch responses, merge-patch documents,
   `Set-Cookie`, the CONNECT response) brings its own `fuzz/*.fcyr`. Other

@@ -999,8 +999,9 @@ fn sandhi_server_options_new(): i64 {
 #   ACCEPT  accept failed with an errno the accept-error policy calls fatal, or
 #           kept failing past SANDHI_ACCEPT_GIVEUP; errno is the last one
 #   THREAD  a pooled loop could not start any worker thread (errno 0:
-#           `thread_create` reports none). 1.11.0. A pool that starts only some
-#           of its workers serves on those and logs a sakshi WARN instead.
+#           `thread_create` reports none). 1.11.0. Worker threads that start but
+#           all fail to allocate their buffers are ALLOC (1.11.1). A pool that
+#           gets only some workers ready serves on those and logs a sakshi WARN.
 #
 # The errno is the target's own number, as `lib/net.cyr` reports it: EADDRINUSE
 # is 98 on Linux, 48 on macOS and 10048 (WSAEADDRINUSE) on Windows.
@@ -2220,14 +2221,15 @@ fn sandhi_server_router_handler_a(a, router, cfd, buf, blen): i64 {
 # (floored > 0, since a stalled peer would otherwise hold a worker forever and a
 # slowloris could pin the whole pool).
 
-# Per-worker arg (32 bytes): { chan, handler_fp, ctx, idle_ms }.
+# Per-worker arg (40 bytes): { chan, handler_fp, ctx, idle_ms, start slot }.
 enum SandhiPoolWorkerOff {
     SANDHI_POOL_W_CHAN    = 0;
     SANDHI_POOL_W_FP      = 8;
     SANDHI_POOL_W_CTX     = 16;
     SANDHI_POOL_W_IDLE_MS = 24;
+    SANDHI_POOL_W_START   = 32;
 }
-var SANDHI_POOL_WORKER_ARG_SIZE = 32;
+var SANDHI_POOL_WORKER_ARG_SIZE = 40;
 
 # Serve one accepted plaintext connection for the pool: rewind the arenas, arm
 # idle_ms, read under the request budget, refuse or dispatch, close. Called by
@@ -2321,10 +2323,20 @@ fn _sandhi_server_pool_run_inline(sfd, fp, ctx, idle_ms, stop_ptr, opts): i64 {
     return 0;
 }
 
-# ── Pooled worker start-up (1.11.0) ──
+# ── Pooled worker start-up (1.11.0; the handshake 1.11.1) ──
 
 # Spawns `_sandhi_server_spawn_worker` allows before it fails; -1 is no limit.
 var _sandhi_server_spawn_limit = 0 - 1;
+
+# How long a pooled loop waits for its workers' start-up reports, in ms.
+var SANDHI_SERVER_POOL_START_MS = 5000;
+
+# A pooled worker's start-up report, one 8-byte slot per worker. 1.11.1
+enum SandhiPoolStart {
+    SANDHI_POOL_START_PENDING = 0;
+    SANDHI_POOL_START_READY   = 1;
+    SANDHI_POOL_START_FAILED  = 2;
+}
 
 # `thread_create` for the pooled loops' workers: the thread, or 0 when the stack
 # mapping or the clone was refused (a pids or memory limit). There is no errno.
@@ -2339,7 +2351,7 @@ fn _sandhi_server_spawn_worker(fp, arg): i64 {
 }
 
 # Log one WARN through sakshi that a pooled loop is serving on fewer workers than
-# `max_conns` asked for, with `started=<started>/<wanted>`. The start does not
+# `max_conns` asked for, with `started=<ready>/<wanted>`. The start does not
 # fail: the pool serves on the workers it has, with less parallelism. Through
 # 1.10.11 a worker that failed to start went unremarked. CHANGELOG [1.11.0]
 fn _sandhi_server_pool_degraded(started, wanted): i64 {
@@ -2348,17 +2360,52 @@ fn _sandhi_server_pool_degraded(started, wanted): i64 {
     store8(&val + n, 47);                          # '/'
     n = n + 1;
     n = n + fmt_int_buf(wanted, &val + n);
-    var msg = "sandhi server: worker pool degraded, some worker threads did not start";
+    var msg = "sandhi server: worker pool degraded, not every worker started";
     sakshi_log_kv(SK_WARN, msg, strlen(msg), "started", 7, &val, n);
     return 0;
 }
 
-# Log one WARN through sakshi that a pooled worker exited at start-up because an
-# allocation failed, leaving the pool a worker short. Returns 0, the worker's
-# exit value. CHANGELOG [1.11.0]
-fn _sandhi_server_worker_oom(): i64 {
+# A worker's start-up report: it is ready to take connections. Each slot has one
+# writer (its worker, or the accept thread when the spawn failed), and an aligned
+# 8-byte store is single-copy atomic on every target, so this needs no lock (the
+# stop flag's reasoning). CHANGELOG [1.11.1]
+fn _sandhi_server_worker_ready(slot): i64 {
+    if (slot != 0) { store64(slot, SANDHI_POOL_START_READY); }
+    return 0;
+}
+
+# A worker exits at start-up because an allocation failed: log one WARN through
+# sakshi, then report it to the accept thread. In that order, so the warning is
+# written before a failed start returns. Returns 0, the worker's exit value.
+# CHANGELOG [1.11.0], the report [1.11.1]
+fn _sandhi_server_worker_oom(slot): i64 {
     var msg = "sandhi server: a pooled worker exited at start-up (allocation failed); the pool is short";
     sakshi_warn(msg, strlen(msg));
+    if (slot != 0) { store64(slot, SANDHI_POOL_START_FAILED); }
+    return 0;
+}
+
+# Wait until every one of the `n` start-up slots at `st` has a report, or
+# SANDHI_SERVER_POOL_START_MS passes, and return how many workers are ready. A
+# worker still pending at the bound counts as not ready; if it starts later it
+# serves, or finds the channel closed and exits. Polls every 1 ms: start-up is a
+# thread start and a few allocations. CHANGELOG [1.11.1]
+fn _sandhi_server_pool_await_start(st, n): i64 {
+    var deadline = clock_now_ms() + SANDHI_SERVER_POOL_START_MS;
+    while (1 == 1) {
+        var ready = 0;
+        var pending = 0;
+        var i = 0;
+        while (i < n) {
+            var v = load64(st + i * 8);
+            if (v == SANDHI_POOL_START_PENDING) { pending = pending + 1; }
+            if (v == SANDHI_POOL_START_READY)   { ready = ready + 1; }
+            i = i + 1;
+        }
+        if (pending == 0) { return ready; }
+        if (clock_now_ms() >= deadline) { return ready; }
+        sleep_ms(1);
+    }
     return 0;
 }
 
@@ -2372,11 +2419,12 @@ fn _sandhi_server_pool_worker(arg): i64 {
     var fp      = load64(arg + SANDHI_POOL_W_FP);
     var ctx     = load64(arg + SANDHI_POOL_W_CTX);
     var idle_ms = load64(arg + SANDHI_POOL_W_IDLE_MS);
+    var slot    = load64(arg + SANDHI_POOL_W_START);
     # `_hsv_req_max` is published by sandhi_server_run_pooled before any worker
     # is spawned, so this read is of a value that is already final.
     var max_req = _hsv_req_max;
     var reqbuf  = alloc_via(default_alloc(), max_req);
-    if (reqbuf == 0) { return _sandhi_server_worker_oom(); }   # 1.11.0: logged
+    if (reqbuf == 0) { return _sandhi_server_worker_oom(slot); }   # 1.11.0: logged
     # 1.9.6 — per-worker reject arena. Every refusal this loop can emit happens
     # BEFORE the user handler runs, so a consumer's own arena discipline cannot
     # reach it: an attacker who only ever gets 400/413/501 back was still growing
@@ -2384,7 +2432,7 @@ fn _sandhi_server_pool_worker(arg): i64 {
     # iteration, so a request always starts with the full budget no matter how
     # the previous one exited. Worker-local, so no cross-worker reset race.
     var rarena = arena_allocator(SANDHI_SERVER_REJECT_ARENA_CAP);
-    if (rarena == 0) { return _sandhi_server_worker_oom(); }
+    if (rarena == 0) { return _sandhi_server_worker_oom(slot); }
     # 1.9.7 — per-worker request arena, published into this thread's slot so
     # `sandhi_server_request_arena` (and therefore the router handler) can find
     # it without threading a parameter through the handler signature. Worker-
@@ -2392,9 +2440,10 @@ fn _sandhi_server_pool_worker(arg): i64 {
     var harena = 0;
     if (_hsv_req_arena_cap > 0 && _sandhi_req_arena_slot >= 0) {
         harena = arena_allocator(_hsv_req_arena_cap);
-        if (harena == 0) { return _sandhi_server_worker_oom(); }
+        if (harena == 0) { return _sandhi_server_worker_oom(slot); }
         thread_local_set(_sandhi_req_arena_slot, harena);
     }
+    _sandhi_server_worker_ready(slot);       # 1.11.1
     while (1 == 1) {
         var cfd = chan_recv(ch);
         if (cfd == 0) { return 0; }          # channel closed
@@ -2476,6 +2525,16 @@ fn sandhi_server_run_pooled(addr, port, handler_fp, ctx, opts): i64 {
         return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
     }
 
+    # 1.11.1 — one start-up slot per worker, zeroed (PENDING).
+    var st = alloc_via(default_alloc(), workers * 8);
+    if (st == 0) {
+        chan_close(ch);
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
+    var si = 0;
+    while (si < workers) { store64(st + si * 8, SANDHI_POOL_START_PENDING); si = si + 1; }
+
     var started = 0;
     var w = 0;
     while (w < workers) {
@@ -2491,22 +2550,31 @@ fn sandhi_server_run_pooled(addr, port, handler_fp, ctx, opts): i64 {
         store64(warg + SANDHI_POOL_W_FP, handler_fp);
         store64(warg + SANDHI_POOL_W_CTX, ctx);
         store64(warg + SANDHI_POOL_W_IDLE_MS, idle_ms);
+        store64(warg + SANDHI_POOL_W_START, st + w * 8);
         if (_sandhi_server_spawn_worker(&_sandhi_server_pool_worker, warg) != 0) {
             started = started + 1;
+        } else {
+            store64(st + w * 8, SANDHI_POOL_START_FAILED);
         }
         w = w + 1;
     }
 
-    # 1.11.0 — with no worker, the accept loop would fill a channel nothing reads
-    # and then park in chan_send with `backlog` connections accepted and unserved,
-    # so the start fails. A short pool serves on the workers it has, and says so in
-    # the log (sakshi WARN).
-    if (started == 0) {
+    # With no ready worker, the accept loop would fill a channel nothing reads and
+    # then park in chan_send with `backlog` connections accepted and unserved, so
+    # the start fails: THREAD when no thread could be created (1.11.0), ALLOC when
+    # threads started but none could allocate its buffers (1.11.1, which waits for
+    # the workers' start-up reports instead of counting spawns). A short pool
+    # serves on the workers that are ready, and says so in the log (sakshi WARN).
+    var ready = _sandhi_server_pool_await_start(st, workers);
+    if (ready == 0) {
         chan_close(ch);
         sock_close(sfd);
-        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_THREAD, 0);
+        if (started == 0) {
+            return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_THREAD, 0);
+        }
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
     }
-    if (started < workers) { _sandhi_server_pool_degraded(started, workers); }
+    if (ready < workers) { _sandhi_server_pool_degraded(ready, workers); }
 
     # 1.9.8 — accept-failure state; see the accept-error policy block above.
     var ast = _sandhi_accept_state_new();
@@ -3140,7 +3208,7 @@ fn sandhi_server_run_tls(addr, port, handler_fp, ctx, opts): i64 {
 # plaintext pool `sandhi_server_run_pooled` never touched sigil scratch and was
 # always safe at any `max_conns`.
 
-# Per-TLS-worker arg (64 bytes): { chan, fp, ctx, idle_ms, cert, cert_len, key, key_len }.
+# Per-TLS-worker arg (72 bytes): { chan, fp, ctx, idle_ms, cert, cert_len, key, key_len, start slot }.
 enum SandhiPoolTlsWorkerOff {
     SANDHI_POOL_TW_CHAN     = 0;
     SANDHI_POOL_TW_FP       = 8;
@@ -3150,8 +3218,9 @@ enum SandhiPoolTlsWorkerOff {
     SANDHI_POOL_TW_CERT_LEN = 40;
     SANDHI_POOL_TW_KEY      = 48;
     SANDHI_POOL_TW_KEY_LEN  = 56;
+    SANDHI_POOL_TW_START    = 64;
 }
-var SANDHI_POOL_TLS_WORKER_ARG_SIZE = 64;
+var SANDHI_POOL_TLS_WORKER_ARG_SIZE = 72;
 
 # Serve one accepted connection for the TLS pool: handshake under the request
 # budget, serve, tear down, rewind the per-connection arena. Called by every TLS
@@ -3216,14 +3285,15 @@ fn _sandhi_server_pool_tls_worker(arg): i64 {
     var cert_len = load64(arg + SANDHI_POOL_TW_CERT_LEN);
     var key      = load64(arg + SANDHI_POOL_TW_KEY);
     var key_len  = load64(arg + SANDHI_POOL_TW_KEY_LEN);
+    var slot     = load64(arg + SANDHI_POOL_TW_START);
     # Published by sandhi_server_run_pooled_tls before any worker spawned.
     var reqbuf   = alloc_via(default_alloc(), _hsv_req_max);
-    if (reqbuf == 0) { return _sandhi_server_worker_oom(); }   # 1.11.0: logged
+    if (reqbuf == 0) { return _sandhi_server_worker_oom(slot); }   # 1.11.0: logged
     # 1.6.10 — per-worker arena, reset_via per connection. Worker ctxs are fully
     # independent, so each owns its own arena → no cross-worker reset race; RSS
     # stays flat per worker.
     var tarena = arena_allocator(SANDHI_SERVER_TLS_ARENA_CAP);
-    if (tarena == 0) { return _sandhi_server_worker_oom(); }
+    if (tarena == 0) { return _sandhi_server_worker_oom(slot); }
     # 1.10.7 — the per-request arena `run_pooled_tls` has resolved since 1.9.7
     # but no TLS worker ever created: `sandhi_server_options_req_arena` was
     # silently ignored on HTTPS and `sandhi_server_request_arena()` answered 0
@@ -3231,9 +3301,10 @@ fn _sandhi_server_pool_tls_worker(arg): i64 {
     var harena = 0;
     if (_hsv_req_arena_cap > 0 && _sandhi_req_arena_slot >= 0) {
         harena = arena_allocator(_hsv_req_arena_cap);
-        if (harena == 0) { return _sandhi_server_worker_oom(); }
+        if (harena == 0) { return _sandhi_server_worker_oom(slot); }
         thread_local_set(_sandhi_req_arena_slot, harena);
     }
+    _sandhi_server_worker_ready(slot);       # 1.11.1
     while (1 == 1) {
         var cfd = chan_recv(ch);
         if (cfd == 0) { return 0; }          # channel closed
@@ -3306,6 +3377,16 @@ fn sandhi_server_run_pooled_tls(addr, port, handler_fp, ctx, opts): i64 {
         return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
     }
 
+    # 1.11.1 — one start-up slot per worker, zeroed (PENDING).
+    var st = alloc_via(default_alloc(), workers * 8);
+    if (st == 0) {
+        chan_close(ch);
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
+    var si = 0;
+    while (si < workers) { store64(st + si * 8, SANDHI_POOL_START_PENDING); si = si + 1; }
+
     var started = 0;
     var w = 0;
     while (w < workers) {
@@ -3325,22 +3406,31 @@ fn sandhi_server_run_pooled_tls(addr, port, handler_fp, ctx, opts): i64 {
         store64(warg + SANDHI_POOL_TW_CERT_LEN, cert_len);
         store64(warg + SANDHI_POOL_TW_KEY, key);
         store64(warg + SANDHI_POOL_TW_KEY_LEN, key_len);
+        store64(warg + SANDHI_POOL_TW_START, st + w * 8);
         if (_sandhi_server_spawn_worker(&_sandhi_server_pool_tls_worker, warg) != 0) {
             started = started + 1;
+        } else {
+            store64(st + w * 8, SANDHI_POOL_START_FAILED);
         }
         w = w + 1;
     }
 
-    # 1.11.0 — with no worker, the accept loop would fill a channel nothing reads
-    # and then park in chan_send with `backlog` connections accepted and unserved,
-    # so the start fails. A short pool serves on the workers it has, and says so in
-    # the log (sakshi WARN).
-    if (started == 0) {
+    # With no ready worker, the accept loop would fill a channel nothing reads and
+    # then park in chan_send with `backlog` connections accepted and unserved, so
+    # the start fails: THREAD when no thread could be created (1.11.0), ALLOC when
+    # threads started but none could allocate its buffers (1.11.1, which waits for
+    # the workers' start-up reports instead of counting spawns). A short pool
+    # serves on the workers that are ready, and says so in the log (sakshi WARN).
+    var ready = _sandhi_server_pool_await_start(st, workers);
+    if (ready == 0) {
         chan_close(ch);
         sock_close(sfd);
-        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_THREAD, 0);
+        if (started == 0) {
+            return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_THREAD, 0);
+        }
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
     }
-    if (started < workers) { _sandhi_server_pool_degraded(started, workers); }
+    if (ready < workers) { _sandhi_server_pool_degraded(ready, workers); }
 
     # 1.9.8 — accept-failure state; see the accept-error policy block above.
     var ast = _sandhi_accept_state_new();

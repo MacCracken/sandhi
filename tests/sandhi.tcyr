@@ -1993,13 +1993,19 @@ fn test_server_pool_no_worker_fails() {
 }
 
 # What a sakshi hook saw: WARN events from the pool, the last one's message, and
-# its `started` field.
+# its `started` field; and (1.11.1) the per-worker start-up exits, counted with an
+# atomic add because workers log them from their own threads at once.
 var _t_sk_degraded  = 0;
 var _t_sk_started[16];
 var _t_sk_started_len = 0;
+var _t_sk_worker_oom = 0;
 
 fn _t_sk_hook(ts, level, category, msg, msg_len, fields) {
     if (level != SK_WARN) { return 0; }
+    if (msg_len >= 37 && memeq(msg, "sandhi server: a pooled worker exited", 37) == 1) {
+        atomic_fetch_add(&_t_sk_worker_oom, 1);
+        return 0;
+    }
     if (msg_len < 35) { return 0; }
     if (memeq(msg, "sandhi server: worker pool degraded", 35) != 1) { return 0; }
     _t_sk_degraded = _t_sk_degraded + 1;
@@ -2089,6 +2095,52 @@ fn test_server_pool_tls_degraded_warns() {
     assert_eq(rc, 0, "tls pool degraded: a short pool starts (and stops on its flag)");
     assert_eq(_t_sk_degraded, 1, "tls pool degraded: one sakshi WARN says the pool is degraded");
     assert_eq(memeq(&_t_sk_started, "2/4", 3), 1, "tls pool degraded: ...started=2/4");
+    return 0;
+}
+
+# 1.11.1 — workers that start and then all exit. A 4 GiB `max_request` is past
+# the stdlib's ALLOC_MAX (2 GiB) on every target, so each worker's request
+# buffer allocation fails at start-up, for real. Through 1.11.0 the accept thread
+# counted those workers as started and went on to accept into a channel nothing
+# read; now it waits for their start-up reports, finds none ready, and fails the
+# start with ALLOC. The stop flag is set first, so the old behaviour returns 0 at
+# once instead of hanging. Mutation: counting spawns instead of ready reports
+# returns 0 here.
+fn test_server_pool_workers_exit_fails() {
+    if (_sandhi_server_pool_inline() == 1) { assert_eq(1, 1, "pool exits: inline pool — skipped"); return 0; }
+    if (_t_threads_concurrent() == 0) { assert_eq(1, 1, "pool exits: no concurrent threads — skipped"); return 0; }
+    var flag[8];
+    store64(&flag, 1);
+    var o = sandhi_server_options_new();
+    sandhi_server_options_stop_flag(o, &flag);
+    sandhi_server_options_max_conns(o, 2);
+    sandhi_server_options_max_request(o, 0x100000000);
+    var err[8];
+    var fd0 = _t_next_fd();
+    _t_sk_degraded = 0;
+    _t_sk_worker_oom = 0;
+    sakshi_set_emit_hook(&_t_sk_hook);
+
+    var rc = sandhi_server_run_pooled(INADDR_LOOPBACK(), 0, &_t_ok_cfd_handler, 0, o);
+    var step = sandhi_server_last_failure(o, 0, &err);
+    var oom1 = atomic_load(&_t_sk_worker_oom);
+    sandhi_server_options_tls(o, "x", 1, "y", 1);
+    var rc2 = sandhi_server_run_pooled_tls(INADDR_LOOPBACK(), 0, 0, 0, o);
+    var step2 = sandhi_server_last_failure(o, 0, 0);
+    var oom2 = atomic_load(&_t_sk_worker_oom) - oom1;
+    sakshi_set_output(SK_OUT_STDERR);
+
+    assert_eq(rc, 1, "pool exits: run_pooled whose workers all exit at start-up returns 1");
+    assert_eq(step, SANDHI_SERVER_FAIL_ALLOC, "pool exits: ...recorded as ALLOC (threads started, buffers did not)");
+    assert_eq(load64(&err), 0, "pool exits: ...with errno 0");
+    assert_eq(rc2, 1, "pool exits: run_pooled_tls likewise returns 1");
+    assert_eq(step2, SANDHI_SERVER_FAIL_ALLOC, "pool exits: ...recorded as ALLOC");
+    assert_eq(oom1, 2, "pool exits: each plaintext worker logged its start-up exit");
+    assert_eq(oom2, 2, "pool exits: each TLS worker logged its start-up exit");
+    assert_eq(_t_sk_degraded, 0, "pool exits: a failed start logs no degraded warning");
+    #ifndef CYRIUS_TARGET_WIN
+    assert_eq(_t_next_fd(), fd0, "pool exits: the failed starts closed their listen sockets");
+    #endif
     return 0;
 }
 
@@ -5681,6 +5733,7 @@ fn main() {
     test_server_pool_no_worker_fails();
     test_server_pool_degraded_warns();
     test_server_pool_tls_degraded_warns();
+    test_server_pool_workers_exit_fails();
 
     test_group("server/options/max_request");
     test_server_stop_wakes_blocked_accept();
