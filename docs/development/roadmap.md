@@ -6,10 +6,11 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.11.2: the two CI gates shipped (the
-> start-up handshake at 1.11.1, the `thread_create` check at 1.11.0). At 1.10.11
-> the Windows accept-errno item shipped, the empty sit-adoption batch was dropped,
-> and the remaining work was reorganized into the lines below.
+> completed work on **2026-10-15** at 1.11.3: the portable Windows harness and the
+> Windows CI job shipped, which completes the 1.11.x line's planned items (1.11.2
+> the two CI gates, 1.11.1 the start-up handshake, 1.11.0 the `thread_create`
+> check). At 1.10.11 the Windows accept-errno item shipped, the empty sit-adoption
+> batch was dropped, and the remaining work was reorganized into the lines below.
 
 ## Context (post-fold)
 
@@ -37,24 +38,20 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 
 ## 1.11.x — Server hardening and Windows parity
 
-Shipped so far: 1.11.0, the pooled loops' `thread_create` check (no worker fails
-the start with `SANDHI_SERVER_FAIL_THREAD`; a short pool serves and logs a sakshi
-WARN); 1.11.1, the start-up handshake (the accept thread waits for each worker's
-ready / failed report, so workers that start and then exit count as not ready);
-1.11.2, two CI gates (`scripts/programs-compile-check.sh`,
-`scripts/surface-link-check.sh`) and CI on ubuntu-26.04 / macos-26 with the
-current actions.
+Every planned item has shipped:
+- **1.11.0:** the pooled loops' `thread_create` check. No worker fails the start with
+  `SANDHI_SERVER_FAIL_THREAD`; a short pool serves and logs a sakshi WARN.
+- **1.11.1:** the start-up handshake. The accept thread waits for each worker's
+  ready / failed report, so workers that start and then exit count as not ready.
+- **1.11.2:** two CI gates (`scripts/programs-compile-check.sh`,
+  `scripts/surface-link-check.sh`), and CI on ubuntu-26.04 / macos-26 with the current
+  actions.
+- **1.11.3:** `tests/sandhi.tcyr` portable to Windows, and a Windows CI job that runs the
+  four suites, cross-built as PE, natively on `windows-2025`.
 
-- **`tests/sandhi.tcyr` portable on Windows, then a Windows CI leg.** First run on
-  cass at 1.10.9: the `h2`, `alloc` and `rpc` suites pass, and `sandhi.tcyr` passed
-  870 of 883 rows. The 13 failures are the harness, not the library:
-  `test_server_conn_seam` opens `/dev/null` with raw syscall 2,
-  `test_download_fd_sink` writes a `/tmp` path, the VERSION row reads `./VERSION`
-  from the run directory, and `_t_canned_server` reads its socket with `sys_read`
-  (the client framing rows). Under wine, from 1.10.11 on, only the three
-  `test_server_conn_seam` rows fail (959 of 962 at 1.11.1). Make them portable, re-run on
-  cass, then add a CI leg: wine on the Linux runner is cheap, and cyrius gates
-  real Windows on cass.
+The line stays open for what the first real-Windows CI run reports. Under wine at
+1.11.3 all four suites pass with no failure. Anything found there takes a 1.11.x patch
+before 1.12.0 opens.
 
 ## 1.12.x — cyrius 6.7.x language adoption (no behaviour change)
 
@@ -220,7 +217,7 @@ move a sandhi pin.
 - **`tests/sandhi.tcyr` cap-drift.** If a patch pushes `sandhi.tcyr` against the
   per-program fixup cap (architecture/001), carve out another `tests/<name>.tcyr` in
   the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 981
-  assertions at 1.11.1.
+  assertions on Linux at 1.11.3.
 - **Fuzz-corpus expansion.** Add harnesses as new parse surfaces land; each
   proposal above that parses wire input (batch responses, merge-patch documents,
   `Set-Cookie`, the CONNECT response) brings its own `fuzz/*.fcyr`. Other

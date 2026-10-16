@@ -18,3 +18,7 @@
 # build artifact, not source. Never commit; never replace with a
 # symlink to a cyrius checkout (see CLAUDE.md "Dependency wiring").
 /lib/
+
+# tests/sandhi.tcyr writes (and removes) this in the working directory; a
+# killed run can leave it behind.
+/_t_sandhi_dl_sink.tmp

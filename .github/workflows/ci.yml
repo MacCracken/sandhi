@@ -433,6 +433,90 @@ jobs:
           cyrius build --no-deps tests/sandhi_raw_include.tcyr build/sandhi-raw-include
           ./build/sandhi-raw-include
 
+  windows-build:
+    # 1.11.3: the four suites, cross-built for Windows (PE) here and run
+    # natively by the `windows` job below. The binaries are built on Linux
+    # with the toolchain's PE backend (`cyrius build --win`, cycc_win) and only
+    # executed on Windows, so the Windows job needs no cyrius install. cyrius
+    # gates real Windows on its self-hosted cass; this is sandhi's equivalent on
+    # a hosted runner. release.yml reuses this workflow, so it gates a release.
+    name: Build Windows test binaries
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Cyrius toolchain
+        run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin" "$HOME/.cyrius/versions/$CYRIUS_VERSION/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin/" 2>/dev/null || true
+          cp "$CYRIUS_DIR/scripts/cyrius" "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin/cyrius" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/versions/$CYRIUS_VERSION/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin/"* 2>/dev/null || true
+          ln -sfn "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin" "$HOME/.cyrius/bin"
+          ln -sfn "$HOME/.cyrius/versions/$CYRIUS_VERSION/lib" "$HOME/.cyrius/lib"
+          echo "$CYRIUS_VERSION" > "$HOME/.cyrius/current"
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+
+      - name: Resolve dependencies
+        run: cyrius deps
+
+      - name: Cross-build the four suites (PE)
+        run: |
+          set -euo pipefail
+          [ -x "$HOME/.cyrius/bin/cycc_win" ] || {
+            echo "ERROR: cycc_win is not in this cyrius toolchain; cannot build for Windows"; exit 1; }
+          mkdir -p build/win
+          for t in sandhi h2 alloc rpc; do
+            cyrius build --win "tests/$t.tcyr" "build/win/$t-tests.exe"
+          done
+          ls -l build/win
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sandhi-windows-tests
+          path: build/win/*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    # Runs the suites built above on Windows Server 2025. Each binary exits
+    # with its failure count, so any failed assertion fails its step. Run from
+    # the checkout root: the VERSION row reads ./VERSION, and the download
+    # fd-sink row writes (and removes) a file in the working directory.
+    name: Test (Windows x64)
+    needs: windows-build
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sandhi-windows-tests
+          path: build/win
+
+      - name: Test (core)
+        run: ./build/win/sandhi-tests.exe
+
+      - name: Test (h2)
+        run: ./build/win/h2-tests.exe
+
+      - name: Test (alloc)
+        run: ./build/win/alloc-tests.exe
+
+      - name: Test (rpc)
+        run: ./build/win/rpc-tests.exe
+
   security:
     name: Security Scan
     runs-on: ubuntu-26.04

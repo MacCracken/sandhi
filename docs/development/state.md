@@ -4,6 +4,19 @@
 
 ## Version
 
+**1.11.3** — 2026-10-15. **The suite is portable to Windows, and CI runs the four suites on
+`windows-2025`.** The Windows half of 1.11.2's intended scope. No library change, no pin
+change (6.7.12).
+- **Harness:** the rows cass failed at 1.10.9 now use portable calls. The `/dev/null` sinks
+  become a loopback TCP pair (`_t_sock_pair`), `sys_read` on a socket becomes `sock_recv`,
+  and the `/tmp` path becomes a working-directory file the row removes. The two live-peer
+  rows move off AF_UNIX `socketpair`, so they run on Windows too.
+- **CI:** `windows-build` (ubuntu-26.04) cross-builds the suites with `cyrius build --win`;
+  `windows` (`windows-2025`) runs them natively.
+- **Counts:** Linux unchanged (**3,089**). Under wine all four suites pass with no failure:
+  `sandhi` 968, `h2` 1,691, `alloc` 353, `rpc` 63.
+- **Not yet run on real Windows:** that is the new job's first run, on the next push.
+
 **1.11.2** — 2026-10-15. **CI: two new gates, and current runners and actions.** No library
 change, no pin change (6.7.12). The third item of the 1.11.x line.
 - **`scripts/programs-compile-check.sh`:** every `programs/*.cyr` must build with no
@@ -687,7 +700,7 @@ Build outputs:
 
 **3,089 assertions green** across five suites (CI runs all five; measured on the **6.7.12** pin at 1.11.1, unchanged at 1.11.2; 3,080 at 1.11.0):
 
-- `tests/sandhi.tcyr` — **981** on Linux (972 at 1.11.0; +9 `test_server_pool_workers_exit_fails`; 962 rows under wine, where the fd-leak checks skip and the Windows codes run) — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint (incl. the 1.6.0 native trust/mTLS enforcement-available + pin-available flips) / SSE / streaming (incl. the 1.6.5 split-inter-chunk-CRLF decoder fix — leading-CRLF parse + split-across-append round-trip, both fail pre-fix) / **download** (1.6.4: result accessors, fd-sink temp-file round-trip + write-error signal, redirect-target resolver across 302/200/follow-off/hops-exhausted/no-Location/downgrade-sentinel) / **server SIGPIPE guard** (1.6.6: `_sandhi_server_ignore_sigpipe()` returns 0 + idempotent) / **server routing** (1.6.7: `route_match` exact/`:name`-capture/segment-count/non-absolute, `_param_int` numeric+non-numeric→-1+oob, router add/cap-full, `router_dispatch` 200/404/405 + query-strip — 28 assertions) / **server TLS** (1.6.8: options `_tls`/`_get_tls` + `_backlog` decouple/floor, `SandhiConn` plain accessors + `conn_write`/`send_*_c` over a /dev/null conn, conn-aware `dispatch_c`/`router_handler_c` 200/404/405 — 22 assertions) / **client dispatch thread-safety** (1.6.9: the `_sandhi_reqctx_*` per-call request context — ctx==0 module-global fallback + per-call isolation, proving a context's open-error / cred-digest don't leak into a sibling context or the module global — 14 assertions) / **mDNS QU receive** (1.6.12: the `discovery/local/qu_unicast` loopback dispatch gate — an unconnected RX receives a unicast reply with a connected TX coexisting on the same port via `SO_REUSEPORT` — 1 assertion).
+- `tests/sandhi.tcyr` — **981** on Linux (972 at 1.11.0; +9 `test_server_pool_workers_exit_fails`). On Windows (CI's `windows` job since 1.11.3; measured under wine) **968**, all passing: the fd-leak checks and the AF_UNIX closed-peer rows skip there, and the Windows errno rows run — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint (incl. the 1.6.0 native trust/mTLS enforcement-available + pin-available flips) / SSE / streaming (incl. the 1.6.5 split-inter-chunk-CRLF decoder fix — leading-CRLF parse + split-across-append round-trip, both fail pre-fix) / **download** (1.6.4: result accessors, fd-sink temp-file round-trip + write-error signal, redirect-target resolver across 302/200/follow-off/hops-exhausted/no-Location/downgrade-sentinel) / **server SIGPIPE guard** (1.6.6: `_sandhi_server_ignore_sigpipe()` returns 0 + idempotent) / **server routing** (1.6.7: `route_match` exact/`:name`-capture/segment-count/non-absolute, `_param_int` numeric+non-numeric→-1+oob, router add/cap-full, `router_dispatch` 200/404/405 + query-strip — 28 assertions) / **server TLS** (1.6.8: options `_tls`/`_get_tls` + `_backlog` decouple/floor, `SandhiConn` plain accessors + `conn_write`/`send_*_c` over a /dev/null conn, conn-aware `dispatch_c`/`router_handler_c` 200/404/405 — 22 assertions) / **client dispatch thread-safety** (1.6.9: the `_sandhi_reqctx_*` per-call request context — ctx==0 module-global fallback + per-call isolation, proving a context's open-error / cred-digest don't leak into a sibling context or the module global — 14 assertions) / **mDNS QU receive** (1.6.12: the `discovery/local/qu_unicast` loopback dispatch gate — an unconnected RX receives a unicast reply with a connected TX coexisting on the same port via `SO_REUSEPORT` — 1 assertion).
 - `tests/h2.tcyr` — **1,691** — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
 - `tests/alloc.tcyr` — **353** — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0). (1.6.1: the conn-timeout test now asserts `_sandhi_conn_set_timeout_ms_a` is arena-independent — it composes the stdlib `sock_set_*_timeout` setters — rather than the retired arena-allocates-timeval behaviour; net −1 vs 343.)
 - `tests/sandhi_raw_include.tcyr` — **1** (1.10.8) — `include "dist/sandhi.cyr"` plus the assert framework and nothing else; CI builds it with `--no-deps` so the `[deps] stdlib` auto-prepend cannot mask a missing requires block.
@@ -750,11 +763,11 @@ list this replaced predated every adoption below.
 
 ## Next
 
-**1.11.x continues** (1.11.0 the `thread_create` check, 1.11.1 the start-up handshake,
-1.11.2 the two CI gates and current runners). No issue or upstream dependency is open.
-Since 1.10.11 the roadmap is organized by release line ([`roadmap.md`](roadmap.md)):
-- **1.11.x** server hardening and Windows parity: left, the portable Windows harness rows
-  and a Windows CI leg.
+**1.11.x's planned items are done** (1.11.0 the `thread_create` check, 1.11.1 the start-up
+handshake, 1.11.2 the two CI gates and current runners, 1.11.3 the portable Windows harness
+and the Windows CI job). No issue or upstream dependency is open. Since 1.10.11 the roadmap
+is organized by release line ([`roadmap.md`](roadmap.md)):
+- **1.11.x** stays open for whatever the first real-Windows CI run reports; then 1.12.0.
 - **1.12.x** cyrius 6.7.x language adoption: `loop`, private `const` and `bool`, traits at
   the resolver and handler seams.
 - **1.13.x** client concurrency and HTTP/2 completeness.

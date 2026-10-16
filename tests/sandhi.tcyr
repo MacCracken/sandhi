@@ -789,11 +789,13 @@ fn test_total_ms_blackhole_returns_timeout() {
 # Connection pool tests (Bite 1 of 0.8.0)
 # ================================================================
 #
-# Fake-conn fixture: /dev/null fd so sandhi_conn_close is real but
-# harmless. Pool API runs end-to-end with no actual network.
+# Fake-conn fixture: an unconnected socket, so sandhi_conn_close is real but
+# harmless. Pool API runs end-to-end with no actual network. (Through 1.11.2 a
+# raw open of /dev/null, which Windows does not have.)
 
 fn _test_pool_fake_conn() {
-    var fd = syscall(2, "/dev/null", 0, 0);  # open(O_RDONLY)
+    var ft, fd = tcp_socket();
+    if (is_err_result(ft) == 1) { fd = 0 - 1; }
     var c = alloc(SANDHI_CONN_STRUCT_SIZE);
     store64(c + SANDHI_CONN_OFF_KIND, SANDHI_CONN_PLAIN);
     store64(c + SANDHI_CONN_OFF_FD, fd);
@@ -2293,6 +2295,57 @@ fn test_route_params() {
     return 0;
 }
 
+# 1.11.3 — a connected loopback TCP pair, the suite's portable stand-in for
+# /dev/null and AF_UNIX socketpair: Windows has neither a /dev/null fd nor
+# socketpair, and its sockets are not file handles that sys_read / sys_close
+# serve. Stores the accepted (server-side) fd at `out` and the client fd at
+# `out + 8`, or -1 in both when the loopback is unavailable. Returns 1 or 0.
+fn _t_sock_pair(out) {
+    store64(out, 0 - 1);
+    store64(out + 8, 0 - 1);
+    var lt, lfd = tcp_socket();
+    if (is_err_result(lt) == 1) { return 0; }
+    if (is_err_result(sock_bind(lfd, INADDR_LOOPBACK(), 0)) == 1) { sock_close(lfd); return 0; }
+    if (is_err_result(sock_listen(lfd, 1)) == 1) { sock_close(lfd); return 0; }
+    var sa[16];
+    var alen[8];
+    store64(&alen, 0);
+    store32(&alen, 16);
+    if (sys_getsockname(lfd, &sa, &alen) < 0) { sock_close(lfd); return 0; }
+    var port = ((load8(&sa + 2) & 0xFF) << 8) | (load8(&sa + 3) & 0xFF);
+    var ct, cfd = tcp_socket();
+    if (is_err_result(ct) == 1) { sock_close(lfd); return 0; }
+    if (is_err_result(sock_connect(cfd, INADDR_LOOPBACK(), port)) == 1) {
+        sock_close(cfd);
+        sock_close(lfd);
+        return 0;
+    }
+    var at, sfd = sock_accept(lfd);
+    sock_close(lfd);
+    if (is_err_result(at) == 1) { sock_close(cfd); return 0; }
+    store64(out, sfd);
+    store64(out + 8, cfd);
+    return 1;
+}
+
+# Close both ends of a `_t_sock_pair`.
+fn _t_sock_pair_close(sp) {
+    if (load64(sp) >= 0) { sock_close(load64(sp)); }
+    if (load64(sp + 8) >= 0) { sock_close(load64(sp + 8)); }
+    return 0;
+}
+
+# Read from `fd` into `buf` until EOF or `max` bytes; returns the count.
+fn _t_recv_all(fd, buf, max) {
+    var have = 0;
+    var going = 1;
+    while (going == 1 && have < max) {
+        var rt, n = sock_recv(fd, buf + have, max - have);
+        if (is_err_result(rt) == 1 || n <= 0) { going = 0; } else { have = have + n; }
+    }
+    return have;
+}
+
 fn test_router_table() {
     var r = sandhi_router_new_a(default_alloc(), 2, 0);
     assert_eq(sandhi_router_add(r, "GET", "/a", &_t_route_handler), 1, "router: add 1");
@@ -2302,7 +2355,9 @@ fn test_router_table() {
 }
 
 fn test_router_dispatch() {
-    var devnull = syscall(2, "/dev/null", 1, 0);   # open O_WRONLY — swallow 404/405 sends
+    var sp[16];
+    _t_sock_pair(&sp);                 # 1.11.3: a loopback socket, not /dev/null
+    var sinkfd = load64(&sp);
     var r = sandhi_router_new(0);
     sandhi_router_add(r, "GET", "/api/notes/:id", &_t_route_handler);
     sandhi_router_add(r, "POST", "/api/notes", &_t_route_handler);
@@ -2313,29 +2368,30 @@ fn test_router_dispatch() {
     _g_route_hit = 0;
     sandhi_route_params_init(&p);
     var req1 = "GET /api/notes/55 HTTP/1.1\r\nHost: x\r\n\r\n";
-    sandhi_router_dispatch(r, 0, devnull, req1, strlen(req1), &p);
+    sandhi_router_dispatch(r, 0, sinkfd, req1, strlen(req1), &p);
     assert_eq(_g_route_calls, 1, "dispatch: matched route invoked once");
     assert_eq(_g_route_hit, 55, "dispatch: :id captured == 55");
 
     # path matches, method doesn't → 405, handler NOT invoked
     _g_route_calls = 0;
     var req2 = "DELETE /api/notes/55 HTTP/1.1\r\nHost: x\r\n\r\n";
-    sandhi_router_dispatch(r, 0, devnull, req2, strlen(req2), &p);
+    sandhi_router_dispatch(r, 0, sinkfd, req2, strlen(req2), &p);
     assert_eq(_g_route_calls, 0, "dispatch: wrong method → 405, not invoked");
 
     # unknown path → 404, handler NOT invoked
     _g_route_calls = 0;
     var req3 = "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n";
-    sandhi_router_dispatch(r, 0, devnull, req3, strlen(req3), &p);
+    sandhi_router_dispatch(r, 0, sinkfd, req3, strlen(req3), &p);
     assert_eq(_g_route_calls, 0, "dispatch: unknown path → 404, not invoked");
 
     # query string is stripped before matching (path_only)
     _g_route_calls = 0;
     sandhi_route_params_init(&p);
     var req4 = "GET /api/notes/7?ref=1 HTTP/1.1\r\nHost: x\r\n\r\n";
-    sandhi_router_dispatch(r, 0, devnull, req4, strlen(req4), &p);
+    sandhi_router_dispatch(r, 0, sinkfd, req4, strlen(req4), &p);
     assert_eq(_g_route_calls, 1, "dispatch: query stripped, route still matches");
     assert_eq(_g_route_hit, 7, "dispatch: :id == 7 with query");
+    _t_sock_pair_close(&sp);
     return 0;
 }
 
@@ -2360,7 +2416,9 @@ fn test_server_req_arena() {
       "request_arena is 0 off a pooled worker — run/run_async have none to own");
 
     # dispatch through an arena behaves exactly as through the global bump
-    var devnull = syscall(2, "/dev/null", 1, 0);
+    var sp[16];
+    _t_sock_pair(&sp);                 # 1.11.3: a loopback socket, not /dev/null
+    var sinkfd = load64(&sp);
     var r = sandhi_router_new(0);
     sandhi_router_add(r, "GET", "/api/notes/:id", &_t_route_handler);
     var p[264];
@@ -2371,7 +2429,7 @@ fn test_server_req_arena() {
     _g_route_hit = 0;
     sandhi_route_params_init(&p);
     var req = "GET /api/notes/91 HTTP/1.1\r\nHost: x\r\n\r\n";
-    sandhi_router_dispatch_a(a, r, 0, devnull, req, strlen(req), &p);
+    sandhi_router_dispatch_a(a, r, 0, sinkfd, req, strlen(req), &p);
     assert_eq(_g_route_calls, 1, "arena dispatch: matched route invoked once");
     assert_eq(_g_route_hit, 91, "arena dispatch: :id captured through the _a accessors");
 
@@ -2381,7 +2439,7 @@ fn test_server_req_arena() {
     for (var i = 0; i < 200; i = i + 1) {
         reset_via(a);
         sandhi_route_params_init(&p);
-        sandhi_router_dispatch_a(a, r, 0, devnull, req, strlen(req), &p);
+        sandhi_router_dispatch_a(a, r, 0, sinkfd, req, strlen(req), &p);
     }
     assert_eq(alloc_used(), used_before,
       "200 arena-threaded dispatches leave the global bump flat — this is the leak 1.9.7 closes");
@@ -2391,7 +2449,7 @@ fn test_server_req_arena() {
     _g_route_calls = 0;
     var miss = "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n";
     var used_404 = alloc_used();
-    sandhi_router_dispatch_a(a, r, 0, devnull, miss, strlen(miss), &p);
+    sandhi_router_dispatch_a(a, r, 0, sinkfd, miss, strlen(miss), &p);
     assert_eq(_g_route_calls, 0, "arena dispatch: unknown path still 404s without invoking");
     # Exactly ZERO bytes. Through 1.9.15 this read `used_404 + 16`, and those 16
     # were not sandhi's: `sock_send` returned a `Result` boxed on the global bump
@@ -2407,13 +2465,13 @@ fn test_server_req_arena() {
     reset_via(a);
     var wrong = "DELETE /api/notes/1 HTTP/1.1\r\nHost: x\r\n\r\n";
     var used_405 = alloc_used();
-    sandhi_router_dispatch_a(a, r, 0, devnull, wrong, strlen(wrong), &p);
+    sandhi_router_dispatch_a(a, r, 0, sinkfd, wrong, strlen(wrong), &p);
     assert_eq(alloc_used(), used_405, "likewise the 405 write");
 
     # a null router still answers, through the arena
     reset_via(a);
     var used_null = alloc_used();
-    sandhi_router_dispatch_a(a, 0, 0, devnull, req, strlen(req), &p);
+    sandhi_router_dispatch_a(a, 0, 0, sinkfd, req, strlen(req), &p);
     assert_eq(alloc_used(), used_null,
       "a null router 404s through the arena as well, and now pays nothing at all");
 
@@ -2422,16 +2480,17 @@ fn test_server_req_arena() {
     _g_route_calls = 0;
     _g_route_hit = 0;
     var used_h = alloc_used();
-    sandhi_server_router_handler_a(a, r, devnull, req, strlen(req));
+    sandhi_server_router_handler_a(a, r, sinkfd, req, strlen(req));
     assert_eq(_g_route_calls, 1, "router_handler_a dispatches");
     assert_eq(_g_route_hit, 91, "with params captured");
     assert_eq(alloc_used(), used_h, "and allocates nothing on the global bump");
 
     # the bare handler still works with no arena configured — the fallback path
     _g_route_calls = 0;
-    sandhi_server_router_handler(r, devnull, req, strlen(req));
+    sandhi_server_router_handler(r, sinkfd, req, strlen(req));
     assert_eq(_g_route_calls, 1,
       "the bare router_handler still dispatches when no request arena is set");
+    _t_sock_pair_close(&sp);
     return 0;
 }
 
@@ -2867,29 +2926,22 @@ fn test_server_oneshot_verbs_report_closed_peer() {
 }
 
 fn test_server_oneshot_verbs_live_peer() {
-    var fds[8];
-    store64(&fds, 0);
-    if (sys_socketpair(1, 1, 0, &fds) != 0) {
-        assert_eq(1, 1, "oneshot live peer: socketpair unavailable — skipped");
+    var sp[16];
+    if (_t_sock_pair(&sp) == 0) {
+        assert_eq(1, 1, "oneshot live peer: loopback unavailable — skipped");
         return 0;
     }
-    var pair = load64(&fds);
-    var srv = pair & 0xFFFFFFFF;
-    var cli = (pair >> 32) & 0xFFFFFFFF;
+    var srv = load64(&sp);
+    var cli = load64(&sp + 8);
     assert_eq(sandhi_server_send_status(srv, 404, "Not Found"), 0, "oneshot live peer: send_status answers 0");
     assert_eq(sandhi_server_send_response(srv, 200, "OK", "text/plain", "hi", 2, 0), 0,
       "oneshot live peer: send_response answers 0");
     assert_eq(sandhi_server_send_204(srv, 0), 0, "oneshot live peer: send_204 answers 0");
-    sys_close(srv);
+    sock_close(srv);
     var buf = alloc(512);
-    var have = 0;
-    var going = 1;
-    while (going == 1 && have < 511) {
-        var n = sys_read(cli, buf + have, 511 - have);
-        if (n <= 0) { going = 0; } else { have = have + n; }
-    }
+    var have = _t_recv_all(cli, buf, 511);
     store8(buf + have, 0);
-    sys_close(cli);
+    sock_close(cli);
     assert_streq(buf,
       "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhiHTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
       "oneshot live peer: exact wire bytes");
@@ -2931,31 +2983,24 @@ fn test_server_chunked_verbs_report_closed_peer() {
 # The same three verbs on a live pair answer 0, and the wire bytes are exactly
 # the head, one framed chunk and the terminator.
 fn test_server_chunked_verbs_live_peer() {
-    var fds[8];
-    store64(&fds, 0);
-    if (sys_socketpair(1, 1, 0, &fds) != 0) {
-        assert_eq(1, 1, "chunked live peer: socketpair unavailable — skipped");
+    var sp[16];
+    if (_t_sock_pair(&sp) == 0) {
+        assert_eq(1, 1, "chunked live peer: loopback unavailable — skipped");
         return 0;
     }
-    var pair = load64(&fds);
-    var srv = pair & 0xFFFFFFFF;
-    var cli = (pair >> 32) & 0xFFFFFFFF;
+    var srv = load64(&sp);
+    var cli = load64(&sp + 8);
     assert_eq(sandhi_server_send_chunked_start(srv, 200, "text/event-stream", 0), 0,
       "chunked live peer: send_chunked_start answers 0");
     assert_eq(sandhi_server_send_chunk(srv, "data: x\n\n", 9), 0,
       "chunked live peer: send_chunk answers 0");
     assert_eq(sandhi_server_send_chunked_end(srv), 0,
       "chunked live peer: send_chunked_end answers 0");
-    sys_close(srv);
+    sock_close(srv);
     var buf = alloc(512);
-    var have = 0;
-    var going = 1;
-    while (going == 1 && have < 511) {
-        var n = sys_read(cli, buf + have, 511 - have);
-        if (n <= 0) { going = 0; } else { have = have + n; }
-    }
+    var have = _t_recv_all(cli, buf, 511);
     store8(buf + have, 0);
-    sys_close(cli);
+    sock_close(cli);
     assert_streq(buf,
       "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n9\r\ndata: x\n\n\r\n0\r\n\r\n",
       "chunked live peer: exact wire bytes");
@@ -3403,18 +3448,23 @@ fn test_server_conn_seam() {
     assert_eq(sandhi_server_conn_fd(c), 7, "conn: plain fd");
     assert_eq(sandhi_server_conn_is_tls(0), 0, "conn: null not tls");
     assert_eq(sandhi_server_conn_fd(0), 0 - 1, "conn: null fd → -1");
-    # conn_write + conn-aware send over a /dev/null plaintext conn succeed
-    var devnull = syscall(2, "/dev/null", 1, 0);
-    var dc = sandhi_server_conn_plain(devnull);
+    # conn_write + conn-aware send over a plaintext conn on a live socket succeed
+    var sp[16];
+    _t_sock_pair(&sp);                 # 1.11.3: a loopback socket, not /dev/null
+    var sinkfd = load64(&sp);
+    var dc = sandhi_server_conn_plain(sinkfd);
     assert_eq(sandhi_server_conn_write(dc, "hello", 5) >= 0, 1, "conn: plain write ok");
     assert_eq(sandhi_server_send_status_c(dc, 404, "Not Found"), 0, "conn: send_status_c ok");
     assert_eq(sandhi_server_send_response_c(dc, 200, "OK", "text/plain", "hi", 2, 0), 0, "conn: send_response_c ok");
+    _t_sock_pair_close(&sp);
     return 0;
 }
 
 fn test_server_dispatch_c() {
-    var devnull = syscall(2, "/dev/null", 1, 0);   # swallow the 404/405 sends
-    var dc = sandhi_server_conn_plain(devnull);
+    var sp[16];
+    _t_sock_pair(&sp);                 # 1.11.3: a loopback socket, not /dev/null
+    var sinkfd = load64(&sp);
+    var dc = sandhi_server_conn_plain(sinkfd);
     var r = sandhi_router_new(0);
     sandhi_router_add(r, "GET", "/api/notes/:id", &_t_route_handler_c);
     sandhi_router_add(r, "POST", "/api/notes", &_t_route_handler_c);
@@ -3445,6 +3495,7 @@ fn test_server_dispatch_c() {
     _g_route_calls = 0;
     sandhi_server_router_handler_c(r, dc, req1, strlen(req1));
     assert_eq(_g_route_calls, 1, "handler_c: routes via stack params");
+    _t_sock_pair_close(&sp);
     return 0;
 }
 
@@ -3456,8 +3507,10 @@ fn _t_noop_route_c(ctx, conn, buf, blen, params): i64 { return 0; }
 # request, arena or not (measured 136 B per routed request, 312 B per 404).
 # Mutation: building with the bare accessors again fails the zero-growth rows.
 fn test_server_dispatch_c_a_is_arena_backed() {
-    var devnull = syscall(2, "/dev/null", 1, 0);
-    var dc = sandhi_server_conn_plain(devnull);
+    var sp[16];
+    _t_sock_pair(&sp);                 # 1.11.3: a loopback socket, not /dev/null
+    var sinkfd = load64(&sp);
+    var dc = sandhi_server_conn_plain(sinkfd);
     var r = sandhi_router_new(0);
     sandhi_router_add(r, "GET", "/api/notes/:id", &_t_noop_route_c);
     var p[264];
@@ -3479,8 +3532,9 @@ fn test_server_dispatch_c_a_is_arena_backed() {
         i = i + 1;
     }
     var grew = alloc_used() - before;
-    syscall(3, devnull);
+    syscall(3, sinkfd);
     assert_eq(grew, 0, "dispatch_c_a: 100 routed / 404 requests on an arena grow the global heap by 0");
+    _t_sock_pair_close(&sp);
     return 0;
 }
 
@@ -4910,8 +4964,8 @@ fn _t_canned_server(arg) {
     var have = 0;
     var done = 0;
     while (done == 0 && have < 4000) {
-        var n = sys_read(cfd, buf + have, 4000 - have);
-        if (n <= 0) { done = 1; } else {
+        var rt, n = sock_recv(cfd, buf + have, 4000 - have);   # 1.11.3: was sys_read
+        if (is_err_result(rt) == 1 || n <= 0) { done = 1; } else {
             have = have + n;
             var i = 0;
             while (i + 3 < have) {
@@ -5287,9 +5341,10 @@ fn test_download_result() {
 }
 
 # The fd-write sink loops over partial writes and returns 1 to continue,
-# (0 - 1) on a write error. Round-trip bytes through a real temp file.
+# (0 - 1) on a write error. Round-trip bytes through a real file, in the working
+# directory (Windows has no /tmp; through 1.11.2 this wrote /tmp), removed after.
 fn test_download_fd_sink() {
-    var path = "/tmp/sandhi_dl_sink_test.bin";
+    var path = "_t_sandhi_dl_sink.tmp";
     var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
     assert(fd >= 0, "dl: temp file opens");
     var payload = "abcdefghij";
@@ -5302,6 +5357,7 @@ fn test_download_fd_sink() {
     assert_eq(n, 10, "dl: 10 bytes landed on disk");
     store8(buf + 10, 0);
     assert_streq(buf, "abcdefghij", "dl: fd-sink wrote exact bytes");
+    sys_unlink(path);
 
     # A write to a bad fd surfaces as the (0 - 1) abort signal.
     var bad = _sandhi_dl_fd_sink(0 - 1, payload, 10);

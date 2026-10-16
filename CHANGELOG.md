@@ -4,6 +4,81 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.11.3] — 2026-10-15
+
+**The suite is portable to Windows, and CI runs all four suites on a real Windows host.**
+This was meant to ship in 1.11.2 with the two CI gates, and did not. No library change and
+no pin change (6.7.12). It completes the roadmap's 1.11.x line.
+
+### Added
+
+- **CI: a Windows job.** Two jobs in `ci.yml`, so `release.yml` (which reuses it) gates on
+  them too:
+  - **`windows-build`** (ubuntu-26.04) installs the pinned cyrius, cross-builds the four
+    suites with `cyrius build --win` (the toolchain's PE backend, `cycc_win`), and uploads
+    the four `.exe` files.
+  - **`windows`** (`windows-2025`) downloads them and runs each from the checkout root.
+    Each binary exits with its failure count, so any failed assertion fails its step. The
+    cyrius toolchain does not run on Windows hosts; this needs only the binaries.
+  - It is sandhi's hosted counterpart to cyrius's own self-hosted Windows gate (cass),
+    where the suites were last run by hand at 1.10.9.
+
+### Fixed
+
+- **tests: the harness rows that failed on real Windows.** At 1.10.9, cass passed
+  `sandhi.tcyr` at 870 of 883 rows. The 13 failures were the harness, not the library:
+  - **A `/dev/null` fd** opened with a raw Linux `syscall(2, …)`, used as the write sink
+    by `test_server_conn_seam`, `test_server_dispatch_c`,
+    `test_server_dispatch_c_a_is_arena_backed`, `test_router_dispatch` and
+    `test_server_req_arena`. Windows has no `/dev/null`, and its sockets are not file
+    handles. The new helper `_t_sock_pair` gives each of them a connected loopback TCP
+    pair, closed at the end of the row. The pool's fake connection
+    (`_test_pool_fake_conn`) uses an unconnected socket.
+  - **`sys_read` on a socket** in the canned test server behind the client framing rows:
+    now `sock_recv`.
+  - **A `/tmp` path** in `test_download_fd_sink`: now `_t_sandhi_dl_sink.tmp` in the
+    working directory, removed by the row (and listed in `.gitignore` in case a run is
+    killed).
+  - **The `VERSION` row** reads `./VERSION`, so it needs the run directory to be the
+    checkout root. The CI job runs from there.
+- **tests: the two "live peer" rows now run on Windows.** `oneshot_verbs_live_peer` and
+  `chunked_verbs_live_peer` read the exact wire bytes over an AF_UNIX `socketpair`, which
+  Windows lacks, so they skipped there. They use `_t_sock_pair` and `sock_recv` now.
+  - The three closed-peer rows and the SIGPIPE row stay on `socketpair`. They depend on a
+    write to a closed AF_UNIX peer failing at once, which TCP does not promise on the
+    first write, so they still skip on Windows.
+
+### Changed
+
+- **CLAUDE.md:** the Closeout Pass names the macOS and Windows CI jobs, and how to
+  reproduce the Windows run with wine.
+- **Roadmap:** the Windows item leaves the 1.11.x line, which is then complete. The line
+  stays open for what the first real-Windows CI run reports.
+
+### Verification
+
+- **Linux, the full gate:**
+  - **3,089 assertions** (981 / 1,691 / 353 / 63 / 1), 8/8 fuzz. lint, fmt (the edited
+    suite included) and vet are clean.
+  - **Builds:** the `CYRIUS_DCE=1` smoke builds, native and libssl, and the aarch64
+    cross-build.
+  - **CI scripts:** the whole-surface link check passes (876 fns, control refused).
+  - **Live gates:** all seven pass.
+  - **dist:** all five bundles regenerated (version stamp only); the `.deps` sidecars are
+    unchanged.
+- **Windows under wine** (the four suites built with `cyrius build --win`, run from the
+  checkout root), all with no failure: `sandhi` 968 of 968, `h2` 1,691, `alloc` 353, `rpc`
+  63. Through 1.11.2 the `sandhi` suite there was 959 of 962. Wine passed cass's 13 rows
+  even before these changes (it maps `/tmp` and serves `sys_read` on sockets), so it
+  cannot show those fixes.
+- **Not yet run on real Windows.** The first real-Windows run is the new CI job's first
+  run, on the next push.
+- **The workflows:**
+  - `actionlint` 1.7.12 is clean apart from one finding: its built-in label list predates
+    `ubuntu-26.04` (GA per `actions/runner-images`). With that label declared, it reports
+    nothing.
+  - The `windows-build` steps (deps, the four PE builds) were run locally.
+
 ## [1.11.2] — 2026-10-15
 
 **CI: two new gates (every program builds; every sandhi function links), and the

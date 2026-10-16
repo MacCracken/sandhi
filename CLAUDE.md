@@ -148,7 +148,9 @@ genuinely isn't in that subset — not that regeneration failed.
 
 ### Closeout Pass (before minor/major bump)
 
-1. Full test suite — every `.tcyr` green (`sandhi` / `h2` / `alloc` / `rpc`)
+1. Full test suite — every `.tcyr` green (`sandhi` / `h2` / `alloc` / `rpc`), on Linux
+   and on CI's macOS and Windows jobs (Windows runs the suites built with
+   `cyrius build --win`; `wine build/win/<suite>-tests.exe` reproduces it locally)
 2. `cyrius lint src/*.cyr` — no unaddressed findings
 3. `cyrius fuzz` — all harnesses green; `scripts/programs-compile-check.sh` and
    `scripts/surface-link-check.sh` pass (CI runs both)
