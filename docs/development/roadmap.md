@@ -6,12 +6,12 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.12.3: the server's transport trait shipped
-> (private `bool` at 1.12.2, private `const` at 1.12.1, the `loop` sweep at 1.12.0);
-> the 1.12.x traits item was re-scoped from the resolver / handler seams to the
-> transport seam (why: CHANGELOG [1.12.3] and the 2.0 item). The 1.11.x line closed at 1.11.3, whose first real-Windows CI
-> run on `windows-2025` passed all four suites, so its section is gone. History is
-> in the CHANGELOG.
+> completed work on **2026-10-15** at 1.12.4: the 1.12.x line is complete (1.12.0
+> the `loop` sweep, 1.12.1 private `const`, 1.12.2 private `bool`, 1.12.3 – 1.12.4
+> the server and client transport traits), so its section is gone, as 1.11.x's
+> went at 1.12.0. The traits item was re-scoped at 1.12.3 from the resolver /
+> handler seams to the transport seam (why: CHANGELOG [1.12.3] and the 2.0 item).
+> History is in the CHANGELOG.
 
 ## Context (post-fold)
 
@@ -27,8 +27,8 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
   within a line ship in the order listed, one item per patch (single focus per
   patch). The lines run in order; a line opens when the previous one has shipped.
 - **Maintenance lands on the open line.** Pin bumps and consumer-filed fixes ship
-  as patches on whichever line is open (1.12.x since 1.12.0) and do not wait for
-  a line of their own.
+  as patches on whichever line is open (1.12.x until 1.13.0 opens 1.13.x) and do
+  not wait for a line of their own.
 - A consumer-filed defect or real-workload friction (sit, bote, …) takes the next
   patch on whatever line is open; it does not wait for its "own" line.
 - Every new public verb still ships permanently into stdlib's `lib/sandhi.cyr`, so
@@ -36,24 +36,6 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
   (CLAUDE.md, small and earned surface), not the full incumbent feature set.
 - Per the no-silent-scope-outs rule, every deferral is a named entry here or in
   [`proposals/`](proposals/README.md), not a buried mention.
-
-## 1.12.x — cyrius 6.7.x language adoption (no behaviour change)
-
-Placed by the W2 stdlib wave (2026-10-08). Shipped so far: 1.12.0, the `loop` /
-`break` sweep (all 20 `while (1 == 1)` loops and 18 of 19 flag-driven ones; see
-CHANGELOG [1.12.0] for the one kept); 1.12.1, private `const` (72 never-written
-integer knobs; see CHANGELOG [1.12.1] for what stays `var`); 1.12.2, private `: bool`
-predicates (36 fns; see CHANGELOG [1.12.2] for the hook left `i64`); 1.12.3, the server
-`SandhiConn` transport as a trait. Every feature these need has shipped
-(cyrius 6.7.0 – 6.7.12: traits and trait-bounded generics, `const`, `bool`,
-`loop`, checked `dyn` at 6.7.8). Internal only: anything that would change a public
-signature or kind waits for 2.0.
-
-- **1.12.4 — the client connection's transport as a trait** (`src/http/conn.cyr`), as
-  1.12.3 did for the server's `SandhiConn`. Plaintext and TLS are sandhi's own two
-  implementations, chosen today by a `sandhi_conn_kind(conn) == SANDHI_CONN_TLS` test in
-  `sandhi_conn_send`, `sandhi_conn_recv` and `sandhi_conn_close`. Internal; the public
-  conn accessors and offsets stay.
 
 ## 1.13.x — Client concurrency and HTTP/2 completeness
 
@@ -162,7 +144,8 @@ move a sandhi pin.
 - **Trait-typed public signatures** for the discovery resolver (`sandhi_resolver_new`
   takes a fn pointer + ctx today) and the server handlers (`fn h(ctx, cfd, buf, blen)`):
   a consumer would declare a struct and an `impl`, and get checked dispatch in return.
-  1.12.3 found no internal trait seam there (see the 1.12.x line).
+  1.12.3 found no internal trait seam there (CHANGELOG [1.12.3]); the transports got
+  their traits instead (1.12.3 server, 1.12.4 client).
 
 ## 2.0.x — after the major
 
@@ -200,8 +183,8 @@ move a sandhi pin.
   cap (architecture/001).
 - **`tests/sandhi.tcyr` cap-drift.** If a patch pushes `sandhi.tcyr` against the
   per-program fixup cap (architecture/001), carve out another `tests/<name>.tcyr` in
-  the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 981
-  assertions on Linux at 1.12.0.
+  the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 1,006
+  assertions on Linux at 1.12.4.
 - **Fuzz-corpus expansion.** Add harnesses as new parse surfaces land; each
   proposal above that parses wire input (batch responses, merge-patch documents,
   `Set-Cookie`, the CONNECT response) brings its own `fuzz/*.fcyr`. Other

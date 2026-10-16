@@ -4,6 +4,71 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.12.4] — 2026-10-15
+
+**The client connection's transport is a trait: `sandhi_conn_send`, `_recv` and `_close`
+dispatch through `SandhiClientTransport` instead of testing `kind` in each.** No
+behaviour change, no public surface change, no pin change (6.7.12). Completes the
+roadmap's 1.12.x line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+### Changed
+
+- **http/conn: `SandhiClientTransport`.** Its members are `send(buf, len)`,
+  `recv(buf, max)` and `close()`, with two impls over the client record (the same shape
+  1.12.3 gave the server):
+  - **`SandhiClientPlainConn`:** `sock_send` / `sock_recv` on the raw socket (a failure
+    is its negative errno), and close shuts the socket.
+  - **`SandhiClientTlsConn`:** `tls_write` (its negative passes through); `tls_read`
+    (any failure is -1); close shuts the session, then the socket.
+  - The bodies are the old branches, moved unchanged.
+- **The transport is formed from `kind` at each call, not stored.** This is where the
+  client differs from the server's `SandhiConn`:
+  - The client record's layout and size (`SANDHI_CONN_STRUCT_SIZE`, 40, and the
+    `SANDHI_CONN_OFF_*` offsets) are public, and records are built by hand: the suites
+    do it in six places (five in `sandhi.tcyr`, one in `alloc.tcyr`).
+  - So `_sandhi_conn_transport(conn)` reads `kind` and returns the matching
+    `dyn SandhiClientTransport`. It is the one place that chooses. The record is
+    unchanged, and a hand-built one dispatches exactly like one from `sandhi_conn_open`.
+  - Through 1.12.3, `send`, `recv` and `close` each tested `kind` themselves.
+- **Roadmap:** the 1.12.x line is complete and its section is removed. Its last item was
+  this one; the line was 1.12.0 `loop`, 1.12.1 `const`, 1.12.2 `bool`, and 1.12.3 – 1.12.4
+  the transport traits. 1.13.x (client concurrency and HTTP/2 completeness) is next.
+
+### Verification
+
+- **First, a probe:** a fn returning a `dyn` formed from a handle chosen by `kind`, called
+  both as `var t: dyn T = f(); t.m()` and as `f().m()`. It builds for native, aarch64,
+  Windows (PE) and AGNOS, and returns the expected values natively, under wine, and under
+  qemu (aarch64).
+- **New group `client/transport`, 10 assertions:**
+  - on a hand-built plaintext record over a live loopback pair: exact bytes out through
+    `sandhi_conn_send`, a reply in through `sandhi_conn_recv`, and `sandhi_conn_close`
+    closing the socket (the peer reads EOF);
+  - the null-conn contract (-1, -1, no-op).
+  - The existing rows that send and receive on hand-built records pass unchanged.
+- **Mutation check:** mapping a plaintext `kind` to the TLS impl fails the send row (got
+  -1). The suite then hangs on a later TLS read of a null session until the runner's
+  timeout, so it fails rather than passing.
+- **The TLS impl** runs end to end in `programs/_server_tls_probe.cyr` (sandhi's own client
+  over TLS 1.3) and in the network gates (`_https_native_loop_gate`,
+  `_https_policy_threading_gate`, `_policy_runtime_probe`, `_stream_idle_gate`).
+- **3,114 assertions** (1,006 / 1,691 / 353 / 63 / 1), 8/8 fuzz. `fmt` and lint are clean.
+- **Windows under wine:** all four suites pass with no failure (993 / 1,691 / 353 / 63).
+- **aarch64 under qemu:** all four suites pass with no failure (1,006 / 1,691 / 353 / 63).
+- **The full Linux gate:**
+  - Builds: the `CYRIUS_DCE=1` smoke builds, native and libssl, and the aarch64
+    cross-build.
+  - Live gates: all seven pass. `_server_tls_probe` [1]–[8] drives sandhi's client over
+    TLS through the new impl.
+  - CI scripts: the whole-surface link check (878 fns; control refused) and the programs
+    sweep (35 programs) pass.
+  - dist: all five bundles regenerated and idempotent; the `.deps` sidecars are unchanged.
+- The AGNOS and Windows smoke cross-builds link.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.12.3] — 2026-10-15
 
 **The server's connection transport is a trait: a `SandhiConn` carries a

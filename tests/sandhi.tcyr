@@ -3460,6 +3460,45 @@ fn test_server_conn_seam() {
     return 0;
 }
 
+# 1.12.4 — the client connection's transport is a trait. Its record is built
+# by hand here (layout and size are public; the suite has always done this), and
+# `_sandhi_conn_transport` forms the transport from `kind` at each call, so a
+# hand-built record dispatches like an opened one. The TLS impl runs end to end
+# in programs/_server_tls_probe.cyr (sandhi's own client over TLS 1.3).
+# Mutation: mapping a plaintext kind to the TLS impl fails these rows.
+fn test_client_transport_plain_live() {
+    var sp[16];
+    if (_t_sock_pair(&sp) == 0) { assert_eq(1, 1, "client transport: loopback unavailable — skipped"); return 0; }
+    var a = arena_allocator(4096);
+    var conn = alloc_via(a, SANDHI_CONN_STRUCT_SIZE);
+    store64(conn + SANDHI_CONN_OFF_KIND, SANDHI_CONN_PLAIN);
+    store64(conn + SANDHI_CONN_OFF_FD, load64(&sp + 8));
+    store64(conn + SANDHI_CONN_OFF_TLS_CTX, 0);
+    var peer = load64(&sp);
+    assert_eq(sandhi_conn_send(conn, "ping", 4), 4, "client transport: send writes 4 bytes");
+    var got[16];
+    var rt, n = sock_recv(peer, &got, 15);
+    assert_eq(n, 4, "client transport: the peer reads 4 bytes");
+    assert_eq(memeq(&got, "ping", 4), 1, "client transport: ...exactly what was sent");
+    sock_send_all(peer, "pong!", 5);
+    var buf[16];
+    assert_eq(sandhi_conn_recv(conn, &buf, 15), 5, "client transport: recv reads the reply");
+    assert_eq(memeq(&buf, "pong!", 5), 1, "client transport: ...byte for byte");
+    assert_eq(sandhi_conn_close(conn), 0, "client transport: close answers 0");
+    var et, en = sock_recv(peer, &got, 15);
+    assert_eq(en, 0, "client transport: after close the peer reads EOF");
+    sock_close(peer);
+    return 0;
+}
+
+fn test_client_transport_null() {
+    assert_eq(sandhi_conn_send(0, "x", 1), 0 - 1, "client transport: send on a null conn is -1");
+    var b[8];
+    assert_eq(sandhi_conn_recv(0, &b, 8), 0 - 1, "client transport: recv on a null conn is -1");
+    assert_eq(sandhi_conn_close(0), 0, "client transport: close on a null conn is a no-op");
+    return 0;
+}
+
 # 1.12.3 — the SandhiConn transport is a trait. The record keeps its public
 # 24-byte prefix (kind / handle / fd at SANDHI_SRVCONN_OFF_*) and carries a
 # `dyn SandhiServerTransport` after it; the conn-aware write and request read
@@ -5926,6 +5965,10 @@ fn main() {
     test_group("server/transport");
     test_server_transport_record();
     test_server_transport_plain_live();
+
+    test_group("client/transport");
+    test_client_transport_plain_live();
+    test_client_transport_null();
 
     test_group("server/tls/dispatch_c");
     test_server_dispatch_c();
