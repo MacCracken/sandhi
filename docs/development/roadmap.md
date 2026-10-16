@@ -6,10 +6,10 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.11.1: the start-up handshake shipped (and
-> the `thread_create` check at 1.11.0). At 1.10.11 the Windows accept-errno item
-> shipped, the empty sit-adoption batch was dropped, and the remaining work was
-> reorganized into the lines below.
+> completed work on **2026-10-15** at 1.11.2: the two CI gates shipped (the
+> start-up handshake at 1.11.1, the `thread_create` check at 1.11.0). At 1.10.11
+> the Windows accept-errno item shipped, the empty sit-adoption batch was dropped,
+> and the remaining work was reorganized into the lines below.
 
 ## Context (post-fold)
 
@@ -40,7 +40,10 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 Shipped so far: 1.11.0, the pooled loops' `thread_create` check (no worker fails
 the start with `SANDHI_SERVER_FAIL_THREAD`; a short pool serves and logs a sakshi
 WARN); 1.11.1, the start-up handshake (the accept thread waits for each worker's
-ready / failed report, so workers that start and then exit count as not ready).
+ready / failed report, so workers that start and then exit count as not ready);
+1.11.2, two CI gates (`scripts/programs-compile-check.sh`,
+`scripts/surface-link-check.sh`) and CI on ubuntu-26.04 / macos-26 with the
+current actions.
 
 - **`tests/sandhi.tcyr` portable on Windows, then a Windows CI leg.** First run on
   cass at 1.10.9: the `h2`, `alloc` and `rpc` suites pass, and `sandhi.tcyr` passed
@@ -52,19 +55,6 @@ ready / failed report, so workers that start and then exit count as not ready).
   `test_server_conn_seam` rows fail (959 of 962 at 1.11.1). Make them portable, re-run on
   cass, then add a CI leg: wine on the Linux runner is cheap, and cyrius gates
   real Windows on cass.
-- **Compile-only CI step over `programs/*.cyr`** (ask before adding). CI compiles
-  only smoke and the seven live gates, so `programs/` rots silently: at 1.10.0
-  nine probes (`dns-probe`, `tls-probe`, `bootstrap-probe`, `cpu-features-probe`,
-  five `dynlib-*`) had not compiled since `src/obs/prof.cyr` landed (1.2.5), and
-  `tls-probe` was Result-migrated at 1.9.16 without a compile. All nine were
-  repaired at 1.10.0.
-- **Whole-surface reachable-undefined CI gate** (ask before adding).
-  `programs/smoke.cyr` references one fn, so its link proves little about the rest
-  of the surface. At 1.10.0 a generated probe taking `&fn` of **all 842** sandhi
-  fns linked under `CYRIUS_DCE=1`, with negative controls (sigil's
-  `secureboot_sign_module` / `_sigil_random_fill`) refused, so no sandhi fn could
-  reach an undefined stub. Worth a CI step before the next stdlib / sigil bump
-  makes the question live again.
 
 ## 1.12.x — cyrius 6.7.x language adoption (no behaviour change)
 

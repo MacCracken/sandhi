@@ -4,6 +4,19 @@
 
 ## Version
 
+**1.11.2** — 2026-10-15. **CI: two new gates, and current runners and actions.** No library
+change, no pin change (6.7.12). The third item of the 1.11.x line.
+- **`scripts/programs-compile-check.sh`:** every `programs/*.cyr` must build with no
+  undefined-function warning (35 today, about two minutes). It catches the 1.10.0-style rot.
+- **`scripts/surface-link-check.sh`:** `&fn` of every fn in `[lib].modules` (876) links under
+  `CYRIUS_DCE=1`, and a negative control (a call to a nonexistent fn) must be refused.
+- **Runners and actions:** `ubuntu-26.04` replaces `ubuntu-latest`. `macos-26` replaces
+  the deprecated `macos-14`. The actions move to `checkout` v7, `upload-artifact` v7,
+  `download-artifact` v8 and `action-gh-release` v3. The ELF-magic step uses `od`, not
+  `xxd`.
+- **Not yet run on GitHub:** the workflows run on the next push. Counts unchanged:
+  **3,089 assertions**.
+
 **1.11.1** — 2026-10-15. **The pooled servers wait for their workers to report ready.** No
 pin change (6.7.12). The second item of the 1.11.x line.
 - **The gap 1.11.0 left:** it counted `thread_create` successes, so a pool whose workers
@@ -657,6 +670,10 @@ All milestone surfaces are live: M1 server (incl. server-side TLS, 1.6.8), M2 HT
 
 Build outputs:
 - `build/sandhi-smoke` — link-proof smoke program.
+- `scripts/programs-compile-check.sh` (1.11.2, **CI gate**) — builds every `programs/*.cyr`
+  into `build/programs/`; fails on a failed build or an undefined-function warning.
+- `scripts/surface-link-check.sh` (1.11.2, **CI gate**) — links `&fn` of every fn in
+  `[lib].modules` under `CYRIUS_DCE=1` (in `build/surface/`), with a negative control.
 - `build/dns-probe` — ad-hoc live DNS check (not part of test suite; `cyrius run programs/dns-probe.cyr <host>`).
 - `build/http-probe` — ad-hoc live HTTP/HTTPS round-trip (`cyrius run programs/http-probe.cyr <url>`).
 - `build/_policy_runtime_probe` — live-network TLS-policy gate (CI step).
@@ -668,7 +685,7 @@ Build outputs:
 
 ## Tests
 
-**3,089 assertions green** across five suites (CI runs all five; measured on the **6.7.12** pin at 1.11.1; 3,080 at 1.11.0):
+**3,089 assertions green** across five suites (CI runs all five; measured on the **6.7.12** pin at 1.11.1, unchanged at 1.11.2; 3,080 at 1.11.0):
 
 - `tests/sandhi.tcyr` — **981** on Linux (972 at 1.11.0; +9 `test_server_pool_workers_exit_fails`; 962 rows under wine, where the fd-leak checks skip and the Windows codes run) — headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint (incl. the 1.6.0 native trust/mTLS enforcement-available + pin-available flips) / SSE / streaming (incl. the 1.6.5 split-inter-chunk-CRLF decoder fix — leading-CRLF parse + split-across-append round-trip, both fail pre-fix) / **download** (1.6.4: result accessors, fd-sink temp-file round-trip + write-error signal, redirect-target resolver across 302/200/follow-off/hops-exhausted/no-Location/downgrade-sentinel) / **server SIGPIPE guard** (1.6.6: `_sandhi_server_ignore_sigpipe()` returns 0 + idempotent) / **server routing** (1.6.7: `route_match` exact/`:name`-capture/segment-count/non-absolute, `_param_int` numeric+non-numeric→-1+oob, router add/cap-full, `router_dispatch` 200/404/405 + query-strip — 28 assertions) / **server TLS** (1.6.8: options `_tls`/`_get_tls` + `_backlog` decouple/floor, `SandhiConn` plain accessors + `conn_write`/`send_*_c` over a /dev/null conn, conn-aware `dispatch_c`/`router_handler_c` 200/404/405 — 22 assertions) / **client dispatch thread-safety** (1.6.9: the `_sandhi_reqctx_*` per-call request context — ctx==0 module-global fallback + per-call isolation, proving a context's open-error / cred-digest don't leak into a sibling context or the module global — 14 assertions) / **mDNS QU receive** (1.6.12: the `discovery/local/qu_unicast` loopback dispatch gate — an unconnected RX receives a unicast reply with a connected TX coexisting on the same port via `SO_REUSEPORT` — 1 assertion).
 - `tests/h2.tcyr` — **1,691** — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
@@ -733,12 +750,11 @@ list this replaced predated every adoption below.
 
 ## Next
 
-**1.11.x continues** (1.11.0 the `thread_create` check, 1.11.1 the start-up handshake).
-No issue or upstream dependency is open. Since 1.10.11 the roadmap is organized by
-release line ([`roadmap.md`](roadmap.md)):
-- **1.11.x** server hardening and Windows parity: next, portable Windows harness rows and
-  a Windows CI leg; then two CI gates to ask about first (a `programs/` compile sweep, a
-  whole-surface reachable-undefined gate).
+**1.11.x continues** (1.11.0 the `thread_create` check, 1.11.1 the start-up handshake,
+1.11.2 the two CI gates and current runners). No issue or upstream dependency is open.
+Since 1.10.11 the roadmap is organized by release line ([`roadmap.md`](roadmap.md)):
+- **1.11.x** server hardening and Windows parity: left, the portable Windows harness rows
+  and a Windows CI leg.
 - **1.12.x** cyrius 6.7.x language adoption: `loop`, private `const` and `bool`, traits at
   the resolver and handler seams.
 - **1.13.x** client concurrency and HTTP/2 completeness.

@@ -14,9 +14,9 @@ concurrency:
 jobs:
   build:
     name: Build & Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Verify version sync (VERSION ↔ src/version_str.cyr)
         # `src/version_str.cyr` is auto-generated from VERSION by
@@ -186,7 +186,9 @@ jobs:
           echo "sandhi-smoke (libssl): $(wc -c < build/sandhi-smoke-libssl) bytes"
 
       - name: Verify ELF magic
-        run: xxd -l 4 build/sandhi-smoke | grep -q "7f45 4c46"
+        # 1.11.2: `od` (coreutils) instead of `xxd`, which the ubuntu-26.04
+        # image does not list among its packages.
+        run: test "$(od -An -tx1 -N4 build/sandhi-smoke | tr -d ' \n')" = "7f454c46"
 
       - name: Cross-build aarch64
         # Cyrius 2.1.1+ added native aarch64 support. Renamed
@@ -218,6 +220,21 @@ jobs:
           file build/sandhi-smoke-aarch64 | grep -q "aarch64" || {
             echo "ERROR: aarch64 build is not an aarch64 ELF"; exit 1; }
           echo "sandhi-smoke-aarch64: $(wc -c < build/sandhi-smoke-aarch64) bytes"
+
+      - name: Compile every program (programs/*.cyr)
+        # 1.11.2. CI builds smoke and the seven live gates; the other programs
+        # were built only by hand, and at 1.10.0 nine of them had not compiled
+        # since 1.2.5. Fails on a program that does not build or that warns of
+        # an undefined function (include-list drift). See the script's header.
+        run: bash scripts/programs-compile-check.sh
+
+      - name: Whole-surface link check
+        # 1.11.2. smoke references one sandhi fn, so its link proves little:
+        # this takes `&fn` of every fn in [lib].modules and links them under
+        # CYRIUS_DCE=1, so none can reach an undefined stub. A negative control
+        # (a call to a fn that does not exist) must be refused, or the check
+        # proves nothing. See the script's header.
+        run: bash scripts/surface-link-check.sh
 
       - name: Test (core)
         run: cyrius test tests/sandhi.tcyr
@@ -373,11 +390,13 @@ jobs:
     # because hosted Intel jobs sat queued. It is covered by the release
     # procedure instead, which runs these four files on a real Intel Mac.
     # release.yml reuses this workflow, so this job gates a release too.
+    # 1.11.2: macos-14 is deprecated on the hosted runners; macos-26 is the
+    # current arm64 image (also `macos-latest`).
     name: Test (macOS arm64)
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Cyrius toolchain (the pinned release)
         # The canonical OS/arch-aware installer from the pinned tag: it fetches
@@ -416,9 +435,9 @@ jobs:
 
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Scan for dangerous patterns
         # Matches code lines only — rejects patterns in `#` comments.
         # awk strip-and-check pattern matches yukti's CI shape.
@@ -491,9 +510,9 @@ jobs:
 
   docs:
     name: Documentation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check required files
         run: |
           MISSING=0

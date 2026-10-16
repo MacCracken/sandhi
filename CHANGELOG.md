@@ -4,6 +4,90 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.11.2] — 2026-10-15
+
+**CI: two new gates (every program builds; every sandhi function links), and the
+workflows move to ubuntu-26.04, macos-26 and the current major of each action.** No library
+change and no pin change (6.7.12). The third item of the roadmap's 1.11.x line.
+
+### Added
+
+- **CI: `scripts/programs-compile-check.sh`, a compile-only sweep over
+  `programs/*.cyr`.** CI built smoke and the seven live gates; the other 27 programs (the
+  probes, the dynlib experiments, the 7-arg repro) were built only by hand. At 1.10.0 nine
+  of them had not compiled since `src/obs/prof.cyr` landed at 1.2.5.
+  - **What fails it:** a program that does not build, or one that builds with an
+    "undefined function" warning (an include list that no longer covers what the program
+    reaches). Other warnings are printed without failing, so an unrelated toolchain
+    warning does not block every change.
+  - **Measured:** all 35 programs build with no warning at all, in about two minutes.
+  - **Mutation check:** dropping `dns-probe.cyr`'s `include "src/obs/prof.cyr"` (the 1.10.0
+    rot) fails it.
+- **CI: `scripts/surface-link-check.sh`, the whole-surface link check.** `smoke.cyr`
+  references one sandhi fn, so its link proves little: DCE drops whatever smoke does not
+  reach, and a fn that calls an undefined stub fails the link only when something reaches
+  it. The script promotes the one-off 1.10.0 probe to a gate:
+  - It takes `&fn` of every top-level `fn` in `[lib].modules` (876 today, public and
+    private), in chunks of 100, and links the probe under `CYRIUS_DCE=1`. All 876 link.
+  - **Negative control:** the same probe plus a call to a function that does not exist
+    must be refused as a reachable undefined function, or the check proved nothing. It is.
+  - **Mutation check:** a private fn calling an undefined stub, which nothing reaches,
+    still lets smoke build. The check fails on it, naming the stub.
+  - It refuses to run if a `fn` is ever defined inside an `#if` / `#ifdef` / `#ifndef`
+    block (none is today), rather than reference a fn this target may not compile.
+  - `CYRIUS_DCE_VERBOSE` cannot stand in for that scan: it lists only the fns DCE removed,
+    and every fn reachable from an address-taken one (a pooled worker, the ALPN hook) counts
+    as live. Found by the first draft, whose sanity check refused to pass with 647 of 876
+    listed.
+  - Both run in the Linux build job, before the suites, and locally from the repo root.
+    Generated files go in `build/`, which is gitignored.
+
+### Changed
+
+- **CI runners:** the build, security and docs jobs and both release jobs move from
+  `ubuntu-latest` (24.04) to **`ubuntu-26.04`**, GA on the hosted runners; `ubuntu-latest`
+  itself moves there in November 2026.
+- **CI: the macOS job moves from `macos-14` to `macos-26` (arm64).** Not part of the ask:
+  `macos-14` is marked deprecated on the hosted runners
+  ([runner-images#13518](https://github.com/actions/runner-images/issues/13518)), so the job
+  would have stopped running. `macos-26` is the current arm64 image (`macos-latest`).
+- **Actions, to the current major of each** (checked against each repo's latest release on
+  2026-10-15; every major tag resolves):
+
+  | Action | Was | Now |
+  |---|---|---|
+  | `actions/checkout` | v4 | **v7** (7.0.1) |
+  | `actions/upload-artifact` | v4 | **v7** (7.0.2) |
+  | `actions/download-artifact` | v4 | **v8** (8.0.2) |
+  | `softprops/action-gh-release` | v2 | **v3** (3.0.3) |
+
+  - All four now run on Node 24, which the hosted runners have.
+  - None of their breaking changes touches these workflows. `download-artifact` v5
+    changed the path of a single artifact downloaded *by ID*; `release.yml` downloads by
+    name. Its v8 fails on a hash mismatch, which is the desired behaviour. `checkout` v7
+    refuses fork PRs under `pull_request_target` / `workflow_run`, triggers these
+    workflows do not use.
+- **CI: "Verify ELF magic" uses `od` (coreutils) instead of `xxd`.** The ubuntu-26.04
+  image does not list `xxd` (vim-common) among its packages. The new check passes on the
+  smoke binary and fails on a non-ELF file.
+- **CLAUDE.md:** the two scripts join the Quick Start and the Closeout Pass.
+- **Roadmap:** both CI items leave the 1.11.x line. Left on it: the portable Windows
+  harness rows and a Windows CI leg.
+
+### Verification
+
+- Both scripts pass locally, and each fails on its mutation (above).
+- **The rest of the gate**, unchanged:
+  - **3,089 assertions** (981 / 1,691 / 353 / 63 / 1), 8/8 fuzz; lint, fmt and vet clean.
+  - **Builds:** the `CYRIUS_DCE=1` smoke builds, native and libssl, and the aarch64
+    cross-build.
+  - **Live gates:** all seven pass.
+  - **dist:** all five bundles regenerated (version stamp only); the `.deps` sidecars are
+    unchanged.
+- **The workflows** parse as YAML. Every `uses:` major tag exists upstream. The new runner
+  labels are listed as GA in `actions/runner-images`. The workflows themselves have not
+  run on GitHub yet: they run on the next push.
+
 ## [1.11.1] — 2026-10-15
 
 **A pooled server waits for its workers to report ready before it accepts. A pool whose

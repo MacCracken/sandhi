@@ -46,6 +46,8 @@ cyrius lint src/*.cyr                                      # static checks
 CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sandhi-smoke  # release-parity build
 cyrius build -D CYRIUS_TLS_LIBSSL programs/smoke.cyr build/sandhi-smoke-libssl  # deprecated libssl opt-in
 cyrius fuzz                                                # fuzz harnesses (fuzz/*.fcyr) — gating in CI
+bash scripts/programs-compile-check.sh                     # every programs/*.cyr builds (CI gate)
+bash scripts/surface-link-check.sh                         # every src fn links under DCE (CI gate)
 
 # Regenerate the dist bundles — ALL FIVE, every release. Bare `cyrius distlib`
 # does only dist/sandhi.cyr; `--all` (cyrius 6.5.x+) does base + every profile.
@@ -148,7 +150,8 @@ genuinely isn't in that subset — not that regeneration failed.
 
 1. Full test suite — every `.tcyr` green (`sandhi` / `h2` / `alloc` / `rpc`)
 2. `cyrius lint src/*.cyr` — no unaddressed findings
-3. `cyrius fuzz` — all harnesses green
+3. `cyrius fuzz` — all harnesses green; `scripts/programs-compile-check.sh` and
+   `scripts/surface-link-check.sh` pass (CI runs both)
 4. All consumer pins up to date with the new tag
 5. **All five** dist bundles re-generated cleanly (see above) — not just
    `dist/sandhi.cyr`; regenerating one is the easy miss, and CI catches it
