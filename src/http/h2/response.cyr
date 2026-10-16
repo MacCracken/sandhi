@@ -57,10 +57,10 @@ fn _h2_parse_status(s): i64 {
 }
 
 # 1 if the header name starts with ':' (a pseudo-header).
-fn _h2_is_pseudo(name): i64 {
-    if (name == 0) { return 0; }
-    if (load8(name) == 58) { return 1; }
-    return 0;
+fn _h2_is_pseudo(name): bool {
+    if (name == 0) { return false; }
+    if (load8(name) == 58) { return true; }
+    return false;
 }
 
 # Append `n` bytes from `src` to `dst+dst_off`. Caller pre-allocated.

@@ -6,8 +6,8 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.12.1: private `const` shipped (the `loop`
-> sweep at 1.12.0). The 1.11.x line closed at 1.11.3, whose first real-Windows CI
+> completed work on **2026-10-15** at 1.12.2: private `bool` predicates shipped
+> (private `const` at 1.12.1, the `loop` sweep at 1.12.0). The 1.11.x line closed at 1.11.3, whose first real-Windows CI
 > run on `windows-2025` passed all four suites, so its section is gone. History is
 > in the CHANGELOG.
 
@@ -40,13 +40,12 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 Placed by the W2 stdlib wave (2026-10-08). Shipped so far: 1.12.0, the `loop` /
 `break` sweep (all 20 `while (1 == 1)` loops and 18 of 19 flag-driven ones; see
 CHANGELOG [1.12.0] for the one kept); 1.12.1, private `const` (72 never-written
-integer knobs; see CHANGELOG [1.12.1] for what stays `var`). Every feature these need has shipped
+integer knobs; see CHANGELOG [1.12.1] for what stays `var`); 1.12.2, private `: bool`
+predicates (36 fns; see CHANGELOG [1.12.2] for the hook left `i64`). Every feature these need has shipped
 (cyrius 6.7.0 – 6.7.12: traits and trait-bounded generics, `const`, `bool`,
 `loop`, checked `dyn` at 6.7.8). Internal only: anything that would change a public
 signature or kind waits for 2.0.
 
-- **Private `: bool` predicates.** The underscore-prefixed `_is_*` / `_has_*`
-  helpers; the public ones change kind, so they go with 2.0.
 - **Traits at the two natural seams.** The discovery resolver chain
   (`src/discovery/chain.cyr`) and the server handler signatures, internally first.
   If the public handler or resolver signatures should change shape, that half is

@@ -4,6 +4,76 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.12.2] — 2026-10-15
+
+**Private `: bool` predicates: the 36 underscore-prefixed yes/no functions return
+`bool`.** No behaviour change, no public surface change, no pin change (6.7.12). The third
+item of the roadmap's 1.12.x line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`. A `bool` is an 8-byte word holding 0 or 1
+and reads as that integer everywhere, so every caller (`== 1`, `!= 0`, arithmetic, an
+`i64` parameter) behaves as before.
+
+### Changed
+
+- **36 private predicates in 14 files become `: bool`.** Each `return 0;` / `return 1;`
+  in them is `return false;` / `return true;`; their other returns were already
+  comparisons.
+  - **What `bool` adds:** the compiler now checks every return of these functions. A
+    literal `0` or `1`, a bare integer, or a tail call to a non-bool function is refused by
+    name, so one of them can no longer quietly start returning a count or an error code.
+  - **The set:**
+    - comparisons: `_sandhi_streq_ci`, `_sandhi_hdr_ieq`, `_hsv_iceq`, `_h2_streq_ci`,
+      `_sandhi_resp_streq_ci`, `_sandhi_url_sceq`, `_sandhi_rpc_bytes_eq`,
+      `_sandhi_server_cstr_eq`, `_sandhi_resolve_name_eq{,_a}`;
+    - `_is_` / `_has_` tests: `_sandhi_is_redirect`, `_sandhi_req_is_head`,
+      `_sandhi_resp_is_chunked`, `_sandhi_fp_is_hex`, `_sandhi_url_is_https_downgrade`,
+      `_sandhi_method_is_replay_safe`, `_sandhi_client_user_header_is_reserved`,
+      `_sandhi_pool_has_idle`, `_sandhi_hdr_has_unsafe_byte`, `_sandhi_sse_value_has_nul`,
+      `_h2_is_pseudo`, `_h2_header_is_forbidden`, `_h2_te_value_is_trailers`;
+    - other yes/no answers: `_sandhi_url_safe`, `_sandhi_url_same_authority`,
+      `_sandhi_rpc_url_under_base`, `_sandhi_resp_trailer_forbidden`,
+      `_sandhi_retry_should_retry`, `_sandhi_sse_line_empty`, `_h2_hbuf_fits`,
+      `_sandhi_check_spki{,_a}` (the SPKI pin matches), `_sandhi_server_stop_requested`,
+      `_sandhi_server_accept_polls`, `_sandhi_server_pool_inline`, and
+      `_sandhi_server_wait_request` (read now, or the deadline has passed).
+  - **Per file:** `http/client.cyr` 7, `server/mod.cyr` 6, `h2/request.cyr` 4,
+    `http/response.cyr` 3, two each in `headers.cyr`, `sse.cyr`, `url.cyr`,
+    `net/resolve.cyr`, `rpc/dispatch.cyr` and `tls_policy/apply.cyr`, one each in
+    `h2/response.cyr`, `pool.cyr`, `retry.cyr` and `tls_policy/fingerprint.cyr`.
+  - **How they were found:** a script read every private fn in `[lib].modules` and kept
+    those whose every return is `0`, `1` or a comparison and that answer both ways, plus
+    the two `_a` wrappers that only tail-call one of them. A name sweep (`_is_`, `_has_`,
+    `eq`, `_should_`, `_fits`, `_safe`, `_empty`, …) found no predicate the shape test had
+    missed. The five it flagged are actions or constructors.
+- **Kept as `i64`: `_sandhi_apply_hook`.** It returns 0 or 1, but it is a
+  `tls_connect_with_ctx_hook` callback reporting a status with the opposite sense (0 = ok,
+  1 = failed), under a contract `lib/tls.cyr` owns. It is not a predicate.
+- **Public predicates are untouched.** `sandhi_*_is_*` / `_has_*` change kind, which is a
+  2.0 item.
+- **Roadmap:** the private-`bool` item leaves the 1.12.x line. Left on it: traits at the
+  resolver and handler seams.
+
+### Verification
+
+- **3,089 assertions** (981 / 1,691 / 353 / 63 / 1), unchanged. The rows that assert
+  `== 1` / `== 0` on these functions pass unchanged, which is the "a bool reads as 0 / 1"
+  contract. 8/8 fuzz. Every edited file is `fmt`- and lint-clean.
+- **Windows under wine:** all four suites pass with no failure (968 / 1,691 / 353 / 63).
+  The AGNOS and Windows smoke cross-builds link.
+- **Binary size:** the non-DCE smoke binary is the same size as at 1.12.1 (2,004,984
+  bytes). `bool` changes what the compiler checks, not the code.
+- **The full Linux gate:**
+  - Builds: the `CYRIUS_DCE=1` smoke builds, native and libssl, and the aarch64
+    cross-build.
+  - Live gates: all seven pass.
+  - CI scripts: the whole-surface link check (876 fns, control refused) and the programs
+    sweep (35 programs) pass.
+  - dist: all five bundles regenerated (same line counts) and idempotent; the `.deps`
+    sidecars are unchanged.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.12.1] — 2026-10-15
 
 **Private `const`: the 72 underscore-prefixed integer knobs that nothing ever writes are

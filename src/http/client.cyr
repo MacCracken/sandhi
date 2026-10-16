@@ -136,12 +136,12 @@ fn _sandhi_client_host_header(url_struct): i64 {
 # from response.cyr (bundled before client.cyr); client.cyr's own
 # `_sandhi_streq_ci` sits later in the file and isn't reachable from
 # here under single-pass compilation.
-fn _sandhi_client_user_header_is_reserved(name): i64 {
-    if (_sandhi_resp_streq_ci(name, "Host") == 1)              { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Content-Length") == 1)    { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Transfer-Encoding") == 1) { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Connection") == 1)        { return 1; }
-    return 0;
+fn _sandhi_client_user_header_is_reserved(name): bool {
+    if (_sandhi_resp_streq_ci(name, "Host") == 1)              { return true; }
+    if (_sandhi_resp_streq_ci(name, "Content-Length") == 1)    { return true; }
+    if (_sandhi_resp_streq_ci(name, "Transfer-Encoding") == 1) { return true; }
+    if (_sandhi_resp_streq_ci(name, "Connection") == 1)        { return true; }
+    return false;
 }
 
 # Construct the wire-format request as a Str. user_headers may be 0.
@@ -289,11 +289,11 @@ fn _sandhi_http_do(method, url, user_headers, body, body_len, max_bytes,
 # GET, HEAD, OPTIONS, TRACE — sandhi exposes the first three. PUT
 # is idempotent but not safe (changes server state), so it stays
 # out per OpenSSL's recommended posture.
-fn _sandhi_method_is_replay_safe(method): i64 {
-    if (streq(method, "GET") == 1) { return 1; }
-    if (streq(method, "HEAD") == 1) { return 1; }
-    if (streq(method, "OPTIONS") == 1) { return 1; }
-    return 0;
+fn _sandhi_method_is_replay_safe(method): bool {
+    if (streq(method, "GET") == 1) { return true; }
+    if (streq(method, "HEAD") == 1) { return true; }
+    if (streq(method, "OPTIONS") == 1) { return true; }
+    return false;
 }
 
 # 1.3.3 — FNV-1a 64-bit byte-mixer. Continues from a running hash
@@ -527,13 +527,13 @@ fn _sandhi_http_do_impl(method, url, user_headers, body, body_len, max_bytes,
 # is built by `_sandhi_client_build_request_a` from the method, so the
 # method token is always first. A HEAD response carries no body whatever
 # its Content-Length says (RFC 7230 §3.3.3); recv_framed needs to know.
-fn _sandhi_req_is_head(req_data): i64 {
-    if (req_data == 0) { return 0; }
+fn _sandhi_req_is_head(req_data): bool {
+    if (req_data == 0) { return false; }
     if (load8(req_data) == 72 && load8(req_data + 1) == 69 && load8(req_data + 2) == 65
       && load8(req_data + 3) == 68 && load8(req_data + 4) == 32) {
-        return 1;
+        return true;
     }
-    return 0;
+    return false;
 }
 
 # Send request, receive response, close connection. Extracted so the
@@ -959,13 +959,13 @@ fn sandhi_http_options_get_pool(opts): i64 {
 }
 
 # 1 if the status code indicates a redirect we follow.
-fn _sandhi_is_redirect(status): i64 {
-    if (status == 301) { return 1; }
-    if (status == 302) { return 1; }
-    if (status == 303) { return 1; }
-    if (status == 307) { return 1; }
-    if (status == 308) { return 1; }
-    return 0;
+fn _sandhi_is_redirect(status): bool {
+    if (status == 301) { return true; }
+    if (status == 302) { return true; }
+    if (status == 303) { return true; }
+    if (status == 307) { return true; }
+    if (status == 308) { return true; }
+    return false;
 }
 
 # Resolve a Location header value against a base URL. Returns an alloc'd
@@ -1015,43 +1015,43 @@ fn _sandhi_resolve_location(base_url, location): i64 {
 # 0.9.0 P0 #4 — case-insensitive cstr compare. Used by the redirect
 # follower for header-name filtering. Inlined here rather than in
 # headers.cyr because the only consumer is right below.
-fn _sandhi_streq_ci(a, b): i64 {
-    if (a == 0 || b == 0) { return 0; }
+fn _sandhi_streq_ci(a, b): bool {
+    if (a == 0 || b == 0) { return false; }
     var i = 0;
     loop {
         var ca = load8(a + i);
         var cb = load8(b + i);
         if (ca >= 65 && ca <= 90) { ca = ca + 32; }
         if (cb >= 65 && cb <= 90) { cb = cb + 32; }
-        if (ca != cb) { return 0; }
-        if (ca == 0)  { return 1; }
+        if (ca != cb) { return false; }
+        if (ca == 0)  { return true; }
         i = i + 1;
     }
-    return 0;
+    return false;
 }
 
 # 1 if `next_url` has the same scheme+host+port as `prev_url`. Used
 # to decide whether to forward sensitive headers across a redirect.
-fn _sandhi_url_same_authority(prev_url, next_url): i64 {
+fn _sandhi_url_same_authority(prev_url, next_url): bool {
     var pu = sandhi_url_parse(prev_url);
     var nu = sandhi_url_parse(next_url);
-    if (pu == 0 || nu == 0) { return 0; }
-    if (sandhi_url_scheme(pu) != sandhi_url_scheme(nu)) { return 0; }
-    if (sandhi_url_port(pu) != sandhi_url_port(nu)) { return 0; }
-    if (streq(sandhi_url_host(pu), sandhi_url_host(nu)) != 1) { return 0; }
-    return 1;
+    if (pu == 0 || nu == 0) { return false; }
+    if (sandhi_url_scheme(pu) != sandhi_url_scheme(nu)) { return false; }
+    if (sandhi_url_port(pu) != sandhi_url_port(nu)) { return false; }
+    if (streq(sandhi_url_host(pu), sandhi_url_host(nu)) != 1) { return false; }
+    return true;
 }
 
 # 1 if `prev_url` was HTTPS and `next_url` is HTTP — a security
 # downgrade we refuse to follow per the curl CVE-2025-0167 /
 # 14524 cluster lessons.
-fn _sandhi_url_is_https_downgrade(prev_url, next_url): i64 {
+fn _sandhi_url_is_https_downgrade(prev_url, next_url): bool {
     var pu = sandhi_url_parse(prev_url);
     var nu = sandhi_url_parse(next_url);
-    if (pu == 0 || nu == 0) { return 0; }
+    if (pu == 0 || nu == 0) { return false; }
     if (sandhi_url_scheme(pu) == SANDHI_URL_HTTPS
-      && sandhi_url_scheme(nu) == SANDHI_URL_HTTP) { return 1; }
-    return 0;
+      && sandhi_url_scheme(nu) == SANDHI_URL_HTTP) { return true; }
+    return false;
 }
 
 # Return a fresh sandhi_headers struct that's a copy of `src` with

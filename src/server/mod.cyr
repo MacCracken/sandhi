@@ -54,13 +54,13 @@ fn _hsv_to_lower(c): i64 {
     return c;
 }
 
-fn _hsv_iceq(a, b, n): i64 {
+fn _hsv_iceq(a, b, n): bool {
     var i = 0;
     while (i < n) {
-        if (_hsv_to_lower(load8(a + i)) != _hsv_to_lower(load8(b + i))) { return 0; }
+        if (_hsv_to_lower(load8(a + i)) != _hsv_to_lower(load8(b + i))) { return false; }
         i = i + 1;
     }
-    return 1;
+    return true;
 }
 
 fn _hsv_next_nl(buf, start, end): i64 {
@@ -656,16 +656,16 @@ fn sandhi_server_recv_request(cfd, buf, max): i64 {
 # `fd_wait_ready`, so a peer that sends nothing, or one byte at a time, cannot
 # hold the read past the deadline. A wait error other than EINTR (agnos has no
 # poll: -38) goes on to the read, which reports it or is bounded by idle_ms.
-fn _sandhi_server_wait_request(cfd, deadline_ms): i64 {
-    if (deadline_ms <= 0) { return 1; }
+fn _sandhi_server_wait_request(cfd, deadline_ms): bool {
+    if (deadline_ms <= 0) { return true; }
     loop {
         var left = deadline_ms - clock_now_ms();
-        if (left <= 0) { return 0; }
+        if (left <= 0) { return false; }
         var r = fd_wait_ready(cfd, 0, left);
-        if (r == 1) { return 1; }
-        if (r < 0 && r != 0 - 4) { return 1; }
+        if (r == 1) { return true; }
+        if (r < 0 && r != 0 - 4) { return true; }
     }
-    return 1;
+    return true;
 }
 
 # `sandhi_server_recv_request` under a whole-request deadline (1.10.7):
@@ -1203,10 +1203,10 @@ fn sandhi_server_options_get_stop_flag(opts): i64 {
 #
 # A 0 pointer is "no flag configured", which is never a stop — that keeps the
 # call site a single unconditional check rather than a nested one.
-fn _sandhi_server_stop_requested(ptr): i64 {
-    if (ptr == 0) { return 0; }
-    if (load64(ptr) != 0) { return 1; }
-    return 0;
+fn _sandhi_server_stop_requested(ptr): bool {
+    if (ptr == 0) { return false; }
+    if (load64(ptr) != 0) { return true; }
+    return false;
 }
 
 # Arm the listen fd so a stop-enabled loop can surface between accepts.
@@ -1235,14 +1235,14 @@ fn _sandhi_server_arm_stop_poll(sfd, stop_ptr): i64 {
 # 1 on the targets whose accept ignores the listener's SO_RCVTIMEO, so a
 # stop-armed listener must be polled instead: macOS (measured on ecb and ach at
 # 1.10.4) and Windows (measured on cass at 1.10.9).
-fn _sandhi_server_accept_polls(): i64 {
+fn _sandhi_server_accept_polls(): bool {
     #ifdef CYRIUS_TARGET_MACOS
-    return 1;
+    return true;
     #endif
     #ifdef CYRIUS_TARGET_WIN
-    return 1;
+    return true;
     #endif
-    return 0;
+    return false;
 }
 
 # `sock_accept` for the four blocking serve loops, which must surface every
@@ -2054,11 +2054,11 @@ fn sandhi_route_param(params, idx): i64 {
 
 # Case-sensitive cstr equality (request method vs route method). Match only if
 # both hit NUL together.
-fn _sandhi_server_cstr_eq(a, b): i64 {
-    if (a == 0 || b == 0) { return 0; }
+fn _sandhi_server_cstr_eq(a, b): bool {
+    if (a == 0 || b == 0) { return false; }
     var i = 0;
     while (load8(a + i) != 0 && load8(b + i) != 0) {
-        if (load8(a + i) != load8(b + i)) { return 0; }
+        if (load8(a + i) != load8(b + i)) { return false; }
         i = i + 1;
     }
     return load8(a + i) == load8(b + i);
@@ -2276,9 +2276,9 @@ fn _sandhi_server_pool_serve(fp, ctx, idle_ms, cfd, reqbuf, max_req, rarena, har
 # Windows; agnos and cx keep the serial ring, whose `chan_recv` answers 0 when
 # empty, and a pooled worker would read that 0 as "channel closed" and exit.
 # CHANGELOG [1.10.7] (the inline path), [1.10.9] (the capability)
-fn _sandhi_server_pool_inline(): i64 {
-    if (CHAN_BLOCKING == 1) { return 0; }
-    return 1;
+fn _sandhi_server_pool_inline(): bool {
+    if (CHAN_BLOCKING == 1) { return false; }
+    return true;
 }
 
 # The plaintext pool where it must run inline: one worker's resources on the

@@ -131,11 +131,11 @@ fn _h2_emit_user_header(h2c, name, value, hbuf, off): i64 {
 # never longer than the raw octets plus its length prefixes (the encoder picks
 # Huffman only when strictly shorter), so `strlen(name) + strlen(value) + 16`
 # covers index prefix + two length varints with room to spare.
-fn _h2_hbuf_fits(off, need): i64 {
-    if (off < 0)  { return 0; }
-    if (need < 0) { return 0; }
-    if (off + need > _SANDHI_H2_REQ_HBUF_CAP) { return 0; }
-    return 1;
+fn _h2_hbuf_fits(off, need): bool {
+    if (off < 0)  { return false; }
+    if (need < 0) { return false; }
+    if (off + need > _SANDHI_H2_REQ_HBUF_CAP) { return false; }
+    return true;
 }
 
 fn sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path, authority,
@@ -189,24 +189,24 @@ fn sandhi_h2_request_encode_headers(h2c, method, scheme, path, authority,
 # value (e.g. `te: gzip`) must be dropped — the spec says a request
 # with TE != "trailers" is malformed. We drop instead of erroring so
 # the request still ships.
-fn _h2_header_is_forbidden(name, value): i64 {
-    if (_h2_streq_ci(name, "connection") == 1)        { return 1; }
-    if (_h2_streq_ci(name, "keep-alive") == 1)        { return 1; }
-    if (_h2_streq_ci(name, "proxy-connection") == 1)  { return 1; }
-    if (_h2_streq_ci(name, "transfer-encoding") == 1) { return 1; }
-    if (_h2_streq_ci(name, "upgrade") == 1)           { return 1; }
+fn _h2_header_is_forbidden(name, value): bool {
+    if (_h2_streq_ci(name, "connection") == 1)        { return true; }
+    if (_h2_streq_ci(name, "keep-alive") == 1)        { return true; }
+    if (_h2_streq_ci(name, "proxy-connection") == 1)  { return true; }
+    if (_h2_streq_ci(name, "transfer-encoding") == 1) { return true; }
+    if (_h2_streq_ci(name, "upgrade") == 1)           { return true; }
     if (_h2_streq_ci(name, "te") == 1) {
-        if (_h2_te_value_is_trailers(value) == 1) { return 0; }
-        return 1;
+        if (_h2_te_value_is_trailers(value) == 1) { return false; }
+        return true;
     }
-    return 0;
+    return false;
 }
 
 # 1 if `value` is the literal "trailers" (case-insensitive) with
 # optional surrounding whitespace. NULL or any other value → 0.
 # Used only by `_h2_header_is_forbidden` for the te-conditional rule.
-fn _h2_te_value_is_trailers(value): i64 {
-    if (value == 0) { return 0; }
+fn _h2_te_value_is_trailers(value): bool {
+    if (value == 0) { return false; }
     var i = 0;
     while (load8(value + i) == 32 || load8(value + i) == 9) { i = i + 1; }
     var need = "trailers";
@@ -214,31 +214,31 @@ fn _h2_te_value_is_trailers(value): i64 {
     while (j < 8) {
         var ch = load8(value + i + j);
         if (ch >= 65 && ch <= 90) { ch = ch + 32; }
-        if (ch != load8(need + j)) { return 0; }
+        if (ch != load8(need + j)) { return false; }
         j = j + 1;
     }
     var k = i + 8;
     loop {
         var ch2 = load8(value + k);
-        if (ch2 == 0) { return 1; }
-        if (ch2 != 32 && ch2 != 9) { return 0; }
+        if (ch2 == 0) { return true; }
+        if (ch2 != 32 && ch2 != 9) { return false; }
         k = k + 1;
     }
-    return 1;
+    return true;
 }
 
-fn _h2_streq_ci(a, b): i64 {
+fn _h2_streq_ci(a, b): bool {
     var i = 0;
     loop {
         var ca = load8(a + i);
         var cb = load8(b + i);
         if (ca >= 65 && ca <= 90) { ca = ca + 32; }
         if (cb >= 65 && cb <= 90) { cb = cb + 32; }
-        if (ca != cb) { return 0; }
-        if (ca == 0)  { return 1; }
+        if (ca != cb) { return false; }
+        if (ca == 0)  { return true; }
         i = i + 1;
     }
-    return 0;
+    return false;
 }
 
 # ================================================================

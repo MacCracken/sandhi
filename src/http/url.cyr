@@ -43,32 +43,32 @@ fn sandhi_url_query(u): i64 { return load64(u + SANDHI_URL_OFF_QUERY); }
 
 # Validate that no byte in the URL can escape the request line / header
 # block. Returns 1 if safe, 0 if any disallowed byte is present.
-fn _sandhi_url_safe(url): i64 {
+fn _sandhi_url_safe(url): bool {
     var i = 0;
     while (load8(url + i) != 0) {
         var c = load8(url + i);
-        if (c == 13) { return 0; }  # CR
-        if (c == 10) { return 0; }  # LF
-        if (c == 9)  { return 0; }  # TAB
-        if (c == 32) { return 0; }  # SPACE
+        if (c == 13) { return false; }  # CR
+        if (c == 10) { return false; }  # LF
+        if (c == 9)  { return false; }  # TAB
+        if (c == 32) { return false; }  # SPACE
         i = i + 1;
     }
-    return 1;
+    return true;
 }
 
 # Lowercase-equal comparison for scheme detection ("HTTP" == "http").
 # Compares up to `n` bytes; returns 1 if equal ignoring case, 0 otherwise.
-fn _sandhi_url_sceq(a, b, n): i64 {
+fn _sandhi_url_sceq(a, b, n): bool {
     var i = 0;
     while (i < n) {
         var ca = load8(a + i);
         var cb = load8(b + i);
         if (ca >= 65 && ca <= 90) { ca = ca + 32; }
         if (cb >= 65 && cb <= 90) { cb = cb + 32; }
-        if (ca != cb) { return 0; }
+        if (ca != cb) { return false; }
         i = i + 1;
     }
-    return 1;
+    return true;
 }
 
 # Parse a URL into the given Allocator. Returns the struct on success,

@@ -282,19 +282,19 @@ fn _sandhi_resp_decode_chunked(buf, blen, start, body_out_ptr, body_len_ptr, hea
 
 # Case-insensitive cstr equality. Local to response.cyr because
 # client.cyr's identical helper sits later in the build order.
-fn _sandhi_resp_streq_ci(a, b): i64 {
-    if (a == 0 || b == 0) { return 0; }
+fn _sandhi_resp_streq_ci(a, b): bool {
+    if (a == 0 || b == 0) { return false; }
     var i = 0;
     loop {
         var ca = load8(a + i);
         var cb = load8(b + i);
         if (ca >= 65 && ca <= 90) { ca = ca + 32; }
         if (cb >= 65 && cb <= 90) { cb = cb + 32; }
-        if (ca != cb) { return 0; }
-        if (ca == 0)  { return 1; }
+        if (ca != cb) { return false; }
+        if (ca == 0)  { return true; }
         i = i + 1;
     }
-    return 0;
+    return false;
 }
 
 # RFC 7230 §4.1.2 forbids these field names in trailers because
@@ -302,19 +302,19 @@ fn _sandhi_resp_streq_ci(a, b): i64 {
 # fact that the recipient already committed to a body framing) or
 # (b) they modify the trailer parsing itself. Returns 1 if `name`
 # (case-insensitive) is on the forbidden list, 0 otherwise.
-fn _sandhi_resp_trailer_forbidden(name): i64 {
-    if (_sandhi_resp_streq_ci(name, "Transfer-Encoding") == 1) { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Content-Length") == 1)    { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Host") == 1)              { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Cache-Control") == 1)     { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Expect") == 1)            { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Max-Forwards") == 1)      { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Pragma") == 1)            { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Range") == 1)             { return 1; }
-    if (_sandhi_resp_streq_ci(name, "TE") == 1)                { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Trailer") == 1)           { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Authorization") == 1)     { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Set-Cookie") == 1)        { return 1; }
+fn _sandhi_resp_trailer_forbidden(name): bool {
+    if (_sandhi_resp_streq_ci(name, "Transfer-Encoding") == 1) { return true; }
+    if (_sandhi_resp_streq_ci(name, "Content-Length") == 1)    { return true; }
+    if (_sandhi_resp_streq_ci(name, "Host") == 1)              { return true; }
+    if (_sandhi_resp_streq_ci(name, "Cache-Control") == 1)     { return true; }
+    if (_sandhi_resp_streq_ci(name, "Expect") == 1)            { return true; }
+    if (_sandhi_resp_streq_ci(name, "Max-Forwards") == 1)      { return true; }
+    if (_sandhi_resp_streq_ci(name, "Pragma") == 1)            { return true; }
+    if (_sandhi_resp_streq_ci(name, "Range") == 1)             { return true; }
+    if (_sandhi_resp_streq_ci(name, "TE") == 1)                { return true; }
+    if (_sandhi_resp_streq_ci(name, "Trailer") == 1)           { return true; }
+    if (_sandhi_resp_streq_ci(name, "Authorization") == 1)     { return true; }
+    if (_sandhi_resp_streq_ci(name, "Set-Cookie") == 1)        { return true; }
     # 0.9.9 audit additions:
     # `Connection` is connection-management metadata per RFC 7230 §6.1
     # and MUST NOT appear in trailers — letting it through would let a
@@ -330,11 +330,11 @@ fn _sandhi_resp_trailer_forbidden(name): i64 {
     # (architecture/001); the cap re-baselined post-fold once consumers
     # stopped re-concatenating sandhi's `src/`. Shipped 1.1.1 (CHANGELOG
     # [1.1.1]).
-    if (_sandhi_resp_streq_ci(name, "Connection") == 1)          { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Cookie") == 1)              { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Proxy-Authorization") == 1) { return 1; }
-    if (_sandhi_resp_streq_ci(name, "Proxy-Authenticate") == 1)  { return 1; }
-    return 0;
+    if (_sandhi_resp_streq_ci(name, "Connection") == 1)          { return true; }
+    if (_sandhi_resp_streq_ci(name, "Cookie") == 1)              { return true; }
+    if (_sandhi_resp_streq_ci(name, "Proxy-Authorization") == 1) { return true; }
+    if (_sandhi_resp_streq_ci(name, "Proxy-Authenticate") == 1)  { return true; }
+    return false;
 }
 
 # Walk forward from `start` parsing trailer header-fields ("Name:
@@ -404,9 +404,9 @@ fn _sandhi_resp_merge_trailers(buf, blen, start, headers): i64 {
 }
 
 # 1 if the headers block declares Transfer-Encoding: chunked.
-fn _sandhi_resp_is_chunked(headers): i64 {
+fn _sandhi_resp_is_chunked(headers): bool {
     var te = sandhi_headers_get(headers, "Transfer-Encoding");
-    if (te == 0) { return 0; }
+    if (te == 0) { return false; }
     var i = 0;
     while (load8(te + i) != 0) {
         if (load8(te + i) == 99
@@ -416,11 +416,11 @@ fn _sandhi_resp_is_chunked(headers): i64 {
           && load8(te + i + 4) == 107
           && load8(te + i + 5) == 101
           && load8(te + i + 6) == 100) {
-            return 1;
+            return true;
         }
         i = i + 1;
     }
-    return 0;
+    return false;
 }
 
 # Parse the decimal Content-Length value from a cstr. Returns 0 on

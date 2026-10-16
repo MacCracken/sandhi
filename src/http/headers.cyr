@@ -45,16 +45,16 @@ fn _sandhi_hdr_to_lower(c): i64 {
 }
 
 # Case-insensitive cstr equality. Returns 1 if equal, 0 otherwise.
-fn _sandhi_hdr_ieq(a, b): i64 {
+fn _sandhi_hdr_ieq(a, b): bool {
     var i = 0;
     loop {
         var ca = _sandhi_hdr_to_lower(load8(a + i));
         var cb = _sandhi_hdr_to_lower(load8(b + i));
-        if (ca != cb) { return 0; }
-        if (ca == 0) { return 1; }
+        if (ca != cb) { return false; }
+        if (ca == 0) { return true; }
         i = i + 1;
     }
-    return 0;
+    return false;
 }
 
 # Trim ASCII SP / HTAB from both ends of a cstr range and copy into
@@ -117,15 +117,15 @@ fn sandhi_headers_count(h): i64 {
 # is the only failure mode; CR/LF are header smuggling vectors).
 # Returns 1 = unsafe, 0 = safe. Used by add / set to refuse caller-
 # injected smuggled-header bytes.
-fn _sandhi_hdr_has_unsafe_byte(s): i64 {
-    if (s == 0) { return 0; }
+fn _sandhi_hdr_has_unsafe_byte(s): bool {
+    if (s == 0) { return false; }
     var i = 0;
     while (load8(s + i) != 0) {
         var c = load8(s + i);
-        if (c == 13 || c == 10) { return 1; }
+        if (c == 13 || c == 10) { return true; }
         i = i + 1;
     }
-    return 0;
+    return false;
 }
 
 # Append an entry into `a`. Multi-value-friendly — `add` never

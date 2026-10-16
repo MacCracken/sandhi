@@ -370,7 +370,7 @@ fn _sandhi_resolve_read_label(buf, blen, off_cell, label_buf, label_len_cell, ho
 # Heaviest alloc site in the resolver — the cells are touched per
 # label per name, so they really want to live in an arena that the
 # resolver caller resets after the query completes.
-fn _sandhi_resolve_name_eq_a(a, buf, blen, off_a, off_b): i64 {
+fn _sandhi_resolve_name_eq_a(a, buf, blen, off_a, off_b): bool {
     var pa_cell = alloc_via(a, 8);
     var pb_cell = alloc_via(a, 8);
     var ha_cell = alloc_via(a, 8);
@@ -380,32 +380,32 @@ fn _sandhi_resolve_name_eq_a(a, buf, blen, off_a, off_b): i64 {
     var la_cell = alloc_via(a, 8);
     var lb_cell = alloc_via(a, 8);
     if (pa_cell == 0 || pb_cell == 0 || ha_cell == 0 || hb_cell == 0
-      || la_buf  == 0 || lb_buf  == 0 || la_cell == 0 || lb_cell == 0) { return 0; }
+      || la_buf  == 0 || lb_buf  == 0 || la_cell == 0 || lb_cell == 0) { return false; }
     store64(pa_cell, off_a);
     store64(pb_cell, off_b);
     store64(ha_cell, 0);
     store64(hb_cell, 0);
     loop {
-        if (_sandhi_resolve_read_label(buf, blen, pa_cell, la_buf, la_cell, ha_cell) < 0) { return 0; }
-        if (_sandhi_resolve_read_label(buf, blen, pb_cell, lb_buf, lb_cell, hb_cell) < 0) { return 0; }
+        if (_sandhi_resolve_read_label(buf, blen, pa_cell, la_buf, la_cell, ha_cell) < 0) { return false; }
+        if (_sandhi_resolve_read_label(buf, blen, pb_cell, lb_buf, lb_cell, hb_cell) < 0) { return false; }
         var la = load64(la_cell);
         var lb = load64(lb_cell);
-        if (la != lb) { return 0; }
-        if (la == 0) { return 1; }
+        if (la != lb) { return false; }
+        if (la == 0) { return true; }
         var i = 0;
         while (i < la) {
             var ca = load8(la_buf + i);
             var cb = load8(lb_buf + i);
             if (ca >= 65 && ca <= 90) { ca = ca + 32; }
             if (cb >= 65 && cb <= 90) { cb = cb + 32; }
-            if (ca != cb) { return 0; }
+            if (ca != cb) { return false; }
             i = i + 1;
         }
     }
-    return 0;
+    return false;
 }
 
-fn _sandhi_resolve_name_eq(buf, blen, off_a, off_b): i64 {
+fn _sandhi_resolve_name_eq(buf, blen, off_a, off_b): bool {
     return _sandhi_resolve_name_eq_a(default_alloc(), buf, blen, off_a, off_b);
 }
 

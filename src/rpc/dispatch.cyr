@@ -149,13 +149,13 @@ fn _sandhi_rpc_policy_tbl_ensure(): i64 {
 # Byte-equality over n bytes. The base-URL prefix test compares a URL
 # against a base that is NOT NUL-terminated at the comparison length,
 # so streq can't be used (stdlib has no memcmp/strncmp).
-fn _sandhi_rpc_bytes_eq(p, q, n): i64 {
+fn _sandhi_rpc_bytes_eq(p, q, n): bool {
     var i = 0;
     while (i < n) {
-        if (load8(p + i) != load8(q + i)) { return 0; }
+        if (load8(p + i) != load8(q + i)) { return false; }
         i = i + 1;
     }
-    return 1;
+    return true;
 }
 
 # Slot index for an exact base_url match, or (0 - 1) if absent.
@@ -174,16 +174,16 @@ fn _sandhi_rpc_policy_slot_exact(base_url): i64 {
 # boundary so "host:444" does not falsely match "host:4444/...". The
 # boundary is satisfied by an exact-length match, a '/' following the
 # prefix in `url`, or a base that already ends with '/'.
-fn _sandhi_rpc_url_under_base(url, base): i64 {
+fn _sandhi_rpc_url_under_base(url, base): bool {
     var blen = strlen(base);
     var ulen = strlen(url);
-    if (blen == 0) { return 0; }
-    if (ulen < blen) { return 0; }
-    if (_sandhi_rpc_bytes_eq(url, base, blen) == 0) { return 0; }
-    if (ulen == blen) { return 1; }
-    if (load8(url + blen) == 47) { return 1; }
-    if (load8(base + blen - 1) == 47) { return 1; }
-    return 0;
+    if (blen == 0) { return false; }
+    if (ulen < blen) { return false; }
+    if (_sandhi_rpc_bytes_eq(url, base, blen) == 0) { return false; }
+    if (ulen == blen) { return true; }
+    if (load8(url + blen) == 47) { return true; }
+    if (load8(base + blen - 1) == 47) { return true; }
+    return false;
 }
 
 # Resolve the policy for `url` by longest-prefix match over registered
