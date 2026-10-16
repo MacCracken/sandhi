@@ -1,7 +1,7 @@
 # sandhi h2 test suite — split from sandhi.tcyr at 0.8.0 Bite 2.5
 # because the per-program fixup-table cap (32768) made it impossible
 # to keep all tests in one file once HPACK + h2 frames + h2 lifecycle
-# tests piled up. See docs/proposals/2026-04-24-cyrius-fixup-table-cap.md
+# tests piled up. See docs/development/proposals/archive/2026-04-24-cyrius-fixup-table-cap.md
 # for the upstream-investigation note.
 
 # h2 tests include the modules they exercise + their dependencies.

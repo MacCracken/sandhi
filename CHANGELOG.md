@@ -4,6 +4,93 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.11] — 2026-10-15
+
+**Windows accept errors are classified, so a Windows serve loop whose listener is gone fails
+at once instead of backing off for about 48 s. In the docs, `proposals/` replaces
+`requests/`, and the roadmap is organized by release line (1.11.x to 2.0.x).** No pin change
+(6.7.12).
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+**Behaviour changes a consumer can see** (Windows only in practice):
+- A serve loop whose listener has been closed or invalidated fails at once, recorded as
+  ACCEPT through `sandhi_server_last_failure`. Through 1.10.10 it backed off for about 48 s
+  before the give-up bound ended it.
+- A connection that is reset or aborted before it is accepted is retried at once instead
+  of backed off.
+
+### Fixed
+
+- **server: Windows accept errors fell through to the backoff path.** `lib/net.cyr` folds
+  only WSAEWOULDBLOCK onto EAGAIN, so every other accept failure reaches
+  `_sandhi_accept_action` as a raw Winsock code. The `_SANDHI_ERRNO_*` set had a macOS arm
+  and a Linux arm, and Windows took the Linux numbers. So WSAENOTSOCK, WSAEBADF, WSAEINVAL
+  and WSAEOPNOTSUPP backed off instead of failing, and WSAEINTR and WSAECONNABORTED backed
+  off instead of retrying. Bounded (the give-up), never a spin. Found at 1.10.10 while
+  writing the `server/last_failure` ACCEPT row, which skipped Windows until now.
+  - **The fix:** a Windows arm for the errno set. WSAEINTR (10004), WSAECONNABORTED (10053)
+    and WSAECONNRESET (10054) retry. WSAEBADF (10009), WSAEINVAL (10022), WSAENOTSOCK
+    (10038) and WSAEOPNOTSUPP (10045) are fatal. WSAEMFILE and WSAENOBUFS keep backing off,
+    as EMFILE and ENOBUFS do. Winsock has no EPROTO, so its slot holds -1, which no errno
+    matches.
+  - **New `_SANDHI_ERRNO_ECONNRESET`, retried, on every target** (104 Linux, 54 macOS). It
+    is how Winsock reports a peer that reset before accept, which Linux and macOS report as
+    ECONNABORTED; their accept does not return it, so nothing changes there in practice.
+  - **Rows:**
+    - New `test_accept_action_target_codes` pins each target's literal codes. The existing
+      rows classify through the vars, so a wrong number in a var passed them.
+    - The live ACCEPT row now runs on Windows. Before closing the loop's listener, its
+      handler checks with `sys_getsockname` that the predicted handle is bound to the row's
+      port and is not the accepted connection. Windows hands out handles, not lowest-free
+      fds, so a wrong prediction now fails the row instead of closing something else.
+    - It asserts that the recorded errno classifies FATAL on every target, and that it is
+      EBADF on Linux and macOS.
+  - **Verified under wine**, not yet on real Windows (cass). The suite built with
+    `cyrius build --win tests/sandhi.tcyr` passes 938 of 941 under wine; the 3 failures are
+    the known `test_server_conn_seam` `/dev/null` harness rows. With the Windows arm deleted,
+    11 rows fail, including the live ACCEPT row: the closed listener backed off until the
+    row's stop flag returned 0.
+
+### Changed
+
+- **docs: one `proposals/` folder.** `docs/proposals/` and `docs/development/requests/` are
+  merged into `docs/development/proposals/`.
+  - The four open requests are now proposals, each scheduled on a roadmap line: CONNECT
+    proxy, cookie jar, JSON merge patch + JSON-RPC batch, and ALPN extensions.
+  - The two shipped proposals (the allocator migration and the fixup-table cap) moved from
+    `proposals/done/` to `proposals/archive/`.
+  - Links follow in ADR 0003, architecture/001, the `tests/h2.tcyr` and `tests/sandhi.tcyr`
+    headers, and CLAUDE.md's docs index.
+- **docs: the roadmap is organized by release line.**
+  - **1.11.x:** server hardening and Windows parity.
+  - **1.12.x:** cyrius 6.7.x language adoption.
+  - **1.13.x:** client concurrency and HTTP/2 completeness.
+  - **1.14.x and 1.15.x:** the four proposals.
+  - **1.16.x:** performance, measured first.
+  - **2.0.0:** the breaking major: libssl retirement, public `bool` and `const`. It is
+    coordinated with cyrius first, since a breaking sandhi reaches consumers as a breaking
+    stdlib re-vendor.
+  - Shipped work is removed (the Windows accept item) and the empty sit-adoption batch is
+    dropped.
+  - "Traits after `dyn`" is no longer blocked: cyrius 6.7.8 shipped checked `dyn`.
+  - The four proposals had been held for a consumer ask; on 2026-10-15 the maintainer
+    scheduled them. Each is to be built to the narrowest shape its known use needs.
+
+### Verification
+
+- **3,066 assertions** (958 / 1,691 / 353 / 63 / 1) on Linux, 8/8 fuzz. lint, fmt and vet
+  are clean.
+- **Builds:** the `CYRIUS_DCE=1` smoke builds, native and libssl. The aarch64, AGNOS and
+  Windows (PE) cross-builds link. The Windows suite was run under wine (see Fixed).
+- **Live gates:** all seven pass, including `_server_tls_probe` [1]–[8] and the EMFILE
+  accept gate.
+- **dist:** all five bundles regenerated, and `cyrius distlib --check` is idempotent. The
+  `.deps` sidecars are unchanged. `server` and the full bundle carry the change; `tls`, `rpc`
+  and `discovery` take only the version stamp.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.10.10] — 2026-10-15
 
 **Pin → cyrius 6.7.12. A serve entry point that fails now says why, and a failed bind or

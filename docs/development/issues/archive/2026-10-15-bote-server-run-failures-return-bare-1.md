@@ -238,7 +238,7 @@ spawned stayed parked on it. They close the channel first now.
 Also found: on Windows, `_sandhi_accept_action` sees raw Winsock codes, since `lib/net.cyr` folds
 only WSAEWOULDBLOCK onto EAGAIN for accept. WSAENOTSOCK, WSAEBADF and WSAEINVAL back off for
 about 48 s before the give-up bound ends the loop instead of failing at once, and WSAECONNABORTED
-backs off instead of retrying. It is on the roadmap (Server).
+backs off instead of retrying. Fixed in 1.10.11 (a Windows arm for the errno set).
 
 ## Related
 
@@ -254,3 +254,4 @@ backs off instead of retrying. It is on the roadmap (Server).
   cyrius 6.7.9).
 - 2026-10-15: resolved in sandhi 1.10.10 (the leak closed; `sandhi_server_last_failure` per
   server handle; the sakshi line declined) and archived.
+- 2026-10-15: the Windows accept-errno gap found while fixing this was fixed in sandhi 1.10.11.

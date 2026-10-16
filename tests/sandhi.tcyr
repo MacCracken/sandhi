@@ -1251,7 +1251,13 @@ fn test_accept_action_transient() {
     # Transient — the connection attempt failed, the listener is healthy.
     assert_eq(_sandhi_accept_action(_SANDHI_ERRNO_EINTR), SANDHI_ACCEPT_RETRY, "accept action: EINTR → RETRY");
     assert_eq(_sandhi_accept_action(_SANDHI_ERRNO_ECONNABORTED), SANDHI_ACCEPT_RETRY, "accept action: ECONNABORTED → RETRY");
+    assert_eq(_sandhi_accept_action(_SANDHI_ERRNO_ECONNRESET), SANDHI_ACCEPT_RETRY, "accept action: ECONNRESET → RETRY");
+    #ifndef CYRIUS_TARGET_WIN
     assert_eq(_sandhi_accept_action(_SANDHI_ERRNO_EPROTO), SANDHI_ACCEPT_RETRY, "accept action: EPROTO → RETRY");
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    assert(_SANDHI_ERRNO_EPROTO < 0, "accept action: Winsock has no EPROTO, so its slot matches no errno");
+    #endif
     # EAGAIN must never be slowed: it is the steady state of the async
     # non-blocking drain AND of every loop on AGNOS.
     assert_eq(_sandhi_accept_action(_SANDHI_EAGAIN), SANDHI_ACCEPT_RETRY, "accept action: EAGAIN → RETRY (never backed off)");
@@ -1282,6 +1288,47 @@ fn test_accept_action_backoff() {
     assert_eq(_sandhi_accept_action(1), SANDHI_ACCEPT_BACKOFF, "accept action: EPERM (AGNOS bare Err(1)) → BACKOFF, not FATAL");
     assert_eq(_sandhi_accept_action(4095), SANDHI_ACCEPT_BACKOFF, "accept action: unrecognised errno → BACKOFF, not FATAL");
     assert_eq(_sandhi_accept_action(0), SANDHI_ACCEPT_BACKOFF, "accept action: errno 0 → BACKOFF, not FATAL");
+    return 0;
+}
+
+# 1.10.11 — the numbers themselves, per target. The rows above classify through
+# the `_SANDHI_ERRNO_*` vars, so a wrong number in a var passes them; these pin
+# each target's literal codes. Windows reports Winsock codes (only WSAEWOULDBLOCK
+# is folded onto EAGAIN), and until 1.10.11 it was classified with the Linux
+# numbers: a closed listener (WSAENOTSOCK) backed off for ~48 s instead of
+# failing at once. Mutation: deleting the Windows arm fails every Windows row.
+fn test_accept_action_target_codes() {
+    #ifdef CYRIUS_TARGET_WIN
+    assert_eq(_sandhi_accept_action(10004), SANDHI_ACCEPT_RETRY, "win accept: WSAEINTR → RETRY");
+    assert_eq(_sandhi_accept_action(10053), SANDHI_ACCEPT_RETRY, "win accept: WSAECONNABORTED → RETRY");
+    assert_eq(_sandhi_accept_action(10054), SANDHI_ACCEPT_RETRY, "win accept: WSAECONNRESET (a peer reset before accept) → RETRY");
+    assert_eq(_sandhi_accept_action(11), SANDHI_ACCEPT_RETRY, "win accept: WSAEWOULDBLOCK, folded onto EAGAIN 11 → RETRY");
+    assert_eq(_sandhi_accept_action(10009), SANDHI_ACCEPT_FATAL, "win accept: WSAEBADF → FATAL");
+    assert_eq(_sandhi_accept_action(10022), SANDHI_ACCEPT_FATAL, "win accept: WSAEINVAL → FATAL");
+    assert_eq(_sandhi_accept_action(10038), SANDHI_ACCEPT_FATAL, "win accept: WSAENOTSOCK (closed listener) → FATAL");
+    assert_eq(_sandhi_accept_action(10045), SANDHI_ACCEPT_FATAL, "win accept: WSAEOPNOTSUPP → FATAL");
+    assert_eq(_sandhi_accept_action(10024), SANDHI_ACCEPT_BACKOFF, "win accept: WSAEMFILE → BACKOFF");
+    assert_eq(_sandhi_accept_action(10055), SANDHI_ACCEPT_BACKOFF, "win accept: WSAENOBUFS → BACKOFF");
+    #endif
+    #ifdef CYRIUS_TARGET_MACOS
+    assert_eq(_sandhi_accept_action(53), SANDHI_ACCEPT_RETRY, "macos accept: ECONNABORTED 53 → RETRY");
+    assert_eq(_sandhi_accept_action(54), SANDHI_ACCEPT_RETRY, "macos accept: ECONNRESET 54 → RETRY");
+    assert_eq(_sandhi_accept_action(100), SANDHI_ACCEPT_RETRY, "macos accept: EPROTO 100 → RETRY");
+    assert_eq(_sandhi_accept_action(38), SANDHI_ACCEPT_FATAL, "macos accept: ENOTSOCK 38 → FATAL");
+    assert_eq(_sandhi_accept_action(102), SANDHI_ACCEPT_FATAL, "macos accept: EOPNOTSUPP 102 → FATAL");
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
+    #ifndef CYRIUS_TARGET_MACOS
+    assert_eq(_sandhi_accept_action(103), SANDHI_ACCEPT_RETRY, "linux accept: ECONNABORTED 103 → RETRY");
+    assert_eq(_sandhi_accept_action(104), SANDHI_ACCEPT_RETRY, "linux accept: ECONNRESET 104 → RETRY");
+    assert_eq(_sandhi_accept_action(71), SANDHI_ACCEPT_RETRY, "linux accept: EPROTO 71 → RETRY");
+    assert_eq(_sandhi_accept_action(88), SANDHI_ACCEPT_FATAL, "linux accept: ENOTSOCK 88 → FATAL");
+    assert_eq(_sandhi_accept_action(95), SANDHI_ACCEPT_FATAL, "linux accept: EOPNOTSUPP 95 → FATAL");
+    #endif
+    assert_eq(_sandhi_accept_action(4), SANDHI_ACCEPT_RETRY, "posix accept: EINTR 4 → RETRY");
+    assert_eq(_sandhi_accept_action(9), SANDHI_ACCEPT_FATAL, "posix accept: EBADF 9 → FATAL");
+    assert_eq(_sandhi_accept_action(22), SANDHI_ACCEPT_FATAL, "posix accept: EINVAL 22 → FATAL");
+    #endif
     return 0;
 }
 
@@ -1820,16 +1867,37 @@ fn test_server_failure_resets_on_start() {
 
 # A fatal accept records ACCEPT with its errno. The handler closes the serve
 # loop's own listener (the fd `_t_next_fd` predicts run_opts will get), so the
-# next accept fails with EBADF, which the accept-error policy calls fatal. A
-# stop flag set after 3 s bounds the row if the prediction is ever wrong: the
-# loop then returns 0 and the row fails instead of hanging. Not run on Windows,
-# whose accept on a closed socket reports WSAENOTSOCK (10038), which the policy
-# does not classify and so backs off for ~48 s before giving up.
-var _t_acc_lfd  = 0 - 1;
-var _t_acc_stop = 0;
+# next accept fails: EBADF on Linux and macOS, a Winsock code on Windows (where
+# the wait reports a closed socket as WSAENOTSOCK). Before closing, the handler
+# checks that the predicted handle is a socket bound to the row's port and is not
+# the accepted connection, so a wrong prediction (Windows hands out handles, not
+# lowest-free fds) fails the row instead of closing something else. A stop flag
+# set after 3 s bounds the row: if accept does not fail fatally, the loop returns
+# 0 and the row fails instead of hanging. Through 1.10.10 the Windows codes were
+# unclassified and backed off, which the stop flag turns into a failure here.
+var _t_acc_lfd   = 0 - 1;
+var _t_acc_stop  = 0;
+var _t_acc_found = 0;
+
+# 1 if `fd` is the serving loop's listener: a socket other than the accepted one
+# whose local port is the row's.
+fn _t_acc_is_listener(fd, cfd): i64 {
+    if (fd < 0 || fd == cfd) { return 0; }
+    var sa[16];
+    var alen[8];
+    store64(&alen, 0);
+    store32(&alen, 16);
+    if (sys_getsockname(fd, &sa, &alen) < 0) { return 0; }
+    var port = ((load8(&sa + 2) & 0xFF) << 8) | (load8(&sa + 3) & 0xFF);
+    if (port == 39842) { return 1; }
+    return 0;
+}
 
 fn _t_acc_close_listener_handler(ctx, cfd, buf, blen): i64 {
-    sock_close(_t_acc_lfd);
+    if (_t_acc_is_listener(_t_acc_lfd, cfd) == 1) {
+        _t_acc_found = 1;
+        sock_close(_t_acc_lfd);
+    }
     sandhi_server_send_status(cfd, 200, "OK");
     return 0;
 }
@@ -1856,12 +1924,9 @@ fn _t_acc_stopper(arg) {
 }
 
 fn test_server_failure_accept_fatal() {
-    #ifdef CYRIUS_TARGET_WIN
-    assert_eq(1, 1, "accept fatal: Windows — skipped (see the row's comment)");
-    return 0;
-    #endif
     if (_t_threads_concurrent() == 0) { assert_eq(1, 1, "accept fatal: no concurrent threads — skipped"); return 0; }
     _t_acc_stop = 0;
+    _t_acc_found = 0;
     var o = sandhi_server_options_new();
     sandhi_server_options_stop_flag(o, &_t_acc_stop);
     if (thread_create(&_t_acc_stopper, 0) == 0) { assert_eq(1, 1, "accept fatal: no thread — skipped"); return 0; }
@@ -1870,10 +1935,15 @@ fn test_server_failure_accept_fatal() {
     var err[8];
     store64(&err, 0);
     var rc = sandhi_server_run_opts(INADDR_LOOPBACK(), 39842, &_t_acc_close_listener_handler, 0, o);
+    assert_eq(_t_acc_found, 1, "accept fatal: the predicted handle was the loop's listener");
     assert_eq(rc, 1, "accept fatal: run_opts returns 1 once its listener is gone");
     assert_eq(sandhi_server_last_failure(o, 0, &err), SANDHI_SERVER_FAIL_ACCEPT,
       "accept fatal: ...recorded as ACCEPT");
-    assert_eq(load64(&err), 9, "accept fatal: ...with EBADF, the errno accept failed with");
+    assert_eq(_sandhi_accept_action(load64(&err)), SANDHI_ACCEPT_FATAL,
+      "accept fatal: ...with an errno the policy calls fatal");
+    #ifndef CYRIUS_TARGET_WIN
+    assert_eq(load64(&err), 9, "accept fatal: ...EBADF on Linux and macOS");
+    #endif
     return 0;
 }
 
@@ -5363,7 +5433,7 @@ fn main() {
     # h2/hpack + h2/frame tests live in tests/h2.tcyr — split off at
     # 0.8.0 Bite 2.5 because the per-program fixup-table cap (32768)
     # made one-file tests impossible. See
-    # docs/proposals/2026-04-24-cyrius-fixup-table-cap.md.
+    # docs/development/proposals/archive/2026-04-24-cyrius-fixup-table-cap.md.
 
     test_group("p0/chunked_complete");
     test_p0_chunked_complete_ok();
@@ -5471,6 +5541,7 @@ fn main() {
     test_group("server/accept_policy/classify");
     test_accept_action_transient();
     test_accept_action_fatal();
+    test_accept_action_target_codes();
     test_accept_action_backoff();
 
     test_group("server/accept_policy/backoff");

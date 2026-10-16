@@ -4,7 +4,7 @@
 at 0.8.0 Bite 2.5 (test-file split into `sandhi.tcyr` / `h2.tcyr`)
 and 1.2.8 (`sandhi.tcyr` → `rpc.tcyr` carve-out). Ongoing
 **cap-drift watch** lives in `docs/development/roadmap.md`
-under 1.4.x as a background slot — when the next slot's
+under "Standing watches" — when the next slot's
 implementation pushes any `tests/*.tcyr` against the cap,
 split out another file in the same patch.
 

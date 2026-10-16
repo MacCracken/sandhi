@@ -1378,6 +1378,19 @@ enum SandhiAcceptAction {
 # four of these differ on Darwin. With the Linux numbers a macOS ECONNABORTED
 # (53) or EPROTO (100) backed off instead of retrying, and ENOTSOCK (38) /
 # EOPNOTSUPP (102) backed off ~48 s instead of failing at once. CHANGELOG [1.10.1].
+# Windows reports Winsock codes, folding only WSAEWOULDBLOCK onto EAGAIN, and
+# took the Linux numbers the same way until 1.10.11. CHANGELOG [1.10.11].
+#ifdef CYRIUS_TARGET_WIN
+var _SANDHI_ERRNO_EINTR        = 10004;
+var _SANDHI_ERRNO_EBADF        = 10009;
+var _SANDHI_ERRNO_EINVAL       = 10022;
+var _SANDHI_ERRNO_ENOTSOCK     = 10038;
+var _SANDHI_ERRNO_EOPNOTSUPP   = 10045;
+var _SANDHI_ERRNO_ECONNABORTED = 10053;
+var _SANDHI_ERRNO_ECONNRESET   = 10054;
+var _SANDHI_ERRNO_EPROTO       = 0 - 1;
+#endif
+#ifndef CYRIUS_TARGET_WIN
 var _SANDHI_ERRNO_EINTR        = 4;
 var _SANDHI_ERRNO_EBADF        = 9;
 var _SANDHI_ERRNO_EINVAL       = 22;
@@ -1386,12 +1399,15 @@ var _SANDHI_ERRNO_EPROTO       = 100;
 var _SANDHI_ERRNO_ENOTSOCK     = 38;
 var _SANDHI_ERRNO_EOPNOTSUPP   = 102;
 var _SANDHI_ERRNO_ECONNABORTED = 53;
+var _SANDHI_ERRNO_ECONNRESET   = 54;
 #endif
 #ifndef CYRIUS_TARGET_MACOS
 var _SANDHI_ERRNO_EPROTO       = 71;
 var _SANDHI_ERRNO_ENOTSOCK     = 88;
 var _SANDHI_ERRNO_EOPNOTSUPP   = 95;
 var _SANDHI_ERRNO_ECONNABORTED = 103;
+var _SANDHI_ERRNO_ECONNRESET   = 104;
+#endif
 #endif
 
 # Capped exponential backoff: 1 ms doubling to 250 ms, reset on any
@@ -1414,8 +1430,12 @@ var SANDHI_ACCEPT_GIVEUP         = 200;
 # unknown → BACKOFF → bounded give-up, instead of an unbounded spin.
 fn _sandhi_accept_action(err): i64 {
     # Transient — this connection attempt failed, the listener is fine.
+    # ECONNRESET (1.10.11) is how Winsock reports a peer that reset before its
+    # connection was accepted, which Linux and macOS report as ECONNABORTED.
+    # Winsock has no EPROTO; its slot holds -1 there, which no errno matches.
     if (err == _SANDHI_ERRNO_EINTR)        { return SANDHI_ACCEPT_RETRY; }
     if (err == _SANDHI_ERRNO_ECONNABORTED) { return SANDHI_ACCEPT_RETRY; }
+    if (err == _SANDHI_ERRNO_ECONNRESET)   { return SANDHI_ACCEPT_RETRY; }
     if (err == _SANDHI_ERRNO_EPROTO)       { return SANDHI_ACCEPT_RETRY; }
     # EAGAIN is the steady state on THREE paths and must never be slowed:
     # `sandhi_server_run_async`'s non-blocking drain (queue empty); every loop
