@@ -41,13 +41,14 @@ put on its roadmap.
 
 ## Sandhi-side defects
 
-**Open:**
+**Open:** none.
 
-| Doc | Reporter | State |
-|-----|----------|-------|
-| [`2026-10-15-bote-server-run-failures-return-bare-1.md`](2026-10-15-bote-server-run-failures-return-bare-1.md) | bote 3.4.0 | **Open.** All five serve entry points return a bare `1` for every failure: the `EADDRINUSE` from bind is in a local and discarded. `_run_opts` and `_run_async` also leak the listen socket on a failed bind / listen (probe: next fd 4 → 9 over five failed starts). Proposed: close `sfd` (four lines), plus an additive per-thread `sandhi_server_last_failure(step, errno)`. |
+The last one closed at **1.10.10**: [`archive/2026-10-15-bote-server-run-failures-return-bare-1.md`](archive/2026-10-15-bote-server-run-failures-return-bare-1.md)
+(bote 3.4.0; every serve entry point returned a bare `1`, and two leaked the listen socket on a
+failed bind or listen). It reaches bote only once a cyrius release re-vendors `lib/sandhi.cyr` from
+the 1.10.10 `dist/sandhi.cyr`.
 
-The last two closed together at **1.10.5** — [`archive/2026-10-03-chunked-response-verbs-discard-send-result.md`](archive/2026-10-03-chunked-response-verbs-discard-send-result.md)
+Before it, two closed together at **1.10.5** — [`archive/2026-10-03-chunked-response-verbs-discard-send-result.md`](archive/2026-10-03-chunked-response-verbs-discard-send-result.md)
 (the chunked-response verbs discarded every send result) and the hoosh feature gap
 [`archive/2026-09-25-http-stream-no-idle-hook.md`](archive/2026-09-25-http-stream-no-idle-hook.md)
 (no consumer turn during a silent upstream), which also surfaced a lost-event defect in the
@@ -108,6 +109,7 @@ stdlib primitive are tracked in [`../roadmap.md`](../roadmap.md)
 
 | Doc | Closed at | Summary |
 |-----|-----------|---------|
+| [`archive/2026-10-15-bote-server-run-failures-return-bare-1.md`](archive/2026-10-15-bote-server-run-failures-return-bare-1.md) | sandhi 1.10.10 | bote 3.4.0: the five serve entry points returned a bare `1` for every failure, discarding the errno (a port in use looked like a failed allocation), and `run_opts` / `run_async` leaked the listen socket on a failed bind or listen (next fd 4 → 9 over five starts). **Fixed**: both close it; new `sandhi_server_last_failure(opts, out_step, out_errno)` records the step (`SANDHI_SERVER_FAIL_*`) and errno, per server handle in the options struct rather than per thread (the Linux main thread may have no thread-local block). The optional sakshi line declined. Also fixed: the pooled loops left spawned workers parked when a worker argument failed to allocate. |
 | [`archive/2026-10-05-adopt-cyrius-6616.md`](archive/2026-10-05-adopt-cyrius-6616.md) | sandhi 1.10.9 | cyrius 6.6.16's five adoption items, recorded by cyrius 2026-10-05: the SIGPIPE comments, `_sandhi_server_conn_blocking` dropped, `CHAN_BLOCKING` for the pool, the PEM-key caveats (guide + probe [8] `== 0`) taken; the libssl end-to-end resumption test declined (the backend retires at 2.0). The cass run for item 4 also found that a stop-enabled blocking serve loop never left `accept` on Windows; fixed in the same release. |
 | [`archive/2026-10-04-cyrius-macos-chan-serial-under-real-threads.md`](archive/2026-10-04-cyrius-macos-chan-serial-under-real-threads.md) | cyrius 6.6.16 / sandhi 1.10.9 | Upstream: arm64 macOS started real threads but kept the serial channel, so pooled workers exited and `run_pooled` / `run_pooled_tls` never served there (1.10.7 served inline off Linux). 6.6.16 gave macOS and Windows the blocking channel and exported `CHAN_BLOCKING`; 1.10.9 keys the pool on it. |
 | [`archive/2026-10-04-cyrius-tls-server-pem-key-decoded-per-accept.md`](archive/2026-10-04-cyrius-tls-server-pem-key-decoded-per-accept.md) | cyrius 6.6.16 / sandhi 1.10.9 | Upstream: the native TLS server decoded a PEM key on every accept, on the global heap (~120 B/request). 6.6.16 decodes it once per process; 1.10.9 drops the DER-key advice and makes probe [8] require 0 B. |

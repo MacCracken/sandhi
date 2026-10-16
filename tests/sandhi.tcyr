@@ -1412,8 +1412,8 @@ fn test_server_options_max_request() {
 
 fn test_server_options_struct_growth() {
     # The options struct grew 64 → 72 bytes in 1.9.4, → 80 in 1.9.7, → 88 in
-    # 1.9.9. Every pre-existing field is read by fixed offset, so they all have
-    # to still round-trip after each growth.
+    # 1.9.9, → 96 in 1.10.7 and → 112 in 1.10.10. Every pre-existing field is
+    # read by fixed offset, so they all have to still round-trip after each growth.
     var o = sandhi_server_options_new();
     sandhi_server_options_idle_ms(o, 7000);
     sandhi_server_options_max_conns(o, 12);
@@ -1427,6 +1427,8 @@ fn test_server_options_struct_growth() {
     assert_eq(sandhi_server_options_get_req_arena(o), 16384, "growth: req_arena intact");
     assert_eq(sandhi_server_options_get_tls(o), 0, "growth: tls_on untouched");
     assert_eq(sandhi_server_options_get_stop_flag(o), 0, "growth: stop_flag defaults to 0");
+    assert_eq(sandhi_server_options_get_request_ms(o), 60000, "growth: request_ms defaults to 60 s");
+    assert_eq(sandhi_server_last_failure(o, 0, 0), SANDHI_SERVER_FAIL_NONE, "growth: the failure record starts NONE");
     return 0;
 }
 
@@ -1659,6 +1661,219 @@ fn test_server_stop_returns_zero() {
     store64(&flag, 0);
     assert_eq(sandhi_server_run_opts(0x010200C0, 9, 0, 0, o), 1,
       "a clear flag does not stop — an unbindable address still reports 1");
+    return 0;
+}
+
+# ── 1.10.10 — a serve entry point says why it failed, and a failed bind or
+# listen no longer leaks the listen socket (bote 3.4.0,
+# docs/development/issues/archive/2026-10-15-bote-server-run-failures-return-bare-1.md) ──
+
+# The number the next socket receives: POSIX hands out the lowest free fd, so a
+# serve call that leaks its listen socket moves this up by one.
+fn _t_next_fd(): i64 {
+    var t, fd = tcp_socket();
+    if (is_err_result(t) == 1) { return 0 - 1; }
+    sock_close(fd);
+    return fd;
+}
+
+fn test_server_last_failure_record() {
+    var o = sandhi_server_options_new();
+    var step[8];
+    var err[8];
+    store64(&step, 77);
+    store64(&err, 77);
+    assert_eq(sandhi_server_last_failure(o, &step, &err), SANDHI_SERVER_FAIL_NONE,
+      "last_failure: a new options struct reads NONE");
+    assert_eq(load64(&step), SANDHI_SERVER_FAIL_NONE, "last_failure: out_step is written");
+    assert_eq(load64(&err), 0, "last_failure: out_errno is written as 0");
+    store64(&err, 77);
+    assert_eq(sandhi_server_last_failure(0, 0, &err), SANDHI_SERVER_FAIL_NONE,
+      "last_failure: a null options struct reads NONE");
+    assert_eq(load64(&err), 0, "last_failure: ...with errno 0");
+    assert_eq(sandhi_server_last_failure(o, 0, 0), SANDHI_SERVER_FAIL_NONE,
+      "last_failure: both out slots are optional");
+
+    # The recorder returns 1, the value its call sites hand back.
+    assert_eq(_sandhi_server_set_failure(o, SANDHI_SERVER_FAIL_LISTEN, 13), 1,
+      "set_failure: returns 1");
+    assert_eq(sandhi_server_last_failure(o, 0, &err), SANDHI_SERVER_FAIL_LISTEN,
+      "set_failure: the step round-trips");
+    assert_eq(load64(&err), 13, "set_failure: the errno round-trips");
+    assert_eq(_sandhi_server_set_failure(0, SANDHI_SERVER_FAIL_BIND, 98), 1,
+      "set_failure: a null options struct records nothing and still returns 1");
+    return 0;
+}
+
+# A TLS entry point without certificate and key fails before it opens a socket.
+fn test_server_failure_tls_config() {
+    var o = sandhi_server_options_new();
+    var err[8];
+    assert_eq(sandhi_server_run_tls(INADDR_LOOPBACK(), 0, 0, 0, o), 1,
+      "tls config: run_tls without TLS options returns 1");
+    assert_eq(sandhi_server_last_failure(o, 0, &err), SANDHI_SERVER_FAIL_CONFIG,
+      "tls config: ...recorded as CONFIG");
+    assert_eq(load64(&err), 0, "tls config: ...with no errno");
+
+    # A stale record must be overwritten, not left for the caller to misread.
+    _sandhi_server_set_failure(o, SANDHI_SERVER_FAIL_BIND, 5);
+    assert_eq(sandhi_server_run_pooled_tls(INADDR_LOOPBACK(), 0, 0, 0, o), 1,
+      "tls config: run_pooled_tls without TLS options returns 1");
+    assert_eq(sandhi_server_last_failure(o, 0, &err), SANDHI_SERVER_FAIL_CONFIG,
+      "tls config: ...recorded as CONFIG over the stale BIND");
+    assert_eq(load64(&err), 0, "tls config: ...and the stale errno is cleared");
+
+    sandhi_server_options_tls(o, "x", 1, 0, 0);
+    assert_eq(sandhi_server_run_tls(INADDR_LOOPBACK(), 0, 0, 0, o), 1,
+      "tls config: a missing key returns 1");
+    assert_eq(sandhi_server_last_failure(o, 0, 0), SANDHI_SERVER_FAIL_CONFIG,
+      "tls config: ...recorded as CONFIG");
+    return 0;
+}
+
+# Every entry point, started on a port another socket holds: it returns 1,
+# records BIND with the errno the stdlib reports for that bind, and closes its
+# socket. The errno oracle is a direct bind set up as the serve loops set theirs
+# up (SO_REUSEADDR, SO_EXCLUSIVEADDRUSE on Windows), so the row holds on every
+# target without a table of errno numbers. Mutation: dropping the
+# `sock_close(sfd)` from run_opts or run_async's failed bind moves the next fd up
+# by 3 (Linux and macOS; Windows hands out socket handles, not lowest-free fds).
+fn _t_bind_in_use_row(which, label, port, want_err) {
+    var o = sandhi_server_options_new();
+    sandhi_server_options_max_conns(o, 2);
+    if (which >= 3) { sandhi_server_options_tls(o, "x", 1, "y", 1); }
+    var fd0 = _t_next_fd();
+    var i = 0;
+    var rc = 0;
+    while (i < 3) {
+        if (which == 0) { rc = sandhi_server_run_opts(INADDR_LOOPBACK(), port, &_t_ok_cfd_handler, 0, o); }
+        if (which == 1) { rc = sandhi_server_run_async(INADDR_LOOPBACK(), port, &_t_ok_cfd_handler, 0, o); }
+        if (which == 2) { rc = sandhi_server_run_pooled(INADDR_LOOPBACK(), port, &_t_ok_cfd_handler, 0, o); }
+        if (which == 3) { rc = sandhi_server_run_tls(INADDR_LOOPBACK(), port, 0, 0, o); }
+        if (which == 4) { rc = sandhi_server_run_pooled_tls(INADDR_LOOPBACK(), port, 0, 0, o); }
+        i = i + 1;
+    }
+    var fd1 = _t_next_fd();
+    var err[8];
+    store64(&err, 0);
+    var step = sandhi_server_last_failure(o, 0, &err);
+    assert_eq(rc, 1, label);
+    assert_eq(step, SANDHI_SERVER_FAIL_BIND, label);
+    assert_eq(load64(&err), want_err, label);
+    #ifndef CYRIUS_TARGET_WIN
+    assert_eq(fd1, fd0, label);
+    #endif
+    return 0;
+}
+
+fn test_server_failure_bind_in_use() {
+    var lo = INADDR_LOOPBACK();
+    var port = 39841;
+    var ht, hfd = tcp_socket();
+    if (is_err_result(ht) == 1) { assert_eq(1, 1, "bind in use: holder socket — skipped"); return 0; }
+    var hbt, hbv = sock_bind(hfd, lo, port);
+    if (is_err_result(hbt) == 1) {
+        sock_close(hfd); assert_eq(1, 1, "bind in use: port busy on this host — skipped"); return 0;
+    }
+    sock_listen(hfd, 4);
+
+    var ot, ofd = tcp_socket();
+    sock_reuse(ofd);
+    var obt, oerr = sock_bind(ofd, lo, port);
+    sock_close(ofd);
+    assert_eq(is_err_result(obt), 1, "bind in use: a direct bind on the held port fails");
+    assert(oerr > 0, "bind in use: ...with a positive errno");
+    #ifdef CYRIUS_TARGET_LINUX
+    assert_eq(oerr, 98, "bind in use: ...EADDRINUSE on Linux");
+    #endif
+
+    _t_bind_in_use_row(0, "bind in use: run_opts returns 1, records BIND + the errno, closes its socket", port, oerr);
+    _t_bind_in_use_row(1, "bind in use: run_async returns 1, records BIND + the errno, closes its socket", port, oerr);
+    _t_bind_in_use_row(2, "bind in use: run_pooled returns 1, records BIND + the errno, closes its socket", port, oerr);
+    _t_bind_in_use_row(3, "bind in use: run_tls returns 1, records BIND + the errno, closes its socket", port, oerr);
+    _t_bind_in_use_row(4, "bind in use: run_pooled_tls returns 1, records BIND + the errno, closes its socket", port, oerr);
+    sock_close(hfd);
+    return 0;
+}
+
+# A record left by a failed start is cleared by the next start: a run stopped by
+# its flag returns 0 and reads NONE.
+fn test_server_failure_resets_on_start() {
+    var flag[8];
+    store64(&flag, 0);
+    var o = sandhi_server_options_new();
+    sandhi_server_options_stop_flag(o, &flag);
+    var err[8];
+    assert_eq(sandhi_server_run_opts(0x010200C0, 9, 0, 0, o), 1,
+      "reset: an unbindable address returns 1");
+    assert_eq(sandhi_server_last_failure(o, 0, &err), SANDHI_SERVER_FAIL_BIND,
+      "reset: ...recorded as BIND");
+    assert(load64(&err) > 0, "reset: ...with the bind's errno");
+    store64(&flag, 1);
+    assert_eq(sandhi_server_run_opts(INADDR_LOOPBACK(), 0, 0, 0, o), 0,
+      "reset: the next start, stopped by its flag, returns 0");
+    assert_eq(sandhi_server_last_failure(o, 0, &err), SANDHI_SERVER_FAIL_NONE,
+      "reset: ...and the record reads NONE");
+    assert_eq(load64(&err), 0, "reset: ...with errno 0");
+    return 0;
+}
+
+# A fatal accept records ACCEPT with its errno. The handler closes the serve
+# loop's own listener (the fd `_t_next_fd` predicts run_opts will get), so the
+# next accept fails with EBADF, which the accept-error policy calls fatal. A
+# stop flag set after 3 s bounds the row if the prediction is ever wrong: the
+# loop then returns 0 and the row fails instead of hanging. Not run on Windows,
+# whose accept on a closed socket reports WSAENOTSOCK (10038), which the policy
+# does not classify and so backs off for ~48 s before giving up.
+var _t_acc_lfd  = 0 - 1;
+var _t_acc_stop = 0;
+
+fn _t_acc_close_listener_handler(ctx, cfd, buf, blen): i64 {
+    sock_close(_t_acc_lfd);
+    sandhi_server_send_status(cfd, 200, "OK");
+    return 0;
+}
+
+fn _t_acc_client(arg) {
+    sleep_ms(200);
+    var t, fd = tcp_socket();
+    if (is_err_result(t) == 1) { return 0; }
+    if (is_err_result(sock_connect(fd, INADDR_LOOPBACK(), 39842)) == 0) {
+        var req = "GET / HTTP/1.1\r\nHost: t\r\n\r\n";
+        sock_send_all(fd, req, strlen(req));
+        _sandhi_conn_set_timeout_ms(fd, 3000, _SANDHI_SO_RCVTIMEO);
+        var rb[64];
+        sock_recv(fd, &rb, 64);
+    }
+    sock_close(fd);
+    return 0;
+}
+
+fn _t_acc_stopper(arg) {
+    sleep_ms(3000);
+    _t_acc_stop = 1;
+    return 0;
+}
+
+fn test_server_failure_accept_fatal() {
+    #ifdef CYRIUS_TARGET_WIN
+    assert_eq(1, 1, "accept fatal: Windows — skipped (see the row's comment)");
+    return 0;
+    #endif
+    if (_t_threads_concurrent() == 0) { assert_eq(1, 1, "accept fatal: no concurrent threads — skipped"); return 0; }
+    _t_acc_stop = 0;
+    var o = sandhi_server_options_new();
+    sandhi_server_options_stop_flag(o, &_t_acc_stop);
+    if (thread_create(&_t_acc_stopper, 0) == 0) { assert_eq(1, 1, "accept fatal: no thread — skipped"); return 0; }
+    if (thread_create(&_t_acc_client, 0) == 0) { assert_eq(1, 1, "accept fatal: no thread — skipped"); return 0; }
+    _t_acc_lfd = _t_next_fd();
+    var err[8];
+    store64(&err, 0);
+    var rc = sandhi_server_run_opts(INADDR_LOOPBACK(), 39842, &_t_acc_close_listener_handler, 0, o);
+    assert_eq(rc, 1, "accept fatal: run_opts returns 1 once its listener is gone");
+    assert_eq(sandhi_server_last_failure(o, 0, &err), SANDHI_SERVER_FAIL_ACCEPT,
+      "accept fatal: ...recorded as ACCEPT");
+    assert_eq(load64(&err), 9, "accept fatal: ...with EBADF, the errno accept failed with");
     return 0;
 }
 
@@ -5239,6 +5454,15 @@ fn main() {
     test_server_options_struct_growth();
     test_server_stop_flag_option();
     test_server_stop_returns_zero();
+
+    test_group("server/last_failure");
+    test_server_last_failure_record();
+    test_server_failure_tls_config();
+    test_server_failure_bind_in_use();
+    test_server_failure_resets_on_start();
+    test_server_failure_accept_fatal();
+
+    test_group("server/options/max_request");
     test_server_stop_wakes_blocked_accept();
     test_server_accept_surfaces_when_idle();
     test_server_armed_accept_never_parks();

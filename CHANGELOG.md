@@ -4,6 +4,107 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.10.10] — 2026-10-15
+
+**Pin → cyrius 6.7.12. A serve entry point that fails now says why, and a failed bind or
+listen no longer leaks the listen socket.** Closes bote 3.4.0's filing
+([`issues/archive/2026-10-15-bote-server-run-failures-return-bare-1.md`](docs/development/issues/archive/2026-10-15-bote-server-run-failures-return-bare-1.md)).
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`. **bote filed it, so note: moving bote's pin to
+cyrius 6.7.12 is not enough.** 6.7.12 vendors sandhi 1.10.9. The fix arrives with the first
+cyrius release that vendors 1.10.10.
+
+**Behaviour changes a consumer can see:**
+- `sandhi_server_run_opts` (and so `sandhi_server_run`) and `sandhi_server_run_async` close
+  their listen socket when bind or listen fails. Each failed start leaked one fd.
+- New `sandhi_server_last_failure(opts, out_step, out_errno)`. The options struct grows
+  96 → 112 bytes. The 0 / 1 return contract is unchanged.
+
+### Fixed
+
+- **server: `run_opts` and `run_async` leaked the listen socket on a failed bind or
+  listen.** Reported by bote 3.4.0 with a probe. Against a held port, the next fd moved 4 → 9
+  over five failed `run_opts` starts and 9 → 14 over five `run_async` ones. `run_pooled`,
+  `run_tls` and `run_pooled_tls` already closed it. A supervisor retrying once a second would
+  leak 3,600 fds an hour and end in EMFILE everywhere else in the process.
+  - **The fix:** both `sock_close(sfd)` before returning. The issue's probe, rebuilt against
+    1.10.10, reads 4 → 4 for both and reports BIND / 98.
+  - **The row:** `server/last_failure` checks the next fd across three failed starts of
+    each of the five entry points, on Linux and macOS (Windows hands out socket handles, not
+    the lowest free fd). Dropping either close fails it: 5 → 8 for `run_opts`, 4 → 7 for
+    `run_async`.
+- **server: the pooled loops left spawned workers parked when a worker argument failed to
+  allocate.** `run_pooled` and `run_pooled_tls` returned 1 with the handoff channel still
+  open, so the workers already started waited on it for good. They close the channel first
+  now, as every other exit from those loops does. Found while reading the issue's sites; no
+  consumer report and no row (it needs an allocation to fail partway through the spawn).
+
+### Added
+
+- **server: `sandhi_server_last_failure(opts, out_step, out_errno)`: why a serve entry
+  point returned 1.** It returns the step and stores the step and errno through two optional
+  8-byte slots. Through 1.10.9 every failure was a bare `1`. The errno from `tcp_socket`,
+  `sock_bind` or `sock_listen` sat in a local and was thrown away, so bote could only log
+  "socket, bind, listen or accept failed (is the port in use?)".
+  - **Steps** (enum `SandhiServerFailStep`): `SANDHI_SERVER_FAIL_NONE`, `_CONFIG` (a TLS
+    entry point without certificate and key), `_ALLOC`, `_SOCKET`, `_BIND`, `_LISTEN`,
+    `_ACCEPT` (a fatal accept, or the give-up bound). CONFIG and ALLOC carry errno 0.
+  - Every `return 1` in the five entry points and the two inline pool paths records one.
+    Each entry point resets the record to NONE when it starts, so a loop stopped by its flag
+    returns 0 and reads NONE.
+  - The errno is the target's own, as `lib/net.cyr` reports it: EADDRINUSE is 98 on Linux, 48
+    on macOS and 10048 (WSAEADDRINUSE) on Windows.
+  - **Per server handle, not per thread.** The issue proposed a per-thread record and
+    allowed a per-handle one. Per-thread storage needs a thread-local block on the calling
+    thread, and on Linux the main thread may have none. sigil installs one only under a
+    once-guard (3.13.6), and a second installer is how sigil's first-use race happened. So
+    the record lives in the options struct the caller passes, and a caller that wants it
+    gives each server its own. `sandhi_server_run` passes `opts = 0` and records nothing:
+    bote moves to `sandhi_server_run_opts` with a `sandhi_server_options_new()` per
+    transport to read it.
+  - **Rows** (`server/last_failure`, 50 assertions; the struct-growth row gains two more):
+    - the record API on a new struct, a null struct and the recorder;
+    - CONFIG from both TLS entry points, including over a stale record;
+    - BIND with the errno of a direct bind set up the same way, from all five entry points
+      against a held port (the oracle keeps the row free of per-target errno tables);
+    - the reset to NONE on the next start;
+    - ACCEPT with EBADF, when a handler closes the loop's own listener. This one is Linux
+      and macOS only; see the roadmap's new Server section.
+  - **Mutation check:** recording nothing at `run_opts`'s fatal accept fails the ACCEPT row.
+
+### Declined
+
+- **A sakshi line at the failing step** (the issue's optional item 3). It would make sandhi
+  write to stderr where it writes nothing today, and bote already logs the failure. bote
+  needed only the step and errno, which `sandhi_server_last_failure` gives it.
+
+### Changed
+
+- **Pin → cyrius 6.7.12.** `lib/` re-resolved from empty: **75 files**. 74 → 75 because
+  bayan 1.6.0 now includes `math`. sigil 3.13.10 → **3.13.12**, sakshi 2.5.7 → **2.5.10**,
+  bayan 1.5.12 → **1.6.0**. `cyrius.lock` re-resolved (75 rows, `cyrius deps --verify`
+  clean). The pin needed no source change.
+  - 6.7.6 through 6.7.12 record nothing for sandhi to adopt.
+  - cyrius 6.7.6 re-vendored sandhi 1.10.9.
+  - cyrius 6.7.11's sakshi 2.5.10 shrank sakshi's static data, which ended the
+    large-static-data advisory that every `include "lib/sandhi.cyr"` printed. No sandhi change.
+- **docs:** `docs/guides/server.md` shows how to read `sandhi_server_last_failure`.
+- **Roadmap:** a new Server section holds two items found during this work:
+  - On Windows, accept errors reach `_sandhi_accept_action` as raw Winsock codes, so
+    WSAENOTSOCK and its kin back off for about 48 s instead of failing at once.
+  - The pooled loops ignore `thread_create`'s result.
+
+### Verification
+
+- **3,055 assertions** (947 / 1,691 / 353 / 63 / 1), 8/8 fuzz. lint, fmt and vet are clean.
+- **Builds:** the `CYRIUS_DCE=1` smoke builds, native and libssl. The aarch64, AGNOS and
+  Windows (PE) cross-builds link.
+- **dist:** all five bundles regenerated, and `cyrius distlib --check` is idempotent. The
+  `.deps` sidecars are unchanged. `server` and the full bundle carry the change; `tls`, `rpc`
+  and `discovery` take only the version stamp.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.10.9] — 2026-10-08
 
 **Pin → cyrius 6.7.5. The pooled servers run on worker threads on macOS and Windows, a stop

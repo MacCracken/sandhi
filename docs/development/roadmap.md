@@ -6,9 +6,10 @@
 > [`requests/`](requests/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. This file was last
-> swept clean of completed work on **2026-10-08** (at 1.10.9: the "Recorded by
-> cyrius 6.6.19" notes, both adopted, and the libssl smoke bullet's stale
-> non-gating premise; earlier sweeps at 1.10.6 and 1.10.7).
+> swept clean of completed work on **2026-10-15** (at 1.10.10: the pin line; nothing
+> else had shipped. Before that at 1.10.9: the "Recorded by cyrius 6.6.19" notes,
+> both adopted, and the libssl smoke bullet's stale non-gating premise; earlier
+> sweeps at 1.10.6 and 1.10.7).
 
 ## Context (post-fold)
 
@@ -17,7 +18,7 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.7.5** (since 1.10.9; the full trail is in `state.md`).
+is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 
 **Pacing.** The items below are *provisional groupings*, not committed dated
 slots — each opens when its gate clears (a cyrius primitive lands, profile
@@ -126,7 +127,7 @@ moved to [`requests/`](requests/README.md) instead.
   per-request timeouts; daimon's registry contract defines no auth surface today.
   Wire it when a consumer needs authenticated / timeout-bounded discovery.
 
-## cyrius 6.7.x language adoption (later; the pin is already 6.7.5)
+## cyrius 6.7.x language adoption (later; the pin is already 6.7.12)
 
 Placed here by the W2 stdlib wave (2026-10-08), which took only the defects. Each is
 an ordinary patch unless marked; none changes behaviour.
@@ -150,6 +151,26 @@ an ordinary patch unless marked; none changes behaviour.
   VERSION row reads `./VERSION` from the run directory, and `_t_canned_server` reads
   its socket with `sys_read` (the client framing rows). Make them portable, then
   consider a Windows CI leg like cyrius's own cass gate.
+
+## Server (found at 1.10.10)
+
+Both surfaced while fixing bote's 2026-10-15 filing; neither has a consumer report.
+
+- **Windows accept errors reach the classifier as raw Winsock codes**
+  (`_sandhi_accept_action`, `src/server/mod.cyr`). `lib/net.cyr` folds only
+  WSAEWOULDBLOCK onto EAGAIN for `sock_accept`, and the `_SANDHI_ERRNO_*` set has a
+  macOS arm and a Linux one but none for Windows. So WSAENOTSOCK (10038), WSAEBADF
+  (10009), WSAEINVAL (10022) and WSAEOPNOTSUPP (10045) back off for about 48 s before
+  the give-up bound ends the loop, instead of failing at once, and WSAECONNABORTED
+  (10053) and WSAEINTR (10004) back off instead of retrying. Bounded, not a spin. Add a
+  Windows arm to the errno set; `server/last_failure`'s ACCEPT row skips Windows until
+  then. Verify on cass (a listener closed under the loop) before and after.
+- **The pooled loops ignore `thread_create`'s result** (`run_pooled`,
+  `run_pooled_tls`). A worker that fails to start leaves the pool short and nothing
+  says so. If none start, the accept thread fills the handoff channel and then parks
+  in `chan_send` with `backlog` connections accepted and unserved. Count the workers
+  that started; fail the start (ALLOC, through `sandhi_server_last_failure`) when none
+  did. Provisional: decide whether a short pool should fail too.
 
 ## Background watches (not slots)
 

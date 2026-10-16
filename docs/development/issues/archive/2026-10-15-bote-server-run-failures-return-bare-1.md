@@ -12,7 +12,8 @@ numbers below are `src/server/mod.cyr` at `7ef9715`.
   matters to any caller that retries, such as a supervisor loop or a fallback to the next port.
 
 No data exposure.
-**Status:** open.
+**Status:** resolved in sandhi 1.10.10 (2026-10-15). It reaches bote only when a cyrius release
+re-vendors `lib/sandhi.cyr` from the 1.10.10 `dist/sandhi.cyr`: cyrius 6.7.12 still vendors 1.10.9.
 
 ## What is wrong
 
@@ -205,9 +206,43 @@ own and rises with retries: a supervisor retrying `sandhi_server_run` every seco
 port leaks 3,600 sockets an hour, and in the end turns that failure into `EMFILE` everywhere else
 in the process.
 
+## Resolution (sandhi 1.10.10)
+
+1. **The leak: fixed as proposed.** `_run_opts` and `_run_async` close `sfd` before returning
+   from a failed bind or listen. The probe above, rebuilt against 1.10.10, reads `4 → 4` for both
+   and reports BIND / 98. Row `server/last_failure` checks the next fd over three failed starts of
+   each of the five entry points (Linux and macOS: Windows hands out socket handles, not the lowest
+   free fd); dropping either close fails it (5 → 8, 4 → 7).
+2. **Say why: taken, per server handle rather than per thread.**
+   `sandhi_server_last_failure(opts, out_step, out_errno)` returns the step and stores the step and
+   errno through the two optional out slots. The steps are `SANDHI_SERVER_FAIL_{NONE, CONFIG, ALLOC,
+   SOCKET, BIND, LISTEN, ACCEPT}` as proposed. Every `return 1` above records one, the record resets
+   to NONE when an entry point starts, and the 0 / 1 return contract is unchanged.
+   - **Why not per thread.** Per-thread storage needs a thread-local block on the calling thread.
+     On Linux the main thread may have none: sigil installs one only under a once-guard (3.13.6),
+     and a second installer is how sigil's first-use race happened. So the record lives in the
+     options struct the caller passes, the "per server handle" shape this filing allowed.
+   - **What bote changes:** call `sandhi_server_run_opts(addr, port, handler, ctx, opts)` with
+     `opts = sandhi_server_options_new()` (one per transport) in place of `sandhi_server_run`, then
+     read `sandhi_server_last_failure(opts, &step, &errno)` after a return of 1.
+     `sandhi_server_run` passes `opts = 0` and records nothing.
+   - The errno is the target's own number as `lib/net.cyr` reports it: EADDRINUSE is 98 on Linux,
+     48 on macOS and 10048 (WSAEADDRINUSE) on Windows.
+3. **The sakshi line: declined.** It would make sandhi write to stderr where it writes nothing
+   today, and bote already logs the failure. bote needed only the step and errno, which (2) gives it.
+
+Found on the way and fixed in the same release: `_run_pooled` and `_run_pooled_tls` returned 1
+with the handoff channel open when a worker argument failed to allocate, so the workers already
+spawned stayed parked on it. They close the channel first now.
+
+Also found: on Windows, `_sandhi_accept_action` sees raw Winsock codes, since `lib/net.cyr` folds
+only WSAEWOULDBLOCK onto EAGAIN for accept. WSAENOTSOCK, WSAEBADF and WSAEINVAL back off for
+about 48 s before the give-up bound ends the loop instead of failing at once, and WSAECONNABORTED
+backs off instead of retrying. It is on the roadmap (Server).
+
 ## Related
 
-- [`archive/2026-07-30-accept-loop-unguarded-spin.md`](archive/2026-07-30-accept-loop-unguarded-spin.md):
+- [`2026-07-30-accept-loop-unguarded-spin.md`](2026-07-30-accept-loop-unguarded-spin.md):
   bote's earlier report against these accept sites, which added `_sandhi_server_accept_action`,
   the classifier whose errno this filing asks sandhi to keep.
 - bote `CHANGELOG.md` [3.4.0] (operational logging through sakshi) and
@@ -217,3 +252,5 @@ in the process.
 
 - 2026-10-15: filed by bote 3.4.0 with the probe output above (sandhi 1.10.9 as folded by
   cyrius 6.7.9).
+- 2026-10-15: resolved in sandhi 1.10.10 (the leak closed; `sandhi_server_last_failure` per
+  server handle; the sakshi line declined) and archived.

@@ -858,6 +858,11 @@ var _hsv_req_buf_cap = 0;
 #                       complete request, TLS handshake included, in ms.
 #                       Default 60000. 0 disables it. See
 #                       sandhi_server_options_request_ms.)
+#
+# 1.10.10 extends the struct (96 → 112 bytes) with the serve loops' failure
+# record. See sandhi_server_last_failure.
+#   +96  fail_step     (SANDHI_SERVER_FAIL_*)
+#   +104 fail_errno    (int: the failed step's errno, or 0)
 
 enum SandhiServerOptOff {
     SANDHI_SERVER_OPT_OFF_IDLE_MS      = 0;
@@ -872,13 +877,26 @@ enum SandhiServerOptOff {
     SANDHI_SERVER_OPT_OFF_REQ_ARENA    = 72;
     SANDHI_SERVER_OPT_OFF_STOP_FLAG    = 80;
     SANDHI_SERVER_OPT_OFF_REQUEST_MS   = 88;
+    SANDHI_SERVER_OPT_OFF_FAIL_STEP    = 96;
+    SANDHI_SERVER_OPT_OFF_FAIL_ERRNO   = 104;
 }
 
-var SANDHI_SERVER_OPT_STRUCT_SIZE = 96;
+var SANDHI_SERVER_OPT_STRUCT_SIZE = 112;
 var SANDHI_SERVER_DEFAULT_IDLE_MS = 30000;
 var SANDHI_SERVER_DEFAULT_MAX_CONNS = 128;
 var SANDHI_SERVER_DEFAULT_BACKLOG = 128;
 var SANDHI_SERVER_DEFAULT_REQUEST_MS = 60000;
+
+# The step at which a serve entry point failed. 1.10.10
+enum SandhiServerFailStep {
+    SANDHI_SERVER_FAIL_NONE   = 0;
+    SANDHI_SERVER_FAIL_CONFIG = 1;
+    SANDHI_SERVER_FAIL_ALLOC  = 2;
+    SANDHI_SERVER_FAIL_SOCKET = 3;
+    SANDHI_SERVER_FAIL_BIND   = 4;
+    SANDHI_SERVER_FAIL_LISTEN = 5;
+    SANDHI_SERVER_FAIL_ACCEPT = 6;
+}
 
 # Floor for `max_request`. A cap below this cannot hold a realistic header
 # block, so every request would 413 — almost certainly a caller bug (or a
@@ -953,11 +971,61 @@ fn sandhi_server_options_new_a(a): i64 {
     store64(o + SANDHI_SERVER_OPT_OFF_REQ_ARENA, 0);
     store64(o + SANDHI_SERVER_OPT_OFF_STOP_FLAG, 0);
     store64(o + SANDHI_SERVER_OPT_OFF_REQUEST_MS, SANDHI_SERVER_DEFAULT_REQUEST_MS);
+    store64(o + SANDHI_SERVER_OPT_OFF_FAIL_STEP, SANDHI_SERVER_FAIL_NONE);
+    store64(o + SANDHI_SERVER_OPT_OFF_FAIL_ERRNO, 0);
     return o;
 }
 
 fn sandhi_server_options_new(): i64 {
     return sandhi_server_options_new_a(default_alloc());
+}
+
+# Why the last serve call given `opts` returned 1: the step that failed, and the
+# errno the stdlib reported for it. Returns the step (SANDHI_SERVER_FAIL_*), and
+# stores the step and errno through `out_step` / `out_errno`, 8-byte slots the
+# caller owns (0 skips either).
+#
+# Every serve entry point sets the record to NONE when it starts, and to the
+# failing step before it returns 1. A loop stopped by its flag returns 0 and
+# leaves NONE. The 0 / 1 return contract is unchanged, so a caller that only
+# tests for non-zero is unaffected.
+#
+#   CONFIG  a TLS entry point without `sandhi_server_options_tls` (errno 0)
+#   ALLOC   a buffer, arena, channel or accept state was not allocated (errno 0)
+#   SOCKET  `tcp_socket` failed
+#   BIND    `sock_bind` failed: EADDRINUSE when the port is already held
+#   LISTEN  `sock_listen` failed
+#   ACCEPT  accept failed with an errno the accept-error policy calls fatal, or
+#           kept failing past SANDHI_ACCEPT_GIVEUP; errno is the last one
+#
+# The errno is the target's own number, as `lib/net.cyr` reports it: EADDRINUSE
+# is 98 on Linux, 48 on macOS and 10048 (WSAEADDRINUSE) on Windows.
+#
+# The record is per server handle, not per thread: it lives in `opts`, so a
+# caller that wants it gives each server its own options struct. With opts == 0
+# (as `sandhi_server_run` passes) nothing is recorded and this answers NONE.
+# Per thread would need a thread-local block on the calling thread, which on
+# Linux the main thread may not have; installing one is sigil's job, not
+# sandhi's. Reported by bote 3.4.0. CHANGELOG [1.10.10]
+fn sandhi_server_last_failure(opts, out_step, out_errno): i64 {
+    var step = SANDHI_SERVER_FAIL_NONE;
+    var err = 0;
+    if (opts != 0) {
+        step = load64(opts + SANDHI_SERVER_OPT_OFF_FAIL_STEP);
+        err  = load64(opts + SANDHI_SERVER_OPT_OFF_FAIL_ERRNO);
+    }
+    if (out_step != 0)  { store64(out_step, step); }
+    if (out_errno != 0) { store64(out_errno, err); }
+    return step;
+}
+
+# Record `step` and `err` in `opts` (a no-op when opts == 0). Returns 1, the
+# serve loops' failure value, so a failing call site can `return` it.
+fn _sandhi_server_set_failure(opts, step, err): i64 {
+    if (opts == 0) { return 1; }
+    store64(opts + SANDHI_SERVER_OPT_OFF_FAIL_STEP, step);
+    store64(opts + SANDHI_SERVER_OPT_OFF_FAIL_ERRNO, err);
+    return 1;
 }
 
 fn sandhi_server_options_idle_ms(opts, ms): i64 {
@@ -1093,7 +1161,8 @@ var SANDHI_SERVER_STOP_POLL_MS = 100;
 # That return value is the whole contract: every serve loop returns **1** for
 # every failure, and previously never returned any other way, so **0 now means
 # and only means "you asked me to stop, and I did."** A caller can map the two
-# straight onto a clean exit and a fatal one.
+# straight onto a clean exit and a fatal one. Which failure a 1 was is in
+# `opts`: see sandhi_server_last_failure (1.10.10).
 #
 # **Setting this is what enables stopping at all.** With no flag the listen fd
 # keeps its blocking-accept behaviour and the loop is bit-for-bit what it was
@@ -1444,7 +1513,9 @@ fn _sandhi_accept_step(st, err): i64 {
 # INADDR_LOOPBACK() for 127.0.0.1). `handler_fp` must have the signature:
 #   fn handler(ctx, cfd, req_buf, req_len) → 0
 #
-# Returns 1 on bind/listen failure; never returns on success (loops forever).
+# Returns 1 on failure (it records nothing: pass an options struct to
+# `sandhi_server_run_opts` to learn why, see sandhi_server_last_failure);
+# never returns on success (loops forever).
 fn sandhi_server_run(addr, port, handler_fp, ctx): i64 {
     return sandhi_server_run_opts(addr, port, handler_fp, ctx, 0);
 }
@@ -1453,6 +1524,7 @@ fn sandhi_server_run(addr, port, handler_fp, ctx): i64 {
 # to bound slow/idle peers (slowloris guard). max_conns is accepted
 # but not honored today — server stays single-threaded until 0.8.0.
 fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts): i64 {
+    _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_NONE, 0);   # 1.10.10
     # 1.6.6 security fix: ignore SIGPIPE so a peer that disconnects
     # mid-response can't kill the process (see _sandhi_server_ignore_sigpipe).
     _sandhi_server_ignore_sigpipe();
@@ -1461,28 +1533,45 @@ fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts): i64 {
     # accepted connection — it must outlive any per-request arena, so
     # always allocate from the global bump.
     var max_req = _hsv_resolve_req_max(opts);
-    if (_hsv_ensure_req_buf(max_req) == 0) { return 1; }
-    if (_hsv_ensure_reject_arena() == 0) { return 1; }   # 1.9.6
+    if (_hsv_ensure_req_buf(max_req) == 0) {
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
+    if (_hsv_ensure_reject_arena() == 0) {                         # 1.9.6
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
 
     var idle_ms = sandhi_server_options_get_idle_ms(opts);
     var stop_ptr = sandhi_server_options_get_stop_flag(opts);   # 1.9.9
 
     var sfd_tag, sfd = tcp_socket();
-    if (is_err_result(sfd_tag) == 1) { return 1; }
+    if (is_err_result(sfd_tag) == 1) {
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_SOCKET, sfd);
+    }
     sock_reuse(sfd);
 
+    # 1.10.10 — a failed bind or listen closes the socket. It returned with it
+    # open, one fd per failed start (bote 3.4.0).
     var br_tag, br = sock_bind(sfd, addr, port);
-    if (is_err_result(br_tag) == 1) { return 1; }
+    if (is_err_result(br_tag) == 1) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_BIND, br);
+    }
 
     var lr_tag, lr = sock_listen(sfd, 16);
-    if (is_err_result(lr_tag) == 1) { return 1; }
+    if (is_err_result(lr_tag) == 1) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_LISTEN, lr);
+    }
 
     # 1.9.9 — no-op unless a stop flag is configured.
     _sandhi_server_arm_stop_poll(sfd, stop_ptr);
 
     # 1.9.8 — accept-failure state; see the accept-error policy block above.
     var ast = _sandhi_accept_state_new();
-    if (ast == 0) { sock_close(sfd); return 1; }
+    if (ast == 0) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
 
     while (1 == 1) {
         # 1.9.9 — checked before accept, so a flag set before the loop starts
@@ -1494,7 +1583,10 @@ fn sandhi_server_run_opts(addr, port, handler_fp, ctx, opts): i64 {
             # any persistent error, and under EMFILE the pending connection
             # was never dequeued so it re-raced the same one.
             var act = _sandhi_accept_step(ast, cr);
-            if (act == SANDHI_ACCEPT_FATAL) { sock_close(sfd); return 1; }
+            if (act == SANDHI_ACCEPT_FATAL) {
+                sock_close(sfd);
+                return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ACCEPT, cr);
+            }
             if (act == SANDHI_ACCEPT_BACKOFF) { sleep_ms(_sandhi_accept_state_delay(ast)); }
         } else {
             _sandhi_accept_state_reset(ast);
@@ -1635,6 +1727,7 @@ fn _sandhi_server_async_handler(arg): i64 {
 # over a sustained connection stream. See the inline 1.5.3 note on the
 # arena sizing below.
 fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
+    _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_NONE, 0);   # 1.10.10
     # 1.6.6 security fix: ignore SIGPIPE (see sandhi_server_run_opts) — a
     # disconnecting peer must not be able to terminate the process.
     _sandhi_server_ignore_sigpipe();
@@ -1647,7 +1740,9 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
     # per-conn arena below is sized from it and _sandhi_server_async_handler
     # reads it.
     var max_req = _hsv_resolve_req_max(opts);
-    if (_hsv_ensure_reject_arena() == 0) { return 1; }   # 1.9.6
+    if (_hsv_ensure_reject_arena() == 0) {                         # 1.9.6
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
     # The cooperative loop runs handlers to completion with no preemption,
     # so EVERY per-connection recv MUST be time-bounded — a single client
     # that connects and sends nothing would otherwise hang the whole loop
@@ -1658,10 +1753,22 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
     if (idle_ms <= 0) { idle_ms = SANDHI_SERVER_DEFAULT_IDLE_MS; }
 
     var sfd_tag, sfd = tcp_socket();
-    if (is_err_result(sfd_tag) == 1) { return 1; }
+    if (is_err_result(sfd_tag) == 1) {
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_SOCKET, sfd);
+    }
     sock_reuse(sfd);
-    if (is_err_result(sock_bind(sfd, addr, port)) == 1) { return 1; }
-    if (is_err_result(sock_listen(sfd, 16)) == 1) { return 1; }
+    # 1.10.10 — a failed bind or listen closes the socket (it leaked one fd per
+    # failed start, as run_opts did).
+    var br_tag, br = sock_bind(sfd, addr, port);
+    if (is_err_result(br_tag) == 1) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_BIND, br);
+    }
+    var lr_tag, lr = sock_listen(sfd, 16);
+    if (is_err_result(lr_tag) == 1) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_LISTEN, lr);
+    }
 
     # Listen fd non-blocking so the accept queue drains cooperatively
     # (EAGAIN ends the drain). 1.6.2: composes stdlib `sock_set_nonblocking`
@@ -1686,13 +1793,22 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
     # 40 B/batch on the global bump). RSS stays flat over a sustained stream.
     var per_conn  = max_req + 64;
     var arena = arena_allocator(max_conns * per_conn + 4096);
-    if (arena == 0) { sock_close(sfd); return 1; }
+    if (arena == 0) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
 
     var rt = async_new_in(arena);
-    if (rt == 0) { sock_close(sfd); return 1; }
+    if (rt == 0) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
     # 1.9.8 — accept-failure state; see the accept-error policy block above.
     var ast = _sandhi_accept_state_new();
-    if (ast == 0) { sock_close(sfd); return 1; }
+    if (ast == 0) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
     var batch = 0;
     while (1 == 1) {
         # 1.9.9 — cooperative stop. This loop needs no SO_RCVTIMEO: its listen
@@ -1716,7 +1832,10 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
                     _sandhi_accept_state_reset(ast);
                 } else {
                     var aact = _sandhi_accept_step(ast, err);
-                    if (aact == SANDHI_ACCEPT_FATAL) { sock_close(sfd); return 1; }
+                    if (aact == SANDHI_ACCEPT_FATAL) {
+                        sock_close(sfd);
+                        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ACCEPT, err);
+                    }
                     if (aact == SANDHI_ACCEPT_BACKOFF) { sleep_ms(_sandhi_accept_state_delay(ast)); }
                 }
                 # End the drain either way. A transient error costs one
@@ -1762,7 +1881,10 @@ fn sandhi_server_run_async(addr, port, handler_fp, ctx, opts): i64 {
             reset_via(arena);       # reclaim this batch's buffers + args + rt + tasks
             batch = 0;
             rt = async_new_in(arena);   # fresh arena-backed runtime for the next batch
-            if (rt == 0) { sock_close(sfd); return 1; }
+            if (rt == 0) {
+                sock_close(sfd);
+                return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+            }
         } else {
             # Empty queue: wait for the listener. `async_await_readable` waits
             # without limit, so with a stop flag the wait is bounded by
@@ -2137,17 +2259,24 @@ fn _sandhi_server_pool_inline(): i64 {
 # The plaintext pool where it must run inline: one worker's resources on the
 # accept thread, each accepted connection served before the next accept. The
 # same per-request contract as a worker (budget, refusals, arenas, request
-# arena published in this thread's slot), without the parallelism.
-fn _sandhi_server_pool_run_inline(sfd, fp, ctx, idle_ms, stop_ptr): i64 {
+# arena published in this thread's slot), without the parallelism. A failure is
+# recorded in the caller's `opts`, as the threaded path records its own.
+fn _sandhi_server_pool_run_inline(sfd, fp, ctx, idle_ms, stop_ptr, opts): i64 {
     var max_req = _hsv_req_max;
     var reqbuf  = alloc_via(default_alloc(), max_req);
     var rarena  = arena_allocator(SANDHI_SERVER_REJECT_ARENA_CAP);
     var ast     = _sandhi_accept_state_new();
-    if (reqbuf == 0 || rarena == 0 || ast == 0) { sock_close(sfd); return 1; }
+    if (reqbuf == 0 || rarena == 0 || ast == 0) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
     var harena = 0;
     if (_hsv_req_arena_cap > 0 && _sandhi_req_arena_slot >= 0) {
         harena = arena_allocator(_hsv_req_arena_cap);
-        if (harena == 0) { sock_close(sfd); return 1; }
+        if (harena == 0) {
+            sock_close(sfd);
+            return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+        }
         thread_local_set(_sandhi_req_arena_slot, harena);
     }
     while (1 == 1) {
@@ -2155,7 +2284,10 @@ fn _sandhi_server_pool_run_inline(sfd, fp, ctx, idle_ms, stop_ptr): i64 {
         var cr_tag, cr = _sandhi_server_accept(sfd, stop_ptr);
         if (is_err_result(cr_tag) == 1) {
             var act = _sandhi_accept_step(ast, cr);
-            if (act == SANDHI_ACCEPT_FATAL) { sock_close(sfd); return 1; }
+            if (act == SANDHI_ACCEPT_FATAL) {
+                sock_close(sfd);
+                return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ACCEPT, cr);
+            }
             if (act == SANDHI_ACCEPT_BACKOFF) { sleep_ms(_sandhi_accept_state_delay(ast)); }
         } else {
             _sandhi_accept_state_reset(ast);
@@ -2210,8 +2342,10 @@ fn _sandhi_server_pool_worker(arg): i64 {
 # accept-loop forever feeding accepted fds to the workers over a bounded channel.
 # `handler_fp` signature matches `run` / `run_async`:
 #   fn handler(ctx, cfd, req_buf, req_len) -> 0
-# Returns 1 on bind/listen/channel failure; never returns on success.
+# Returns 1 on bind/listen/channel failure (sandhi_server_last_failure says
+# which); never returns on success.
 fn sandhi_server_run_pooled(addr, port, handler_fp, ctx, opts): i64 {
+    _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_NONE, 0);   # 1.10.10
     # Same security fix as the other serve loops — SIGPIPE disposition is
     # process-wide, so installing it once here covers every worker thread.
     _sandhi_server_ignore_sigpipe();
@@ -2245,16 +2379,26 @@ fn sandhi_server_run_pooled(addr, port, handler_fp, ctx, opts): i64 {
     var stop_ptr = sandhi_server_options_get_stop_flag(opts);   # 1.9.9
 
     var sfd_tag, sfd = tcp_socket();
-    if (is_err_result(sfd_tag) == 1) { return 1; }
+    if (is_err_result(sfd_tag) == 1) {
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_SOCKET, sfd);
+    }
     sock_reuse(sfd);
-    if (is_err_result(sock_bind(sfd, addr, port)) == 1) { sock_close(sfd); return 1; }
-    if (is_err_result(sock_listen(sfd, backlog)) == 1) { sock_close(sfd); return 1; }
+    var br_tag, br = sock_bind(sfd, addr, port);
+    if (is_err_result(br_tag) == 1) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_BIND, br);
+    }
+    var lr_tag, lr = sock_listen(sfd, backlog);
+    if (is_err_result(lr_tag) == 1) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_LISTEN, lr);
+    }
 
     # 1.9.9 — no-op unless a stop flag is configured.
     _sandhi_server_arm_stop_poll(sfd, stop_ptr);
 
     if (_sandhi_server_pool_inline() == 1) {
-        return _sandhi_server_pool_run_inline(sfd, handler_fp, ctx, idle_ms, stop_ptr);
+        return _sandhi_server_pool_run_inline(sfd, handler_fp, ctx, idle_ms, stop_ptr, opts);
     }
 
     # Bounded handoff channel sized to `backlog`: when `backlog` connections are
@@ -2262,12 +2406,21 @@ fn sandhi_server_run_pooled(addr, port, handler_fp, ctx, opts): i64 {
     # worker frees a slot. cfd values are always > 0, so they never collide with
     # chan's 0-on-close.
     var ch = chan_new(backlog);
-    if (ch == 0) { sock_close(sfd); return 1; }
+    if (ch == 0) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
 
     var w = 0;
     while (w < workers) {
         var warg = alloc_via(default_alloc(), SANDHI_POOL_WORKER_ARG_SIZE);
-        if (warg == 0) { sock_close(sfd); return 1; }
+        if (warg == 0) {
+            # 1.10.10 — close the channel too, so the workers already spawned
+            # read 0 and exit. They parked on it for good.
+            chan_close(ch);
+            sock_close(sfd);
+            return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+        }
         store64(warg + SANDHI_POOL_W_CHAN, ch);
         store64(warg + SANDHI_POOL_W_FP, handler_fp);
         store64(warg + SANDHI_POOL_W_CTX, ctx);
@@ -2278,7 +2431,11 @@ fn sandhi_server_run_pooled(addr, port, handler_fp, ctx, opts): i64 {
 
     # 1.9.8 — accept-failure state; see the accept-error policy block above.
     var ast = _sandhi_accept_state_new();
-    if (ast == 0) { chan_close(ch); sock_close(sfd); return 1; }
+    if (ast == 0) {
+        chan_close(ch);
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
 
     while (1 == 1) {
         # 1.9.9 — cooperative stop. Same teardown ORDER as the fatal path
@@ -2297,7 +2454,11 @@ fn sandhi_server_run_pooled(addr, port, handler_fp, ctx, opts): i64 {
             # workers' `chan_recv` returns 0 and they exit instead of parking
             # on a channel nobody will ever feed again.
             var act = _sandhi_accept_step(ast, cr);
-            if (act == SANDHI_ACCEPT_FATAL) { chan_close(ch); sock_close(sfd); return 1; }
+            if (act == SANDHI_ACCEPT_FATAL) {
+                chan_close(ch);
+                sock_close(sfd);
+                return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ACCEPT, cr);
+            }
             if (act == SANDHI_ACCEPT_BACKOFF) { sleep_ms(_sandhi_accept_state_delay(ast)); }
         } else {
             _sandhi_accept_state_reset(ast);
@@ -2790,27 +2951,47 @@ fn _sandhi_server_tls_serve_one(a, handler_fp, ctx, shim, fd, reqbuf, deadline_m
 # 1 otherwise). handler_fp signature: fn(ctx, conn, buf, blen) -> 0 (a
 # SandhiConn, not a raw fd — write via sandhi_server_send_*_c). For real
 # concurrency use sandhi_server_run_pooled_tls. Returns 1 on
-# config/bind/listen failure; never returns on success.
+# config/bind/listen failure (sandhi_server_last_failure says which); never
+# returns on success.
 fn sandhi_server_run_tls(addr, port, handler_fp, ctx, opts): i64 {
+    _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_NONE, 0);   # 1.10.10
     _sandhi_server_ignore_sigpipe();
-    if (sandhi_server_options_get_tls(opts) == 0) { return 1; }
+    if (sandhi_server_options_get_tls(opts) == 0) {
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_CONFIG, 0);
+    }
     var cert     = load64(opts + SANDHI_SERVER_OPT_OFF_TLS_CERT);
     var cert_len = load64(opts + SANDHI_SERVER_OPT_OFF_TLS_CERT_LEN);
     var key      = load64(opts + SANDHI_SERVER_OPT_OFF_TLS_KEY);
     var key_len  = load64(opts + SANDHI_SERVER_OPT_OFF_TLS_KEY_LEN);
-    if (cert == 0 || key == 0) { return 1; }
+    if (cert == 0 || key == 0) {
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_CONFIG, 0);
+    }
     var idle_ms  = sandhi_server_options_get_idle_ms(opts);
     var backlog  = sandhi_server_options_get_backlog(opts);
     var stop_ptr = sandhi_server_options_get_stop_flag(opts);   # 1.9.9
 
-    if (_hsv_ensure_req_buf(_hsv_resolve_req_max(opts)) == 0) { return 1; }
-    if (_hsv_ensure_reject_arena() == 0) { return 1; }   # 1.9.6
+    if (_hsv_ensure_req_buf(_hsv_resolve_req_max(opts)) == 0) {
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
+    if (_hsv_ensure_reject_arena() == 0) {                         # 1.9.6
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
 
     var sfd_tag, sfd = tcp_socket();
-    if (is_err_result(sfd_tag) == 1) { return 1; }
+    if (is_err_result(sfd_tag) == 1) {
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_SOCKET, sfd);
+    }
     sock_reuse(sfd);
-    if (is_err_result(sock_bind(sfd, addr, port)) == 1) { sock_close(sfd); return 1; }
-    if (is_err_result(sock_listen(sfd, backlog)) == 1) { sock_close(sfd); return 1; }
+    var br_tag, br = sock_bind(sfd, addr, port);
+    if (is_err_result(br_tag) == 1) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_BIND, br);
+    }
+    var lr_tag, lr = sock_listen(sfd, backlog);
+    if (is_err_result(lr_tag) == 1) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_LISTEN, lr);
+    }
 
     # 1.9.9 — no-op unless a stop flag is configured.
     _sandhi_server_arm_stop_poll(sfd, stop_ptr);
@@ -2820,11 +3001,17 @@ fn sandhi_server_run_tls(addr, port, handler_fp, ctx, opts): i64 {
     # so RSS stays flat instead of growing per accepted connection (the 1.6.8
     # limitation, now closed via cyrius 6.2.37's arena-aware tls_accept_alloc_in).
     var tarena = arena_allocator(SANDHI_SERVER_TLS_ARENA_CAP);
-    if (tarena == 0) { sock_close(sfd); return 1; }
+    if (tarena == 0) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
 
     # 1.9.8 — accept-failure state; see the accept-error policy block above.
     var ast = _sandhi_accept_state_new();
-    if (ast == 0) { sock_close(sfd); return 1; }
+    if (ast == 0) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
 
     while (1 == 1) {
         # 1.9.9 — cooperative stop.
@@ -2833,7 +3020,10 @@ fn sandhi_server_run_tls(addr, port, handler_fp, ctx, opts): i64 {
         if (is_err_result(cr_tag) == 1) {
             # 1.9.8: was no else branch (see sandhi_server_run_opts).
             var act = _sandhi_accept_step(ast, cr);
-            if (act == SANDHI_ACCEPT_FATAL) { sock_close(sfd); return 1; }
+            if (act == SANDHI_ACCEPT_FATAL) {
+                sock_close(sfd);
+                return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ACCEPT, cr);
+            }
             if (act == SANDHI_ACCEPT_BACKOFF) { sleep_ms(_sandhi_accept_state_delay(ast)); }
         } else {
             _sandhi_accept_state_reset(ast);
@@ -2901,16 +3091,23 @@ fn _sandhi_server_pool_tls_serve(fp, ctx, idle_ms, cfd, cert, cert_len, key, key
     return 0;
 }
 
-# The TLS pool where it must run inline (see `_sandhi_server_pool_inline`).
-fn _sandhi_server_pool_tls_run_inline(sfd, fp, ctx, idle_ms, stop_ptr, cert, cert_len, key, key_len): i64 {
+# The TLS pool where it must run inline (see `_sandhi_server_pool_inline`). A
+# failure is recorded in the caller's `opts`.
+fn _sandhi_server_pool_tls_run_inline(sfd, fp, ctx, idle_ms, stop_ptr, cert, cert_len, key, key_len, opts): i64 {
     var reqbuf = alloc_via(default_alloc(), _hsv_req_max);
     var tarena = arena_allocator(SANDHI_SERVER_TLS_ARENA_CAP);
     var ast    = _sandhi_accept_state_new();
-    if (reqbuf == 0 || tarena == 0 || ast == 0) { sock_close(sfd); return 1; }
+    if (reqbuf == 0 || tarena == 0 || ast == 0) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
     var harena = 0;
     if (_hsv_req_arena_cap > 0 && _sandhi_req_arena_slot >= 0) {
         harena = arena_allocator(_hsv_req_arena_cap);
-        if (harena == 0) { sock_close(sfd); return 1; }
+        if (harena == 0) {
+            sock_close(sfd);
+            return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+        }
         thread_local_set(_sandhi_req_arena_slot, harena);
     }
     while (1 == 1) {
@@ -2918,7 +3115,10 @@ fn _sandhi_server_pool_tls_run_inline(sfd, fp, ctx, idle_ms, stop_ptr, cert, cer
         var cr_tag, cr = _sandhi_server_accept(sfd, stop_ptr);
         if (is_err_result(cr_tag) == 1) {
             var act = _sandhi_accept_step(ast, cr);
-            if (act == SANDHI_ACCEPT_FATAL) { sock_close(sfd); return 1; }
+            if (act == SANDHI_ACCEPT_FATAL) {
+                sock_close(sfd);
+                return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ACCEPT, cr);
+            }
             if (act == SANDHI_ACCEPT_BACKOFF) { sleep_ms(_sandhi_accept_state_delay(ast)); }
         } else {
             _sandhi_accept_state_reset(ast);
@@ -2963,14 +3163,21 @@ fn _sandhi_server_pool_tls_worker(arg): i64 {
     return 0;
 }
 
+# Returns 1 on config/bind/listen/channel failure (sandhi_server_last_failure
+# says which); never returns on success.
 fn sandhi_server_run_pooled_tls(addr, port, handler_fp, ctx, opts): i64 {
+    _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_NONE, 0);   # 1.10.10
     _sandhi_server_ignore_sigpipe();
-    if (sandhi_server_options_get_tls(opts) == 0) { return 1; }
+    if (sandhi_server_options_get_tls(opts) == 0) {
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_CONFIG, 0);
+    }
     var cert     = load64(opts + SANDHI_SERVER_OPT_OFF_TLS_CERT);
     var cert_len = load64(opts + SANDHI_SERVER_OPT_OFF_TLS_CERT_LEN);
     var key      = load64(opts + SANDHI_SERVER_OPT_OFF_TLS_KEY);
     var key_len  = load64(opts + SANDHI_SERVER_OPT_OFF_TLS_KEY_LEN);
-    if (cert == 0 || key == 0) { return 1; }
+    if (cert == 0 || key == 0) {
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_CONFIG, 0);
+    }
     var idle_ms = sandhi_server_options_get_idle_ms(opts);
     if (idle_ms <= 0) { idle_ms = SANDHI_SERVER_DEFAULT_IDLE_MS; }
     var workers = sandhi_server_options_get_max_conns(opts);
@@ -2991,26 +3198,45 @@ fn sandhi_server_run_pooled_tls(addr, port, handler_fp, ctx, opts): i64 {
     var stop_ptr = sandhi_server_options_get_stop_flag(opts);   # 1.9.9
 
     var sfd_tag, sfd = tcp_socket();
-    if (is_err_result(sfd_tag) == 1) { return 1; }
+    if (is_err_result(sfd_tag) == 1) {
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_SOCKET, sfd);
+    }
     sock_reuse(sfd);
-    if (is_err_result(sock_bind(sfd, addr, port)) == 1) { sock_close(sfd); return 1; }
-    if (is_err_result(sock_listen(sfd, backlog)) == 1) { sock_close(sfd); return 1; }
+    var br_tag, br = sock_bind(sfd, addr, port);
+    if (is_err_result(br_tag) == 1) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_BIND, br);
+    }
+    var lr_tag, lr = sock_listen(sfd, backlog);
+    if (is_err_result(lr_tag) == 1) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_LISTEN, lr);
+    }
 
     # 1.9.9 — no-op unless a stop flag is configured.
     _sandhi_server_arm_stop_poll(sfd, stop_ptr);
 
     if (_sandhi_server_pool_inline() == 1) {
         return _sandhi_server_pool_tls_run_inline(sfd, handler_fp, ctx, idle_ms, stop_ptr,
-          cert, cert_len, key, key_len);
+          cert, cert_len, key, key_len, opts);
     }
 
     var ch = chan_new(backlog);
-    if (ch == 0) { sock_close(sfd); return 1; }
+    if (ch == 0) {
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
 
     var w = 0;
     while (w < workers) {
         var warg = alloc_via(default_alloc(), SANDHI_POOL_TLS_WORKER_ARG_SIZE);
-        if (warg == 0) { sock_close(sfd); return 1; }
+        if (warg == 0) {
+            # 1.10.10 — close the channel too, so the spawned workers exit (see
+            # sandhi_server_run_pooled).
+            chan_close(ch);
+            sock_close(sfd);
+            return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+        }
         store64(warg + SANDHI_POOL_TW_CHAN, ch);
         store64(warg + SANDHI_POOL_TW_FP, handler_fp);
         store64(warg + SANDHI_POOL_TW_CTX, ctx);
@@ -3025,7 +3251,11 @@ fn sandhi_server_run_pooled_tls(addr, port, handler_fp, ctx, opts): i64 {
 
     # 1.9.8 — accept-failure state; see the accept-error policy block above.
     var ast = _sandhi_accept_state_new();
-    if (ast == 0) { chan_close(ch); sock_close(sfd); return 1; }
+    if (ast == 0) {
+        chan_close(ch);
+        sock_close(sfd);
+        return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ALLOC, 0);
+    }
 
     while (1 == 1) {
         # 1.9.9 — cooperative stop. Same teardown ORDER as the fatal path
@@ -3042,7 +3272,11 @@ fn sandhi_server_run_pooled_tls(addr, port, handler_fp, ctx, opts): i64 {
             # 1.9.8: was no else branch (see sandhi_server_run_pooled) — same
             # channel-then-socket close order so workers unpark and exit.
             var act = _sandhi_accept_step(ast, cr);
-            if (act == SANDHI_ACCEPT_FATAL) { chan_close(ch); sock_close(sfd); return 1; }
+            if (act == SANDHI_ACCEPT_FATAL) {
+                chan_close(ch);
+                sock_close(sfd);
+                return _sandhi_server_set_failure(opts, SANDHI_SERVER_FAIL_ACCEPT, cr);
+            }
             if (act == SANDHI_ACCEPT_BACKOFF) { sleep_ms(_sandhi_accept_state_delay(ast)); }
         } else {
             _sandhi_accept_state_reset(ast);

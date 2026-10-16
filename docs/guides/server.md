@@ -35,7 +35,25 @@ fn main() {
 - `handler_fp` — function pointer; signature `fn h(ctx, cfd, req_buf, req_len) → 0`.
 - `ctx` — opaque pointer passed through to your handler each call.
 
-Return value: `1` if bind / listen fails at startup; otherwise loops forever.
+Return value: `1` if the server cannot start (or its accept fails fatally);
+otherwise loops forever. With a stop flag set, `0` means it stopped.
+
+To learn *why* it returned `1`, start it through `sandhi_server_run_opts` (or any
+other entry point) with an options struct of its own, and read the record the loop
+leaves there (since 1.10.10):
+
+```
+var opts = sandhi_server_options_new();
+if (sandhi_server_run_opts(INADDR_LOOPBACK(), 8080, &my_handler, 0, opts) == 1) {
+    var err[8];
+    var step = sandhi_server_last_failure(opts, 0, &err);
+    # step: SANDHI_SERVER_FAIL_CONFIG / _ALLOC / _SOCKET / _BIND / _LISTEN / _ACCEPT
+    # load64(&err): the errno, e.g. EADDRINUSE (98 on Linux) when the port is held
+}
+```
+
+The record lives in the options struct, so give each server its own.
+`sandhi_server_run` passes no options and records nothing.
 
 ## Handler signature
 
