@@ -59,26 +59,26 @@ Behavior:
 - Otherwise → fall back to `_sandhi_http_dispatch` (normal HTTP/1.1 with
   pool + redirect + timeout honoring).
 
-Today the "if" branch is effectively dead: nothing populates the pool's h2 map
-because `sandhi_conn_alpn_is_h2` always returns 0 post-handshake. So
-`sandhi_http_request_auto` is `_sandhi_http_dispatch` with a cheap h2-map
-lookup in front of it.
+With no h2 conn pooled for the route, a pooled HTTPS request first tries the ALPN
+promotion described above, and caches the h2 conn when the peer picks h2. Redirects
+are followed per hop on either protocol, and the `_retry` verbs send every attempt
+through `sandhi_http_request_auto`.
 
 Convenience verbs: `sandhi_http_get_auto`, `_head_auto`, `_post_auto`, `_put_auto`,
 `_patch_auto`, `_delete_auto` — all mirror the 1.1 signatures.
 
-Consumers can call the `_auto` verbs today and get HTTP/1.1 behavior; when TLS
-clears, they get h2 without a code change.
-
 ## Limitations of the h2 path
 
-The h2 path does **not** honor:
-
-- **Redirects** — `sandhi_http_options_follow_redirects` is 1.1-only. Redirect
-  responses on an h2 stream come back to the caller unhandled. (If you need
-  redirect following on h2, the dispatch layer can plumb it through — ask.)
-- **Retry with backoff** — `sandhi_http_get_retry` and friends are 1.1-only.
-  The h2 path is single-shot for idempotent-method calls.
+- ⚠ **A pooled h2 conn stalls after about 64 KiB of responses.** sandhi never sends
+  `WINDOW_UPDATE`, so once the responses on one conn add up to the peer's 65,535-byte
+  connection window, the peer stops sending. The h2 path sets no read or total timeout
+  of its own: only the read timeout of the request that opened the conn bounds the wait,
+  and there is none by default. Measured at 1.13.1: two `_auto` GETs of a 56 KB page
+  through one pool, and the second never returned. Until roadmap 1.13.x lands, use the
+  HTTP/1.1 verbs (`sandhi_http_*`, not `_auto`) with a pool for repeated large
+  responses. Setting `sandhi_http_options_read_ms` on the request that opens the conn
+  bounds the wait: the stalled request then fails with `SANDHI_ERR_PROTOCOL` after that
+  long (measured: 3,000 ms, about 3 s).
 
 Both of these are addressable when a consumer reports a real need. For now, the
 h2 path serves single-shot RPC traffic where neither applies.

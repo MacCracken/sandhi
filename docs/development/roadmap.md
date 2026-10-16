@@ -6,8 +6,8 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.13.0: the per-pool mutex shipped, and the
-> shared-HTTP/2-connection gap it exposed joined the 1.13.x line. The 1.11.x and
+> completed work on **2026-10-15** at 1.13.1: the ALPN-flag item shipped, and two
+> gaps found during it joined the 1.13.x line. The 1.11.x and
 > 1.12.x lines are complete and their sections are gone (the 1.12.x traits item was
 > re-scoped to the transport seam: CHANGELOG [1.12.3]). History is in the CHANGELOG.
 
@@ -37,15 +37,10 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 
 ## 1.13.x — Client concurrency and HTTP/2 completeness
 
-Shipped so far: 1.13.0, the per-pool mutex (a pool may be shared across threads).
+Shipped so far: 1.13.0, the per-pool mutex (a pool may be shared across threads);
+1.13.1, the h2 ALPN offer and the `_auto` dispatch's 0-RTT opt-in and credential
+digest in the request context.
 
-- **`_sandhi_alpn_advertise_h2` into the request context** (`src/http/conn.cyr`,
-  written by the h2 promotion in `src/http/h2/dispatch.cyr`, read by
-  `_sandhi_policy_pre_open_a` and the connection finalize). 1.10.7 moved the TLS
-  policy hook into the per-call request context and left this process-wide flag,
-  because a collision only changes which ALPN list a concurrent open offers
-  (negotiation, not enforcement). Lift it into a `SANDHI_REQCTX_*` slot. Pairs with
-  the pool mutex; it also clears the ground for the 1.14 ALPN proposal.
 - **One HTTP/2 connection used by several threads at once** (`src/http/h2/conn.cyr`,
   `request.cyr`, `response.cyr`; found at 1.13.0). The pool hands the same h2
   connection to every caller for a route (that is the multiplexing), and the `_auto`
@@ -55,17 +50,39 @@ Shipped so far: 1.13.0, the per-pool mutex (a pool may be shared across threads)
   simple first step), or demultiplex responses by stream id for real concurrency.
   Until then `docs/guides/connection-pool.md` tells a multi-threaded client to keep h2
   traffic to one thread or to give each thread its own pool.
+- **HPACK and Huffman tables built twice at once** (`src/http/h2/hpack.cyr`,
+  `huffman.cyr`; found at 1.13.1 by reading, not reproduced). `_hpack_static_init` and
+  `_hpack_huffman_init` build process-wide tables on first use, writing straight into
+  the globals and setting the "built" flag last. Two threads making their first h2
+  request at the same moment (even on separate pools, the guide's advice) both build:
+  the second replaces the table with an empty one mid-fill and both then push into it,
+  which can leave entries from both interleaved, so static-index lookups return wrong
+  names for the life of the process. Build into locals and publish once, as 1.13.1 did
+  for the ALPN lists.
+- **TLS session cache under concurrent opens** (`src/tls_policy/session_cache.cyr`;
+  found at 1.13.1). Once `sandhi_session_cache_enable(1)` is on, every TLS open looks
+  up, stores and evicts in one process-wide map with no lock. Only the libssl backend
+  stores sessions (native never resumes), so there concurrent opens can corrupt the
+  map; on native only the hit/miss counters race. A mutex, as the pool got at 1.13.0.
 - **Per-hop cred-digest recompute on cross-authority redirect-follow**
   (`src/http/client.cyr`). The 1.3.3 session-cache cred-digest is computed once per
   top-level dispatch (stored in the 1.6.9 request context), so an A→B redirect
   reuses A's digest for the B handshake. Fold the recompute into
-  `_sandhi_http_follow_a`'s hop loop.
+  `_sandhi_http_follow_a`'s hop loop, and `_sandhi_http_auto_follow_a`'s (since
+  1.13.1 its hops copy the digest from the dispatch's seed context).
 - **h2 spec-completeness**, one patch each (drained from `src/http/h2/` comments at
   1.4.3):
   - (a) request-body DATA-frame fragmentation when `body_len > peer_max_frame`
     (rejected with `_SANDHI_H2_ERR_BAD_LENGTH` today; `request.cyr`);
-  - (b) flow-control `WINDOW_UPDATE` enforcement (silently accepted; the peer's
-    default window keeps responses bounded; `response.cyr`);
+  - (b) flow control (`response.cyr`, `request.cyr`): sandhi never sends
+    `WINDOW_UPDATE` and ignores the peer's. **A pooled h2 conn stalls once its
+    responses add up to the peer's 65,535-byte connection window**, and the h2 path has
+    no read or total timeout of its own (only the opening request's `read_ms`, 0 by
+    default). Measured at 1.13.1 against one.one.one.one: two `_auto` GETs of a 56 KB
+    page through one pool, the second never returned; with `read_ms` 3,000 on the
+    opener it fails with `SANDHI_ERR_PROTOCOL` after about 3 s. Send `WINDOW_UPDATE` as
+    response data is consumed, and apply the request's own timeouts on the h2 path;
+    `docs/guides/http2-manual.md` carries the caveat until then;
   - (c) peer-SETTINGS `MAX_HEADER_LIST_SIZE` enforcement (not applied to conn
     state; `conn.cyr`). `ENABLE_PUSH` is moot client-side;
   - (d) a caller-overridable HEADERS-frame buffer cap (fixed 8 KB; `request.cyr`).

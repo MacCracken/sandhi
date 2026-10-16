@@ -4,6 +4,130 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.13.1] — 2026-10-15
+
+**The h2 ALPN offer, and the `_auto` dispatch's 0-RTT opt-in and credential digest, live
+in each request's own context.** Through 1.13.0 all three were module globals set around a
+call, where an open or dispatch on another thread read them. No pin change (6.7.12), no
+public surface change. Second patch on the 1.13.x line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+**Visible to a consumer:**
+- **Concurrent `_auto` dispatches no longer share state.** That includes the `_retry` verbs,
+  which send every attempt through `sandhi_http_request_auto_a`. Their 0-RTT opt-in and
+  credential digest no longer leak between threads, and no HTTP/1.1 request offers h2
+  because a promotion is running elsewhere.
+- **Found while testing, not fixed:** a pooled HTTP/2 connection stalls after about 64 KiB
+  of responses. Measured live, it is pre-existing (1.13.0 does the same), and roadmap
+  1.13.x item (b) now describes it. `docs/guides/http2-manual.md` carries the caveat and
+  the `read_ms` bound.
+
+### Fixed
+
+- **http/conn, h2/dispatch: the h2 ALPN offer was process-wide.** The h2 promotion set
+  `_sandhi_alpn_advertise_h2` to 1 around its open and back to 0 after, and the
+  connection finalize and `_sandhi_policy_pre_open_a` read it.
+  - **An open on another thread in that window offered `h2,http/1.1`** for a caller that
+    speaks only HTTP/1.1. A server that picked h2 then received an HTTP/1.1 request.
+  - **A promotion's reset could land inside another promotion's open** and withdraw its
+    h2 offer.
+  - **The fix:** a `SANDHI_REQCTX_OFF_ALPN_H2` slot (`SANDHI_REQCTX_SIZE` 48 → 56, with
+    `_sandhi_reqctx_alpn_h2` / `_set_alpn_h2`). The promotion sets it on its own context,
+    and both readers read the open's context.
+  - **The global stays as the `ctx == 0` fallback** for the public conn-open verbs, like
+    the other request globals. `programs/_alpn_runtime_probe.cyr` drives it.
+- **http/conn: the two ALPN lists were published torn.** `_sandhi_alpn_init_wire` built
+  them into two globals. It published the http/1.1 list, which doubled as the "built"
+  check, before it had allocated the h2 one.
+  - **An h2 open racing the process's first TLS open** could pass the check and hand the
+    TLS layer a null list pointer with a length of 12. Found by reading while lifting the
+    flag; not reproduced (the window is the first open of the process).
+  - **The fix:** both lists live in one 21-byte buffer (`_sandhi_alpn_wire_get`; the h2
+    list at `_sandhi_alpn_h2h11_wire_off`). It is filled completely, fenced with
+    `atomic_fence`, and published by one store. Two threads building at once each publish
+    a complete buffer.
+  - **An allocation failure is now a failed open:** a TLS error on the client, a failed
+    pre-open under a policy, a failed handshake on the server. Before, it wrote through a
+    null pointer.
+- **h2/dispatch: the `_auto` dispatch shared its 0-RTT opt-in and credential digest
+  through globals.** `sandhi_http_request_auto_a` set `_sandhi_allow_0rtt` and
+  `_sandhi_cred_digest` for the length of the call, restored them after, and each hop's
+  context copied them from there. Two `_auto` dispatches on separate threads read each
+  other's values:
+  - **one request could become eligible for 0-RTT** through another's opt-in;
+  - **one could key its TLS session (the 1.3.3 cache key) under another's credentials;**
+  - **the restores could leave a dispatch's values behind** in the globals.
+  - **The fix:** the entry point builds a seed request context and passes it down.
+    `_sandhi_http_auto_follow_a`, `_auto_once_a` and `_try_h2_promote_a` take a trailing
+    `seed`, and `_sandhi_reqctx_new_seeded_a` gives each hop, and the promotion, a
+    context carrying the seed's two values. No dispatch path writes either global now.
+    The 1.10.7 note in the request-context block said only the ALPN flag was still
+    shared; it missed these two.
+- **h2/dispatch: the h2 promotion keyed its TLS session under no credentials.** Since
+  1.10.7 its fresh context had a credential digest of 0; through 1.10.6 it read the global
+  the `_auto` entry set. It now carries the dispatch's digest. Only the libssl backend
+  with the session cache enabled resumes sessions, so only that setup was affected.
+
+### Changed
+
+- **docs:** `docs/guides/http2-manual.md` said the pooled-h2 branch was dead and that
+  redirects and retry were HTTP/1.1-only. All three were stale: the promotion pools h2
+  connections, `_auto` follows redirects per hop, and `_retry` goes through `_auto`. The
+  section now says so, and lists the stall as its first limitation.
+  `docs/guides/connection-pool.md` no longer calls h2 pools uncommon, and points to the
+  stall.
+- **Roadmap:** the ALPN-flag item leaves 1.13.x. Two items found during this patch join
+  it:
+  - **the HPACK and Huffman tables' first-use build race** (two threads building at once
+    can interleave both builds into one table);
+  - **the TLS session cache's unlocked map** (a race on libssl; on native only the
+    counters race).
+  - **Item (b), flow control,** now states the measured stall, and that the h2 path
+    applies no timeout of its own.
+  - **The per-hop cred-digest item** names `_sandhi_http_auto_follow_a` too.
+
+### Verification
+
+- **New rows, 39 assertions:**
+  - **`client/reqctx_alpn_h2`** (27):
+    - the slot and its `ctx == 0` fallback;
+    - the policy pre-open's hook list per context, with the global set as a concurrent
+      promotion did;
+    - the one-buffer wire layout;
+    - an end-to-end row: a real ClientHello over a loopback pair that nobody answers
+      (the client's 200 ms read times out and the hello is read back from the server
+      end). It offers `h2,http/1.1` only when the context says so, and `ctx == 0` still
+      follows the global.
+  - **`client/reqctx_seeded`** (9): the seed's 0-RTT opt-in and digest are copied, and
+    its policy, hook, h2 offer and error are not; `seed == 0` reads the globals.
+  - **`alloc/1131/auto_dispatch_leaves_globals`** (3): a resolver hook running
+    mid-dispatch sees both globals at 0.
+- **Mutations, each caught:**
+  - reading the global in the finalize: 2 rows;
+  - reading it in the pre-open: 2 rows;
+  - the seeded helper dropping the digest: 2 rows;
+  - the `_auto` entry writing the globals again: 3 rows.
+- **3,159 assertions** (1,048 / 1,691 / 356 / 63 / 1), 8/8 fuzz. `fmt` is clean, and
+  lint's one warning is the pre-existing long table line in `src/http/h2/huffman.cyr`.
+- **Windows under wine:** all four suites pass (1,035 / 1,691 / 356 / 63). Every new row
+  ran there, including the ClientHello row.
+- **aarch64 under qemu:** all four suites pass (1,048 / 1,691 / 356 / 63).
+- **The full Linux gate:**
+  - Builds: the `CYRIUS_DCE=1` smoke, native and libssl, and the Windows, aarch64 and
+    AGNOS cross-builds.
+  - Live gates: all seven pass.
+  - `programs/_alpn_runtime_probe.cyr` against 1.1.1.1: `http/1.1`, then `h2` with the
+    global set, then `http/1.1` (the `ctx == 0` path).
+  - A throwaway `_auto` probe with a pool: 200, an h2 connection pooled by the promotion,
+    and the module flag still 0 after it.
+  - CI scripts: the whole-surface link check (883 fns; control refused) and the programs
+    sweep (35 programs) pass.
+  - dist: all five bundles regenerated and idempotent. **`.deps` sidecars:** all five
+    gain `atomic` (`atomic_fence`, in `src/http/conn.cyr`, which every profile includes).
+- Not yet re-vendored into a cyrius release.
+
 ## [1.13.0] — 2026-10-15
 
 **A client connection pool may be shared across threads: each pool owns a mutex.**

@@ -2643,6 +2643,169 @@ fn test_reqctx_hook_is_per_call() {
     return 0;
 }
 
+# 1.13.1 — the h2 ALPN offer belongs to the request context.
+#
+# Through 1.13.0 the h2 promotion set a module flag around its open, and the
+# connection finalize and the policy pre-open read it, so an open on another
+# thread in that window offered h2 too. Mutation: reading
+# `_sandhi_alpn_advertise_h2` in `_sandhi_policy_pre_open_a` fails the
+# "c2 offers http/1.1 only" row.
+fn test_reqctx_alpn_h2_is_per_call() {
+    var a = default_alloc();
+    var g = _sandhi_alpn_advertise_h2;
+    var c1 = _sandhi_reqctx_new_a(a);
+    var c2 = _sandhi_reqctx_new_a(a);
+    assert_eq(_sandhi_reqctx_alpn_h2(c1), 0, "alpn ctx: a new context offers http/1.1 only");
+    _sandhi_reqctx_set_alpn_h2(c1, 1);
+    assert_eq(_sandhi_reqctx_alpn_h2(c1), 1, "alpn ctx: set in c1");
+    assert_eq(_sandhi_reqctx_alpn_h2(c2), 0, "alpn ctx: a sibling context is unaffected");
+    assert_eq(_sandhi_alpn_advertise_h2, g, "alpn ctx: the module global is untouched");
+    _sandhi_alpn_advertise_h2 = 1;
+    assert_eq(_sandhi_reqctx_alpn_h2(0), 1, "alpn ctx: ctx 0 reads the global");
+    assert_eq(_sandhi_reqctx_alpn_h2(c2), 0, "alpn ctx: which a context never reads");
+    _sandhi_reqctx_set_alpn_h2(0, 0);
+    assert_eq(_sandhi_alpn_advertise_h2, 0, "alpn ctx: ctx 0 writes the global");
+    assert_eq(_sandhi_reqctx_alpn_h2(c1), 1, "alpn ctx: and c1 keeps its own");
+    if (sandhi_tls_policy_enforcement_available() == 1) {
+        # The policy hook's list comes from the context, whatever the global
+        # says (set as a concurrent promotion did through 1.13.0).
+        var p = sandhi_tls_policy_new_trust_store("programs/_tls_fixtures/cert.pem");
+        _sandhi_alpn_advertise_h2 = 1;
+        assert_eq(_sandhi_policy_pre_open_a(a, p, c1), 0, "alpn ctx: pre_open arms c1");
+        assert_eq(_sandhi_policy_pre_open_a(a, p, c2), 0, "alpn ctx: pre_open arms c2");
+        var h1 = _sandhi_reqctx_hook_ctx(c1);
+        var h2 = _sandhi_reqctx_hook_ctx(c2);
+        assert_eq(load64(h1 + 8), _sandhi_alpn_h2h11_wire_len, "alpn ctx: c1's hook offers h2,http/1.1");
+        assert_eq(memeq(load64(h1) + 1, "h2", 2), 1, "alpn ctx: h2 first");
+        assert_eq(load64(h2 + 8), _sandhi_alpn_h11_wire_len, "alpn ctx: c2 offers http/1.1 only");
+        assert_eq(memeq(load64(h2) + 1, "http/1.1", 8), 1, "alpn ctx: which is http/1.1");
+        _sandhi_policy_post_open_a(a, 0, p, c1);
+        _sandhi_policy_post_open_a(a, 0, p, c2);
+    } else {
+        assert_eq(1, 1, "alpn ctx: TLS policy enforcement unavailable — pre_open rows skipped");
+    }
+    _sandhi_alpn_advertise_h2 = g;
+    return 0;
+}
+
+# 1.13.1 — both ALPN lists live in one buffer, built once and published whole
+# (through 1.13.0 the http/1.1 list was published before the h2 list existed).
+fn test_alpn_wire_one_buffer() {
+    var w = _sandhi_alpn_wire_get();
+    assert_neq(w, 0, "alpn wire: built");
+    assert_eq(_sandhi_alpn_wire_get(), w, "alpn wire: built once");
+    assert_eq(_sandhi_alpn_wire, w, "alpn wire: published");
+    assert_eq(load8(w) & 0xFF, 8, "alpn wire: http/1.1 length prefix");
+    assert_eq(memeq(w + 1, "http/1.1", 8), 1, "alpn wire: http/1.1");
+    var b = w + _sandhi_alpn_h2h11_wire_off;
+    assert_eq(load8(b) & 0xFF, 2, "alpn wire: h2 length prefix");
+    assert_eq(memeq(b + 1, "h2", 2), 1, "alpn wire: h2");
+    assert_eq(load8(b + 3) & 0xFF, 8, "alpn wire: then the http/1.1 prefix");
+    assert_eq(memeq(b + 4, "http/1.1", 8), 1, "alpn wire: then http/1.1");
+    return 0;
+}
+
+# The ALPN ProtocolNameList a ClientHello in `buf` carries: 2 for
+# h2,http/1.1, 1 for http/1.1 only, 0 for neither.
+fn _t_alpn_offer(buf, n): i64 {
+    var i = 0;
+    while (i + 14 <= n) {
+        if ((load8(buf + i) & 0xFF) == 0 && (load8(buf + i + 1) & 0xFF) == 12
+          && (load8(buf + i + 2) & 0xFF) == 2 && memeq(buf + i + 3, "h2", 2) == 1
+          && (load8(buf + i + 5) & 0xFF) == 8 && memeq(buf + i + 6, "http/1.1", 8) == 1) {
+            return 2;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i + 11 <= n) {
+        if ((load8(buf + i) & 0xFF) == 0 && (load8(buf + i + 1) & 0xFF) == 9
+          && (load8(buf + i + 2) & 0xFF) == 8 && memeq(buf + i + 3, "http/1.1", 8) == 1) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# One client handshake under `ctx` over a loopback pair nobody answers: the
+# client's 200 ms read times out and the ClientHello is left in the server
+# end's buffer. Returns what it offered (`_t_alpn_offer`), or -1 with no pair.
+fn _t_client_hello_offer(ctx): i64 {
+    var sp[16];
+    if (_t_sock_pair(&sp) == 0) { return 0 - 1; }
+    var sfd = load64(&sp);
+    var cfd = load64(&sp + 8);
+    _sandhi_conn_set_timeout_ms(sfd, 2000, _SANDHI_SO_RCVTIMEO);
+    var c = _sandhi_conn_finalize_with_early_data_a(default_alloc(), cfd, 1, "localhost",
+      200, 200, 0, 0, ctx);
+    if (c != 0) { sandhi_conn_close(c); }
+    var buf = alloc(4096);
+    var n = _t_recv_all(sfd, buf, 4096);
+    sock_close(sfd);
+    return _t_alpn_offer(buf, n);
+}
+
+# End to end through the connection finalize: the ClientHello offers what the
+# context says. Mutation: reading `_sandhi_alpn_advertise_h2` in the finalize
+# fails the "global set, context not" row.
+fn test_client_hello_alpn_follows_ctx() {
+    if (tls_available() == 0) { assert_eq(1, 1, "client hello alpn: TLS unavailable — skipped"); return 0; }
+    var a = default_alloc();
+    var g = _sandhi_alpn_advertise_h2;
+    _sandhi_alpn_advertise_h2 = 0;
+    var c1 = _sandhi_reqctx_new_a(a);
+    _sandhi_reqctx_set_alpn_h2(c1, 1);
+    var o1 = _t_client_hello_offer(c1);
+    if (o1 < 0) {
+        _sandhi_alpn_advertise_h2 = g;
+        assert_eq(1, 1, "client hello alpn: loopback unavailable — skipped");
+        return 0;
+    }
+    assert_eq(o1, 2, "client hello alpn: a context set for h2 offers h2,http/1.1");
+    _sandhi_alpn_advertise_h2 = 1;
+    var c2 = _sandhi_reqctx_new_a(a);
+    assert_eq(_t_client_hello_offer(c2), 1,
+      "client hello alpn: with the global set and the context not, http/1.1 only");
+    assert_eq(_t_client_hello_offer(0), 2, "client hello alpn: ctx 0 still follows the global");
+    _sandhi_alpn_advertise_h2 = 0;
+    assert_eq(_t_client_hello_offer(0), 1, "client hello alpn: which defaults to http/1.1 only");
+    _sandhi_alpn_advertise_h2 = g;
+    return 0;
+}
+
+# 1.13.1 — the `_auto` dispatch's per-hop context and the h2 promotion's copy
+# the dispatch's 0-RTT opt-in and credential digest from its seed context, and
+# nothing else of it.
+fn test_reqctx_new_seeded() {
+    var a = default_alloc();
+    var s = _sandhi_reqctx_new_a(a);
+    store64(s + SANDHI_REQCTX_OFF_ALLOW_0RTT, 1);
+    store64(s + SANDHI_REQCTX_OFF_CRED_DIGEST, 0xC0C0);
+    store64(s + SANDHI_REQCTX_OFF_TLS_POLICY, 333);
+    _sandhi_reqctx_set_hook(s, 444, 555);
+    _sandhi_reqctx_set_alpn_h2(s, 1);
+    _sandhi_reqctx_set_err(s, SANDHI_CONN_OPEN_TLS);
+    var c = _sandhi_reqctx_new_seeded_a(a, s);
+    assert_neq(c, 0, "seeded: allocates");
+    assert_eq(_sandhi_reqctx_allow_0rtt(c), 1, "seeded: the 0-RTT opt-in is copied");
+    assert_eq(_sandhi_reqctx_cred(c), 0xC0C0, "seeded: the credential digest is copied");
+    assert_eq(_sandhi_reqctx_tls_policy(c), 0, "seeded: the policy is not");
+    assert_eq(_sandhi_reqctx_hook_fp(c), 0, "seeded: nor the hook");
+    assert_eq(_sandhi_reqctx_alpn_h2(c), 0, "seeded: nor the h2 offer");
+    assert_eq(_sandhi_reqctx_err(c), SANDHI_CONN_OPEN_OK, "seeded: nor the open error");
+    var s0 = _sandhi_allow_0rtt;
+    var sc = _sandhi_cred_digest;
+    _sandhi_allow_0rtt = 1;
+    _sandhi_cred_digest = 777;
+    var c0 = _sandhi_reqctx_new_seeded_a(a, 0);
+    assert_eq(_sandhi_reqctx_allow_0rtt(c0), 1, "seeded: seed 0 reads the 0-RTT global");
+    assert_eq(_sandhi_reqctx_cred(c0), 777, "seeded: and the digest global");
+    _sandhi_allow_0rtt = s0;
+    _sandhi_cred_digest = sc;
+    return 0;
+}
+
 # 1 when `thread_create` starts a second thread. On a serial backend (x86 macOS,
 # Windows, agnos, cx) a thread body runs to completion inside `thread_create`, so a
 # row whose peer must make progress WHILE the caller waits cannot run there: the
@@ -6025,6 +6188,14 @@ fn main() {
 
     test_group("tls_policy/reqctx_hook");
     test_reqctx_hook_is_per_call();
+
+    test_group("client/reqctx_alpn_h2");
+    test_reqctx_alpn_h2_is_per_call();
+    test_alpn_wire_one_buffer();
+    test_client_hello_alpn_follows_ctx();
+
+    test_group("client/reqctx_seeded");
+    test_reqctx_new_seeded();
 
     test_group("server/request_budget");
     test_server_request_ms_option();

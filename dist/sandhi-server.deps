@@ -9,6 +9,7 @@ hashmap
 str
 vec
 chrono
+atomic
 syscalls
 result
 string

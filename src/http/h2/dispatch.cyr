@@ -109,8 +109,8 @@ fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len): i64 {
 # `_sandhi_http_auto_once` when the pool doesn't already have an h2
 # conn for the route AND the URL is HTTPS AND a pool is attached.
 #
-# Opens a TLS connection advertising `h2,http/1.1` (toggling
-# `_sandhi_alpn_advertise_h2` for this open only); after handshake,
+# Opens a TLS connection advertising `h2,http/1.1` (the ALPN_H2 slot
+# of this open's own request context, 1.13.1); after handshake,
 # inspects what the server picked:
 #
 #   - h2 selected → do preface + SETTINGS exchange, cache the h2
@@ -128,7 +128,11 @@ fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len): i64 {
 # ACK roundtrips don't pay back on a single request — without a pool
 # to cache the conn for the next request, advertising h2 is strictly
 # slower than 1.1.
-fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool): i64 {
+#
+# `seed` is the dispatch's request context (`sandhi_http_request_auto_a`),
+# or 0 for the module globals; the open keys the session cache under its
+# credential digest.
+fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool, seed): i64 {
     var addr = _sandhi_client_resolve_a(a, host);
     var addr6 = 0;
     if (addr == 0 - 1) {
@@ -141,9 +145,12 @@ fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool): i64 {
 
     # 1.10.7 — a context of its own (no hook armed), so this open never picks
     # up a policy hook another thread armed and then pools the result.
-    var rc = _sandhi_reqctx_new_a(a);
+    # 1.13.1 — the h2 offer rides that context too, and so does the dispatch's
+    # credential digest: 1.10.7's fresh context had keyed this open's TLS
+    # session under no credentials (through 1.10.6 it read the module global).
+    var rc = _sandhi_reqctx_new_seeded_a(a, seed);
     if (rc == 0) { return 0; }
-    _sandhi_alpn_advertise_h2 = 1;
+    _sandhi_reqctx_set_alpn_h2(rc, 1);
     var conn = 0;
     if (addr6 != 0) {
         conn = _sandhi_conn_open_v6_fully_timed_a(a, addr6, port, 1, host,
@@ -152,7 +159,6 @@ fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool): i64 {
         conn = _sandhi_conn_open_fully_timed_ctx_a(a, addr, port, 1, host,
           connect_ms, read_ms, write_ms, rc);
     }
-    _sandhi_alpn_advertise_h2 = 0;
 
     if (conn == 0) { return 0; }
 
@@ -179,7 +185,7 @@ fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool): i64 {
 }
 
 fn _sandhi_http_try_h2_promote(url, opts, host, port, pool): i64 {
-    return _sandhi_http_try_h2_promote_a(default_alloc(), url, opts, host, port, pool);
+    return _sandhi_http_try_h2_promote_a(default_alloc(), url, opts, host, port, pool, 0);
 }
 
 # Per-hop dispatch — try h2 from pool, then ALPN-promote (TLS+pool
@@ -188,8 +194,10 @@ fn _sandhi_http_try_h2_promote(url, opts, host, port, pool): i64 {
 # single hop; the auto-level follower handles the redirect chain.
 # 1.2.1: `_a` threads `a` through h2 / promote / 1.1 paths uniformly.
 # h2 path uses `sandhi_h2_request_a(a, ...)` for the per-request resp;
-# 1.1 path uses `_sandhi_http_do_a(a, ...)`.
-fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts): i64 {
+# 1.1 path uses `_sandhi_http_do_a(a, ...)`. `seed` is the dispatch's
+# request context (0-RTT opt-in + credential digest), or 0 for the
+# module globals.
+fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts, seed): i64 {
     # 1.9.12 P1 — the auto path must honour a TLS policy attached to `opts`.
     #
     # This function read every other option off `opts` and passed `ctx = 0` to
@@ -238,7 +246,7 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts):
                 # handshake every request instead of reusing the idle
                 # 1.1 conn.
                 if (tls == 1 && _sandhi_pool_has_idle(pool, host, port, 1) == 0) {
-                    var promoted = _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool);
+                    var promoted = _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool, seed);
                     if (promoted != 0) {
                         return sandhi_h2_request_a(a, promoted, method, url, user_headers, body, body_len);
                     }
@@ -253,15 +261,13 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts):
     var total_ms = sandhi_http_options_get_total_ms(opts);
     # 1.9.12 P1 — a real request context, so the TLS policy reaches enforcement.
     #
-    # The 0-RTT and cred-digest slots are seeded from the module globals that
-    # `sandhi_http_request_auto_a` already save/restores around this call, which
-    # is exactly what do_impl's `ctx == 0` branch used to read — so those two
-    # keep their prior per-dispatch semantics (computed once from the original
-    # headers, not recomputed per redirect hop) and only the policy is new.
-    var ctx = _sandhi_reqctx_new_a(a);
+    # The 0-RTT and cred-digest slots are copied from `seed`, built once per
+    # dispatch by `sandhi_http_request_auto_a` (so the digest is computed from
+    # the original headers, not recomputed per redirect hop). 1.13.1: through
+    # 1.13.0 they came from two module globals that entry point set and
+    # restored around this call.
+    var ctx = _sandhi_reqctx_new_seeded_a(a, seed);
     if (ctx == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
-    store64(ctx + SANDHI_REQCTX_OFF_ALLOW_0RTT, _sandhi_allow_0rtt);
-    store64(ctx + SANDHI_REQCTX_OFF_CRED_DIGEST, _sandhi_cred_digest);
     store64(ctx + SANDHI_REQCTX_OFF_TLS_POLICY, policy);
     store64(ctx + SANDHI_REQCTX_OFF_LAST_ERR, SANDHI_CONN_OPEN_OK);
     return _sandhi_http_do_a(a, method, url, user_headers, body, body_len,
@@ -269,19 +275,19 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts):
 }
 
 fn _sandhi_http_auto_once(method, url, user_headers, body, body_len, opts): i64 {
-    return _sandhi_http_auto_once_a(default_alloc(), method, url, user_headers, body, body_len, opts);
+    return _sandhi_http_auto_once_a(default_alloc(), method, url, user_headers, body, body_len, opts, 0);
 }
 
 # Auto-path redirect driver. Same shape as `_sandhi_http_follow`:
 # per-hop locals reassigned in place to keep the frame small.
-fn _sandhi_http_auto_follow_a(a, method, url, user_headers, body, body_len, opts, max_hops): i64 {
+fn _sandhi_http_auto_follow_a(a, method, url, user_headers, body, body_len, opts, max_hops, seed): i64 {
     var m = method;
     var u = url;
     var b = body;
     var bl = body_len;
     var h = user_headers;
     var hops = 0;
-    var r = _sandhi_http_auto_once_a(a, m, u, h, b, bl, opts);
+    var r = _sandhi_http_auto_once_a(a, m, u, h, b, bl, opts, seed);
     while (hops < max_hops) {
         if (_sandhi_is_redirect(sandhi_http_status(r)) == 0) { return r; }
         var loc = sandhi_headers_get(sandhi_http_headers(r), "Location");
@@ -301,44 +307,43 @@ fn _sandhi_http_auto_follow_a(a, method, url, user_headers, body, body_len, opts
         if (sandhi_http_status(r) == 303) { m = "GET"; b = 0; bl = 0; }
         u = next;
         hops = hops + 1;
-        r = _sandhi_http_auto_once_a(a, m, u, h, b, bl, opts);
+        r = _sandhi_http_auto_once_a(a, m, u, h, b, bl, opts, seed);
     }
     return r;
 }
 
 fn _sandhi_http_auto_follow(method, url, user_headers, body, body_len, opts, max_hops): i64 {
-    return _sandhi_http_auto_follow_a(default_alloc(), method, url, user_headers, body, body_len, opts, max_hops);
+    return _sandhi_http_auto_follow_a(default_alloc(), method, url, user_headers, body, body_len, opts, max_hops, 0);
 }
 
 fn sandhi_http_request_auto_a(a, method, url, user_headers, body, body_len, opts): i64 {
-    # 1.3.2 — propagate the 0-RTT opt-in flag for the duration of
-    # this dispatch. Mirrors `_sandhi_http_dispatch_a` in client.cyr;
-    # the module-level `_sandhi_allow_0rtt` is read inside the 1.1
-    # fallback's `_do_impl_a` eligibility check. Save+restore so
-    # nested invocations (none today, but cheap insurance) don't
-    # corrupt outer state. h2 path doesn't consult the flag — TLS
-    # 1.3 0-RTT for h2 sits in a future milestone once the
-    # CONNECTION preface vs. early-data ordering is settled.
-    var prior_0rtt = _sandhi_allow_0rtt;
-    _sandhi_allow_0rtt = sandhi_http_options_get_allow_0rtt(opts);
-    # 1.3.3 — propagate cred-digest into the conn-finalize path so
-    # the session cache distinguishes auth contexts. Same save+restore
-    # shape as the 0-RTT flag. Available to the 1.1 fallback branch
-    # of auto dispatch (h2 fast-path uses pool-cached conns whose
-    # session was cached at finalize-time with the prior digest, so
-    # the "right session for this auth context" decision happens at
-    # the lookup that built the cached h2 conn — not on every reuse).
-    var prior_cred = _sandhi_cred_digest;
-    _sandhi_cred_digest = _sandhi_compute_cred_digest(user_headers);
+    # The dispatch's 0-RTT opt-in (1.3.2, read by the 1.1 fallback's
+    # `_do_impl_a` eligibility check; the h2 path doesn't consult it — TLS
+    # 1.3 0-RTT for h2 sits in a future milestone once the CONNECTION
+    # preface vs. early-data ordering is settled) and credential digest
+    # (1.3.3, so the session cache distinguishes auth contexts), held in a
+    # seed request context that every hop's own context, and the h2
+    # promotion's, copies. A pooled h2 conn keeps the session its opening
+    # request cached, so the digest applies where a connection is made, not
+    # on every reuse.
+    #
+    # 1.13.1 — through 1.13.0 both values went into module globals here,
+    # restored after the call, so two `_auto` dispatches on separate threads
+    # (the `_retry` verbs route every attempt through here) read each other's:
+    # one request could be made eligible for 0-RTT by another's opt-in, or
+    # key its TLS session under another's credentials. An OOM here is a
+    # per-request failure -> INTERNAL.
+    var seed = _sandhi_reqctx_new_a(a);
+    if (seed == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
+    store64(seed + SANDHI_REQCTX_OFF_ALLOW_0RTT, sandhi_http_options_get_allow_0rtt(opts));
+    store64(seed + SANDHI_REQCTX_OFF_CRED_DIGEST, _sandhi_compute_cred_digest(user_headers));
     var r = 0;
     if (sandhi_http_options_follow(opts) == 1) {
         var hops = sandhi_http_options_hops(opts);
-        r = _sandhi_http_auto_follow_a(a, method, url, user_headers, body, body_len, opts, hops);
+        r = _sandhi_http_auto_follow_a(a, method, url, user_headers, body, body_len, opts, hops, seed);
     } else {
-        r = _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts);
+        r = _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts, seed);
     }
-    _sandhi_cred_digest = prior_cred;
-    _sandhi_allow_0rtt = prior_0rtt;
     return r;
 }
 

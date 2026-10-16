@@ -87,7 +87,8 @@ sandhi_http_pool_close(pool);
 Closes every idle conn (fd + TLS context). The pool struct stays allocated and
 reusable — you can continue to use it after close; it just has no idle conns.
 
-For pools that hold h2 conns (uncommon today; see `http2-manual.md`), call
+For pools that hold h2 conns (any `_auto` request on a pooled HTTPS route whose peer
+picks h2; see `http2-manual.md`), call
 `sandhi_http_pool_close_h2_conns(pool)` **first** to tear down the h2 side
 cleanly, *then* `sandhi_http_pool_close(pool)` for the 1.1 side. The h2 map
 is not walked by the generic close for build-order reasons.
@@ -115,7 +116,8 @@ that is how h2 multiplexes. Running two requests on one HTTP/2 connection from t
 threads at once is **not** safe yet: its stream ids, writes and response reads are not
 serialised. A multi-threaded client that uses the h2-capable `_auto` dispatch with a
 shared pool should keep h2 traffic to one thread, or give each thread its own pool, until
-that lands (roadmap 1.13.x).
+that lands (roadmap 1.13.x). A pooled h2 conn also stalls after about 64 KiB of
+responses, on one thread or many: see `http2-manual.md`'s limitations.
 
 One pool per thread still works everywhere and avoids any contention, if that suits the
 program better.

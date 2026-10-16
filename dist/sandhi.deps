@@ -10,6 +10,7 @@ alloc
 vec
 str
 hashmap
+atomic
 syscalls
 result
 sigil

@@ -818,7 +818,7 @@ fn test_alloc_121bc_follow_err_resp_arena() {
 fn test_alloc_121bc_auto_once_err_resp_arena() {
     var a = arena_allocator(4096);
     var opts = sandhi_http_options_new_a(a);
-    var resp = _sandhi_http_auto_once_a(a, "GET", "not-a-valid-url", 0, 0, 0, opts);
+    var resp = _sandhi_http_auto_once_a(a, "GET", "not-a-valid-url", 0, 0, 0, opts, 0);
     assert_eq(resp != 0, 1, "auto_once_a constructed err-resp");
     assert_eq(sandhi_http_err_kind(resp), SANDHI_ERR_PARSE, "URL parse fail");
     return 0;
@@ -1616,16 +1616,44 @@ fn test_alloc_132_method_is_replay_safe() {
     return 0;
 }
 
-# Dispatch-flag plumbing — `_sandhi_http_dispatch_a` and
-# `sandhi_http_request_auto_a` both save+restore the module-level
-# `_sandhi_allow_0rtt` flag from `sandhi_http_options_get_allow_0rtt(opts)`.
-# Verify the flag is the actual storage location and starts at 0.
+# The module-level `_sandhi_allow_0rtt` flag is the ctx == 0 fallback for
+# the 0-RTT opt-in (1.6.9). Since 1.13.1 no dispatch path sets it — the
+# buffered and `_auto` dispatches carry the opt-in in their request
+# context — so it stays at its default of 0.
 fn test_alloc_132_allow_0rtt_flag_default() {
-    # Flag is module-level, defined in src/http/conn.cyr next to
-    # `_sandhi_alpn_advertise_h2`. Mirrors that pattern exactly —
-    # default 0, set transiently around dispatch, restored after.
     assert_eq(_sandhi_allow_0rtt, 0,
       "module-level 0-RTT flag defaults to 0");
+    return 0;
+}
+
+var _t_auto_seen_0rtt = 0;
+var _t_auto_seen_cred = 0;
+
+fn _t_resolver_spy_globals(ctx, host, family): i64 {
+    _t_auto_seen_0rtt = _sandhi_allow_0rtt;
+    _t_auto_seen_cred = _sandhi_cred_digest;
+    return 0;
+}
+
+# 1.13.1 — an `_auto` dispatch keeps its 0-RTT opt-in and credential digest in
+# its own context. Through 1.13.0 it set them into module globals for the
+# length of the call, where a dispatch on another thread read them. The
+# resolver hook runs mid-dispatch, so it sees what that other thread would
+# have. Mutation: restoring the save/restore fails both rows.
+fn test_auto_dispatch_leaves_globals() {
+    var a = default_alloc();
+    var o = sandhi_http_options_new();
+    sandhi_http_options_allow_0rtt(o, 1);
+    var h = sandhi_headers_new();
+    sandhi_headers_set(h, "Authorization", "Bearer t");
+    _t_auto_seen_0rtt = 0 - 1;
+    _t_auto_seen_cred = 0 - 1;
+    sandhi_client_set_resolver(&_t_resolver_spy_globals, 0);
+    var r = sandhi_http_request_auto_a(a, "GET", "http://example.invalid/x", h, 0, 0, o);
+    sandhi_client_clear_resolver();
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_DISCOVERY, "auto globals: the hook refused the dispatch");
+    assert_eq(_t_auto_seen_0rtt, 0, "auto globals: the 0-RTT global stayed 0 during the dispatch");
+    assert_eq(_t_auto_seen_cred, 0, "auto globals: and so did the credential digest");
     return 0;
 }
 
@@ -2302,6 +2330,9 @@ fn main() {
 
     test_group("alloc/132/allow_0rtt_flag_default");
     test_alloc_132_allow_0rtt_flag_default();
+
+    test_group("alloc/1131/auto_dispatch_leaves_globals");
+    test_auto_dispatch_leaves_globals();
 
     test_group("alloc/132/conn_0rtt_status_accessor");
     test_alloc_132_conn_0rtt_status_accessor();

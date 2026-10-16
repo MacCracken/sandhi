@@ -236,14 +236,15 @@ fn _sandhi_policy_pre_open_a(a, policy, ctx): i64 {
     }
 
     # Build the policy hook ctx and arm conn.cyr's override mechanism.
-    _sandhi_alpn_init_wire();
-    var protos = _sandhi_alpn_h11_wire;
+    var wire = _sandhi_alpn_wire_get();
+    var protos = wire;
     var plen   = _sandhi_alpn_h11_wire_len;
-    if (_sandhi_alpn_advertise_h2 == 1) {
-        protos = _sandhi_alpn_h2h11_wire;
+    if (_sandhi_reqctx_alpn_h2(ctx) == 1) {
+        protos = wire + _sandhi_alpn_h2h11_wire_off;
         plen   = _sandhi_alpn_h2h11_wire_len;
     }
-    var hook_ctx = alloc_via(a, 24);
+    var hook_ctx = 0;
+    if (wire != 0) { hook_ctx = alloc_via(a, 24); }
     if (hook_ctx == 0) {
         _sandhi_reqctx_set_err(ctx, SANDHI_CONN_OPEN_TLS);
         return 0 - 1;
