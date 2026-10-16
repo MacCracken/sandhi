@@ -48,6 +48,7 @@ if (sandhi_server_run_opts(INADDR_LOOPBACK(), 8080, &my_handler, 0, opts) == 1) 
     var err[8];
     var step = sandhi_server_last_failure(opts, 0, &err);
     # step: SANDHI_SERVER_FAIL_CONFIG / _ALLOC / _SOCKET / _BIND / _LISTEN / _ACCEPT
+    #       / _THREAD (a pooled loop could start no worker thread)
     # load64(&err): the errno, e.g. EADDRINUSE (98 on Linux) when the port is held
 }
 ```
@@ -237,6 +238,13 @@ never runs. No consumer code needed.
   real threads on Linux, macOS and Windows (macOS and Windows since 1.10.9). On
   agnos, whose stdlib channel cannot hand a connection to another thread, the
   pooled loops serve each connection on the accept thread instead.
+  If the system refuses some of the threads (a pids or memory limit), the server
+  still starts and serves on the ones it got, and logs one sakshi WARN:
+  `sandhi server: worker pool degraded, some worker threads did not start
+  started=1/3`. A worker that starts but cannot allocate its buffers exits and
+  logs a WARN too. If no worker starts, the call returns `1` with
+  `SANDHI_SERVER_FAIL_THREAD` (since 1.11.0). The WARN goes wherever your program
+  points sakshi (stderr by default, at the default INFO level).
 - `sandhi_server_options_backlog(opts, n)` — listen backlog and pooled handoff depth
   (default 128).
 - `sandhi_server_options_req_arena(opts, n)` — a per-request arena of `n` bytes for

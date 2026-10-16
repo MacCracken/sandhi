@@ -1947,6 +1947,151 @@ fn test_server_failure_accept_fatal() {
     return 0;
 }
 
+# ── 1.11.0 — the pooled loops check that their workers started ──
+#
+# `thread_create` answers 0 when the stack mapping or the clone is refused (a
+# pids or memory limit). Through 1.10.11 the pooled loops ignored it: a pool with
+# no worker accepted into a channel nothing read and then parked in `chan_send`,
+# and a short pool served on fewer workers than asked with nothing said. Now no
+# worker fails the start (THREAD), and a short pool serves and logs one sakshi
+# WARN. `_sandhi_server_spawn_limit` stands in for the refusal. The pool runs
+# inline, with no worker threads, where the stdlib channel cannot hand off
+# (agnos, cx), so these rows skip there.
+
+# A pool with no worker fails its start. The stop flag is set first, so a loop
+# that went on to accept anyway returns 0 at once and the row fails rather than
+# hangs. Mutation: dropping the `started == 0` check returns 0 (stopped) here.
+fn test_server_pool_no_worker_fails() {
+    if (_sandhi_server_pool_inline() == 1) { assert_eq(1, 1, "pool start: inline pool — skipped"); return 0; }
+    var flag[8];
+    store64(&flag, 1);
+    var o = sandhi_server_options_new();
+    sandhi_server_options_stop_flag(o, &flag);
+    sandhi_server_options_max_conns(o, 2);
+    var err[8];
+    var fd0 = _t_next_fd();
+
+    _sandhi_server_spawn_limit = 0;
+    var rc = sandhi_server_run_pooled(INADDR_LOOPBACK(), 0, &_t_ok_cfd_handler, 0, o);
+    _sandhi_server_spawn_limit = 0 - 1;
+    assert_eq(rc, 1, "pool start: run_pooled with no worker started returns 1");
+    assert_eq(sandhi_server_last_failure(o, 0, &err), SANDHI_SERVER_FAIL_THREAD,
+      "pool start: ...recorded as THREAD");
+    assert_eq(load64(&err), 0, "pool start: ...with errno 0 (thread_create reports none)");
+
+    sandhi_server_options_tls(o, "x", 1, "y", 1);
+    _sandhi_server_spawn_limit = 0;
+    rc = sandhi_server_run_pooled_tls(INADDR_LOOPBACK(), 0, 0, 0, o);
+    _sandhi_server_spawn_limit = 0 - 1;
+    assert_eq(rc, 1, "pool start: run_pooled_tls with no worker started returns 1");
+    assert_eq(sandhi_server_last_failure(o, 0, 0), SANDHI_SERVER_FAIL_THREAD,
+      "pool start: ...recorded as THREAD");
+    #ifndef CYRIUS_TARGET_WIN
+    assert_eq(_t_next_fd(), fd0, "pool start: both failed starts closed their listen socket");
+    #endif
+    return 0;
+}
+
+# What a sakshi hook saw: WARN events from the pool, the last one's message, and
+# its `started` field.
+var _t_sk_degraded  = 0;
+var _t_sk_started[16];
+var _t_sk_started_len = 0;
+
+fn _t_sk_hook(ts, level, category, msg, msg_len, fields) {
+    if (level != SK_WARN) { return 0; }
+    if (msg_len < 35) { return 0; }
+    if (memeq(msg, "sandhi server: worker pool degraded", 35) != 1) { return 0; }
+    _t_sk_degraded = _t_sk_degraded + 1;
+    # The fields block: a count, then {key, key_len, value, value_len} per field.
+    if (fields != 0 && load64(fields) == 1) {
+        var vl = load64(fields + 32);
+        if (vl > 15) { vl = 15; }
+        memcpy(&_t_sk_started, load64(fields + 24), vl);
+        _t_sk_started_len = vl;
+    }
+    return 0;
+}
+
+var _t_deg_stop = 0;
+var _t_deg_opts = 0;
+
+fn _t_deg_server(arg) {
+    sandhi_server_run_pooled(INADDR_LOOPBACK(), 39843, &_t_ok_cfd_handler, 0, _t_deg_opts);
+    return 0;
+}
+
+# A pool that starts one worker of three serves a real request on it and logs the
+# degradation once. Mutation: dropping the `started < workers` warning leaves the
+# hook count at 0; failing a short start (the policy not taken) leaves the client
+# unanswered.
+fn test_server_pool_degraded_warns() {
+    if (_sandhi_server_pool_inline() == 1) { assert_eq(1, 1, "pool degraded: inline pool — skipped"); return 0; }
+    if (_t_threads_concurrent() == 0) { assert_eq(1, 1, "pool degraded: no concurrent threads — skipped"); return 0; }
+    _t_deg_stop = 0;
+    _t_sk_degraded = 0;
+    _t_sk_started_len = 0;
+    var o = sandhi_server_options_new();
+    sandhi_server_options_max_conns(o, 3);
+    sandhi_server_options_stop_flag(o, &_t_deg_stop);
+    _t_deg_opts = o;
+    sakshi_set_emit_hook(&_t_sk_hook);
+    _sandhi_server_spawn_limit = 1;
+    var t = thread_create(&_t_deg_server, 0);
+    if (t == 0) {
+        _sandhi_server_spawn_limit = 0 - 1;
+        sakshi_set_output(SK_OUT_STDERR);
+        assert_eq(1, 1, "pool degraded: no thread — skipped");
+        return 0;
+    }
+    sleep_ms(200);
+    var n = 0;
+    var buf[64];
+    var ct, cfd = tcp_socket();
+    if (is_err_result(ct) == 0) {
+        if (is_err_result(sock_connect(cfd, INADDR_LOOPBACK(), 39843)) == 0) {
+            _sandhi_conn_set_timeout_ms(cfd, 3000, _SANDHI_SO_RCVTIMEO);
+            sock_send_all(cfd, "GET / HTTP/1.1\r\nHost: a\r\n\r\n", 28);
+            var rt, rn = sock_recv(cfd, &buf, 63);
+            if (is_err_result(rt) == 0 && rn > 0) { n = rn; }
+        }
+        sock_close(cfd);
+    }
+    _t_deg_stop = 1;
+    thread_join(t);
+    _sandhi_server_spawn_limit = 0 - 1;
+    sakshi_set_output(SK_OUT_STDERR);
+    assert_gte(n, 12, "pool degraded: the one worker that started answered");
+    assert_eq(memeq(&buf, "HTTP/1.1 200", 12), 1, "pool degraded: ...with 200");
+    assert_eq(_t_sk_degraded, 1, "pool degraded: one sakshi WARN says the pool is degraded");
+    assert_eq(_t_sk_started_len, 3, "pool degraded: ...with a started field");
+    assert_eq(memeq(&_t_sk_started, "1/3", 3), 1, "pool degraded: ...started=1/3");
+    return 0;
+}
+
+# The TLS pool logs the same warning. A pre-set stop flag ends the loop as soon
+# as it would accept, after the start-up check has run.
+fn test_server_pool_tls_degraded_warns() {
+    if (_sandhi_server_pool_inline() == 1) { assert_eq(1, 1, "tls pool degraded: inline pool — skipped"); return 0; }
+    var flag[8];
+    store64(&flag, 1);
+    var o = sandhi_server_options_new();
+    sandhi_server_options_stop_flag(o, &flag);
+    sandhi_server_options_max_conns(o, 4);
+    sandhi_server_options_tls(o, "x", 1, "y", 1);
+    _t_sk_degraded = 0;
+    _t_sk_started_len = 0;
+    sakshi_set_emit_hook(&_t_sk_hook);
+    _sandhi_server_spawn_limit = 2;
+    var rc = sandhi_server_run_pooled_tls(INADDR_LOOPBACK(), 0, 0, 0, o);
+    _sandhi_server_spawn_limit = 0 - 1;
+    sakshi_set_output(SK_OUT_STDERR);
+    assert_eq(rc, 0, "tls pool degraded: a short pool starts (and stops on its flag)");
+    assert_eq(_t_sk_degraded, 1, "tls pool degraded: one sakshi WARN says the pool is degraded");
+    assert_eq(memeq(&_t_sk_started, "2/4", 3), 1, "tls pool degraded: ...started=2/4");
+    return 0;
+}
+
 fn test_server_unsupported_te() {
     # The regression this guard exists for: `Transfer-Encoding: chunked` with
     # no Content-Length slipped past BOTH pre-1.9.4 smuggling guards, so
@@ -5531,6 +5676,11 @@ fn main() {
     test_server_failure_bind_in_use();
     test_server_failure_resets_on_start();
     test_server_failure_accept_fatal();
+
+    test_group("server/pool_startup");
+    test_server_pool_no_worker_fails();
+    test_server_pool_degraded_warns();
+    test_server_pool_tls_degraded_warns();
 
     test_group("server/options/max_request");
     test_server_stop_wakes_blocked_accept();

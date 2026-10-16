@@ -6,9 +6,9 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.10.11: the Windows accept-errno item
-> shipped, the empty sit-adoption batch was dropped, and the remaining work was
-> reorganized into the 1.11.x – 2.0.x lines below.
+> completed work on **2026-10-15** at 1.11.0: its `thread_create` check shipped.
+> At 1.10.11 the Windows accept-errno item shipped, the empty sit-adoption batch
+> was dropped, and the remaining work was reorganized into the lines below.
 
 ## Context (post-fold)
 
@@ -23,8 +23,9 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 - Each line is a minor release (1.11.0, 1.12.0, …) followed by its patches; items
   within a line ship in the order listed, one item per patch (single focus per
   patch). The lines run in order; a line opens when the previous one has shipped.
-- **1.10.x stays open for maintenance** until 1.11.0: pin bumps and consumer-filed
-  fixes land there as patches and do not wait for a line.
+- **Maintenance lands on the open line.** Pin bumps and consumer-filed fixes ship
+  as patches on whichever line is open (1.11.x since 1.11.0) and do not wait for
+  a line of their own.
 - A consumer-filed defect or real-workload friction (sit, bote, …) takes the next
   patch on whatever line is open; it does not wait for its "own" line.
 - Every new public verb still ships permanently into stdlib's `lib/sandhi.cyr`, so
@@ -35,13 +36,18 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 
 ## 1.11.x — Server hardening and Windows parity
 
-- **1.11.0 — the pooled loops check `thread_create`** (`run_pooled`,
-  `run_pooled_tls`, `src/server/mod.cyr`). A worker that fails to start leaves the
-  pool short and nothing says so. If none start, the accept thread fills the
-  handoff channel and then parks in `chan_send` with `backlog` connections accepted
-  and unserved. Count the workers that started; fail the start (ALLOC, through
-  `sandhi_server_last_failure`) when none did. Decide first whether a short pool
-  should fail too: that is the behaviour change that makes this a minor.
+1.11.0 shipped the pooled loops' `thread_create` check (no worker fails the start
+with `SANDHI_SERVER_FAIL_THREAD`; a short pool serves and logs a sakshi WARN).
+
+- **Workers that start and then exit** (`_sandhi_server_pool_worker`,
+  `_sandhi_server_pool_tls_worker`). A worker that cannot allocate its buffers
+  exits at start-up; since 1.11.0 it logs a WARN, but the accept thread still
+  counts it as started. If every worker exits that way, the accept thread fills
+  the handoff channel and parks in `chan_send`, as a pool with no thread did
+  before 1.11.0. Fix with a start-up handshake: each worker reports ready or
+  failed (an atomic count), and the accept thread waits for all of them, bounded,
+  before it accepts; zero ready fails the start (THREAD or ALLOC), fewer than
+  asked warns as today.
 - **`tests/sandhi.tcyr` portable on Windows, then a Windows CI leg.** First run on
   cass at 1.10.9: the `h2`, `alloc` and `rpc` suites pass, and `sandhi.tcyr` passed
   870 of 883 rows. The 13 failures are the harness, not the library:
@@ -229,8 +235,8 @@ move a sandhi pin.
   cap (architecture/001).
 - **`tests/sandhi.tcyr` cap-drift.** If a patch pushes `sandhi.tcyr` against the
   per-program fixup cap (architecture/001), carve out another `tests/<name>.tcyr` in
-  the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 958
-  assertions at 1.10.11.
+  the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 972
+  assertions at 1.11.0.
 - **Fuzz-corpus expansion.** Add harnesses as new parse surfaces land; each
   proposal above that parses wire input (batch responses, merge-patch documents,
   `Set-Cookie`, the CONNECT response) brings its own `fuzz/*.fcyr`. Other

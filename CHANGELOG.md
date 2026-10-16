@@ -4,6 +4,87 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-10-15
+
+**The pooled servers check that their worker threads started. A pool that starts none
+fails, and one that starts only some serves on those and logs a degraded-performance
+warning.** No pin change (6.7.12). The first item of the roadmap's 1.11.x line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+**Behaviour changes a consumer can see:**
+- `sandhi_server_run_pooled` / `_run_pooled_tls` return `1` with the new step
+  `SANDHI_SERVER_FAIL_THREAD` when no worker thread starts. Through 1.10.11 they
+  accepted connections and then hung.
+- **sandhi now writes to the log in two cases.** Through 1.10.11 the server module wrote
+  nothing outside the opt-in trace spans. Both new messages are WARNs through sakshi, so
+  they go wherever the program points sakshi (stderr by default; WARN is on at the
+  default INFO level):
+  - `sandhi server: worker pool degraded, some worker threads did not start
+    started=<n>/<max_conns>`, once, when a pooled loop starts fewer workers than asked;
+  - `sandhi server: a pooled worker exited at start-up (allocation failed); the pool is
+    short`, once per worker that exits that way.
+- `dist/sandhi-server.deps` gains `sakshi` and `fmt`: the server profile now logs through
+  sakshi and formats the count with `fmt_int_buf`. The full bundle already needed both.
+
+### Fixed
+
+- **server: the pooled loops ignored `thread_create`'s result.** `thread_create` answers
+  0 when the stack mapping or the clone is refused (a pids limit such as a container's
+  `pids.max`, or memory). A short pool served with less parallelism than `max_conns`
+  asked for, and nothing said so. A pool with no worker accepted connections into a
+  handoff channel nothing read, then parked in `chan_send` with `backlog` connections
+  accepted and never answered.
+  - **The policy** (decided 2026-10-15): a pool that starts no worker fails its start,
+    with the handoff channel and listen socket closed. A pool that starts some workers
+    keeps serving on them and logs the degraded warning above. It does not fail: fewer
+    workers is slower, not broken.
+  - **New step `SANDHI_SERVER_FAIL_THREAD` (7)** for `sandhi_server_last_failure`, with
+    errno 0 because `thread_create` reports none. It is a distinct step rather than
+    ALLOC because an operator fixes a thread limit differently from an allocation
+    failure.
+  - **Workers that exit at start-up log it too.** A pooled worker (plaintext or TLS) that
+    cannot allocate its request buffer or arenas exits, as before, and now logs a WARN
+    first. The accept thread still counts such a worker as started, so a pool whose
+    workers *all* exit that way can still park; that case is on the roadmap's 1.11.x
+    line (a start-up handshake).
+  - **The test seam:** the workers are spawned through `_sandhi_server_spawn_worker`,
+    which `thread_create`s unless the private `_sandhi_server_spawn_limit` (−1 outside
+    the suite) has run out. That is how the suite makes a spawn fail.
+  - **Rows** (new group `server/pool_startup`, 14 assertions):
+    - no worker: both pooled loops return 1, record THREAD with errno 0, and close their
+      listen socket;
+    - one worker of three: the plaintext pool answers a real request with 200 and logs
+      exactly one WARN carrying `started=1/3`, captured through a sakshi emit hook;
+    - two of four: the TLS pool starts and logs `started=2/4`.
+  - **Mutation checks:** dropping the no-worker check fails four rows (the loops return 0
+    from their pre-set stop flag instead of hanging). Dropping the warning fails five.
+  - **Windows:** the suite built for Windows passes under wine, 951 of 954. The 3
+    failures are the known `test_server_conn_seam` `/dev/null` harness rows. Not yet run
+    on cass.
+
+### Changed
+
+- **docs:** `docs/guides/server.md` documents the degraded-pool warning and the THREAD
+  step.
+- **Roadmap:** the shipped item leaves the 1.11.x line, and one is added: workers that
+  start and then exit (the start-up handshake above). Maintenance now lands as patches
+  on the open line, 1.11.x.
+
+### Verification
+
+- **3,080 assertions** (972 / 1,691 / 353 / 63 / 1) on Linux, 8/8 fuzz. lint, fmt and vet
+  are clean.
+- **Builds:** the `CYRIUS_DCE=1` smoke builds, native and libssl. The aarch64, AGNOS and
+  Windows (PE) cross-builds link. The Windows suite was run under wine (see Fixed).
+- **Live gates:** all seven pass. `_server_tls_probe` [1]–[8] runs the TLS pool on four
+  real workers, with no degraded warning.
+- **dist:** all five bundles regenerated, and `cyrius distlib --check` is idempotent.
+  `server` and the full bundle carry the change; `tls`, `rpc` and `discovery` take only
+  the version stamp. Of the sidecars only `-server` changed (above).
+- Not yet re-vendored into a cyrius release.
+
 ## [1.10.11] — 2026-10-15
 
 **Windows accept errors are classified, so a Windows serve loop whose listener is gone fails
@@ -1810,7 +1891,7 @@ docs job clean.
   the pin bump neither caused nor cured it. An upstream sigil-packaging gap; sandhi
   composes stdlib and does not patch a vendored bundle. Already on record as
   always-tolerated in
-  [`issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](docs/development/issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md).
+  [`issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](docs/development/issues/archive/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md).
 - `src/http/h2/huffman.cyr:73` exceeds the 120-char line limit. That is the 2,570-char
   HPACK Appendix B table as a single literal, deliberate per architecture/001 and
   explicitly allowlisted in CI's lint step.
@@ -1821,7 +1902,7 @@ docs job clean.
   reports the same 14, checked specifically for this release. The step is
   `continue-on-error` in CI and retires with the backend at 2.0; the native no-flag
   build links clean and is what all five live gates run against. Logged in
-  [`issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](docs/development/issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md),
+  [`issues/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md`](docs/development/issues/archive/2026-06-29-cyrius-libssl-dce-reachable-undef-6.3.x.md),
   whose earlier counts (4, then 1) were snapshots of their own dates.
 
 ## [1.9.10] — 2026-08-12
@@ -2047,7 +2128,7 @@ the real schedule takes.
   (RETRY neither consumes nor resets the streak), the give-up boundary at exactly 200/201, the
   null-state fail-closed path, and that `sleep_ms` genuinely blocks. 613 → 662 assertions.
 
-Full write-up: [`docs/development/issues/2026-07-30-accept-loop-unguarded-spin.md`](docs/development/issues/2026-07-30-accept-loop-unguarded-spin.md).
+Full write-up: [`docs/development/issues/2026-07-30-accept-loop-unguarded-spin.md`](docs/development/issues/archive/2026-07-30-accept-loop-unguarded-spin.md).
 
 **Downstream note.** A fix landing here does not reach consumers — they include stdlib's
 vendored `lib/sandhi.cyr`, so bote's four transports stay affected until a cyrius release
