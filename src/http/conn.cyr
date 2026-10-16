@@ -1004,8 +1004,7 @@ fn sandhi_conn_recv_all(conn, buf, max): i64 {
 # the outer ceiling.
 fn sandhi_conn_recv_all_deadline(conn, buf, max, deadline_ms): i64 {
     var have = 0;
-    var going = 1;
-    while (going == 1 && have < max) {
+    while (have < max) {
         if (deadline_ms > 0) {
             if (clock_now_ms() >= deadline_ms) {
                 store8(buf + have, 0);
@@ -1015,8 +1014,8 @@ fn sandhi_conn_recv_all_deadline(conn, buf, max, deadline_ms): i64 {
         var n = sandhi_conn_recv(conn, buf + have, max - have);
         if (n == 0 - _SANDHI_EAGAIN) { return 0 - _SANDHI_EAGAIN; }
         if (n < 0) { return 0 - 1; }
-        if (n == 0) { going = 0; }
-        else { have = have + n; }
+        if (n == 0) { break; }
+        have = have + n;
     }
     store8(buf + have, 0);
     return have;

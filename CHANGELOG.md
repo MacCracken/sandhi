@@ -4,6 +4,81 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-10-15
+
+**The `loop` / `break` sweep: every `while (1 == 1)` loop in `src/` is a `loop`, and the
+flag-driven loops that emulated `break` use `break`.** No behaviour change, no public
+surface change, no pin change (6.7.12). Opens the roadmap's 1.12.x line (cyrius 6.7.x
+language adoption).
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`. The bundles now use `loop`, which every
+cyrius that vendors them supports (cyrius 6.7.5 added it).
+
+### Changed
+
+- **All 20 `while (1 == 1)` loops become `loop { … }`.** Twelve are in
+  `src/server/mod.cyr` (the serve and accept loops, the pool workers, 1.11.1's start-up
+  wait). The rest: two each in `src/http/h2/request.cyr` and `src/net/resolve.cyr`, one
+  each in `headers.cyr`, `client.cyr`, `response.cyr` and `stream.cyr`. Mechanical.
+  - The 1.9.7 loop that the accept-error policy's comment quotes keeps its old spelling:
+    it is history.
+- **18 of the 19 flag-driven loops lose their flag.** Each was read for one thing: does
+  anything run after the flag is cleared, within that pass through the loop or after the
+  loop? Only where nothing does is `break` exact.
+  - **The flag was never set** (the loop leaves by `return`): `loop`.
+    - `stream.cyr` `_sandhi_stream_decode_chunked_into`.
+    - `download.cyr` `_sandhi_dl_stream_chunked_a` and `_sandhi_dl_stream_plain_a`.
+    - `pool.cyr` `_sandhi_pool_chunked_complete`.
+    - `pool.cyr` `_sandhi_pool_take`'s `picked`: its condition is now just
+      `vec_len(v) > 0`.
+  - **The flag was the last thing a pass did:** `break`.
+    - The host and path scans in `url.cyr`.
+    - The HPACK integer decoder in `h2/hpack.cyr`.
+    - The buffered chunk decoder in `response.cyr`.
+    - `sandhi_conn_recv_all_deadline` in `conn.cyr`.
+    - The redirect loop of `sandhi_http_download_sink_headers_a`.
+    - `pool.cyr` `_sandhi_http_recv_framed`.
+    - `run_async`'s accept drain in `server/mod.cyr`. Its trailing
+      `batch >= max_conns` check only set the flag again.
+  - **The three chunk-size hex scans** (`stream.cyr`, `response.cyr`, `pool.cyr`):
+    `break`. Each ran its size cap once more after clearing the flag. On that pass the
+    size had not changed since the previous pass checked it (it starts at 0), so
+    skipping that check is exact.
+  - **The SSE body loop** (`stream.cyr`): `break` at each of its five exits. The two
+    `going == 1` guards that sheltered the rest of the pass are gone, since nothing after
+    an exit runs now.
+  - **`server/mod.cyr`'s `Transfer-Encoding: chunked` matcher** keeps `matched` as its
+    answer and stops at the first mismatch.
+- **Kept: `h2/response.cyr`'s frame loop** (`while (stream_complete == 0 && fail_kind ==
+  SANDHI_OK)`). That is a two-flag state machine, not break emulation: `fail_kind` is the
+  function's result after the loop, and later steps of a pass check it. Breaking out
+  would mean restructuring it, which is not this sweep.
+- **Roadmap:** the 1.11.x section is removed. All four of its items shipped 1.11.0 –
+  1.11.3, and 1.11.3's first real-Windows CI run passed all four suites on
+  `windows-2025`. The `loop` sweep leaves the 1.12.x line, and the maintenance pointer
+  moves to 1.12.x.
+
+### Verification
+
+- **First, a probe:** `loop`, `break` and a `return` placed after a break-less `loop` build
+  cleanly for native, aarch64, Windows (PE) and AGNOS, and run correctly (native, and
+  Windows under wine).
+- **3,089 assertions** (981 / 1,691 / 353 / 63 / 1), unchanged. 8/8 fuzz: the URL,
+  chunked-response, HPACK and SSE parsers all changed. Every edited file is `fmt`- and
+  lint-clean.
+- **Windows under wine:** all four suites pass with no failure (968 / 1,691 / 353 / 63).
+- **The full Linux gate:**
+  - Builds: the `CYRIUS_DCE=1` smoke builds, native and libssl, and the aarch64
+    cross-build.
+  - Live gates: all seven pass. The stream idle gate runs the converted SSE body loop over
+    TLS; `_server_tls_probe` [1]–[8] runs the pooled and single-flight servers.
+  - CI scripts: the whole-surface link check (876 fns, control refused) and the programs
+    sweep (35 programs) pass.
+  - dist: all five bundles regenerated and idempotent, and the `.deps` sidecars are
+    unchanged. Every bundle shrinks a little as the flag lines go (full 16,680 lines).
+- Not yet re-vendored into a cyrius release.
+
 ## [1.11.3] — 2026-10-15
 
 **The suite is portable to Windows, and CI runs all four suites on a real Windows host.**

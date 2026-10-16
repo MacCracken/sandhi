@@ -196,13 +196,12 @@ fn _sandhi_resp_chunk_size(buf, blen, offset_ptr): i64 {
     var p = load64(offset_ptr);
     var size = 0;
     var seen_digit = 0;
-    var scan = 1;
-    while (scan == 1 && p < blen) {
+    while (p < blen) {
         var c = load8(buf + p);
         if (c >= 48 && c <= 57)      { size = size * 16 + (c - 48); seen_digit = 1; p = p + 1; }
         elif (c >= 97 && c <= 102)   { size = size * 16 + (c - 87); seen_digit = 1; p = p + 1; }
         elif (c >= 65 && c <= 70)    { size = size * 16 + (c - 55); seen_digit = 1; p = p + 1; }
-        else { scan = 0; }
+        else { break; }
         if (size > _SANDHI_RESP_CHUNK_MAX) { return _SANDHI_RESP_CHUNK_BAD; }
     }
     if (seen_digit == 0) { return _SANDHI_RESP_CHUNK_BAD; }
@@ -236,22 +235,21 @@ fn _sandhi_resp_decode_chunked_a(a, buf, blen, start, body_out_ptr, body_len_ptr
     var off_cell = alloc_via(a, 8);
     if (off_cell == 0) { return 0 - 1; }
     store64(off_cell, start);
-    var going = 1;
     var saw_terminal = 0;
     var malformed = 0;
-    while (going == 1) {
+    loop {
         var size = _sandhi_resp_chunk_size(buf, blen, off_cell);
         var off = load64(off_cell);
         if (size == _SANDHI_RESP_CHUNK_BAD) {
             malformed = 1;
-            going = 0;
+            break;
         } elif (size == 0) {
             saw_terminal = 1;
-            going = 0;
+            break;
         } else {
             if (off + size > blen) {
                 malformed = 1;
-                going = 0;
+                break;
             } else {
                 memcpy(out + out_len, buf + off, size);
                 out_len = out_len + size;
@@ -287,7 +285,7 @@ fn _sandhi_resp_decode_chunked(buf, blen, start, body_out_ptr, body_len_ptr, hea
 fn _sandhi_resp_streq_ci(a, b): i64 {
     if (a == 0 || b == 0) { return 0; }
     var i = 0;
-    while (1 == 1) {
+    loop {
         var ca = load8(a + i);
         var cb = load8(b + i);
         if (ca >= 65 && ca <= 90) { ca = ca + 32; }

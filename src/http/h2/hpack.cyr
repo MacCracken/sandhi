@@ -398,15 +398,14 @@ fn _hpack_int_decode(buf, blen, off_cell, prefix_bits, value_out): i64 {
     }
     var i = first;
     var m = 0;
-    var going = 1;
-    while (going == 1) {
+    loop {
         if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
         if (m > 56) { return _SANDHI_HPACK_ERR_INT_OVERFLOW; }
         var b = load8(buf + off);
         off = off + 1;
         i = i + ((b & 0x7F) << m);
-        if ((b & 0x80) == 0) { going = 0; }
-        else { m = m + 7; }
+        if ((b & 0x80) == 0) { break; }
+        m = m + 7;
     }
     store64(value_out, i);
     store64(off_cell, off);

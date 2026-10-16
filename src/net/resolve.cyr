@@ -328,7 +328,7 @@ fn _sandhi_resolve_skip_name(buf, blen, off): i64 {
 # shared.
 fn _sandhi_resolve_read_label(buf, blen, off_cell, label_buf, label_len_cell, hops_cell): i64 {
     var p = load64(off_cell);
-    while (1 == 1) {
+    loop {
         if (p >= blen) { return 0 - 1; }
         var c = load8(buf + p);
         if (c == 0) {
@@ -385,7 +385,7 @@ fn _sandhi_resolve_name_eq_a(a, buf, blen, off_a, off_b): i64 {
     store64(pb_cell, off_b);
     store64(ha_cell, 0);
     store64(hb_cell, 0);
-    while (1 == 1) {
+    loop {
         if (_sandhi_resolve_read_label(buf, blen, pa_cell, la_buf, la_cell, ha_cell) < 0) { return 0; }
         if (_sandhi_resolve_read_label(buf, blen, pb_cell, lb_buf, lb_cell, hb_cell) < 0) { return 0; }
         var la = load64(la_cell);

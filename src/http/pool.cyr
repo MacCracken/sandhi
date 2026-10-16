@@ -245,8 +245,7 @@ fn _sandhi_pool_take(pool, host, port, tls): i64 {
     if (v == 0) { return 0; }
     var idle_to = load64(pool + SANDHI_POOL_OFF_IDLE_TIMEOUT);
     var now = clock_now_ms();
-    var picked = 0;
-    while (picked == 0 && vec_len(v) > 0) {
+    while (vec_len(v) > 0) {
         var ic = vec_pop(v);
         if (ic == 0) { return 0; }  # defensive; vec_pop shouldn't yield 0
         var conn = load64(ic + SANDHI_IDLE_OFF_CONN);
@@ -343,19 +342,17 @@ fn _sandhi_pool_chunked_complete(buf, body_start, blen): i64 {
     # if a complete chunked stream is present in [body_start, blen),
     # 0 if more bytes are needed, (0 - 1) on malformed chunk-size.
     var off = body_start;
-    var going = 1;
-    while (going == 1) {
+    loop {
         if (off >= blen) { return 0; }
         # Parse chunk-size hex digits.
         var size = 0;
         var seen = 0;
-        var scan = 1;
-        while (scan == 1 && off < blen) {
+        while (off < blen) {
             var c = load8(buf + off);
             if (c >= 48 && c <= 57)      { size = size * 16 + (c - 48); seen = 1; off = off + 1; }
             elif (c >= 97 && c <= 102)   { size = size * 16 + (c - 87); seen = 1; off = off + 1; }
             elif (c >= 65 && c <= 70)    { size = size * 16 + (c - 55); seen = 1; off = off + 1; }
-            else { scan = 0; }
+            else { break; }
             # 1.9.13 P1 — cap the accumulator. THIRD copy of this bound: the
             # buffered `_sandhi_resp_chunk_size` has had `_SANDHI_RESP_CHUNK_MAX`
             # since 0.9.0 P0 #3, 1.9.12 added it to the streaming
@@ -443,8 +440,7 @@ fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms, no_body, close_cell): i
     var step = 16384;
     var scratch_done = 0;
 
-    var going = 1;
-    while (going == 1) {
+    loop {
         # Response exceeds the caller's `max_response_bytes` cap. This gets its
         # OWN sentinel (1.9.3): it used to share `0 - 1` with a genuine read
         # error below, so the caller mapped both to SANDHI_ERR_CONNECT and a
@@ -526,13 +522,13 @@ fn _sandhi_http_recv_framed(conn, buf, cap, deadline_ms, no_body, close_cell): i
             if (body_none == 1) {
                 have = body_start;
                 store8(buf + have, 0);
-                going = 0;
+                break;
             } elif (is_chunked == 1) {
                 var done = _sandhi_pool_chunked_complete(buf, body_start, have);
                 if (done == 0 - 1) { return 0 - 1; }
-                if (done == 1) { going = 0; }
+                if (done == 1) { break; }
             } elif (content_length >= 0) {
-                if (have - body_start >= content_length) { going = 0; }
+                if (have - body_start >= content_length) { break; }
             } else {
                 # No framing declared — HTTP/1.0 close-delimited. Read
                 # until EOF (handled by the n==0 branch above).

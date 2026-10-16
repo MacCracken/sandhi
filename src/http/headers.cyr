@@ -47,7 +47,7 @@ fn _sandhi_hdr_to_lower(c): i64 {
 # Case-insensitive cstr equality. Returns 1 if equal, 0 otherwise.
 fn _sandhi_hdr_ieq(a, b): i64 {
     var i = 0;
-    while (1 == 1) {
+    loop {
         var ca = _sandhi_hdr_to_lower(load8(a + i));
         var cb = _sandhi_hdr_to_lower(load8(b + i));
         if (ca != cb) { return 0; }

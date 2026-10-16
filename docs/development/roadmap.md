@@ -6,11 +6,10 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.11.3: the portable Windows harness and the
-> Windows CI job shipped, which completes the 1.11.x line's planned items (1.11.2
-> the two CI gates, 1.11.1 the start-up handshake, 1.11.0 the `thread_create`
-> check). At 1.10.11 the Windows accept-errno item shipped, the empty sit-adoption
-> batch was dropped, and the remaining work was reorganized into the lines below.
+> completed work on **2026-10-15** at 1.12.0: the 1.11.x line is closed (all four
+> items shipped 1.11.0 – 1.11.3, and 1.11.3's first real-Windows CI run on
+> `windows-2025` passed all four suites), so its section is gone; the `loop` sweep
+> shipped at 1.12.0. History for both is in the CHANGELOG.
 
 ## Context (post-fold)
 
@@ -26,7 +25,7 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
   within a line ship in the order listed, one item per patch (single focus per
   patch). The lines run in order; a line opens when the previous one has shipped.
 - **Maintenance lands on the open line.** Pin bumps and consumer-filed fixes ship
-  as patches on whichever line is open (1.11.x since 1.11.0) and do not wait for
+  as patches on whichever line is open (1.12.x since 1.12.0) and do not wait for
   a line of their own.
 - A consumer-filed defect or real-workload friction (sit, bote, …) takes the next
   patch on whatever line is open; it does not wait for its "own" line.
@@ -36,33 +35,15 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 - Per the no-silent-scope-outs rule, every deferral is a named entry here or in
   [`proposals/`](proposals/README.md), not a buried mention.
 
-## 1.11.x — Server hardening and Windows parity
-
-Every planned item has shipped:
-- **1.11.0:** the pooled loops' `thread_create` check. No worker fails the start with
-  `SANDHI_SERVER_FAIL_THREAD`; a short pool serves and logs a sakshi WARN.
-- **1.11.1:** the start-up handshake. The accept thread waits for each worker's
-  ready / failed report, so workers that start and then exit count as not ready.
-- **1.11.2:** two CI gates (`scripts/programs-compile-check.sh`,
-  `scripts/surface-link-check.sh`), and CI on ubuntu-26.04 / macos-26 with the current
-  actions.
-- **1.11.3:** `tests/sandhi.tcyr` portable to Windows, and a Windows CI job that runs the
-  four suites, cross-built as PE, natively on `windows-2025`.
-
-The line stays open for what the first real-Windows CI run reports. Under wine at
-1.11.3 all four suites pass with no failure. Anything found there takes a 1.11.x patch
-before 1.12.0 opens.
-
 ## 1.12.x — cyrius 6.7.x language adoption (no behaviour change)
 
-Placed by the W2 stdlib wave (2026-10-08). Every feature these need has shipped
+Placed by the W2 stdlib wave (2026-10-08). Shipped so far: 1.12.0, the `loop` /
+`break` sweep (all 20 `while (1 == 1)` loops and 18 of 19 flag-driven ones; see
+CHANGELOG [1.12.0] for the one kept). Every feature these need has shipped
 (cyrius 6.7.0 – 6.7.12: traits and trait-bounded generics, `const`, `bool`,
 `loop`, checked `dyn` at 6.7.8). Internal only: anything that would change a public
 signature or kind waits for 2.0.
 
-- **`loop { … break; }` sweep.** The W2 survey counted 32 candidate sites: the 20
-  `while (1 == 1)` loops in `src/` (12 of them in `src/server/mod.cyr`) plus
-  flag-driven loops that emulate `break`. Mechanical; one patch per file.
 - **Private `const`.** Underscore-prefixed knobs that are never written
   (`_SANDHI_SIGPIPE`, the per-target `_SANDHI_ERRNO_*` set) become `const`. Public
   consts are a 2.0 item (see there).
@@ -217,7 +198,7 @@ move a sandhi pin.
 - **`tests/sandhi.tcyr` cap-drift.** If a patch pushes `sandhi.tcyr` against the
   per-program fixup cap (architecture/001), carve out another `tests/<name>.tcyr` in
   the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 981
-  assertions on Linux at 1.11.3.
+  assertions on Linux at 1.12.0.
 - **Fuzz-corpus expansion.** Add harnesses as new parse surfaces land; each
   proposal above that parses wire input (batch responses, merge-patch documents,
   `Set-Cookie`, the CONNECT response) brings its own `fuzz/*.fcyr`. Other

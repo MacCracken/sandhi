@@ -292,8 +292,7 @@ fn _sandhi_dl_stream_chunked_a(a, conn, body_sb, scratch, status, cb, ctx, deadl
         return _sandhi_dl_result_a(a, status, 0, SANDHI_ERR_INTERNAL, 0);
     }
     store64(written, 0);
-    var going = 1;
-    while (going == 1) {
+    loop {
         store64(decoded + SANDHI_SB_OFF_LEN, 0);
         # 1.9.12 P1 — refuse a malformed chunk header instead of decoding on.
         if (_sandhi_stream_decode_chunked_into(body_sb, chunk_state, decoded) != 0) {
@@ -340,8 +339,7 @@ fn _sandhi_dl_stream_plain_a(a, conn, body_sb, scratch, status, cb, ctx, deadlin
         if (v0 < 0)  { return _sandhi_dl_result_a(a, status, load64(written), SANDHI_ERR_INTERNAL, 0); }
     }
 
-    var going = 1;
-    while (going == 1) {
+    loop {
         if (clen > 0 && load64(written) >= clen) {
             return _sandhi_dl_result_a(a, status, load64(written), SANDHI_OK, 0);
         }
@@ -436,8 +434,7 @@ fn sandhi_http_download_sink_headers_a(a, url, cb, ctx, headers, opts): i64 {
     var h = headers;
     var hops = 0;
     var out = 0;
-    var going = 1;
-    while (going == 1) {
+    loop {
         var hop = _sandhi_dl_open_drain_a(a, u, h, opts);
         if (hop == 0) { return _sandhi_dl_result_a(a, 0, 0, SANDHI_ERR_INTERNAL, 0); }
         var conn = load64(hop + SANDHI_DL_HOP_CONN);
@@ -461,7 +458,7 @@ fn sandhi_http_download_sink_headers_a(a, url, cb, ctx, headers, opts): i64 {
         } else {
             out = _sandhi_dl_stream_body_a(a, hop, cb, ctx, opts);
             sandhi_conn_close(conn);
-            going = 0;
+            break;
         }
     }
     return out;

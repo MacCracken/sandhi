@@ -1018,7 +1018,7 @@ fn _sandhi_resolve_location(base_url, location): i64 {
 fn _sandhi_streq_ci(a, b): i64 {
     if (a == 0 || b == 0) { return 0; }
     var i = 0;
-    while (1 == 1) {
+    loop {
         var ca = load8(a + i);
         var cb = load8(b + i);
         if (ca >= 65 && ca <= 90) { ca = ca + 32; }

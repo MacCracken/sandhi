@@ -218,7 +218,7 @@ fn _h2_te_value_is_trailers(value): i64 {
         j = j + 1;
     }
     var k = i + 8;
-    while (1 == 1) {
+    loop {
         var ch2 = load8(value + k);
         if (ch2 == 0) { return 1; }
         if (ch2 != 32 && ch2 != 9) { return 0; }
@@ -229,7 +229,7 @@ fn _h2_te_value_is_trailers(value): i64 {
 
 fn _h2_streq_ci(a, b): i64 {
     var i = 0;
-    while (1 == 1) {
+    loop {
         var ca = load8(a + i);
         var cb = load8(b + i);
         if (ca >= 65 && ca <= 90) { ca = ca + 32; }

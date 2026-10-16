@@ -118,13 +118,12 @@ fn sandhi_url_parse_a(a, url): i64 {
     }
 
     var host_start = p;
-    var scanning = 1;
-    while (scanning == 1) {
+    loop {
         var c = load8(url + p);
-        if (c == 0)  { scanning = 0; }
-        elif (c == 58) { scanning = 0; }
-        elif (c == 47) { scanning = 0; }
-        elif (c == 63) { scanning = 0; }
+        if (c == 0)  { break; }
+        elif (c == 58) { break; }
+        elif (c == 47) { break; }
+        elif (c == 63) { break; }
         else { p = p + 1; }
     }
     return _sandhi_url_finish_at_a(a, url, scheme, default_port, host_start, p, p);
@@ -179,11 +178,10 @@ fn _sandhi_url_finish_at_a(a, url, scheme, default_port, host_start, host_end_ex
     if (load8(url + p) == 47) {
         var path_start = p;
         var qmark = 0 - 1;
-        var scan = 1;
-        while (scan == 1) {
+        loop {
             var c = load8(url + p);
-            if (c == 0)  { scan = 0; }
-            elif (c == 63) { qmark = p; scan = 0; }
+            if (c == 0)  { break; }
+            elif (c == 63) { qmark = p; break; }
             else { p = p + 1; }
         }
         var path_end = p;
