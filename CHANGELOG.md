@@ -4,6 +4,88 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.12.3] — 2026-10-15
+
+**The server's connection transport is a trait: a `SandhiConn` carries a
+`dyn SandhiServerTransport`, and the conn-aware write and request read dispatch through
+it instead of testing `kind`.** No behaviour change, no pin change (6.7.12). The last
+1.12.x item, re-scoped (below).
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+**Visible to a consumer:**
+- `SANDHI_CONN_SIZE` is 40 (was 24). The record's 24-byte prefix is unchanged: `kind`,
+  `handle` and `fd` at `SANDHI_SRVCONN_OFF_*`, read by `sandhi_server_conn_is_tls` /
+  `_fd`. The transport follows it.
+- **A SandhiConn must come from `sandhi_server_conn_plain{,_a}`** (or the TLS serve loops).
+  A record built by hand to the old 24-byte layout has no transport, and writing through
+  it now crashes. Nothing in sandhi, its tests or its programs builds one; it was never
+  documented.
+
+### Changed
+
+- **server: `SandhiServerTransport`, sandhi's first trait** (cyrius 6.7.0 traits, 6.7.8
+  checked `dyn`). Its members are `write(buf, len)` and
+  `recv_request(buf, max, deadline_ms)`, with two impls over the same record:
+  - **`SandhiServerPlainConn`:** `handle` is the raw fd. `write` loops `sock_send`
+    (`_sandhi_server_plain_write_all`). `recv_request` is the deadline-aware plaintext
+    read (`_sandhi_server_recv_request_dl`).
+  - **`SandhiServerTlsConn`:** `handle` is the `lib/tls.cyr` session. `write` is
+    `tls_write`. `recv_request` is the TLS framing loop, moved unchanged into
+    `_sandhi_server_tls_recv_request`. The request deadline is already on the session
+    (`tls_set_deadline`), so it is not passed on.
+  - **How it is wired:** `SandhiServerConnRec` is the record as a struct (the public
+    prefix, then the `dyn`). Each constructor sets the transport once, from a handle to
+    the same record typed as the transport. `sandhi_server_conn_write` and
+    `_sandhi_server_recv_request_c_dl` call through the trait.
+  - **What it buys:** the compiler checks both impls against the trait (parameter count,
+    types, returns) and builds the dispatch table. Through 1.12.2 the two paths were an
+    `if (kind == SANDHI_CONN_TLS)` in each function.
+  - `kind` stays in the record, for `sandhi_server_conn_is_tls`.
+- **Re-scoped: the 1.12.x traits item.** It named the discovery resolver chain and the
+  server handler signatures as the trait seams. Both are public function-pointer
+  contracts (`sandhi_resolver_new(&fn, ctx)`; `fn h(ctx, cfd, buf, blen)` called by
+  `fncall4`), and a `dyn` cannot be formed from an untyped pointer. So an internal trait
+  there would only wrap the same unchecked call. Asked 2026-10-15, the maintainer chose
+  the transport seam instead: the server here, the client (`src/http/conn.cyr`) as 1.12.4.
+  Trait-typed resolver and handler signatures stay a 2.0 item.
+- **Roadmap:** the traits item becomes 1.12.4 (the client transport). The 2.0 item
+  "trait-typed public signatures" says what it would mean for a consumer.
+
+### Verification
+
+- **First, a probe:** the exact pattern (a trait, two impls over one record layout, a
+  struct with a `dyn` field, forming from a handle, calling through `rec.transport.m()`)
+  builds for native, aarch64, Windows (PE) and AGNOS. It returns the expected values
+  natively, under wine, and as the aarch64 binary under qemu.
+- **New group `server/transport`, 15 assertions:**
+  - the record's size and its public prefix, for both constructors;
+  - exact bytes written through the trait on a live loopback socket;
+  - a whole request read back through it.
+- **Mutation check:** pointing the plaintext constructor at the TLS impl crashes the suite
+  (`tls_write` reads the fd as a session), so it fails rather than passing.
+- **The TLS impl** runs end to end in `programs/_server_tls_probe.cyr`: every HTTPS row
+  handshakes, reads its request and writes its response through it. [1]–[8] all pass,
+  including [8]'s zero heap growth over 41 requests: the 40-byte record rides the
+  per-connection arena.
+- **3,104 assertions** (996 / 1,691 / 353 / 63 / 1), 8/8 fuzz. `fmt` and lint are clean.
+- **Windows under wine:** all four suites pass with no failure (983 / 1,691 / 353 / 63).
+- **aarch64 under qemu (new):** the four suites, built with `cyrius build --aarch64` and
+  run under `qemu-aarch64`, all pass with no failure (996 / 1,691 / 353 / 63). This is the
+  first run of sandhi's suites as aarch64 binaries in this repo's checks. Until now CI
+  only cross-built smoke for aarch64.
+- **The full Linux gate:**
+  - Builds: the `CYRIUS_DCE=1` smoke builds, native and libssl, and the aarch64
+    cross-build.
+  - Live gates: all seven pass.
+  - CI scripts: the whole-surface link check (877 fns: the new TLS read, and the impl
+    methods linked through their vtables; control refused) and the programs sweep (35
+    programs) pass.
+  - dist: all five bundles regenerated and idempotent; the `.deps` sidecars are unchanged.
+- The AGNOS and Windows smoke cross-builds link.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.12.2] — 2026-10-15
 
 **Private `: bool` predicates: the 36 underscore-prefixed yes/no functions return

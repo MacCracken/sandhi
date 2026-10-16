@@ -6,8 +6,10 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.12.2: private `bool` predicates shipped
-> (private `const` at 1.12.1, the `loop` sweep at 1.12.0). The 1.11.x line closed at 1.11.3, whose first real-Windows CI
+> completed work on **2026-10-15** at 1.12.3: the server's transport trait shipped
+> (private `bool` at 1.12.2, private `const` at 1.12.1, the `loop` sweep at 1.12.0);
+> the 1.12.x traits item was re-scoped from the resolver / handler seams to the
+> transport seam (why: CHANGELOG [1.12.3] and the 2.0 item). The 1.11.x line closed at 1.11.3, whose first real-Windows CI
 > run on `windows-2025` passed all four suites, so its section is gone. History is
 > in the CHANGELOG.
 
@@ -41,15 +43,17 @@ Placed by the W2 stdlib wave (2026-10-08). Shipped so far: 1.12.0, the `loop` /
 `break` sweep (all 20 `while (1 == 1)` loops and 18 of 19 flag-driven ones; see
 CHANGELOG [1.12.0] for the one kept); 1.12.1, private `const` (72 never-written
 integer knobs; see CHANGELOG [1.12.1] for what stays `var`); 1.12.2, private `: bool`
-predicates (36 fns; see CHANGELOG [1.12.2] for the hook left `i64`). Every feature these need has shipped
+predicates (36 fns; see CHANGELOG [1.12.2] for the hook left `i64`); 1.12.3, the server
+`SandhiConn` transport as a trait. Every feature these need has shipped
 (cyrius 6.7.0 – 6.7.12: traits and trait-bounded generics, `const`, `bool`,
 `loop`, checked `dyn` at 6.7.8). Internal only: anything that would change a public
 signature or kind waits for 2.0.
 
-- **Traits at the two natural seams.** The discovery resolver chain
-  (`src/discovery/chain.cyr`) and the server handler signatures, internally first.
-  If the public handler or resolver signatures should change shape, that half is
-  a 2.0 item.
+- **1.12.4 — the client connection's transport as a trait** (`src/http/conn.cyr`), as
+  1.12.3 did for the server's `SandhiConn`. Plaintext and TLS are sandhi's own two
+  implementations, chosen today by a `sandhi_conn_kind(conn) == SANDHI_CONN_TLS` test in
+  `sandhi_conn_send`, `sandhi_conn_recv` and `sandhi_conn_close`. Internal; the public
+  conn accessors and offsets stay.
 
 ## 1.13.x — Client concurrency and HTTP/2 completeness
 
@@ -155,8 +159,10 @@ move a sandhi pin.
   their names with `lib/http.cyr`'s vars, and a `const` beside a same-name `var` is
   a hard error, so this needs a cyrius-side plan (likely in the same coordination
   issue).
-- **Trait-typed public signatures**, if 1.12's internal trait work concludes the
-  server handler or discovery resolver signatures should change.
+- **Trait-typed public signatures** for the discovery resolver (`sandhi_resolver_new`
+  takes a fn pointer + ctx today) and the server handlers (`fn h(ctx, cfd, buf, blen)`):
+  a consumer would declare a struct and an `impl`, and get checked dispatch in return.
+  1.12.3 found no internal trait seam there (see the 1.12.x line).
 
 ## 2.0.x — after the major
 

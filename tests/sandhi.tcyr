@@ -3460,6 +3460,52 @@ fn test_server_conn_seam() {
     return 0;
 }
 
+# 1.12.3 — the SandhiConn transport is a trait. The record keeps its public
+# 24-byte prefix (kind / handle / fd at SANDHI_SRVCONN_OFF_*) and carries a
+# `dyn SandhiServerTransport` after it; the conn-aware write and request read
+# dispatch through that instead of testing `kind`. The TLS impl runs end to end
+# in programs/_server_tls_probe.cyr (every HTTPS row writes and reads through it).
+fn test_server_transport_record() {
+    assert_eq(SANDHI_CONN_SIZE, 40, "transport: a SandhiConn is 40 bytes (24 prefix + a 16-byte dyn)");
+    assert_eq(sizeof(SandhiServerConnRec), SANDHI_CONN_SIZE, "transport: the record struct is SANDHI_CONN_SIZE");
+    var a = arena_allocator(4096);
+    var p = sandhi_server_conn_plain_a(a, 9);
+    assert_eq(load64(p + SANDHI_SRVCONN_OFF_KIND), SANDHI_CONN_PLAIN, "transport: plain kind at the public offset");
+    assert_eq(load64(p + SANDHI_SRVCONN_OFF_HANDLE), 9, "transport: plain handle at the public offset");
+    assert_eq(load64(p + SANDHI_SRVCONN_OFF_FD), 9, "transport: plain fd at the public offset");
+    assert_eq(sandhi_server_conn_is_tls(p), 0, "transport: plain is not tls");
+    var t = _sandhi_server_conn_tls_a(a, 0x5151, 12);
+    assert_eq(load64(t + SANDHI_SRVCONN_OFF_KIND), SANDHI_CONN_TLS, "transport: tls kind at the public offset");
+    assert_eq(load64(t + SANDHI_SRVCONN_OFF_HANDLE), 0x5151, "transport: tls handle (the session) at the public offset");
+    assert_eq(sandhi_server_conn_fd(t), 12, "transport: tls fd is the raw socket");
+    assert_eq(sandhi_server_conn_is_tls(t), 1, "transport: tls is tls");
+    return 0;
+}
+
+# Through the trait on a live plaintext socket: conn_write puts exactly the
+# bytes on the wire, and the conn-aware request read returns a whole request.
+# Mutation: pointing the plaintext constructor at the TLS impl fails both.
+fn test_server_transport_plain_live() {
+    var sp[16];
+    if (_t_sock_pair(&sp) == 0) { assert_eq(1, 1, "transport live: loopback unavailable — skipped"); return 0; }
+    var a = arena_allocator(4096);
+    var srv = sandhi_server_conn_plain_a(a, load64(&sp));
+    var cli = load64(&sp + 8);
+    assert_eq(sandhi_server_conn_write(srv, "hello", 5), 5, "transport live: conn_write writes all 5 bytes");
+    var got[16];
+    var rt, n = sock_recv(cli, &got, 15);
+    assert_eq(n, 5, "transport live: the peer reads 5 bytes");
+    assert_eq(memeq(&got, "hello", 5), 1, "transport live: ...exactly what was written");
+    var req = "GET /t HTTP/1.1\r\nHost: x\r\n\r\n";
+    sock_send_all(cli, req, strlen(req));
+    var buf = alloc(256);
+    var r = sandhi_server_recv_request_c(srv, buf, 255);
+    assert_eq(r, strlen(req), "transport live: recv_request_c returns the whole request");
+    assert_eq(memeq(buf, req, strlen(req)), 1, "transport live: ...byte for byte");
+    _t_sock_pair_close(&sp);
+    return 0;
+}
+
 fn test_server_dispatch_c() {
     var sp[16];
     _t_sock_pair(&sp);                 # 1.11.3: a loopback socket, not /dev/null
@@ -5876,6 +5922,10 @@ fn main() {
 
     test_group("server/tls/conn_seam");
     test_server_conn_seam();
+
+    test_group("server/transport");
+    test_server_transport_record();
+    test_server_transport_plain_live();
 
     test_group("server/tls/dispatch_c");
     test_server_dispatch_c();
