@@ -6,10 +6,10 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.12.0: the 1.11.x line is closed (all four
-> items shipped 1.11.0 – 1.11.3, and 1.11.3's first real-Windows CI run on
-> `windows-2025` passed all four suites), so its section is gone; the `loop` sweep
-> shipped at 1.12.0. History for both is in the CHANGELOG.
+> completed work on **2026-10-15** at 1.12.1: private `const` shipped (the `loop`
+> sweep at 1.12.0). The 1.11.x line closed at 1.11.3, whose first real-Windows CI
+> run on `windows-2025` passed all four suites, so its section is gone. History is
+> in the CHANGELOG.
 
 ## Context (post-fold)
 
@@ -39,14 +39,12 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 
 Placed by the W2 stdlib wave (2026-10-08). Shipped so far: 1.12.0, the `loop` /
 `break` sweep (all 20 `while (1 == 1)` loops and 18 of 19 flag-driven ones; see
-CHANGELOG [1.12.0] for the one kept). Every feature these need has shipped
+CHANGELOG [1.12.0] for the one kept); 1.12.1, private `const` (72 never-written
+integer knobs; see CHANGELOG [1.12.1] for what stays `var`). Every feature these need has shipped
 (cyrius 6.7.0 – 6.7.12: traits and trait-bounded generics, `const`, `bool`,
 `loop`, checked `dyn` at 6.7.8). Internal only: anything that would change a public
 signature or kind waits for 2.0.
 
-- **Private `const`.** Underscore-prefixed knobs that are never written
-  (`_SANDHI_SIGPIPE`, the per-target `_SANDHI_ERRNO_*` set) become `const`. Public
-  consts are a 2.0 item (see there).
 - **Private `: bool` predicates.** The underscore-prefixed `_is_*` / `_has_*`
   helpers; the public ones change kind, so they go with 2.0.
 - **Traits at the two natural seams.** The discovery resolver chain

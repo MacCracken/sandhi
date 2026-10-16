@@ -23,27 +23,27 @@
 # pulling in a generic DNS library would inflate the fold-into-stdlib
 # surface area ADR 0002 is trying to keep small.
 
-var _SANDHI_RESOLVE_BUF_SIZE = 512;   # RFC 1035 UDP limit
-var _SANDHI_RESOLVE_TIMEOUT_MS = 2000;  # reserved; net.cyr lacks timeouts today
+const _SANDHI_RESOLVE_BUF_SIZE = 512;   # RFC 1035 UDP limit
+const _SANDHI_RESOLVE_TIMEOUT_MS = 2000;  # reserved; net.cyr lacks timeouts today
 
 # Maximum compression-pointer hops when walking a wire-format name.
 # RFC 1035 §4.1.4 bans forward / cyclic pointers, but malformed or
 # hostile responses can have both. Bound the traversal to 32 hops —
 # well above any legitimate DNS message (names are ≤255 bytes = ≤128
 # labels, and compression can only point backward).
-var _SANDHI_RESOLVE_MAX_PTR_HOPS = 32;
+const _SANDHI_RESOLVE_MAX_PTR_HOPS = 32;
 
 # Maximum CNAME indirections followed within one response. Real chains
 # are 1–2 links (a vanity name onto a CDN); 8 is generous. A hostile
 # packet can contain a cycle (a CNAME b, b CNAME a), so the walk MUST
 # be bounded — the per-name pointer guard above does not help here,
 # since each hop is a well-formed name.
-var _SANDHI_RESOLVE_MAX_CNAME_HOPS = 8;
+const _SANDHI_RESOLVE_MAX_CNAME_HOPS = 8;
 
 # RR TYPE codes we care about (RFC 1035 §3.2.2 + RFC 3596 §2.1).
-var _SANDHI_RR_A = 1;
-var _SANDHI_RR_CNAME = 5;
-var _SANDHI_RR_AAAA = 28;
+const _SANDHI_RR_A = 1;
+const _SANDHI_RR_CNAME = 5;
+const _SANDHI_RR_AAAA = 28;
 
 # ================================================================
 # Cryptographic randomness for DNS TXID + future needs

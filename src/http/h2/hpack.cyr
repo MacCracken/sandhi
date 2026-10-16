@@ -26,11 +26,11 @@
 # ================================================================
 # Error sentinels
 # ================================================================
-var _SANDHI_HPACK_ERR_TRUNCATED   = 0 - 1;
-var _SANDHI_HPACK_ERR_BAD_INDEX   = 0 - 2;
-var _SANDHI_HPACK_ERR_HUFFMAN     = 0 - 3;
-var _SANDHI_HPACK_ERR_MALFORMED   = 0 - 4;
-var _SANDHI_HPACK_ERR_INT_OVERFLOW = 0 - 5;
+const _SANDHI_HPACK_ERR_TRUNCATED   = 0 - 1;
+const _SANDHI_HPACK_ERR_BAD_INDEX   = 0 - 2;
+const _SANDHI_HPACK_ERR_HUFFMAN     = 0 - 3;
+const _SANDHI_HPACK_ERR_MALFORMED   = 0 - 4;
+const _SANDHI_HPACK_ERR_INT_OVERFLOW = 0 - 5;
 
 # Default dynamic-table size from SETTINGS_HEADER_TABLE_SIZE — RFC
 # 7540 §6.5.2 default is 4096 octets.
@@ -557,7 +557,7 @@ fn sandhi_hpack_encode_table_size_update(out, off, new_max_size): i64 {
 # `_SANDHI_HPACK_TBL_UPDATE` (positive non-zero) and writes the new
 # max size to `value_out` (re-purposed; name_out is set to 0).
 
-var _SANDHI_HPACK_TBL_UPDATE = 1;  # not zero so caller can distinguish
+const _SANDHI_HPACK_TBL_UPDATE = 1;  # not zero so caller can distinguish
 
 # Decode one HPACK header field into `a`. Every transient cell + the
 # decoded name + value cstrs live in `a`. The dynamic-table side-effect

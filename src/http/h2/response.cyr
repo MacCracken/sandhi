@@ -34,8 +34,8 @@
 
 # Buffer caps. Generous defaults; consumers with bigger needs use
 # Bite 7's options surface.
-var _SANDHI_H2_HBLOCK_CAP = 16384;
-var _SANDHI_H2_BODY_CAP   = 1048576;  # 1 MB
+const _SANDHI_H2_HBLOCK_CAP = 16384;
+const _SANDHI_H2_BODY_CAP   = 1048576;  # 1 MB
 
 # ================================================================
 # Helpers

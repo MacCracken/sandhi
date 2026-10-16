@@ -14,7 +14,7 @@
 # post-mortem, closed v5.6.29-1). The small-function shape stays
 # because it reads better; no compiler quirk was at fault.
 
-var _SANDHI_HTTP_RESP_BUF_SIZE = 262144;  # 256 KB — enough for most API responses
+const _SANDHI_HTTP_RESP_BUF_SIZE = 262144;  # 256 KB — enough for most API responses
 
 # ================================================================
 # Host resolution

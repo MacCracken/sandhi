@@ -77,11 +77,11 @@ var SANDHI_H2_DEFAULT_MAX_FRAME = 16384;
 var SANDHI_H2_MAX_FRAME_SIZE    = 16777215;  # 2^24 - 1
 
 # Internal-error sentinels (negative)
-var _SANDHI_H2_ERR_TRUNCATED  = 0 - 1;
-var _SANDHI_H2_ERR_BAD_LENGTH = 0 - 2;
-var _SANDHI_H2_ERR_BAD_STREAM = 0 - 3;
-var _SANDHI_H2_ERR_BAD_TYPE   = 0 - 4;
-var _SANDHI_H2_ERR_MALFORMED  = 0 - 5;
+const _SANDHI_H2_ERR_TRUNCATED  = 0 - 1;
+const _SANDHI_H2_ERR_BAD_LENGTH = 0 - 2;
+const _SANDHI_H2_ERR_BAD_STREAM = 0 - 3;
+const _SANDHI_H2_ERR_BAD_TYPE   = 0 - 4;
+const _SANDHI_H2_ERR_MALFORMED  = 0 - 5;
 
 # ================================================================
 # Frame header struct (32 bytes — 8-byte stride per field)

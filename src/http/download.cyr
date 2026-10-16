@@ -51,9 +51,9 @@ enum SandhiDownloadOff {
 }
 
 var SANDHI_DOWNLOAD_RESULT_SIZE = 32;
-var _SANDHI_DL_READ_CHUNK = 16384;
-var _SANDHI_DL_WORK_CAP   = 262144;
-var _SANDHI_DL_MAX_HOPS   = 10;
+const _SANDHI_DL_READ_CHUNK = 16384;
+const _SANDHI_DL_WORK_CAP   = 262144;
+const _SANDHI_DL_MAX_HOPS   = 10;
 
 # Per-hop state handed back by _sandhi_dl_open_drain_a. The connection
 # stays open so the caller can either stream its body (final hop) or
@@ -76,7 +76,7 @@ enum SandhiDlHopOff {
     SANDHI_DL_HOP_CLEN    = 40;
     SANDHI_DL_HOP_ERR     = 48;
 }
-var _SANDHI_DL_HOP_SIZE = 56;
+const _SANDHI_DL_HOP_SIZE = 56;
 
 # ----------------------------------------------------------------
 # Result struct

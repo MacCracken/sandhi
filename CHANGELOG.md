@@ -4,6 +4,82 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.12.1] — 2026-10-15
+
+**Private `const`: the 72 underscore-prefixed integer knobs that nothing ever writes are
+`const`.** No behaviour change, no public surface change, no pin change (6.7.12). The
+second item of the roadmap's 1.12.x line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`. These names are private by convention.
+Reading one still works. Writing one, or taking `&NAME`, now fails to compile; nothing in
+sandhi, its tests or its programs does either.
+
+### Changed
+
+- **72 private integer knobs, 86 declarations in 17 files, become `const`** (more
+  declarations than names because of the per-target `#ifdef` arms).
+  - **What a `const` changes:** it has no storage (every use is its value, folded like an
+    enum constant), and a write or `&NAME` is refused by name. A stray assignment to an
+    errno or a buffer cap is now a compile error, not a silent change.
+  - **The set:**
+    - error and sentinel codes: the HPACK, h2 frame, chunk-size and non-blocking-connect
+      returns;
+    - the per-target socket and errno numbers: `_SANDHI_EAGAIN`, the full
+      `_SANDHI_ERRNO_*` set with its Windows, macOS and Linux arms,
+      `_SANDHI_SO_RCVTIMEO` / `_SNDTIMEO`, `_SANDHI_SIGPIPE`;
+    - buffer caps and read chunks: client, stream, download, h2, resolver;
+    - the DNS record types and hop bounds;
+    - the mDNS port, TTL and timeouts;
+    - h2 request static-table indices and default peer settings;
+    - struct sizes;
+    - the ALPN wire lengths.
+  - **Per file:** `src/server/mod.cyr` 23, `src/http/conn.cyr` 11, `h2/request.cyr` 7,
+    `net/resolve.cyr` 7, `h2/hpack.cyr` 6, `h2/frame.cyr` 5, `discovery/local.cyr` 5,
+    `http/stream.cyr` 5, `http/download.cyr` 4, `h2/conn.cyr` 3, two each in
+    `http/response.cyr`, `h2/response.cyr` and `rpc/dispatch.cyr`, one each in
+    `http/client.cyr`, `http/sse.cyr`, `h2/huffman.cyr` and `tls_policy/apply.cyr`.
+  - **How they were chosen:** a script read every top-level `var _…` in `[lib].modules`.
+    It took those with a constant integer initialiser that nothing writes or
+    address-takes, across `src/`, `tests/`, `programs/` and `fuzz/` (not just `src/`, so a
+    test that pokes a knob keeps it a `var`). None carried a type annotation, which a
+    `const` cannot take. No other file declares a global of the same name; one top-level
+    name is a const or a global, never both.
+- **Kept as `var`, by design:**
+  - **48 that are real mutable state:** the lazy-built HPACK and Huffman tables, the
+    session-cache map and counters, the prof timestamps, the trace switch, the resolver
+    and TLS hooks, the per-request arena slot, the pooled loops' published caps, and the
+    1.11.0 spawn-limit test seam.
+  - **3 strings:** `_SANDHI_H2_PREFACE`, `_SANDHI_WD_ELEMENT_KEY` and
+    `_hpack_huffman_blob`. A string `const` is its literal at every use, while these hold
+    one copy. The Huffman blob in particular is one literal by design
+    (architecture/001's fixup budget). They are not knobs, which this item was about.
+- **Roadmap:** the private-`const` item leaves the 1.12.x line. Public consts stay a 2.0
+  item (`HTTP_OK` and friends share their names with `lib/http.cyr`'s vars).
+
+### Verification
+
+- **First, a probe:** a `const` defined in nested `#ifdef CYRIUS_TARGET_WIN` /
+  `CYRIUS_TARGET_MACOS` arms builds for native, aarch64, Windows (PE) and AGNOS, and each
+  picks its own target's value (native, and Windows under wine).
+- **3,089 assertions** (981 / 1,691 / 353 / 63 / 1), unchanged; 8/8 fuzz. Every edited
+  file is `fmt`-clean, and lint-clean apart from the allowlisted Huffman blob line in
+  `h2/huffman.cyr` (CI skips that file).
+- **Windows under wine:** all four suites pass with no failure (968 / 1,691 / 353 / 63).
+  That includes the rows that pin the Windows `_SANDHI_ERRNO_*` codes, now read from a
+  `const` arm.
+- The AGNOS and Windows smoke cross-builds link. The smoke binary is 576 bytes smaller:
+  the consts take no storage.
+- **The full Linux gate:**
+  - Builds: the `CYRIUS_DCE=1` smoke builds, native and libssl, and the aarch64
+    cross-build.
+  - Live gates: all seven pass.
+  - CI scripts: the whole-surface link check (876 fns, control refused) and the programs
+    sweep (35 programs) pass.
+  - dist: all five bundles regenerated (`var` → `const` keeps each line) and idempotent;
+    the `.deps` sidecars are unchanged.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.12.0] — 2026-10-15
 
 **The `loop` / `break` sweep: every `while (1 == 1)` loop in `src/` is a `loop`, and the

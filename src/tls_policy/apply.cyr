@@ -39,7 +39,7 @@
 # lazy-resolve step is retired.
 
 # SSL_FILETYPE_PEM(1) / SSL_FILETYPE_ASN1(2 = DER) for the cert/key verbs.
-var _SANDHI_SSL_FILETYPE_PEM = 1;
+const _SANDHI_SSL_FILETYPE_PEM = 1;
 
 # Trust-store / mTLS enforcement availability. 1.6.0 / cyrius 6.2.8: the typed
 # config verbs (`tls_ctx_load_verify_locations` / `_use_certificate_file` /

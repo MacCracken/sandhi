@@ -133,8 +133,8 @@ fn _sandhi_rpc_dup(s): i64 {
 # Slot layout (16 bytes):
 #   +0  base_url  (cstr, dup'd into default_alloc)
 #   +8  policy    (sandhi_tls_policy*)
-var _SANDHI_RPC_POLICY_CAP = 16;
-var _SANDHI_RPC_POLICY_SLOT = 16;
+const _SANDHI_RPC_POLICY_CAP = 16;
+const _SANDHI_RPC_POLICY_SLOT = 16;
 var _sandhi_rpc_policy_tbl = 0;
 var _sandhi_rpc_policy_count = 0;
 

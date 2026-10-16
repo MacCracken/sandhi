@@ -25,18 +25,18 @@
 # Bite 5b of 0.8.0.
 
 # Static-table indices we hardcode (RFC 7541 Appendix A).
-var _SANDHI_H2_REQ_IDX_AUTHORITY     = 1;
-var _SANDHI_H2_REQ_IDX_METHOD_GET    = 2;
-var _SANDHI_H2_REQ_IDX_METHOD_POST   = 3;
-var _SANDHI_H2_REQ_IDX_PATH_ROOT     = 4;
-var _SANDHI_H2_REQ_IDX_SCHEME_HTTP   = 6;
-var _SANDHI_H2_REQ_IDX_SCHEME_HTTPS  = 7;
+const _SANDHI_H2_REQ_IDX_AUTHORITY     = 1;
+const _SANDHI_H2_REQ_IDX_METHOD_GET    = 2;
+const _SANDHI_H2_REQ_IDX_METHOD_POST   = 3;
+const _SANDHI_H2_REQ_IDX_PATH_ROOT     = 4;
+const _SANDHI_H2_REQ_IDX_SCHEME_HTTP   = 6;
+const _SANDHI_H2_REQ_IDX_SCHEME_HTTPS  = 7;
 
 # Default HEADERS-frame buffer cap. For typical RPC requests the
 # HPACK-encoded block is well under 1 KB. A caller-override path is a
 # wait-for-consumer-ask roadmap item (h2 spec-completeness) — parked
 # until a consumer ships absurdly large header sets.
-var _SANDHI_H2_REQ_HBUF_CAP = 8192;
+const _SANDHI_H2_REQ_HBUF_CAP = 8192;
 
 # ================================================================
 # Pseudo-header emit helpers

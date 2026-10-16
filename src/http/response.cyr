@@ -190,8 +190,8 @@ fn _sandhi_resp_eol(buf, start, end): i64 {
 #     long before it lands in a real response. Capping at i31 keeps
 #     `off + size > blen` comparisons always-positive even if blen
 #     itself approached i63.
-var _SANDHI_RESP_CHUNK_BAD     = 0 - 1;
-var _SANDHI_RESP_CHUNK_MAX     = 0x7FFFFFFF;
+const _SANDHI_RESP_CHUNK_BAD     = 0 - 1;
+const _SANDHI_RESP_CHUNK_MAX     = 0x7FFFFFFF;
 fn _sandhi_resp_chunk_size(buf, blen, offset_ptr): i64 {
     var p = load64(offset_ptr);
     var size = 0;

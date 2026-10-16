@@ -202,7 +202,7 @@ enum _SandhiSseCtxOff {
     _SANDHI_SSE_CTX_OFF_HAS_FIELDS = 32;
 }
 
-var _SANDHI_SSE_CTX_STRUCT_SIZE = 40;
+const _SANDHI_SSE_CTX_STRUCT_SIZE = 40;
 
 fn _sandhi_sse_ctx_new_a(a): i64 {
     var c = alloc_via(a, _SANDHI_SSE_CTX_STRUCT_SIZE);

@@ -40,9 +40,9 @@ enum SandhiH2ConnOff {
 var SANDHI_H2_CONN_STRUCT_SIZE = 80;
 
 # Spec defaults — RFC 7540 §6.5.2.
-var _SANDHI_H2_DEFAULT_PEER_FRAME   = 16384;
-var _SANDHI_H2_DEFAULT_PEER_STREAMS = 0;       # 0 = unlimited
-var _SANDHI_H2_DEFAULT_PEER_WINDOW  = 65535;
+const _SANDHI_H2_DEFAULT_PEER_FRAME   = 16384;
+const _SANDHI_H2_DEFAULT_PEER_STREAMS = 0;       # 0 = unlimited
+const _SANDHI_H2_DEFAULT_PEER_WINDOW  = 65535;
 
 # Connection preface — first 24 octets the client MUST send. RFC 7540
 # §3.5. Spelled out so it stays a single literal.

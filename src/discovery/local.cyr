@@ -27,14 +27,14 @@
 # 224.0.0.251 packed as a network-byte-order uint32 in little-endian-host repr
 # (bytes 224, 0, 0, 251 across the int).
 var _SANDHI_MDNS_GROUP = 0;
-var _SANDHI_MDNS_PORT  = 5353;
-var _SANDHI_MDNS_TIMEOUT_MS = 500;
+const _SANDHI_MDNS_PORT  = 5353;
+const _SANDHI_MDNS_TIMEOUT_MS = 500;
 # MC_TTL: IP multicast hop limit for the outgoing query — RFC 6762 §11 sets 255
 # (link-scope is enforced by the group address, not the TTL). MC_MAX_RECV: hard
 # cap on the recv-loop, since a group-joined socket sees all group traffic and the
 # loop filters by name; the total-time bound is the SO_RCVTIMEO deadline.
-var _SANDHI_MDNS_MC_TTL = 255;
-var _SANDHI_MDNS_MC_MAX_RECV = 8;
+const _SANDHI_MDNS_MC_TTL = 255;
+const _SANDHI_MDNS_MC_MAX_RECV = 8;
 
 # Build a `<name>.local` cstr in `a`. If `name` already ends in
 # `.local` (case-insensitive), the input is dup'd into `a`; otherwise
@@ -115,7 +115,7 @@ fn _sandhi_local_build_query(id, qname, out): i64 {
 # Carried so the resolver-fn-pointer `(ctx, name)` shape can pull an
 # Allocator without growing the callback signature — same approach as
 # daimon's ctx struct.
-var _SANDHI_LOCAL_CTX_SIZE = 8;
+const _SANDHI_LOCAL_CTX_SIZE = 8;
 
 fn _sandhi_discovery_local_ctx_new_a(a): i64 {
     var c = alloc_via(a, _SANDHI_LOCAL_CTX_SIZE);

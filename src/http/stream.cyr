@@ -27,8 +27,8 @@ enum SandhiStreamOff {
 }
 
 var SANDHI_STREAM_RESULT_SIZE = 32;
-var _SANDHI_STREAM_READ_CHUNK = 16384;
-var _SANDHI_STREAM_BUF_CAP    = 262144;
+const _SANDHI_STREAM_READ_CHUNK = 16384;
+const _SANDHI_STREAM_BUF_CAP    = 262144;
 
 fn _sandhi_stream_result_a(a, status, events, err, stopped): i64 {
     var r = alloc_via(a, SANDHI_STREAM_RESULT_SIZE);
@@ -451,9 +451,9 @@ fn _sandhi_stream_read_loop(conn, cb, ctx, cap, deadline_ms, opts): i64 {
 }
 
 # Idle-wait outcomes.
-var _SANDHI_STREAM_WAIT_READ    = 0;
-var _SANDHI_STREAM_WAIT_STOP    = 1;
-var _SANDHI_STREAM_WAIT_TIMEOUT = 2;
+const _SANDHI_STREAM_WAIT_READ    = 0;
+const _SANDHI_STREAM_WAIT_STOP    = 1;
+const _SANDHI_STREAM_WAIT_TIMEOUT = 2;
 
 # Before a body read, give the consumer its idle turns (1.10.5,
 # `sandhi_http_options_idle_ms` / `_idle_cb`). Waits for the socket to become

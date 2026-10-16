@@ -39,7 +39,7 @@
 #   +8   right  (ptr to child node, or 0)
 #   +16  symbol (i64: 0..256 on leaf, -1 on internal node)
 
-var _SANDHI_HPACK_HUFFMAN_INTERNAL = 0 - 1;
+const _SANDHI_HPACK_HUFFMAN_INTERNAL = 0 - 1;
 
 # Decode tree nodes are part of the lazily-initialized process-wide
 # table; they must outlive any per-request arena. The `_a` variant

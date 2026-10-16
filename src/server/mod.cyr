@@ -153,7 +153,7 @@ fn sandhi_server_find_header(buf, blen, name): i64 {
 # Largest Content-Length this server will represent. Same bound the response
 # side has applied to chunk sizes since the 0.9.0 P0 sweep
 # (`_SANDHI_RESP_CHUNK_MAX`), and far above any request `max_request` allows.
-var _HSV_CL_MAX = 0x7FFFFFFF;
+const _HSV_CL_MAX = 0x7FFFFFFF;
 
 # Content-Length value — 0 if header absent or malformed, `0 - 1` if the value
 # is well-formed digits but too large to represent (see below).
@@ -1313,7 +1313,7 @@ fn _hsv_ensure_req_buf(want): i64 {
 # SIGPIPE guard (1.6.6; every target since 1.10.6)
 # ================================================================
 
-var _SANDHI_SIGPIPE = 13;
+const _SANDHI_SIGPIPE = 13;
 
 # Ignore SIGPIPE for the whole process. Every serve loop calls this once at
 # startup, and it is idempotent.
@@ -1386,32 +1386,32 @@ enum SandhiAcceptAction {
 # Windows reports Winsock codes, folding only WSAEWOULDBLOCK onto EAGAIN, and
 # took the Linux numbers the same way until 1.10.11. CHANGELOG [1.10.11].
 #ifdef CYRIUS_TARGET_WIN
-var _SANDHI_ERRNO_EINTR        = 10004;
-var _SANDHI_ERRNO_EBADF        = 10009;
-var _SANDHI_ERRNO_EINVAL       = 10022;
-var _SANDHI_ERRNO_ENOTSOCK     = 10038;
-var _SANDHI_ERRNO_EOPNOTSUPP   = 10045;
-var _SANDHI_ERRNO_ECONNABORTED = 10053;
-var _SANDHI_ERRNO_ECONNRESET   = 10054;
-var _SANDHI_ERRNO_EPROTO       = 0 - 1;
+const _SANDHI_ERRNO_EINTR        = 10004;
+const _SANDHI_ERRNO_EBADF        = 10009;
+const _SANDHI_ERRNO_EINVAL       = 10022;
+const _SANDHI_ERRNO_ENOTSOCK     = 10038;
+const _SANDHI_ERRNO_EOPNOTSUPP   = 10045;
+const _SANDHI_ERRNO_ECONNABORTED = 10053;
+const _SANDHI_ERRNO_ECONNRESET   = 10054;
+const _SANDHI_ERRNO_EPROTO       = 0 - 1;
 #endif
 #ifndef CYRIUS_TARGET_WIN
-var _SANDHI_ERRNO_EINTR        = 4;
-var _SANDHI_ERRNO_EBADF        = 9;
-var _SANDHI_ERRNO_EINVAL       = 22;
+const _SANDHI_ERRNO_EINTR        = 4;
+const _SANDHI_ERRNO_EBADF        = 9;
+const _SANDHI_ERRNO_EINVAL       = 22;
 #ifdef CYRIUS_TARGET_MACOS
-var _SANDHI_ERRNO_EPROTO       = 100;
-var _SANDHI_ERRNO_ENOTSOCK     = 38;
-var _SANDHI_ERRNO_EOPNOTSUPP   = 102;
-var _SANDHI_ERRNO_ECONNABORTED = 53;
-var _SANDHI_ERRNO_ECONNRESET   = 54;
+const _SANDHI_ERRNO_EPROTO       = 100;
+const _SANDHI_ERRNO_ENOTSOCK     = 38;
+const _SANDHI_ERRNO_EOPNOTSUPP   = 102;
+const _SANDHI_ERRNO_ECONNABORTED = 53;
+const _SANDHI_ERRNO_ECONNRESET   = 54;
 #endif
 #ifndef CYRIUS_TARGET_MACOS
-var _SANDHI_ERRNO_EPROTO       = 71;
-var _SANDHI_ERRNO_ENOTSOCK     = 88;
-var _SANDHI_ERRNO_EOPNOTSUPP   = 95;
-var _SANDHI_ERRNO_ECONNABORTED = 103;
-var _SANDHI_ERRNO_ECONNRESET   = 104;
+const _SANDHI_ERRNO_EPROTO       = 71;
+const _SANDHI_ERRNO_ENOTSOCK     = 88;
+const _SANDHI_ERRNO_EOPNOTSUPP   = 95;
+const _SANDHI_ERRNO_ECONNABORTED = 103;
+const _SANDHI_ERRNO_ECONNRESET   = 104;
 #endif
 #endif
 
