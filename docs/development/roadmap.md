@@ -41,6 +41,18 @@ Shipped so far: 1.13.0, the per-pool mutex (a pool may be shared across threads)
 1.13.1, the h2 ALPN offer and the `_auto` dispatch's 0-RTT opt-in and credential
 digest in the request context.
 
+- **`sandhi_server_content_length` keeps its header value on the global heap**
+  (`src/server/mod.cyr`; filed by sit, 2026-10-20, checked at 1.13.1). It reads the
+  header through `sandhi_server_find_header`, which is
+  `find_header_a(default_alloc(), …)`, so the value's copy is a global-heap
+  allocation nothing frees. Both recv loops (`_sandhi_server_recv_request_dl` and
+  `_sandhi_server_tls_recv_request`) call it on every request with a body, so a
+  long-running server keeps about 8 B per such request, for its life. sit's
+  `sit serve` parses `Content-Length` itself over its request arena
+  (`_serve_content_length`, differential-fuzzed against this verb) but cannot reach
+  the accept loop's call. Give it an `_a` form the loops pass their per-request arena
+  to, or scan the value in place without copying it (it is a run of digits and
+  whitespace). Either keeps the 1.9.12 overflow rule (`0 - 1` for a value too large).
 - **One HTTP/2 connection used by several threads at once** (`src/http/h2/conn.cyr`,
   `request.cyr`, `response.cyr`; found at 1.13.0). The pool hands the same h2
   connection to every caller for a route (that is the multiplexing), and the `_auto`
