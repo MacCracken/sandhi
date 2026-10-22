@@ -21,8 +21,8 @@ at 1.0.0 / Cyrius v5.7.0 ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5
 Patches land here first; `dist/sandhi.cyr` is regenerated each release and a
 small cyrius slot re-folds it.
 
-Current: **1.13.4**, pinned to **Cyrius 6.7.16**. **3,204 test assertions green**
-(1,066 sandhi + 1,691 h2 + 383 alloc + 63 rpc + 1 raw-include) on Linux and macOS, plus a `cyrius fuzz`
+Current: **1.13.5**, pinned to **Cyrius 6.7.16**. **3,216 test assertions green**
+(1,066 sandhi + 1,691 h2 + 395 alloc + 63 rpc + 1 raw-include) on Linux and macOS, plus a `cyrius fuzz`
 harness suite (9 parser-robustness harnesses) gating in CI. Builds clean for x86_64,
 aarch64, and the **AGNOS** target.
 
@@ -90,7 +90,7 @@ is in [`cyrius.cyml`](cyrius.cyml) `[deps].stdlib`.
 | `src/rpc/*` | JSON-RPC dialects: W3C WebDriver, Appium extensions, MCP-over-HTTP + SSE — transport only per [ADR 0001](docs/adr/0001-sandhi-is-a-composer-not-a-reimplementer.md) |
 | `src/discovery/*` | Service discovery: chain composition, daimon-backed resolver, mDNS — QU-bit unicast (default) + opt-in multicast (QM) resolver `sandhi_discovery_local_mc_resolver` (1.5.5, over Cyrius 6.2.7 multicast primitives) |
 | `src/tls_policy/*` | Cert pinning (SPKI, constant-time compare), mTLS, trust store, ALPN, backend selection. Enforcement is live + **native on every mode** (1.6.0 / Batch A1): pinning + trust-store + mTLS all enforce on the native default backend; high-level threading via `sandhi_http_options_tls_policy` (1.4.6); fail-closed |
-| `src/tls_policy/session_cache.cyr` | TLS 1.3/1.2 client session-resumption cache — TTL + max-size LRU eviction, cred-strip-aware keying (1.3.1–1.4.0) |
+| `src/tls_policy/session_cache.cyr` | TLS 1.3/1.2 client session-resumption cache — TTL + max-size LRU eviction, cred-strip-aware keying, safe under concurrent opens (1.3.1–1.13.5) |
 | `src/server/mod.cyr` | HTTP/1.1 **+ HTTPS** server — sync `sandhi_server_run` / `_run_opts`, epoll-cooperative `sandhi_server_run_async` (1.4.9), thread-pool `sandhi_server_run_pooled` (true multi-core, 1.6.7), and **server-side TLS** `sandhi_server_run_tls` / `_run_pooled_tls` (1.6.8; concurrent handshakes safe at `max_conns > 1` since 1.8.1); method+path **routing** with `:name` params (`sandhi_router_*` / `route_match`, 1.6.7); SIGPIPE-guarded (1.6.6; macOS since 1.10.6); built-in CL+TE / dup-header smuggling guards |
 | `src/net/resolve.cyr` | Native UDP DNS resolver — A + AAAA, randomized TXID + answer-name verification, RFC 1035 |
 | `src/obs/trace.cyr` · `prof.cyr` | Opt-in sakshi spans at HTTP / RPC / DNS boundaries; opt-in per-request per-phase profiling |
@@ -157,7 +157,7 @@ cyrius deps                                                 # resolve stdlib dep
 cyrius build programs/smoke.cyr build/sandhi-smoke          # smoke link proof (native, no flag)
 cyrius test  tests/sandhi.tcyr                              # core (1,066 assertions)
 cyrius test  tests/h2.tcyr                                  # h2-specific (1,691 assertions)
-cyrius test  tests/alloc.tcyr                               # allocator / arena (383 assertions)
+cyrius test  tests/alloc.tcyr                               # allocator / arena (395 assertions)
 cyrius test  tests/rpc.tcyr                                 # RPC dialects (63 assertions)
 cyrius fuzz                                                 # parser-robustness harnesses (fuzz/*.fcyr)
 cyrius lint  $(find src -name '*.cyr')                      # static checks (warn-as-fail in CI; recurses into src/http/h2/)

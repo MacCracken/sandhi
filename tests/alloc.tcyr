@@ -2568,6 +2568,237 @@ fn test_hpack_tables_build_fails_closed() {
     return 0;
 }
 
+# 1.13.5 — the TLS session cache under concurrent opens. Once enabled, every TLS
+# open looks up, stores and evicts in one process-wide map. Four threads are
+# released together onto it, with fake session pointers (freeing one is a no-op
+# while libssl is not loaded, as in the rows above). Phase 1: each thread stores
+# and reads back its own keys, so every lookup must answer that thread's last
+# store; the cache's mutex is forgotten first, so the threads also race to make
+# it. Phase 2: a cap of 32 and only new keys, so the cache evicts as it goes.
+var _t_sc_ready = 0;
+var _t_sc_go = 0;
+var _t_sc_phase = 0;
+var _t_sc_hosts = 0;
+var _t_sc_bad = 0;
+var _t_sc_lookups = 0;
+
+fn _t_sc_threads(): i64 { return 4; }
+fn _t_sc_keys(): i64 { return 64; }
+fn _t_sc_rounds(): i64 { return 40; }
+
+fn _t_sc_host(t, i): i64 { return load64(_t_sc_hosts + (t * _t_sc_keys() + i) * 8); }
+
+fn _t_sc_fake(t, i, j): i64 { return (t + 1) * 1000000 + j * 1000 + i + 1; }
+
+fn _t_sc_worker(arg) {
+    var t = arg;
+    var bad = 0;
+    var looks = 0;
+    atomic_fetch_add(&_t_sc_ready, 1);
+    while (atomic_load(&_t_sc_go) == 0) { }
+    var j = 0;
+    while (j < _t_sc_rounds()) {
+        var i = 0;
+        while (i < _t_sc_keys()) {
+            if (_t_sc_phase == 1) {
+                sandhi_session_cache_store(_t_sc_host(t, i), 0, 0, _t_sc_fake(t, i, j));
+                if (sandhi_session_cache_lookup(_t_sc_host(t, i), 0, 0) != _t_sc_fake(t, i, j)) {
+                    bad = bad + 1;
+                }
+            } else {
+                # A new key every time: the round rides in the hook fingerprint.
+                sandhi_session_cache_store(_t_sc_host(t, i), j + 1, 0, _t_sc_fake(t, i, j));
+                sandhi_session_cache_lookup(_t_sc_host(t, i), j + 1, 0);
+            }
+            looks = looks + 1;
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    atomic_fetch_add(&_t_sc_bad, bad);
+    atomic_fetch_add(&_t_sc_lookups, looks);
+    return 0;
+}
+
+# Run one phase on `_t_sc_threads()` threads. 1, or 0 when a thread could not start.
+fn _t_sc_run(phase): i64 {
+    var nt = _t_sc_threads();
+    var th = alloc(nt * 8);
+    var spawned = 1;
+    _t_sc_phase = phase;
+    atomic_store(&_t_sc_bad, 0);
+    atomic_store(&_t_sc_lookups, 0);
+    atomic_store(&_t_sc_ready, 0);
+    atomic_store(&_t_sc_go, 0);
+    var t = 0;
+    while (t < nt) {
+        store64(th + t * 8, thread_create(&_t_sc_worker, t));
+        if (load64(th + t * 8) == 0) { spawned = 0; }
+        t = t + 1;
+    }
+    if (spawned == 1) {
+        while (atomic_load(&_t_sc_ready) < nt) { }
+    }
+    atomic_store(&_t_sc_go, 1);
+    t = 0;
+    while (t < nt) {
+        if (load64(th + t * 8) != 0) { thread_join(load64(th + t * 8)); }
+        t = t + 1;
+    }
+    return spawned;
+}
+
+fn test_session_cache_threads() {
+    if (THREADS_CONCURRENT != 1) { assert_eq(1, 1, "session cache: no concurrent threads — skipped"); return 0; }
+    var nt = _t_sc_threads();
+    var nk = _t_sc_keys();
+    _t_sc_hosts = alloc(nt * nk * 8);
+    var t = 0;
+    while (t < nt) {
+        var i = 0;
+        while (i < nk) {
+            var h = alloc(32);
+            store8(h, 115);                       # "s"
+            var o = _t_h2s_put_int(h, 1, t);
+            store8(h + o, 45);                    # "-"
+            o = _t_h2s_put_int(h, o + 1, i);
+            memcpy(h + o, ".test", 6);
+            store64(_t_sc_hosts + (t * nk + i) * 8, h);
+            i = i + 1;
+        }
+        t = t + 1;
+    }
+    var was_enabled = sandhi_session_cache_enabled();
+    sandhi_session_cache_enable(1);
+    sandhi_session_cache_clear();
+    sandhi_session_cache_reset_stats();
+    sandhi_session_cache_set_max_size(100000);
+
+    # Phase 1 — own keys, read back.
+    _sandhi_session_cache_mtx = 0;
+    if (_t_sc_run(1) == 0) {
+        sandhi_session_cache_set_max_size(256);
+        sandhi_session_cache_enable(was_enabled);
+        assert_eq(1, 1, "session cache: no thread — skipped");
+        return 0;
+    }
+    var total = nt * nk * _t_sc_rounds();
+    assert_eq(_t_sc_bad, 0, "session cache: every lookup answered its thread's last store");
+    assert_eq(sandhi_session_cache_hit_count(), total, "session cache: every lookup counted as a hit");
+    assert_eq(sandhi_session_cache_miss_count(), 0, "session cache: and none as a miss");
+    assert_eq(sandhi_session_cache_size(), nt * nk, "session cache: one entry per key");
+    var last_bad = 0;
+    t = 0;
+    while (t < nt) {
+        var k = 0;
+        while (k < nk) {
+            if (sandhi_session_cache_lookup(_t_sc_host(t, k), 0, 0) != _t_sc_fake(t, k, _t_sc_rounds() - 1)) {
+                last_bad = last_bad + 1;
+            }
+            k = k + 1;
+        }
+        t = t + 1;
+    }
+    assert_eq(last_bad, 0, "session cache: each key holds its thread's last store");
+
+    # Phase 2 — a cap of 32 and a new key every store.
+    sandhi_session_cache_clear();
+    sandhi_session_cache_reset_stats();
+    sandhi_session_cache_set_max_size(32);
+    _t_sc_run(2);
+    var size = sandhi_session_cache_size();
+    var over = size - 32;
+    if (over < 0) { over = 0; }
+    assert_eq(over, 0, "session cache: evicting threads keep the cache within its cap (entries over)");
+    assert_eq(sandhi_session_cache_evict_count(), total - size,
+      "session cache: every key stored is either held or evicted once");
+    assert_eq(sandhi_session_cache_hit_count() + sandhi_session_cache_miss_count(), _t_sc_lookups,
+      "session cache: every lookup counted once");
+
+    sandhi_session_cache_clear();
+    sandhi_session_cache_reset_stats();
+    sandhi_session_cache_set_max_size(256);
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
+# The cache's lock excludes from the first use. Each round forgets the mutex and
+# releases the threads into `_sandhi_session_cache_lock` together, so they race
+# to make it; each counts itself inside, and finding another thread there is an
+# overlap. Mutation: publishing the mutex by a plain store instead of the CAS
+# lets two threads lock rival mutexes.
+var _t_scl_inside = 0;
+var _t_scl_overlap = 0;
+
+fn _t_scl_worker(arg) {
+    atomic_fetch_add(&_t_sc_ready, 1);
+    while (atomic_load(&_t_sc_go) == 0) { }
+    var mx = _sandhi_session_cache_lock();
+    if (mx == 0) { atomic_fetch_add(&_t_scl_overlap, 1); return 0; }
+    if (atomic_fetch_add(&_t_scl_inside, 1) != 0) { atomic_fetch_add(&_t_scl_overlap, 1); }
+    var spin = 2000;
+    while (spin > 0) { spin = spin - 1; }
+    atomic_fetch_add(&_t_scl_inside, 0 - 1);
+    _sandhi_session_cache_unlock(mx);
+    return 0;
+}
+
+fn test_session_cache_lock_first_use() {
+    if (THREADS_CONCURRENT != 1) { assert_eq(1, 1, "session lock: no concurrent threads — skipped"); return 0; }
+    var nt = _t_sc_threads();
+    var th = alloc(nt * 8);
+    var saved = _sandhi_session_cache_mtx;
+    _t_scl_overlap = 0;
+    var spawned = 1;
+    var r = 0;
+    while (r < 200) {
+        _sandhi_session_cache_mtx = 0;
+        atomic_store(&_t_sc_ready, 0);
+        atomic_store(&_t_sc_go, 0);
+        var t = 0;
+        while (t < nt) {
+            store64(th + t * 8, thread_create(&_t_scl_worker, t));
+            if (load64(th + t * 8) == 0) { spawned = 0; }
+            t = t + 1;
+        }
+        if (spawned == 1) {
+            while (atomic_load(&_t_sc_ready) < nt) { }
+        }
+        atomic_store(&_t_sc_go, 1);
+        t = 0;
+        while (t < nt) {
+            if (load64(th + t * 8) != 0) { thread_join(load64(th + t * 8)); }
+            t = t + 1;
+        }
+        if (spawned == 0) { r = 200; }
+        r = r + 1;
+    }
+    _sandhi_session_cache_mtx = saved;
+    if (spawned == 0) { assert_eq(1, 1, "session lock: no thread — skipped"); return 0; }
+    assert_eq(_t_scl_overlap, 0, "session lock: 4 threads x 200 first uses never held it together");
+    return 0;
+}
+
+# The TLS open installs a cached session under the cache's lock and gets it back
+# only when the ctx took it. A ctx that cannot (0 here; every native ctx) gets 0,
+# and the entry stays cached.
+fn test_session_cache_install_needs_ctx() {
+    var was_enabled = sandhi_session_cache_enabled();
+    sandhi_session_cache_enable(1);
+    sandhi_session_cache_clear();
+    sandhi_session_cache_reset_stats();
+    sandhi_session_cache_store("install.test", 0, 0, 0xDEADBEEF);
+    assert_eq(_sandhi_session_cache_install(0, "install.test", 0, 0), 0,
+      "session install: a ctx that cannot take the session gets none back");
+    assert_eq(sandhi_session_cache_hit_count(), 1, "session install: the lookup counts as a hit");
+    assert_eq(sandhi_session_cache_lookup("install.test", 0, 0), 0xDEADBEEF,
+      "session install: the entry stays cached");
+    sandhi_session_cache_clear();
+    sandhi_session_cache_reset_stats();
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
 # ================================================================
 # Runner
 # ================================================================
@@ -2826,6 +3057,11 @@ fn main() {
     test_group("alloc/1134/hpack_tables_first_use");
     test_hpack_tables_build_fails_closed();
     test_hpack_tables_first_use_threads();
+
+    test_group("alloc/1135/session_cache_threads");
+    test_session_cache_install_needs_ctx();
+    test_session_cache_lock_first_use();
+    test_session_cache_threads();
 
     test_group("alloc/132/conn_0rtt_status_accessor");
     test_alloc_132_conn_0rtt_status_accessor();

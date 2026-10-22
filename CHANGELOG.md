@@ -4,6 +4,125 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.13.5] — 2026-10-22
+
+**The TLS session cache is safe under concurrent opens: a mutex guards it, and the TLS open
+installs a cached session under that mutex.** Through 1.13.4 every open with the cache
+enabled shared one process-wide map with no lock. No pin change (6.7.16), no new public
+verb. Sixth patch on the 1.13.x line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+**Visible to a consumer:**
+- **With `sandhi_session_cache_enable(1)`, threads may open TLS connections at once.** On
+  the native backend no session is ever stored, so there only the hit and miss counters
+  raced. On the deprecated libssl backend the map itself did.
+- **A consumer calling `sandhi_session_cache_lookup` itself:** under threads, the pointer it
+  returns stays valid only until another thread stores over or evicts that key. The verb's
+  comment now says so. sandhi's own TLS open no longer calls it.
+- **0-RTT (libssl only) waits on the ctx having taken the cached session.** Before, the open
+  wrote early data whenever the lookup found a session, even one `tls_set_session` refused.
+- **`dist/sandhi-tls.deps` and `dist/sandhi-server.deps` gain `sync`** (13 and 18 leaves).
+  The other three sidecars list the same leaves in a new order.
+
+### Fixed
+
+- **tls_policy/session_cache: concurrent TLS opens shared the cache's map with no lock.**
+  Found at 1.13.1 (roadmap 1.13.x). With the cache enabled, every TLS open looks up, stores
+  and evicts in one process-wide map and bumps its counters.
+  - **Measured by the new row, before the fix** (three runs; four threads):
+    - **Each thread on its own 64 keys, 40 rounds:** 2 – 4 lookups missed an entry their
+      own thread had just stored, 238 – 277 of 10,240 hits went uncounted, and the map held
+      246 – 255 entries for 256 keys.
+    - **A cap of 32 and a new key every store:** the cache ended 6,672 – 6,950 entries over
+      its cap. The eviction count disagreed with the keys stored by −229 to +48, and 8 – 22
+      lookups went uncounted.
+    - **What that can mean on libssl,** where each entry holds a real `SSL_SESSION`: an
+      entry lost without an eviction never frees its session, and one evicted twice frees
+      it twice.
+  - **The open also used a session it did not own.** `sandhi_session_cache_lookup` returned
+    a session the cache still owned, and the open installed it only after the call returned.
+    Another thread's store over that key, or an eviction, could free the session in between.
+    libssl only; found by reading, not reproduced.
+  - **The fix:** a `lib/sync.cyr` mutex, held for each public verb's map, entry and counter
+    work.
+    - **First use:** `_sandhi_session_cache_mutex` makes the mutex and publishes it by a
+      CAS, so two first users cannot lock rival mutexes. Each unlock releases the mutex its
+      lock returned.
+    - **Keys** are built before the lock is taken. The disabled path is still one load and a
+      return, with no lock.
+    - **The TLS open installs the cached session under the lock**
+      (`_sandhi_session_cache_install`) and gets it back only when `tls_set_session`
+      succeeds. From then on the ctx holds its own reference.
+    - **Unlocked by design:** the counter getters and the max-size / max-age setters, each
+      one word.
+- **tls_policy/session_cache: a store whose map could not grow freed nothing.** Found by
+  reading while moving the store under the lock. `map_set_a`'s failure was ignored, so the
+  new entry and the session the store took ownership of leaked. Both are released now.
+  Reachable only through an exhausted global heap, and not tested: the store allocates from
+  the global heap, which the suite cannot fail.
+
+### Changed
+
+- **http/conn:** the TLS open calls `_sandhi_session_cache_install` in place of
+  `sandhi_session_cache_lookup` followed by `tls_set_session`.
+- **Roadmap:**
+  - **The session-cache item leaves 1.13.x.**
+  - **One item joins the line, ahead of the fuzz-PRNG item:** every cache lookup and store
+    builds its key on the global heap and never frees it. Measured: 160 B per call, so with
+    the cache on each TLS open keeps about 320 B for the life of the process (since 1.3.1).
+
+### Verification
+
+- **New rows, 12 assertions,** in `alloc/1135/session_cache_threads`:
+  - **The cache under threads:** four threads released together, with fake session pointers
+    (freeing one is a no-op while libssl is not loaded, as in the older cache rows).
+    - **Phase 1:** each thread stores and reads back its own 64 keys for 40 rounds. Every
+      lookup must answer its thread's last store and count as a hit, and the map must end
+      with one entry per key, each holding its last store. The mutex is forgotten first, so
+      the threads also race to make it.
+    - **Phase 2:** a cap of 32 and a new key every store. The cache must stay within its
+      cap, every key stored must be either held or evicted once, and every lookup must be
+      counted once.
+  - **The lock from first use:** 200 rounds, each forgetting the mutex and releasing four
+    threads into the lock together. Each thread counts itself inside and checks that no
+    other thread is.
+  - **The install:** a ctx that cannot take the session (0 here, as every native ctx) gets 0
+    back. The lookup still counts as a hit, and the entry stays cached.
+- **Before the fix:** the cache row failed seven assertions in each run, as measured above.
+  The lock and install rows have no 1.13.4 counterpart.
+- **Mutations, each caught:**
+  - the lookup without the lock: 1 row (23 – 45 hits uncounted);
+  - the store without the lock: 6 rows;
+  - the install keeping a session its ctx refused: 1 row;
+  - the mutex published by a plain store instead of the CAS: 595 – 596 overlaps in 800 first
+    uses (three runs). The cache row alone missed this one in all three runs, because only
+    a process's first lock can race; the lock row was added for it.
+- **The first draft's unlock re-read the global mutex** instead of releasing the one it had
+  locked. Under the plain-store mutation, a thread was left waiting on a mutex nobody would
+  release, and the row hung. Each unlock now releases the mutex its lock returned.
+- **Live, on the deprecated libssl backend** (a scratch probe, not kept): three GETs to
+  `one.one.one.one` with the cache on gave one miss and then two hits, each a 200, with one
+  entry cached, which on that backend is a real `SSL_SESSION`. A direct install on a fresh
+  libssl ctx handed the session back, and its handshake completed.
+- **Stability:** the rows passed 6 runs of 6.
+- **3,216 assertions** (1,066 / 1,691 / 395 / 63 / 1), 9/9 fuzz. `fmt` is clean, and lint's
+  one warning is the long table line in `src/http/h2/huffman.cyr`.
+- **Windows under wine:** all four suites pass (1,053 / 1,691 / 395 / 63). The threaded rows
+  run there.
+- **aarch64 under qemu:** all four suites pass (1,066 / 1,691 / 395 / 63).
+- **The full Linux gate, on 6.7.16:**
+  - Builds: the `CYRIUS_DCE=1` smoke, native (1,220,256 B) and libssl (819,712 B), and the
+    aarch64, Windows and AGNOS cross-builds; the Windows smoke runs under wine.
+  - Live gates: all seven pass.
+  - CI scripts: the whole-surface link check (897 fns, seven of them new and private;
+    control refused) and the programs sweep (35 programs) pass. The security scans pass.
+  - `cyrius deps --verify`: 82 verified.
+  - dist: all five bundles regenerated and idempotent. Every profile includes the session
+    cache, so the change reaches all five; the sidecars change as listed above.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.13.4] — 2026-10-22
 
 **Pin → cyrius 6.7.16. The HPACK static and Huffman tables are built once, even when

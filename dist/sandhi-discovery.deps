@@ -8,12 +8,12 @@ chrono
 alloc
 vec
 str
-hashmap
+sync
 atomic
+hashmap
 syscalls
 result
 sigil
 io
 fnptr
-sync
 fmt

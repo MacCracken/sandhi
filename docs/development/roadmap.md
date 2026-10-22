@@ -6,8 +6,9 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-22** at 1.13.4: the HPACK / Huffman first-use item shipped
-> with the pin → 6.7.16, and nothing new joined the line. The 1.11.x and
+> completed work on **2026-10-22** at 1.13.5: the session-cache lock shipped, and the
+> cache's per-call key allocation, found during it, joined the 1.13.x line ahead of the
+> fuzz-PRNG item, which stays last. The 1.11.x and
 > 1.12.x lines are complete and their sections are gone (the 1.12.x traits item was
 > re-scoped to the transport seam: CHANGELOG [1.12.3]). History is in the CHANGELOG.
 
@@ -42,13 +43,9 @@ Shipped so far: 1.13.0, the per-pool mutex (a pool may be shared across threads)
 digest in the request context; 1.13.2, pin → cyrius 6.7.15 and the server's framing
 reads in place (sit's filing); 1.13.3, one h2 connection shared by threads (a
 per-connection lock around one exchange); 1.13.4, pin → cyrius 6.7.16 and the HPACK /
-Huffman tables built once under concurrent first use.
+Huffman tables built once under concurrent first use; 1.13.5, a lock on the TLS session
+cache.
 
-- **TLS session cache under concurrent opens** (`src/tls_policy/session_cache.cyr`;
-  found at 1.13.1). Once `sandhi_session_cache_enable(1)` is on, every TLS open looks
-  up, stores and evicts in one process-wide map with no lock. Only the libssl backend
-  stores sessions (native never resumes), so there concurrent opens can corrupt the
-  map; on native only the hit/miss counters race. A mutex, as the pool got at 1.13.0.
 - **Per-hop cred-digest recompute on cross-authority redirect-follow**
   (`src/http/client.cyr`). The 1.3.3 session-cache cred-digest is computed once per
   top-level dispatch (stored in the 1.6.9 request context), so an A→B redirect
@@ -113,6 +110,12 @@ Huffman tables built once under concurrent first use.
   `TCP_NODELAY` on its test pair to run at full speed. Over TLS each write is its own
   record, so the same applies. Send each frame as one write, or set `TCP_NODELAY` on
   client conns (`sock_set_nodelay`, cyrius 6.7.9).
+- **Each session-cache lookup and store keeps its key on the global heap**
+  (`src/tls_policy/session_cache.cyr`; measured at 1.13.5). `_sandhi_session_cache_key_a`
+  builds the `host|hook|cred` key with `default_alloc()` on every call, and only a store of
+  a new key keeps it (in the map). 160 B a call, so with the cache on each TLS open, one
+  install and one store, keeps about 320 B for the life of the process (since 1.3.1). Build
+  the key in a per-call buffer and copy it to the heap only for a new entry.
 - **The older fuzz harnesses draw correlated bytes** (`fuzz/dns`, `headers`, `hpack`,
   `json`, `response`, `sse`, `url`; found at 1.13.2). Each takes `% k` of the raw LCG
   state, whose low bits have short periods. `_fz_fill`'s `s % 256` has period 256, and a

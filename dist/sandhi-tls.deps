@@ -3,11 +3,12 @@
 net
 tls
 alloc
+sync
+atomic
 hashmap
 str
 vec
 chrono
-atomic
 syscalls
 result
 string
