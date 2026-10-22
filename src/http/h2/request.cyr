@@ -16,11 +16,24 @@
 #
 # Static-table optimization: we use the obvious pre-baked indices
 # for `:method GET`/`POST`, `:scheme http`/`https`, `:path /`, and
-# `:authority` (name-only). Everything else emits as literal-with-
-# incremental-indexing with inline name + value. That trades a few
-# extra wire bytes for code simplicity; the HPACK dynamic table
-# absorbs repeated headers across requests on the same connection
-# anyway, so it amortizes.
+# `:authority` (name-only). Everything else is a literal without
+# indexing (RFC 7541 §6.2.2), so the conn's encoder table stays empty.
+#
+# 1.13.6:
+#   - Never index. Through 1.13.5 every other field was a literal with
+#     incremental indexing: each was inserted into the conn's encoder
+#     table on the global heap (at least 304 B a field, kept for the life
+#     of the conn), holding pointers into the request's arena, and the
+#     encoder never referenced its dynamic entries, so it bought nothing.
+#   - The header block is sized per request, and one larger than the
+#     peer's MAX_FRAME_SIZE goes out as HEADERS + CONTINUATION. Through
+#     1.13.5 a fixed 8 KB buffer refused any larger block.
+#   - A header list larger than the peer's SETTINGS_MAX_HEADER_LIST_SIZE is
+#     refused before anything is sent (`_SANDHI_H2_ERR_HDR_LIST`).
+#   - A body larger than the peer's MAX_FRAME_SIZE is split into DATA
+#     frames, each within the peer's connection and stream windows; the
+#     sender waits for WINDOW_UPDATE when they are spent. Through 1.13.5 a
+#     body over one frame was refused, and the windows were never consulted.
 #
 # Bite 5b of 0.8.0.
 
@@ -32,10 +45,8 @@ const _SANDHI_H2_REQ_IDX_PATH_ROOT     = 4;
 const _SANDHI_H2_REQ_IDX_SCHEME_HTTP   = 6;
 const _SANDHI_H2_REQ_IDX_SCHEME_HTTPS  = 7;
 
-# Default HEADERS-frame buffer cap. For typical RPC requests the
-# HPACK-encoded block is well under 1 KB. A caller-override path is a
-# wait-for-consumer-ask roadmap item (h2 spec-completeness) — parked
-# until a consumer ships absurdly large header sets.
+# The header-block buffer the public `sandhi_h2_request_encode_headers_a`
+# contract names. sandhi's own sender sizes its buffer per request.
 const _SANDHI_H2_REQ_HBUF_CAP = 8192;
 
 # ================================================================
@@ -43,7 +54,6 @@ const _SANDHI_H2_REQ_HBUF_CAP = 8192;
 # ================================================================
 
 fn _h2_emit_method(h2c, method, hbuf, off): i64 {
-    var enc = sandhi_h2_conn_enc_table(h2c);
     if (streq(method, "GET") == 1)  {
         return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_METHOD_GET);
     }
@@ -51,8 +61,7 @@ fn _h2_emit_method(h2c, method, hbuf, off): i64 {
         return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_METHOD_POST);
     }
     # PUT / DELETE / PATCH / HEAD — emit literal with name idx 2 + value.
-    return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-      _SANDHI_H2_REQ_IDX_METHOD_GET, ":method", method);
+    return _hpack_encode_literal_no_index_name(hbuf, off, _SANDHI_H2_REQ_IDX_METHOD_GET, method);
 }
 
 fn _h2_emit_scheme(h2c, scheme, hbuf, off): i64 {
@@ -62,30 +71,24 @@ fn _h2_emit_scheme(h2c, scheme, hbuf, off): i64 {
     if (streq(scheme, "http") == 1) {
         return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_SCHEME_HTTP);
     }
-    var enc = sandhi_h2_conn_enc_table(h2c);
-    return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-      _SANDHI_H2_REQ_IDX_SCHEME_HTTP, ":scheme", scheme);
+    return _hpack_encode_literal_no_index_name(hbuf, off, _SANDHI_H2_REQ_IDX_SCHEME_HTTP, scheme);
 }
 
 fn _h2_emit_path(h2c, path, hbuf, off): i64 {
     if (streq(path, "/") == 1) {
         return sandhi_hpack_encode_indexed(hbuf, off, _SANDHI_H2_REQ_IDX_PATH_ROOT);
     }
-    var enc = sandhi_h2_conn_enc_table(h2c);
-    return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-      _SANDHI_H2_REQ_IDX_PATH_ROOT, ":path", path);
+    return _hpack_encode_literal_no_index_name(hbuf, off, _SANDHI_H2_REQ_IDX_PATH_ROOT, path);
 }
 
 fn _h2_emit_authority(h2c, authority, hbuf, off): i64 {
-    var enc = sandhi_h2_conn_enc_table(h2c);
-    return sandhi_hpack_encode_literal_indexed_name(enc, hbuf, off,
-      _SANDHI_H2_REQ_IDX_AUTHORITY, ":authority", authority);
+    return _hpack_encode_literal_no_index_name(hbuf, off, _SANDHI_H2_REQ_IDX_AUTHORITY, authority);
 }
 
 # Emit one user header, allocating the lowercased-name copy from `a`.
 # The HPACK encoder only references the lowercased name during this
-# call, so the alloc is short-lived; arena callers reset after the
-# request is on the wire.
+# call (it never indexes), so the alloc is short-lived; arena callers
+# reset after the request is on the wire.
 fn _h2_emit_user_header_a(a, h2c, name, value, hbuf, off): i64 {
     var nlen = strlen(name);
     var lower = alloc_via(a, nlen + 1);
@@ -98,8 +101,7 @@ fn _h2_emit_user_header_a(a, h2c, name, value, hbuf, off): i64 {
         i = i + 1;
     }
     store8(lower + nlen, 0);
-    var enc = sandhi_h2_conn_enc_table(h2c);
-    return sandhi_hpack_encode_literal_indexed(enc, hbuf, off, lower, value);
+    return sandhi_hpack_encode_literal_no_index(hbuf, off, lower, value);
 }
 
 fn _h2_emit_user_header(h2c, name, value, hbuf, off): i64 {
@@ -131,31 +133,34 @@ fn _h2_emit_user_header(h2c, name, value, hbuf, off): i64 {
 # never longer than the raw octets plus its length prefixes (the encoder picks
 # Huffman only when strictly shorter), so `strlen(name) + strlen(value) + 16`
 # covers index prefix + two length varints with room to spare.
-fn _h2_hbuf_fits(off, need): bool {
+fn _h2_hbuf_fits(off, need, cap): bool {
     if (off < 0)  { return false; }
     if (need < 0) { return false; }
-    if (off + need > _SANDHI_H2_REQ_HBUF_CAP) { return false; }
+    if (off + need > cap) { return false; }
     return true;
 }
 
 fn sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path, authority,
   user_headers, hbuf): i64 {
+    return _h2_encode_headers_cap_a(a, h2c, method, scheme, path, authority,
+      user_headers, hbuf, _SANDHI_H2_REQ_HBUF_CAP);
+}
+
+# The encode, into an `hbuf` of `cap` bytes.
+fn _h2_encode_headers_cap_a(a, h2c, method, scheme, path, authority,
+  user_headers, hbuf, cap): i64 {
     var off = 0;
-    if (_h2_hbuf_fits(off, strlen(method) + 16) == 0)    { return _SANDHI_H2_ERR_MALFORMED; }
+    if (_h2_hbuf_fits(off, strlen(method) + 16, cap) == 0)    { return _SANDHI_H2_ERR_MALFORMED; }
     off = _h2_emit_method(h2c, method, hbuf, off);
-    if (_h2_hbuf_fits(off, strlen(scheme) + 16) == 0)    { return _SANDHI_H2_ERR_MALFORMED; }
+    if (_h2_hbuf_fits(off, strlen(scheme) + 16, cap) == 0)    { return _SANDHI_H2_ERR_MALFORMED; }
     off = _h2_emit_scheme(h2c, scheme, hbuf, off);
-    if (_h2_hbuf_fits(off, strlen(path) + 16) == 0)      { return _SANDHI_H2_ERR_MALFORMED; }
+    if (_h2_hbuf_fits(off, strlen(path) + 16, cap) == 0)      { return _SANDHI_H2_ERR_MALFORMED; }
     off = _h2_emit_path(h2c, path, hbuf, off);
-    if (_h2_hbuf_fits(off, strlen(authority) + 16) == 0) { return _SANDHI_H2_ERR_MALFORMED; }
+    if (_h2_hbuf_fits(off, strlen(authority) + 16, cap) == 0) { return _SANDHI_H2_ERR_MALFORMED; }
     off = _h2_emit_authority(h2c, authority, hbuf, off);
 
-    var have_te = 0;
-    if (user_headers != 0) {
-        if (sandhi_headers_has(user_headers, "TE") == 1) { have_te = 1; }
-    }
-    if (have_te == 0) {
-        if (_h2_hbuf_fits(off, 26) == 0) { return _SANDHI_H2_ERR_MALFORMED; }
+    if (_h2_needs_te(user_headers) == 1) {
+        if (_h2_hbuf_fits(off, 26, cap) == 0) { return _SANDHI_H2_ERR_MALFORMED; }
         off = _h2_emit_user_header_a(a, h2c, "te", "trailers", hbuf, off);
     }
 
@@ -166,7 +171,7 @@ fn sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path, authority,
             var name = sandhi_headers_name_at(user_headers, i);
             var value = sandhi_headers_value_at(user_headers, i);
             if (_h2_header_is_forbidden(name, value) == 0) {
-                if (_h2_hbuf_fits(off, strlen(name) + strlen(value) + 16) == 0) {
+                if (_h2_hbuf_fits(off, strlen(name) + strlen(value) + 16, cap) == 0) {
                     return _SANDHI_H2_ERR_MALFORMED;
                 }
                 off = _h2_emit_user_header_a(a, h2c, name, value, hbuf, off);
@@ -175,6 +180,44 @@ fn sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path, authority,
         }
     }
     return off;
+}
+
+# 1 when the encoder adds `te: trailers` (the caller sent no TE).
+fn _h2_needs_te(user_headers): bool {
+    if (user_headers == 0) { return true; }
+    if (sandhi_headers_has(user_headers, "TE") == 1) { return false; }
+    return true;
+}
+
+# The worst-case encoded size of the request's header block (the buffer
+# `_h2_encode_headers_cap_a` needs: raw octets plus 16 a field, as
+# `_h2_hbuf_fits` reserves), and into `list_out` its header-list size
+# (RFC 7540 §6.5.2: name + value + 32 octets a field), over every field the
+# encoder emits.
+fn _h2_req_sizes(method, scheme, path, authority, user_headers, list_out): i64 {
+    var need = strlen(method) + strlen(scheme) + strlen(path) + strlen(authority) + 64;
+    var list = 7 + strlen(method) + 7 + strlen(scheme) + 5 + strlen(path)
+    + 10 + strlen(authority) + 4 * 32;
+    if (_h2_needs_te(user_headers) == 1) {
+        need = need + 26;
+        list = list + 10 + 32;
+    }
+    if (user_headers != 0) {
+        var n = sandhi_headers_count(user_headers);
+        var i = 0;
+        while (i < n) {
+            var name = sandhi_headers_name_at(user_headers, i);
+            var value = sandhi_headers_value_at(user_headers, i);
+            if (_h2_header_is_forbidden(name, value) == 0) {
+                var fl = strlen(name) + strlen(value);
+                need = need + fl + 16;
+                list = list + fl + 32;
+            }
+            i = i + 1;
+        }
+    }
+    store64(list_out, list);
+    return need;
 }
 
 fn sandhi_h2_request_encode_headers(h2c, method, scheme, path, authority,
@@ -246,46 +289,158 @@ fn _h2_streq_ci(a, b): bool {
 # ================================================================
 #
 # For body-less methods (GET/HEAD/DELETE): one HEADERS frame with
-# END_HEADERS | END_STREAM. For body-bearing (POST/PUT/PATCH):
-# HEADERS frame with END_HEADERS only, then a DATA frame with the
-# body and END_STREAM.
+# END_HEADERS | END_STREAM (plus CONTINUATION frames for a block over the
+# peer's MAX_FRAME_SIZE). For body-bearing (POST/PUT/PATCH): HEADERS
+# without END_STREAM, then DATA frames with the body, the last carrying
+# END_STREAM.
 #
 # Returns the allocated stream-id on success (≥ 1), or a negative
-# `_SANDHI_H2_ERR_*` sentinel on failure.
+# `_SANDHI_H2_ERR_*` sentinel on failure. If the peer answers on the
+# stream before the body is all sent, the sender stops and leaves that
+# frame for `sandhi_h2_response_recv_a`.
 
 fn sandhi_h2_request_send_a(a, h2c, method, scheme, path, authority,
   user_headers, body, body_len): i64 {
-    var hbuf = alloc_via(a, _SANDHI_H2_REQ_HBUF_CAP);
+    var st = alloc_via(a, 8);
+    if (st == 0) { return _SANDHI_H2_ERR_MALFORMED; }
+    return _sandhi_h2_request_send_ex_a(a, h2c, method, scheme, path, authority,
+      user_headers, body, body_len, st);
+}
+
+# The send, reporting into `state_out` how far it got: 0 nothing written,
+# 1 the request is on the wire but its body was cut short by an early
+# answer (the stream is still open on our side), 2 the request is complete.
+fn _sandhi_h2_request_send_ex_a(a, h2c, method, scheme, path, authority,
+  user_headers, body, body_len, state_out): i64 {
+    store64(state_out, 0);
+    var lcell = alloc_via(a, 8);
+    if (lcell == 0) { return _SANDHI_H2_ERR_MALFORMED; }
+    var need = _h2_req_sizes(method, scheme, path, authority, user_headers, lcell);
+    var limit = load64(h2c + SANDHI_H2_CONN_OFF_PEER_HDR_LIST);
+    if (limit > 0 && load64(lcell) > limit) { return _SANDHI_H2_ERR_HDR_LIST; }
+    var hbuf = alloc_via(a, need);
     if (hbuf == 0) { return _SANDHI_H2_ERR_MALFORMED; }
-    var hlen = sandhi_h2_request_encode_headers_a(a, h2c, method, scheme, path,
-      authority, user_headers, hbuf);
+    var hlen = _h2_encode_headers_cap_a(a, h2c, method, scheme, path,
+      authority, user_headers, hbuf, need);
     if (hlen <= 0) { return _SANDHI_H2_ERR_MALFORMED; }
 
     var stream_id = sandhi_h2_conn_next_stream_id(h2c);
     var has_body = 0;
     if (body_len > 0 && body != 0) { has_body = 1; }
 
-    var hflags = SANDHI_H2_FLAG_END_HEADERS;
-    if (has_body == 0) { hflags = hflags | SANDHI_H2_FLAG_END_STREAM; }
-    var hr = sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_HEADERS,
-      hflags, stream_id, hbuf, hlen);
+    var hr = _h2_send_header_block_a(a, h2c, stream_id, hbuf, hlen, has_body == 0);
     if (hr < 0) { return hr; }
-
+    store64(state_out, 2);
     if (has_body == 1) {
-        # First cut: send the entire body in one DATA frame. If
-        # body_len > peer_max_frame, we need to fragment across
-        # multiple DATA frames — a wait-for-consumer-ask roadmap item
-        # (h2 spec-completeness). Reject explicitly until then so we
-        # don't ship a silently-truncated request.
-        if (body_len > sandhi_h2_conn_peer_max_frame(h2c)) {
-            return _SANDHI_H2_ERR_BAD_LENGTH;
-        }
-        var dr = sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_DATA,
-          SANDHI_H2_FLAG_END_STREAM,
-          stream_id, body, body_len);
-        if (dr < 0) { return dr; }
+        store64(state_out, 1);
+        var br = _h2_send_body_a(a, h2c, stream_id, body, body_len);
+        if (br < 0) { return br; }
+        if (br == 1) { store64(state_out, 2); }
     }
     return stream_id;
+}
+
+# HEADERS, then CONTINUATION frames while the block is longer than the
+# peer's MAX_FRAME_SIZE (RFC 7540 §6.10); END_HEADERS on the last.
+fn _h2_send_header_block_a(a, h2c, sid, hbuf, hlen, end_stream): i64 {
+    var max = sandhi_h2_conn_peer_max_frame(h2c);
+    var n = hlen;
+    if (n > max) { n = max; }
+    var flags = 0;
+    if (end_stream == 1) { flags = SANDHI_H2_FLAG_END_STREAM; }
+    if (n == hlen) { flags = flags | SANDHI_H2_FLAG_END_HEADERS; }
+    var r = sandhi_h2_conn_send_frame_a(a, h2c, SANDHI_H2_FRAME_HEADERS, flags, sid, hbuf, n);
+    if (r < 0) { return r; }
+    var off = n;
+    while (off < hlen) {
+        n = hlen - off;
+        if (n > max) { n = max; }
+        var cf = 0;
+        if (off + n == hlen) { cf = SANDHI_H2_FLAG_END_HEADERS; }
+        r = sandhi_h2_conn_send_frame_a(a, h2c, SANDHI_H2_FRAME_CONTINUATION, cf, sid, hbuf + off, n);
+        if (r < 0) { return r; }
+        off = off + n;
+    }
+    return 0;
+}
+
+# The body as DATA frames, each at most the peer's MAX_FRAME_SIZE and within
+# its connection and stream windows (RFC 7540 §6.9); END_STREAM on the last.
+# Returns 1 when all of it is sent, 0 when the peer answered first (that
+# frame is left pending), or a negative sentinel.
+fn _h2_send_body_a(a, h2c, sid, body, body_len): i64 {
+    var swin = alloc_via(a, 8);
+    if (swin == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
+    store64(swin, sandhi_h2_conn_peer_init_window(h2c));
+    var sent = 0;
+    while (sent < body_len) {
+        var n = body_len - sent;
+        var mf = sandhi_h2_conn_peer_max_frame(h2c);
+        if (n > mf) { n = mf; }
+        var cw = load64(h2c + SANDHI_H2_CONN_OFF_SEND_WINDOW);
+        if (n > cw) { n = cw; }
+        if (n > load64(swin)) { n = load64(swin); }
+        if (n <= 0) {
+            var w = _h2_await_window_a(a, h2c, sid, swin);
+            if (w < 0) { return w; }
+            if (w == 1) { return 0; }
+        } else {
+            var flags = 0;
+            if (sent + n == body_len) { flags = SANDHI_H2_FLAG_END_STREAM; }
+            var r = sandhi_h2_conn_send_frame_a(a, h2c, SANDHI_H2_FRAME_DATA, flags, sid, body + sent, n);
+            if (r < 0) { return r; }
+            store64(h2c + SANDHI_H2_CONN_OFF_SEND_WINDOW, cw - n);
+            store64(swin, load64(swin) - n);
+            sent = sent + n;
+        }
+    }
+    return 1;
+}
+
+# Read one frame while the body waits on a window. Returns 0 to try again,
+# 1 when the frame belongs to the response (an answer on `sid`, or a GOAWAY):
+# it is left in the conn's pending slot for the response reader. Applies
+# WINDOW_UPDATE, SETTINGS (a new INITIAL_WINDOW_SIZE moves the stream window
+# by the difference, §6.9.2) and PING; returns DATA on other streams to the
+# connection window. Negative on a read error.
+fn _h2_await_window_a(a, h2c, sid, swin): i64 {
+    var res = alloc_via(a, 16);
+    if (res == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
+    var n = sandhi_h2_conn_recv_frame_a(a, h2c, res);
+    if (n < 0) { return n; }
+    var hdr = load64(res);
+    var payload = load64(res + 8);
+    var ftype = sandhi_h2_hdr_type(hdr);
+    var fsid = sandhi_h2_hdr_stream_id(hdr);
+    var flen = sandhi_h2_hdr_length(hdr);
+    if (ftype == SANDHI_H2_FRAME_WINDOW_UPDATE) {
+        if (flen != 4) { return _SANDHI_H2_ERR_MALFORMED; }
+        var inc = sandhi_h2_window_update_decode(payload, flen, 0);
+        if (fsid == 0) { return _h2_conn_window_grant(h2c, inc); }
+        if (fsid == sid) {
+            if (inc <= 0 || load64(swin) + inc > _SANDHI_H2_MAX_WINDOW) { return _SANDHI_H2_ERR_FLOW; }
+            store64(swin, load64(swin) + inc);
+        }
+        return 0;
+    }
+    if (ftype == SANDHI_H2_FRAME_SETTINGS && fsid == 0) {
+        var before = sandhi_h2_conn_peer_init_window(h2c);
+        var sr = _h2_handle_settings_a(a, h2c, hdr, payload);
+        if (sr < 0) { return sr; }
+        store64(swin, load64(swin) + sandhi_h2_conn_peer_init_window(h2c) - before);
+        return 0;
+    }
+    if (ftype == SANDHI_H2_FRAME_PING && fsid == 0) {
+        return _h2_handle_ping_a(a, h2c, hdr, payload);
+    }
+    if (ftype == SANDHI_H2_FRAME_DATA && fsid != sid) {
+        return _h2_conn_data_received_a(a, h2c, flen);
+    }
+    if (fsid == sid || (ftype == SANDHI_H2_FRAME_GOAWAY && fsid == 0)) {
+        store64(h2c + SANDHI_H2_CONN_OFF_PENDING, res);
+        return 1;
+    }
+    return 0;
 }
 
 fn sandhi_h2_request_send(h2c, method, scheme, path, authority,

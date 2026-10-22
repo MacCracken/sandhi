@@ -118,9 +118,10 @@ one request's send and its response. Requests on one h2 connection therefore run
 a time, not in parallel: threads that need parallel h2 requests to one route give each
 thread its own pool. `sandhi_http_pool_close_h2_conns` waits for a request in flight on
 each connection, and a thread still holding a closed connection gets
-`SANDHI_ERR_PROTOCOL` rather than writing to a reused descriptor. A pooled h2 conn also
-stalls after about 64 KiB of responses, on one thread or many: see `http2-manual.md`'s
-limitations.
+`SANDHI_ERR_PROTOCOL` rather than writing to a reused descriptor. Since 1.13.6 an h2
+connection whose exchange fails (a timeout, a protocol error, a GOAWAY) is closed by that
+exchange and dropped by the next take, so later requests open a fresh one; see
+`http2-manual.md` for the rest of the h2 behaviour.
 
 One pool per thread still works everywhere and avoids any contention, if that suits the
 program better.

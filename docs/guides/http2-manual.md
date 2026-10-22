@@ -76,21 +76,40 @@ run one after another. A caller that composes the lower-level verbs itself
 must keep the pair together on one thread: the response reader drops frames for other
 streams, so a second thread's send between them loses one of the two answers.
 
+## How the h2 path behaves
+
+Since 1.13.6:
+
+- **Flow control.** Response data is returned to the peer with `WINDOW_UPDATE` (for the
+  connection and the stream) once half the default window is outstanding, so a pooled
+  conn no longer stalls after 64 KiB of responses. Request bodies go out as DATA frames
+  of at most the peer's `MAX_FRAME_SIZE`, within its connection and stream windows; the
+  sender waits for the peer's `WINDOW_UPDATE` when they are spent. If the peer answers
+  before the body is all sent, the sender stops, the answer is read, and the stream is
+  closed with `RST_STREAM` (`NO_ERROR`).
+- **Headers.** The request side never indexes (every field is a literal without
+  indexing), so the conn's encoder table stays empty. A header block longer than the
+  peer's `MAX_FRAME_SIZE` goes out as HEADERS + CONTINUATION; there is no fixed cap. A
+  header list larger than the peer's `SETTINGS_MAX_HEADER_LIST_SIZE` is refused before
+  anything is sent (`SANDHI_ERR_PROTOCOL`, with a message), and the conn carries on.
+- **Timeouts.** The `_auto` path applies the request's own `read_ms`, `write_ms` and
+  `total_ms` to its exchange; a timeout fails as `SANDHI_ERR_TIMEOUT`. The manual verb
+  (`sandhi_h2_request_a`) keeps whatever timeouts the conn's socket has.
+- **Failure retires the conn.** An exchange that fails after its request reached the
+  wire (a timeout, a protocol error, a GOAWAY) marks the conn dead and closes it; the
+  pool's next take drops it. A peer's `RST_STREAM` ends only that stream, and the conn
+  stays.
+- **Push is off.** The preface's SETTINGS carry `ENABLE_PUSH = 0`, and a `PUSH_PROMISE`
+  fails the exchange.
+
 ## Limitations of the h2 path
 
-- ⚠ **A pooled h2 conn stalls after about 64 KiB of responses.** sandhi never sends
-  `WINDOW_UPDATE`, so once the responses on one conn add up to the peer's 65,535-byte
-  connection window, the peer stops sending. The h2 path sets no read or total timeout
-  of its own: only the read timeout of the request that opened the conn bounds the wait,
-  and there is none by default. Measured at 1.13.1: two `_auto` GETs of a 56 KB page
-  through one pool, and the second never returned. Until roadmap 1.13.x lands, use the
-  HTTP/1.1 verbs (`sandhi_http_*`, not `_auto`) with a pool for repeated large
-  responses. Setting `sandhi_http_options_read_ms` on the request that opens the conn
-  bounds the wait: the stalled request then fails with `SANDHI_ERR_PROTOCOL` after that
-  long (measured: 3,000 ms, about 3 s).
+- **GOAWAY fails the exchange in flight,** even when its last-stream-id says the peer
+  will still finish it (roadmap 1.14.x).
+- **Response caps are fixed:** a header block over 16 KB, or a body over 1 MiB, fails
+  as `SANDHI_ERR_PROTOCOL` (roadmap 1.14.x).
 
-Both of these are addressable when a consumer reports a real need. For now, the
-h2 path serves single-shot RPC traffic where neither applies.
+The h2 path serves RPC traffic where neither applies.
 
 ## When to choose the h2 path
 

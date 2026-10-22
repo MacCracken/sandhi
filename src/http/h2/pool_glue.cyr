@@ -17,34 +17,42 @@
 
 # Take the h2 conn for a route, or 0 if none. Doesn't remove from
 # the map — h2 conns are shared, not exclusive.
+#
+# A conn that can carry no more exchanges (the peer sent GOAWAY, or an
+# exchange retired it) is dropped from the map, and closed once no
+# exchange holds it (1.13.6; through 1.13.5 a GOAWAY'd conn was dropped
+# and never closed). The caller opens a fresh conn.
 fn sandhi_http_pool_take_h2(pool, host, port, tls): i64 {
     if (pool == 0) { return 0; }
     var key = _sandhi_pool_route_key(host, port, tls);
     var h2m = load64(pool + SANDHI_POOL_OFF_H2_MAP);
     if (h2m == 0) { return 0; }
+    var victim = 0;
     _sandhi_pool_lock(pool);                 # 1.13.0
     var h2c = map_get(h2m, key);
-    # Skip if peer sent GOAWAY — caller will open a fresh conn.
-    if (h2c != 0 && sandhi_h2_conn_goaway_received(h2c) == 1) {
+    if (h2c != 0 && _sandhi_h2_conn_retired(h2c) == 1) {
         map_delete(h2m, key);
+        victim = h2c;
         h2c = 0;
     }
     _sandhi_pool_unlock(pool);
+    if (victim != 0) { _sandhi_h2_conn_retire(victim); }
     return h2c;
 }
 
 # Store an h2 conn for a route. Replaces any prior entry — h2 conns
-# are exclusive per route in our first-cut model. Caller is
-# responsible for closing the prior entry's underlying socket if
-# they care about leaks (no-op today since we only call this once
-# per route per process).
+# are exclusive per route in our first-cut model. A replaced conn is
+# closed once no exchange holds it (1.13.6: two threads promoting one
+# route at once each put a conn, and the first was left open).
 fn sandhi_http_pool_put_h2(pool, host, port, tls, h2c): i64 {
     if (pool == 0 || h2c == 0) { return 0; }
     var key = _sandhi_pool_route_key(host, port, tls);
     var h2m = load64(pool + SANDHI_POOL_OFF_H2_MAP);
     _sandhi_pool_lock(pool);                 # 1.13.0
+    var prior = map_get(h2m, key);
     map_set(h2m, key, h2c);
     _sandhi_pool_unlock(pool);
+    if (prior != 0 && prior != h2c) { _sandhi_h2_conn_retire(prior); }
     return 0;
 }
 

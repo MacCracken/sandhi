@@ -543,7 +543,8 @@ fn test_h2_request_encode_simple_get() {
     #   :method GET     → indexed 2  (1 byte: 0x82)
     #   :scheme https   → indexed 7  (1 byte: 0x87)
     #   :path /         → indexed 4  (1 byte: 0x84)
-    #   :authority X    → literal-with-incremental (name idx 1)
+    #   :authority X    → literal without indexing (name idx 1; 1.13.6 —
+    #                     the request side never indexes)
     var h2c = sandhi_h2_conn_new(0);
     var hbuf = alloc(8192);
     var n = sandhi_h2_request_encode_headers(h2c, "GET", "https", "/",
@@ -551,9 +552,9 @@ fn test_h2_request_encode_simple_get() {
     assert_eq(load8(hbuf + 0), 0x82, "byte 0 = indexed :method GET");
     assert_eq(load8(hbuf + 1), 0x87, "byte 1 = indexed :scheme https");
     assert_eq(load8(hbuf + 2), 0x84, "byte 2 = indexed :path /");
-    # Byte 3 starts the literal-with-incremental for :authority
-    # (name idx 1 → 0x40 | 1 = 0x41).
-    assert_eq(load8(hbuf + 3), 0x41, "byte 3 = literal-incr name idx 1");
+    # Byte 3 starts the literal without indexing for :authority
+    # (name idx 1 → 0x00 | 1 = 0x01).
+    assert_eq(load8(hbuf + 3), 0x01, "byte 3 = literal no-index name idx 1");
     return 0;
 }
 

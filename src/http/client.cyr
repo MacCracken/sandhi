@@ -1081,6 +1081,26 @@ fn _sandhi_strip_sensitive_headers(src): i64 {
     return _sandhi_strip_sensitive_headers_a(default_alloc(), src);
 }
 
+# The headers for a redirect's next hop, from the current hop's `h`: the
+# cred-bearing ones are stripped when `next` leaves `u`'s authority. The hop's
+# credential digest is recomputed into `ctx` from what it will send, so its
+# TLS session is keyed under the hop's own credentials. Shared by both
+# redirect drivers (`ctx` is the `_auto` dispatch's seed there).
+#
+# 1.13.6 — through 1.13.5 the digest was computed once per dispatch, so after
+# a cross-authority hop the new host's session was keyed under the first
+# host's credentials, which the hop no longer sent.
+fn _sandhi_http_hop_headers_a(a, ctx, u, next, h): i64 {
+    var nh = h;
+    if (_sandhi_url_same_authority(u, next) == 0) {
+        nh = _sandhi_strip_sensitive_headers_a(a, h);
+    }
+    if (ctx != 0) {
+        store64(ctx + SANDHI_REQCTX_OFF_CRED_DIGEST, _sandhi_compute_cred_digest(nh));
+    }
+    return nh;
+}
+
 # Redirect-following driver. Keep compact — each iteration reassigns
 # locals rather than allocating new ones, so the function stays under
 # the Cyrius local-count threshold. total_ms resets per hop (each
@@ -1095,10 +1115,12 @@ fn _sandhi_strip_sensitive_headers(src): i64 {
 #     headers when the redirect crosses authorities (different
 #     scheme / host / port). The caller's secret was bound to the
 #     original origin; the redirect target may be hostile.
-#   - Both apply per-hop, so a chain that bounces back to the
-#     original authority gets the full headers again. (curl does
-#     the same; matches RFC 7235 §2.2 spirit even though the spec
-#     doesn't mandate.)
+#   - Both apply per-hop. Stripping lasts for the rest of the chain:
+#     a hop back to the original authority does not get the
+#     credentials again (the safe reading of RFC 7235 §2.2's spirit,
+#     which the spec doesn't mandate).
+#   - Each hop's credential digest (the TLS session-cache key part)
+#     is recomputed from the headers it sends (1.13.6).
 fn _sandhi_http_follow_a(a, method, url, headers, body, body_len, max_hops,
   max_bytes, connect_ms, read_ms, write_ms, total_ms, pool, ctx): i64 {
     var m = method;
@@ -1124,10 +1146,9 @@ fn _sandhi_http_follow_a(a, method, url, headers, body, body_len, max_hops,
             return r;
         }
 
-        # Strip sensitive headers if crossing authorities.
-        if (_sandhi_url_same_authority(u, next) == 0) {
-            h = _sandhi_strip_sensitive_headers_a(a, h);
-        }
+        # Strip sensitive headers if crossing authorities, and key the
+        # hop's TLS session under what it sends.
+        h = _sandhi_http_hop_headers_a(a, ctx, u, next, h);
 
         if (sandhi_http_status(r) == 303) { m = "GET"; b = 0; bl = 0; }
         u = next;
@@ -1170,10 +1191,8 @@ fn _sandhi_http_dispatch_a(a, method, url, headers, body, body_len, opts): i64 {
     # per-call exactly as before; the connect path now writes its open-error
     # classification into the same context (read back below the open in
     # do_impl) instead of `_sandhi_conn_last_err`. ONE context is reused for
-    # the whole redirect-follow hop chain, so the cred-digest is still
-    # computed once per top-level dispatch — same semantics as the prior
-    # save/restore (the "per-hop cred-digest recompute on cross-authority
-    # redirect-follow" wait-for-consumer item is unchanged). An OOM here
+    # the whole redirect-follow hop chain; since 1.13.6 each hop recomputes
+    # its cred-digest into it (`_sandhi_http_hop_headers_a`). An OOM here
     # is a fatal per-request failure -> INTERNAL. 1.10.7: the context also
     # carries this dispatch's TLS hook, zeroed by `_sandhi_reqctx_new_a`.
     var ctx = _sandhi_reqctx_new_a(a);

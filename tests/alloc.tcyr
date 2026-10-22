@@ -2117,10 +2117,15 @@ fn _t_h2s_conn(fd): i64 {
 }
 
 # A loopback pair into `_t_h2s_cfd` / `_t_h2s_sfd`, each end with a 2 s read
-# timeout so a lost frame fails a row instead of hanging it, and TCP_NODELAY: an
-# h2 frame goes out as two writes, and without it each exchange waits ~80 ms on
-# Nagle and delayed ACK (a roadmap item). 0, or -1 to skip.
+# timeout so a lost frame fails a row instead of hanging it, and TCP_NODELAY
+# (through 1.13.5 an h2 frame went out as two writes, and without it each
+# exchange waited ~80 ms on Nagle and delayed ACK). 0, or -1 to skip.
 fn _t_h2s_pair(port): i64 {
+    return _t_h2s_pair_nd(port, 1);
+}
+
+# The same, with TCP_NODELAY only when `nodelay` is 1.
+fn _t_h2s_pair_nd(port, nodelay): i64 {
     var lr_tag, lfd = tcp_socket();
     if (is_err_result(lr_tag) == 1) { return 0 - 1; }
     sock_reuse(lfd);
@@ -2136,8 +2141,10 @@ fn _t_h2s_pair(port): i64 {
     if (is_err_result(ar_tag) == 1) { sock_close(cfd); return 0 - 1; }
     _sandhi_conn_set_timeout_ms(cfd, 2000, _SANDHI_SO_RCVTIMEO);
     _sandhi_conn_set_timeout_ms(sfd, 2000, _SANDHI_SO_RCVTIMEO);
-    sock_set_nodelay(cfd, 1);
-    sock_set_nodelay(sfd, 1);
+    if (nodelay == 1) {
+        sock_set_nodelay(cfd, 1);
+        sock_set_nodelay(sfd, 1);
+    }
     _t_h2s_cfd = cfd;
     _t_h2s_sfd = sfd;
     return 0;
@@ -2278,12 +2285,13 @@ fn test_h2_conn_shared_by_threads() {
     return 0;
 }
 
-# The h2 conn carries its lock. `SANDHI_H2_CONN_STRUCT_SIZE` 80 → 88.
+# The h2 conn carries its lock. `SANDHI_H2_CONN_STRUCT_SIZE` 80 → 88 (and 88 →
+# 144 at 1.13.6, for the flow-control and retirement slots).
 fn test_h2_conn_has_mutex() {
     var a = arena_allocator(8192);
     var c = sandhi_h2_conn_new_a(a, 0);
     assert_neq(c, 0, "h2 conn: built");
-    assert_eq(SANDHI_H2_CONN_STRUCT_SIZE, 88, "h2 conn: struct 88 bytes");
+    assert_eq(SANDHI_H2_CONN_STRUCT_SIZE, 144, "h2 conn: struct 144 bytes");
     assert_neq(load64(c + SANDHI_H2_CONN_OFF_MUTEX), 0, "h2 conn: owns a mutex");
     return 0;
 }
@@ -2799,6 +2807,1020 @@ fn test_session_cache_install_needs_ctx() {
     return 0;
 }
 
+# 1.13.6 — the session cache builds each key in the caller's frame. Through 1.13.5
+# every lookup, install and store built it on the global heap, 160 B a call for the
+# life of the process; only a store of a new key needs a copy there now.
+fn test_session_cache_key_no_global_heap() {
+    var was_enabled = sandhi_session_cache_enabled();
+    sandhi_session_cache_enable(1);
+    sandhi_session_cache_clear();
+    sandhi_session_cache_store("key.example.com", 0, 0, 0xDEADBEEF);
+    sandhi_session_cache_lookup("key.example.com", 0, 0);
+    var b = alloc_used();
+    var i = 0;
+    while (i < 100) { sandhi_session_cache_lookup("key.example.com", 0, 0); i = i + 1; }
+    assert_eq(alloc_used() - b, 0, "session key: 100 hits keep nothing on the global heap");
+    b = alloc_used();
+    i = 0;
+    while (i < 100) { sandhi_session_cache_lookup("miss.example.com", 7, 9); i = i + 1; }
+    assert_eq(alloc_used() - b, 0, "session key: nor 100 misses");
+    b = alloc_used();
+    i = 0;
+    while (i < 100) { _sandhi_session_cache_install(0, "key.example.com", 0, 0); i = i + 1; }
+    assert_eq(alloc_used() - b, 0, "session key: nor 100 installs");
+    b = alloc_used();
+    i = 0;
+    while (i < 100) { sandhi_session_cache_store("key.example.com", 0, 0, 0xDEADBEEF); i = i + 1; }
+    assert_eq(alloc_used() - b, 0, "session key: nor 100 stores over one key");
+    # A new key is copied, so it outlives the caller's buffer.
+    sandhi_session_cache_store("new.example.com", 0x1234, 0x5678, 0xCAFEBABE);
+    assert_eq(sandhi_session_cache_lookup("new.example.com", 0x1234, 0x5678), 0xCAFEBABE,
+      "session key: a new key's entry is found again");
+    assert_eq(sandhi_session_cache_lookup("new.example.com", 0x1234, 0x5679), 0,
+      "session key: the credential digest still separates keys");
+    # A host no DNS name could be is never cached.
+    var long_host = alloc(300);
+    memset(long_host, 97, 256);
+    store8(long_host + 256, 0);
+    var n = sandhi_session_cache_size();
+    sandhi_session_cache_store(long_host, 0, 0, 0xDEADBEEF);
+    assert_eq(sandhi_session_cache_size(), n, "session key: a 256-byte host is not stored");
+    assert_eq(sandhi_session_cache_lookup(long_host, 0, 0), 0, "session key: nor found");
+    store8(long_host + 255, 0);
+    sandhi_session_cache_store(long_host, 0, 0, 0xDEADBEEF);
+    assert_eq(sandhi_session_cache_lookup(long_host, 0, 0), 0xDEADBEEF, "session key: a 255-byte host is");
+    sandhi_session_cache_clear();
+    sandhi_session_cache_reset_stats();
+    sandhi_session_cache_enable(was_enabled);
+    return 0;
+}
+
+# 1.13.6 — each redirect hop's credential digest is computed from the headers that
+# hop sends. Through 1.13.5 it was computed once per dispatch, so after a hop to
+# another authority (which strips the credentials) the new host's TLS session was
+# keyed under the first host's credentials.
+fn test_redirect_hop_headers() {
+    var a = arena_allocator(65536);
+    var ctx = _sandhi_reqctx_new_a(a);
+    var h = sandhi_headers_new_a(a);
+    sandhi_headers_set_a(a, h, "Authorization", "Bearer t");
+    sandhi_headers_set_a(a, h, "Accept", "*/*");
+    var d = _sandhi_compute_cred_digest(h);
+    store64(ctx + SANDHI_REQCTX_OFF_CRED_DIGEST, d);
+    var same = _sandhi_http_hop_headers_a(a, ctx, "https://a.test/x", "https://a.test/y", h);
+    assert_eq(same, h, "hop headers: the same authority keeps the headers");
+    assert_eq(_sandhi_reqctx_cred(ctx), d, "hop headers: and their digest");
+    var other = _sandhi_http_hop_headers_a(a, ctx, "https://a.test/x", "https://b.test/y", h);
+    assert_eq(sandhi_headers_get(other, "Authorization"), 0, "hop headers: another authority strips the credentials");
+    assert_neq(sandhi_headers_get(other, "Accept"), 0, "hop headers: and keeps the rest");
+    assert_eq(_sandhi_reqctx_cred(ctx), 0, "hop headers: and the hop's digest is that of no credentials");
+    var bare = _sandhi_http_hop_headers_a(a, 0, "https://a.test/x", "https://b.test/y", h);
+    assert_eq(sandhi_headers_get(bare, "Authorization"), 0, "hop headers: with no context, still stripped");
+    return 0;
+}
+
+# One canned HTTP/1.1 answer: `arg` holds a listening socket and a response; accept
+# one connection, read its request head, write the response, close.
+var _t_rd_served = 0;
+
+fn _t_rd_serve(arg) {
+    var ar_tag, fd = sock_accept(load64(arg));
+    if (is_err_result(ar_tag) == 1) { return 0; }
+    _sandhi_conn_set_timeout_ms(fd, 2000, _SANDHI_SO_RCVTIMEO);
+    var c = _t_h2s_conn(fd);
+    var buf = alloc(4097);
+    var n = 0;
+    while (n < 4096) {
+        var got = sandhi_conn_recv(c, buf + n, 4096 - n);
+        if (got <= 0) { break; }
+        n = n + got;
+        store8(buf + n, 0);
+        if (strstr(buf, "\r\n\r\n") != 0) { break; }
+    }
+    var resp = load64(arg + 8);
+    sandhi_conn_send_all(c, resp, strlen(resp));
+    sock_close(fd);
+    atomic_fetch_add(&_t_rd_served, 1);
+    return 0;
+}
+
+# Append cstr `s` at `off` in `dst` (NUL included); the new end.
+fn _t_rd_cat(dst, off, s): i64 {
+    var n = strlen(s);
+    memcpy(dst + off, s, n + 1);
+    return off + n;
+}
+
+# A loopback listener on `port`, or -1.
+fn _t_rd_listen(port): i64 {
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { return 0 - 1; }
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, INADDR_LOOPBACK(), port)) == 1) { sock_close(lfd); return 0 - 1; }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) { sock_close(lfd); return 0 - 1; }
+    return lfd;
+}
+
+# Serve A (302 to B, another port, so another authority) and B (200) on loopback,
+# then run `fp(url_a, ctx)`, a redirect driver, with credentials. 1 when the chain
+# reached B and left the context holding the digest of no credentials, 0 when it
+# did not, -1 when the fixture is unavailable.
+var _t_rd_status = 0;
+
+fn _t_rd_chain(port_a, port_b, which): i64 {
+    if (THREADS_CONCURRENT != 1) { return 0 - 1; }
+    var la = _t_rd_listen(port_a);
+    var lb = _t_rd_listen(port_b);
+    if (la < 0 || lb < 0) { return 0 - 1; }
+    var ra = alloc(256);
+    var o = _t_rd_cat(ra, 0, "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:");
+    o = _t_h2s_put_int(ra, o, port_b);
+    _t_rd_cat(ra, o, "/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    var aa = alloc(16);
+    store64(aa, la);
+    store64(aa + 8, ra);
+    var ab = alloc(16);
+    store64(ab, lb);
+    store64(ab + 8, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    _t_rd_served = 0;
+    var ta = thread_create(&_t_rd_serve, aa);
+    var tb = thread_create(&_t_rd_serve, ab);
+    if (ta == 0 || tb == 0) { return 0 - 1; }
+    var url = alloc(64);
+    o = _t_rd_cat(url, 0, "http://127.0.0.1:");
+    o = _t_h2s_put_int(url, o, port_a);
+    _t_rd_cat(url, o, "/start");
+    var a = arena_allocator(1200000);
+    var h = sandhi_headers_new_a(a);
+    sandhi_headers_set_a(a, h, "Authorization", "Bearer t");
+    var ctx = _sandhi_reqctx_new_a(a);
+    store64(ctx + SANDHI_REQCTX_OFF_CRED_DIGEST, _sandhi_compute_cred_digest(h));
+    var r = 0;
+    if (which == 1) {
+        r = _sandhi_http_follow_a(a, "GET", url, h, 0, 0, 5, sandhi_http_options_bytes(0),
+          2000, 2000, 2000, 0, 0, ctx);
+    } else {
+        r = _sandhi_http_auto_follow_a(a, "GET", url, h, 0, 0, sandhi_http_options_new(), 5, ctx);
+    }
+    _t_rd_status = sandhi_http_status(r);
+    # Release a listener nobody reached, so its thread can be joined.
+    if (atomic_load(&_t_rd_served) < 2) {
+        var cr_tag, cfd = tcp_socket();
+        if (is_err_result(cr_tag) == 0) { sock_connect(cfd, INADDR_LOOPBACK(), port_b); sock_close(cfd); }
+    }
+    thread_join(ta);
+    thread_join(tb);
+    sock_close(la);
+    sock_close(lb);
+    if (_t_rd_status != 200) { return 0; }
+    if (_sandhi_reqctx_cred(ctx) != 0) { return 0; }
+    return 1;
+}
+
+fn test_redirect_chain_cred_digest() {
+    var r1 = _t_rd_chain(39861, 39862, 1);
+    if (r1 < 0) {
+        assert_eq(1, 1, "redirect digest: loopback or threads unavailable — skipped");
+    } else {
+        assert_eq(_t_rd_status, 200, "redirect digest: the 1.1 driver followed A's 302 to B");
+        assert_eq(r1, 1, "redirect digest: and B's hop was keyed under no credentials");
+    }
+    var r2 = _t_rd_chain(39863, 39864, 2);
+    if (r2 < 0) {
+        assert_eq(1, 1, "redirect digest: loopback or threads unavailable — skipped");
+    } else {
+        assert_eq(_t_rd_status, 200, "redirect digest: the _auto driver followed A's 302 to B");
+        assert_eq(r2, 1, "redirect digest: and B's hop was keyed under no credentials");
+    }
+    return 0;
+}
+
+# ----------------------------------------------------------------
+# 1.13.6 — HTTP/2 completeness. A scriptable peer on a loopback pair: its own h2
+# conn (as a frame codec) and HPACK decode table. It honours the client's
+# flow-control windows the way a server does, and grants its own only once they
+# are spent, so a client that ignores either stalls or overruns.
+# ----------------------------------------------------------------
+var _t_hp_peer = 0;
+var _t_hp_dec = 0;
+var _t_hp_swin_c = 0;      # the client's connection window, as the peer tracks it
+var _t_hp_rwin_c = 0;      # the peer's connection window, as granted to the client
+var _t_hp_viol = 0;        # DATA the client sent past a window
+var _t_hp_maxdata = 0;     # the longest DATA frame the client sent
+var _t_hp_cont = 0;        # CONTINUATION frames in the last request
+var _t_hp_big = 0;         # the length of the last request's x-big value
+var _t_hp_body_len = 0;    # the last request's body length
+var _t_hp_body_sum = 0;    # and its byte sum
+var _t_hp_requests = 0;    # whole requests read
+var _t_hp_eof = 0;         # 1 once the peer saw the client close
+var _t_hp_sizes = 0;       # response body sizes, by request
+var _t_hp_pa = 0;          # the peer's arena, reset per request, so it keeps off the global heap
+var _t_hp_asym = 0;        # 1: stream grants are twice the connection's; 2: the reverse
+var _t_hp_pd = 0;          # the peer's decode arena, never reset: through 1.13.5 a decode table kept
+# pointers into the arena it decoded with, so the peer's must outlive it
+
+# A loopback pair (`_t_h2s_pair_nd`, no TCP_NODELAY from the test) with a peer on
+# the server end. 0, or -1 to skip.
+fn _t_hp_setup(port): i64 {
+    if (THREADS_CONCURRENT != 1) { return 0 - 1; }
+    if (_t_h2s_pair_nd(port, 0) != 0) { return 0 - 1; }
+    _t_hp_peer = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_sfd));
+    _t_hp_dec = sandhi_hpack_table_new(0);
+    if (_t_hp_pa == 0) { _t_hp_pa = arena_allocator(1200000); }
+    if (_t_hp_pd == 0) { _t_hp_pd = arena_allocator(16000000); }
+    reset_via(_t_hp_pa);
+    _t_hp_swin_c = 65535;
+    _t_hp_rwin_c = 65535;
+    _t_hp_viol = 0;
+    _t_hp_maxdata = 0;
+    _t_hp_requests = 0;
+    _t_hp_eof = 0;
+    _t_hp_asym = 0;
+    return 0;
+}
+
+fn _t_hp_done(): i64 {
+    sock_close(_t_h2s_cfd);
+    sock_close(_t_h2s_sfd);
+    return 0;
+}
+
+fn _t_hp_grant(sid, inc): i64 {
+    var p = alloc_via(_t_hp_pa, 4);
+    sandhi_h2_window_update_encode(p, 0, inc);
+    return sandhi_h2_conn_send_frame_a(_t_hp_pa, _t_hp_peer, SANDHI_H2_FRAME_WINDOW_UPDATE, 0, sid, p, 4);
+}
+
+# Read one whole request: its header block (decoded with the peer's table) and
+# body. A spent window is granted back only once the client has stopped at it
+# (150 ms with nothing arriving); DATA that arrives first lands past the window
+# and counts as a violation. Resets the peer's arena first: what the previous
+# answer used is done with.
+fn _t_hp_read_request(): i64 {
+    reset_via(_t_hp_pa);
+    var res = alloc_via(_t_hp_pa, 16);
+    var blk = alloc_via(_t_hp_pa, 65552);
+    var blen = 0;
+    var sid = 0;
+    var ended = 0;
+    var hdone = 0;
+    var es = 0;
+    var swin = 65535;
+    _t_hp_cont = 0;
+    _t_hp_big = 0;
+    _t_hp_body_len = 0;
+    _t_hp_body_sum = 0;
+    var waiting = 0;
+    while (ended == 0) {
+        if (waiting == 1) { _sandhi_conn_set_timeout_ms(_t_h2s_sfd, 150, _SANDHI_SO_RCVTIMEO); }
+        var got = sandhi_h2_conn_recv_frame_a(_t_hp_pa, _t_hp_peer, res);
+        if (waiting == 1) { _sandhi_conn_set_timeout_ms(_t_h2s_sfd, 2000, _SANDHI_SO_RCVTIMEO); }
+        if (got < 0) {
+            if (waiting == 0) { return 0 - 1; }
+            # The client stopped at the spent window(s): grant them.
+            if (_t_hp_rwin_c <= 0) {
+                var cg = 65535;
+                if (_t_hp_asym == 2) { cg = 131070; }
+                _t_hp_grant(0, cg - _t_hp_rwin_c);
+                _t_hp_rwin_c = cg;
+            }
+            if (swin <= 0) {
+                var sg = 65535;
+                if (_t_hp_asym == 1) { sg = 131070; }
+                _t_hp_grant(sid, sg - swin);
+                swin = sg;
+            }
+            waiting = 0;
+            continue;
+        }
+        var hdr = load64(res);
+        var pl = load64(res + 8);
+        var ty = sandhi_h2_hdr_type(hdr);
+        var fl = sandhi_h2_hdr_flags(hdr);
+        var n = sandhi_h2_hdr_length(hdr);
+        if (ty == SANDHI_H2_FRAME_HEADERS || ty == SANDHI_H2_FRAME_CONTINUATION) {
+            if (ty == SANDHI_H2_FRAME_CONTINUATION) { _t_hp_cont = _t_hp_cont + 1; }
+            sid = sandhi_h2_hdr_stream_id(hdr);
+            if (blen + n <= 65536) { memcpy(blk + blen, pl, n); blen = blen + n; }
+            # END_STREAM on HEADERS takes effect once the block is complete.
+            if ((fl & SANDHI_H2_FLAG_END_STREAM) != 0) { es = 1; }
+            if ((fl & SANDHI_H2_FLAG_END_HEADERS) != 0) { hdone = 1; }
+            if (es == 1 && hdone == 1) { ended = 1; }
+        } elif (ty == SANDHI_H2_FRAME_DATA) {
+            if (n > _t_hp_maxdata) { _t_hp_maxdata = n; }
+            var i = 0;
+            while (i < n) { _t_hp_body_sum = _t_hp_body_sum + load8(pl + i); i = i + 1; }
+            _t_hp_body_len = _t_hp_body_len + n;
+            _t_hp_rwin_c = _t_hp_rwin_c - n;
+            swin = swin - n;
+            if (_t_hp_rwin_c < 0 || swin < 0) { _t_hp_viol = _t_hp_viol + 1; }
+            if ((fl & SANDHI_H2_FLAG_END_STREAM) != 0) { ended = 1; }
+            if (ended == 0 && (_t_hp_rwin_c <= 0 || swin <= 0)) { waiting = 1; }
+            if (ended == 1 && _t_hp_rwin_c <= 0) { _t_hp_grant(0, 65535 - _t_hp_rwin_c); _t_hp_rwin_c = 65535; }
+        } elif (ty == SANDHI_H2_FRAME_WINDOW_UPDATE) {
+            if (sandhi_h2_hdr_stream_id(hdr) == 0) {
+                _t_hp_swin_c = _t_hp_swin_c + sandhi_h2_window_update_decode(pl, 4, 0);
+            }
+        } elif (ty == SANDHI_H2_FRAME_RST_STREAM) {
+            return 0 - 1;
+        }
+    }
+    _t_hp_requests = _t_hp_requests + 1;
+    var off = alloc_via(_t_hp_pa, 8);
+    var no = alloc_via(_t_hp_pa, 8);
+    var vo = alloc_via(_t_hp_pa, 8);
+    store64(off, 0);
+    while (load64(off) < blen) {
+        var r = sandhi_hpack_decode_field_a(_t_hp_pd, _t_hp_dec, blk, blen, off, no, vo);
+        if (r < 0) { return 0 - 1; }
+        if (r != _SANDHI_HPACK_TBL_UPDATE) {
+            if (streq(load64(no), "x-big") == 1) { _t_hp_big = strlen(load64(vo)); }
+        }
+    }
+    return sid;
+}
+
+# Answer `sid` with header block `hb` and `body`: DATA in frames of at most
+# 16,384 within the client's windows, waiting for its WINDOW_UPDATEs. 0, or -1
+# when the client never opened a window (the read timed out).
+fn _t_hp_respond(sid, hb, hlen, body, blen): i64 {
+    var f = SANDHI_H2_FLAG_END_HEADERS;
+    if (blen == 0) { f = f | SANDHI_H2_FLAG_END_STREAM; }
+    if (sandhi_h2_conn_send_frame_a(_t_hp_pa, _t_hp_peer, SANDHI_H2_FRAME_HEADERS, f, sid, hb, hlen) < 0) { return 0 - 1; }
+    var sw = 65535;
+    var off = 0;
+    var res = alloc_via(_t_hp_pa, 16);
+    while (off < blen) {
+        var n = blen - off;
+        if (n > 16384) { n = 16384; }
+        if (n > _t_hp_swin_c) { n = _t_hp_swin_c; }
+        if (n > sw) { n = sw; }
+        if (n <= 0) {
+            if (sandhi_h2_conn_recv_frame_a(_t_hp_pa, _t_hp_peer, res) < 0) { return 0 - 1; }
+            var hdr = load64(res);
+            if (sandhi_h2_hdr_type(hdr) == SANDHI_H2_FRAME_WINDOW_UPDATE) {
+                var inc = sandhi_h2_window_update_decode(load64(res + 8), 4, 0);
+                if (sandhi_h2_hdr_stream_id(hdr) == 0) { _t_hp_swin_c = _t_hp_swin_c + inc; }
+                elif (sandhi_h2_hdr_stream_id(hdr) == sid) { sw = sw + inc; }
+            }
+        } else {
+            var fl = 0;
+            if (off + n == blen) { fl = SANDHI_H2_FLAG_END_STREAM; }
+            if (sandhi_h2_conn_send_frame_a(_t_hp_pa, _t_hp_peer, SANDHI_H2_FRAME_DATA, fl, sid, body + off, n) < 0) {
+                return 0 - 1;
+            }
+            _t_hp_swin_c = _t_hp_swin_c - n;
+            sw = sw - n;
+            off = off + n;
+        }
+    }
+    return 0;
+}
+
+# `n` bytes of a pattern keyed by `k`, from `a`.
+fn _t_hp_pattern_a(a, n, k): i64 {
+    var b = alloc_via(a, n + 1);
+    var i = 0;
+    while (i < n) { store8(b + i, (i * 31 + k * 7 + 1) & 255); i = i + 1; }
+    store8(b + n, 0);
+    return b;
+}
+
+fn _t_hp_same(r, n, k): bool {
+    if (sandhi_http_body_len(r) != n) { return false; }
+    var b = sandhi_http_body(r);
+    var i = 0;
+    while (i < n) {
+        if (load8(b + i) != ((i * 31 + k * 7 + 1) & 255)) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+# A response header, or 0 for a failed response (which carries no headers).
+fn _t_hp_hdr(r, name): i64 {
+    var h = sandhi_http_headers(r);
+    if (h == 0) { return 0; }
+    return sandhi_headers_get(h, name);
+}
+
+# 1 when the response body is the cstr `want` (0 for a failed response).
+fn _t_hp_body_is(r, want): bool {
+    var b = sandhi_http_body(r);
+    if (b == 0) { return false; }
+    return streq(b, want) == 1;
+}
+
+# 1 when cstr `got` (possibly 0) is `want`.
+fn _t_hp_is(got, want): bool {
+    if (got == 0) { return false; }
+    return streq(got, want) == 1;
+}
+
+fn _t_hp_status_block(): i64 {
+    var hb = alloc_via(_t_hp_pa, 1);
+    store8(hb, 0x88);                    # :status 200 (static index 8)
+    return hb;
+}
+
+# Wait for the client to close its end: 1 on EOF, 0 on a 1.5 s timeout.
+fn _t_hp_await_eof(): i64 {
+    _sandhi_conn_set_timeout_ms(_t_h2s_sfd, 1500, _SANDHI_SO_RCVTIMEO);
+    var c = _t_h2s_conn(_t_h2s_sfd);
+    var buf = alloc_via(_t_hp_pa, 4097);
+    loop {
+        var n = sandhi_conn_recv(c, buf, 4096);
+        if (n == 0) { return 1; }
+        if (n < 0) { return 0; }
+    }
+    return 0;
+}
+
+# Answer `arg` requests with a pattern body of `_t_hp_sizes[k]` bytes.
+fn _t_hp_peer_bodies(arg) {
+    var k = 0;
+    while (k < arg) {
+        var sid = _t_hp_read_request();
+        if (sid < 0) { break; }
+        var n = load64(_t_hp_sizes + k * 8);
+        if (_t_hp_respond(sid, _t_hp_status_block(), 1, _t_hp_pattern_a(_t_hp_pa, n, k), n) < 0) { break; }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Answer `arg` requests with "<body_len>:<body_sum>:<x-big length>:<CONTINUATION frames>".
+fn _t_hp_peer_report(arg) {
+    var k = 0;
+    while (k < arg) {
+        var sid = _t_hp_read_request();
+        if (sid < 0) { break; }
+        if (k == 0 && _t_hp_sizes != 0) {
+            # A SETTINGS frame ahead of the first answer (`_t_hp_sizes` holds it).
+            sandhi_h2_conn_send_frame_a(_t_hp_pa, _t_hp_peer, SANDHI_H2_FRAME_SETTINGS, 0, 0, _t_hp_sizes, 6);
+        }
+        var out = alloc_via(_t_hp_pa, 96);
+        var o = _t_h2s_put_int(out, 0, _t_hp_body_len);
+        store8(out + o, 58);
+        o = _t_h2s_put_int(out, o + 1, _t_hp_body_sum);
+        store8(out + o, 58);
+        o = _t_h2s_put_int(out, o + 1, _t_hp_big);
+        store8(out + o, 58);
+        _t_h2s_put_int(out, o + 1, _t_hp_cont);
+        if (_t_hp_respond(sid, _t_hp_status_block(), 1, out, strlen(out)) < 0) { break; }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# The response rows. Through 1.13.5 sandhi never sent WINDOW_UPDATE: a conn
+# stalled once its responses added up to the peer's 65,535-octet connection
+# window (measured live at 1.13.1), and one response over the stream window
+# stalled alone.
+fn test_h2_flow_control_recv() {
+    if (_t_hp_setup(39870) != 0) { assert_eq(1, 1, "h2 flow: loopback or threads unavailable — skipped"); return 0; }
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    _t_hp_sizes = alloc(24);
+    store64(_t_hp_sizes, 56000);
+    store64(_t_hp_sizes + 8, 56000);
+    store64(_t_hp_sizes + 16, 200000);
+    var peer = thread_create(&_t_hp_peer_bodies, 3);
+    var a = arena_allocator(2400000);
+    var ok = 0;
+    var k = 0;
+    while (k < 3) {
+        var r = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/b", 0, 0, 0);
+        if (sandhi_http_status(r) == 200 && _t_hp_same(r, load64(_t_hp_sizes + k * 8), k) == 1) { ok = ok + 1; }
+        reset_via(a);
+        k = k + 1;
+    }
+    thread_join(peer);
+    _t_hp_done();
+    _t_hp_sizes = 0;
+    assert_eq(ok, 3, "h2 flow: 56,000 + 56,000 + 200,000 B answers all arrive on one conn");
+    return 0;
+}
+
+# The request rows. Through 1.13.5 a body over one frame (16,384) was refused,
+# the peer's windows were never consulted, and a header block over 8 KB was
+# refused.
+fn test_h2_request_body_and_headers() {
+    if (_t_hp_setup(39871) != 0) { assert_eq(1, 1, "h2 send: loopback or threads unavailable — skipped"); return 0; }
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    _t_hp_sizes = 0;
+    var peer = thread_create(&_t_hp_peer_report, 3);
+    var a = arena_allocator(2400000);
+    var body = _t_hp_pattern_a(default_alloc(), 150000, 3);
+    var sum = 0;
+    var i = 0;
+    while (i < 150000) { sum = sum + load8(body + i); i = i + 1; }
+    var want = alloc(64);
+    var o = _t_rd_cat(want, 0, "150000:");
+    o = _t_h2s_put_int(want, o, sum);
+    _t_rd_cat(want, o, ":0:0");
+    # Two bodies: the first while the peer grants its stream window twice what it
+    # grants the connection, the second the reverse, so neither window can stand
+    # in for the other.
+    var ok = 0;
+    var asym = 1;
+    while (asym <= 2) {
+        _t_hp_asym = asym;
+        var r0 = sandhi_h2_request_a(a, h2c, "POST", "http://h2.test/up", 0, body, 150000);
+        if (sandhi_http_status(r0) == 200 && _t_hp_body_is(r0, want) == 1) { ok = ok + 1; }
+        reset_via(a);
+        asym = asym + 1;
+    }
+    assert_eq(ok, 2, "h2 send: two 150,000 B bodies are accepted, and arrive whole");
+    assert(_t_hp_maxdata <= 16384, "h2 send: in DATA frames of at most the peer's MAX_FRAME_SIZE");
+    assert_eq(_t_hp_viol, 0, "h2 send: never past the peer's connection or stream window");
+    _t_hp_asym = 0;
+    var r = 0;
+    var h = sandhi_headers_new_a(a);
+    var big = alloc(40001);
+    memset(big, 113, 40000);
+    store8(big + 40000, 0);
+    sandhi_headers_set_a(a, h, "X-Big", big);
+    r = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/big", h, 0, 0);
+    assert_eq(sandhi_http_status(r), 200, "h2 send: a 40,000 B header is sent");
+    assert_eq(_t_hp_body_is(r, "0:0:40000:2"), 1,
+      "h2 send: whole, as HEADERS + 2 CONTINUATION frames");
+    thread_join(peer);
+    _t_hp_done();
+    return 0;
+}
+
+# The peer's SETTINGS_MAX_HEADER_LIST_SIZE is enforced before sending: a larger
+# list is refused locally, and the conn carries on.
+fn test_h2_max_header_list() {
+    if (_t_hp_setup(39872) != 0) { assert_eq(1, 1, "h2 hdr list: loopback or threads unavailable — skipped"); return 0; }
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    _t_hp_sizes = alloc(8);
+    sandhi_h2_settings_pair_encode(_t_hp_sizes, 0, SANDHI_H2_SETTINGS_MAX_HEADER_LIST_SIZE, 600);
+    var peer = thread_create(&_t_hp_peer_report, 2);
+    var a = arena_allocator(2400000);
+    var r1 = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/1", 0, 0, 0);
+    assert_eq(sandhi_http_status(r1), 200, "h2 hdr list: the first request answers");
+    var h = sandhi_headers_new_a(a);
+    var big = alloc(1001);
+    memset(big, 113, 1000);
+    store8(big + 1000, 0);
+    sandhi_headers_set_a(a, h, "X-Big", big);
+    var r2 = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/2", h, 0, 0);
+    assert_eq(sandhi_http_err_kind(r2), SANDHI_ERR_PROTOCOL, "h2 hdr list: a list over the peer's 600 is refused");
+    assert_neq(sandhi_http_err_message(r2), 0, "h2 hdr list: and says why");
+    var r3 = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/3", 0, 0, 0);
+    assert_eq(sandhi_http_status(r3), 200, "h2 hdr list: the conn carries on");
+    thread_join(peer);
+    assert_eq(_t_hp_requests, 2, "h2 hdr list: the refused request never reached the peer");
+    _t_hp_done();
+    _t_hp_sizes = 0;
+    return 0;
+}
+
+# Answer two requests: the first adds `x-tag: alpha` to the client's decode table
+# (literal with incremental indexing), the second names it by index 62. With
+# `arg` 1 the peer first advertises SETTINGS_HEADER_TABLE_SIZE 0.
+fn _t_hp_peer_tag(arg) {
+    var sid = _t_hp_read_request();
+    if (sid < 0) { return 0; }
+    if (arg == 1) {
+        var sp = alloc_via(_t_hp_pa, 8);
+        sandhi_h2_settings_pair_encode(sp, 0, SANDHI_H2_SETTINGS_HEADER_TABLE_SIZE, 0);
+        sandhi_h2_conn_send_frame_a(_t_hp_pa, _t_hp_peer, SANDHI_H2_FRAME_SETTINGS, 0, 0, sp, 6);
+    }
+    var hb = alloc_via(_t_hp_pa, 16);
+    store8(hb, 0x88);
+    store8(hb + 1, 0x40);
+    store8(hb + 2, 5);
+    memcpy(hb + 3, "x-tag", 5);
+    store8(hb + 8, 5);
+    memcpy(hb + 9, "alpha", 5);
+    if (_t_hp_respond(sid, hb, 14, 0, 0) < 0) { return 0; }
+    sid = _t_hp_read_request();
+    if (sid < 0) { return 0; }
+    var hb2 = alloc_via(_t_hp_pa, 2);
+    store8(hb2, 0x88);
+    store8(hb2 + 1, 0xBE);               # index 62: the newest dynamic entry
+    _t_hp_respond(sid, hb2, 2, 0, 0);
+    return 0;
+}
+
+# The client's decode table outlives the request that filled it. Through 1.13.5
+# the table held the decoded strings in the request's arena, and rebuilt its vecs
+# there, so after the arena was reset the next response read reused memory.
+fn test_h2_decode_table_survives_arena_reset() {
+    if (_t_hp_setup(39873) != 0) { assert_eq(1, 1, "h2 dec table: loopback or threads unavailable — skipped"); return 0; }
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    var peer = thread_create(&_t_hp_peer_tag, 0);
+    var a = arena_allocator(2400000);
+    var r1 = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/1", 0, 0, 0);
+    assert_eq(_t_hp_is(_t_hp_hdr(r1, "x-tag"), "alpha"), 1, "h2 dec table: the first answer carries x-tag");
+    reset_via(a);
+    var junk = alloc_via(a, 2300000);
+    memset(junk, 90, 2300000);
+    reset_via(a);
+    var r2 = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/2", 0, 0, 0);
+    assert_eq(sandhi_http_status(r2), 200, "h2 dec table: after the arena is reset and overwritten, the next answer decodes");
+    assert_eq(_t_hp_is(_t_hp_hdr(r2, "x-tag"), "alpha"), 1, "h2 dec table: and index 62 still names x-tag: alpha");
+    thread_join(peer);
+    _t_hp_done();
+    return 0;
+}
+
+# The peer's SETTINGS_HEADER_TABLE_SIZE bounds sandhi's encoder, not its
+# decoder. Through 1.13.5 a peer advertising 0 emptied sandhi's decode table, and
+# the entries the peer's encoder then referenced were gone.
+fn test_h2_peer_header_table_size() {
+    if (_t_hp_setup(39874) != 0) { assert_eq(1, 1, "h2 table size: loopback or threads unavailable — skipped"); return 0; }
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    var peer = thread_create(&_t_hp_peer_tag, 1);
+    var a = arena_allocator(2400000);
+    sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/1", 0, 0, 0);
+    var r2 = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/2", 0, 0, 0);
+    assert_eq(_t_hp_is(_t_hp_hdr(r2, "x-tag"), "alpha"), 1,
+      "h2 table size: a peer advertising HEADER_TABLE_SIZE 0 is still decoded");
+    assert_eq(sandhi_hpack_table_max_size(sandhi_h2_conn_enc_table(h2c)), 0,
+      "h2 table size: the setting caps sandhi's encoder table");
+    thread_join(peer);
+    _t_hp_done();
+    return 0;
+}
+
+# Read one request, then stall (`arg` 0: HEADERS, no END_STREAM, then silence) or
+# send GOAWAY (`arg` 1), and wait for the client to close the conn.
+fn _t_hp_peer_fail(arg) {
+    var sid = _t_hp_read_request();
+    if (sid < 0) { return 0; }
+    if (arg == 0) {
+        sandhi_h2_conn_send_frame_a(_t_hp_pa, _t_hp_peer, SANDHI_H2_FRAME_HEADERS, SANDHI_H2_FLAG_END_HEADERS, sid,
+          _t_hp_status_block(), 1);
+    } else {
+        var g = alloc_via(_t_hp_pa, 8);
+        sandhi_h2_goaway_encode(g, 0, 0, 0, 0, 0);
+        sandhi_h2_conn_send_frame_a(_t_hp_pa, _t_hp_peer, SANDHI_H2_FRAME_GOAWAY, 0, 0, g, 8);
+    }
+    _t_hp_eof = _t_hp_await_eof();
+    return 0;
+}
+
+# A failed exchange retires its conn, and a retired conn is closed. Through 1.13.5
+# a conn whose exchange timed out stayed pooled mid-stream (its next exchange
+# would skip the stream's late frames, HEADERS among them, and its HPACK decoder
+# would drift), and a conn dropped for GOAWAY was never closed. The `_auto` path
+# also applies the request's own read_ms (300 here) where it used the opener's
+# (2,000).
+fn test_h2_failed_exchange_retired() {
+    var which = 0;
+    while (which < 2) {
+        if (_t_hp_setup(39875 + which) != 0) { assert_eq(1, 1, "h2 retire: loopback or threads unavailable — skipped"); return 0; }
+        var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+        var pool = sandhi_http_pool_new(8, 90000);
+        sandhi_http_pool_put_h2(pool, "h2.test", 80, 0, h2c);
+        var opts = sandhi_http_options_new();
+        sandhi_http_options_pool(opts, pool);
+        sandhi_http_options_read_ms(opts, 300);
+        var peer = thread_create(&_t_hp_peer_fail, which);
+        var a = arena_allocator(2400000);
+        var t0 = clock_now_ms();
+        var r = sandhi_http_request_auto_a(a, "GET", "http://h2.test/x", 0, 0, 0, opts);
+        var el = clock_now_ms() - t0;
+        if (which == 0) {
+            assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_TIMEOUT, "h2 retire: a stalled answer times out");
+            assert(el < 1500, "h2 retire: on the request's own read_ms, not the opener's");
+        } else {
+            assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_REMOTE, "h2 retire: a GOAWAY fails the exchange");
+        }
+        # The exchange itself closes the conn: the peer sees EOF before any take.
+        thread_join(peer);
+        assert_eq(_t_hp_eof, 1, "h2 retire: the failed exchange closes the conn's socket");
+        assert_eq(sandhi_http_pool_take_h2(pool, "h2.test", 80, 0), 0, "h2 retire: and the conn leaves the pool");
+        sock_close(_t_h2s_sfd);
+        which = which + 1;
+    }
+    # A pooled conn flagged for GOAWAY outside an exchange is closed by the take
+    # that drops it.
+    if (_t_hp_setup(39883) != 0) { return 0; }
+    var gc = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    var gp = sandhi_http_pool_new(8, 90000);
+    sandhi_http_pool_put_h2(gp, "h2.test", 80, 0, gc);
+    store64(gc + SANDHI_H2_CONN_OFF_GOAWAY, 1);
+    assert_eq(sandhi_http_pool_take_h2(gp, "h2.test", 80, 0), 0, "h2 retire: a GOAWAY'd conn leaves the pool");
+    assert_eq(_t_hp_await_eof(), 1, "h2 retire: and the take closes it");
+    sock_close(_t_h2s_sfd);
+    return 0;
+}
+
+# A HEADERS frame's padding and priority fields are not part of its header block
+# (RFC 7540 §6.2). Through 1.13.5 the whole payload was decoded as the block.
+fn _t_hp_peer_padded(arg) {
+    var sid = _t_hp_read_request();
+    if (sid < 0) { return 0; }
+    var pl = alloc_via(_t_hp_pa, 10);
+    memset(pl, 0, 10);
+    store8(pl, 3);                       # pad length
+    store8(pl + 5, 16);                  # priority weight (the dependency is 0)
+    store8(pl + 6, 0x88);                # the block: :status 200
+    sandhi_h2_conn_send_frame_a(_t_hp_pa, _t_hp_peer, SANDHI_H2_FRAME_HEADERS,
+      SANDHI_H2_FLAG_END_HEADERS | SANDHI_H2_FLAG_END_STREAM | SANDHI_H2_FLAG_PADDED | SANDHI_H2_FLAG_PRIORITY,
+      sid, pl, 10);
+    sid = _t_hp_read_request();
+    if (sid < 0) { return 0; }
+    # A PUSH_PROMISE, which sandhi's SETTINGS turn off, then an answer.
+    var pp = alloc_via(_t_hp_pa, 5);
+    memset(pp, 0, 5);
+    store8(pp + 3, 2);                   # promised stream 2
+    store8(pp + 4, 0x82);                # its block: :method GET
+    sandhi_h2_conn_send_frame_a(_t_hp_pa, _t_hp_peer, SANDHI_H2_FRAME_PUSH_PROMISE, SANDHI_H2_FLAG_END_HEADERS, sid, pp, 5);
+    _t_hp_respond(sid, _t_hp_status_block(), 1, 0, 0);
+    return 0;
+}
+
+fn test_h2_headers_padding_and_push() {
+    if (_t_hp_setup(39877) != 0) { assert_eq(1, 1, "h2 padded: loopback or threads unavailable — skipped"); return 0; }
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    var peer = thread_create(&_t_hp_peer_padded, 0);
+    var a = arena_allocator(2400000);
+    var r1 = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/1", 0, 0, 0);
+    assert_eq(sandhi_http_status(r1), 200, "h2 padded: a padded HEADERS with a priority block decodes");
+    var r2 = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/2", 0, 0, 0);
+    assert_eq(sandhi_http_err_kind(r2), SANDHI_ERR_PROTOCOL, "h2 push: a PUSH_PROMISE fails the exchange");
+    thread_join(peer);
+    _t_hp_done();
+    return 0;
+}
+
+# The client's preface SETTINGS turn push off (ENABLE_PUSH 0); through 1.13.5
+# they were empty, which leaves push on.
+fn test_h2_preface_disables_push() {
+    if (_t_hp_setup(39878) != 0) { assert_eq(1, 1, "h2 preface: loopback or threads unavailable — skipped"); return 0; }
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    sandhi_h2_conn_send_preface_and_settings(h2c);
+    var buf = alloc(64);
+    sandhi_conn_recv_all(_t_h2s_conn(_t_h2s_sfd), buf, 24);
+    var res = alloc(16);
+    sandhi_h2_conn_recv_frame(_t_hp_peer, res);
+    var hdr = load64(res);
+    assert_eq(sandhi_h2_hdr_type(hdr), SANDHI_H2_FRAME_SETTINGS, "h2 preface: SETTINGS follow the preface");
+    assert_eq(sandhi_h2_hdr_length(hdr), 6, "h2 preface: with one setting");
+    var idc = alloc(8);
+    var vc = alloc(8);
+    store64(idc, 0 - 1);
+    store64(vc, 0 - 1);
+    if (sandhi_h2_hdr_length(hdr) == 6) { sandhi_h2_settings_pair_decode(load64(res + 8), 6, 0, idc, vc); }
+    assert_eq(load64(idc), SANDHI_H2_SETTINGS_ENABLE_PUSH, "h2 preface: ENABLE_PUSH");
+    assert_eq(load64(vc), 0, "h2 preface: set to 0");
+    _t_hp_done();
+    return 0;
+}
+
+# SETTINGS the spec makes a connection error are refused, and leave the conn as
+# it was. Through 1.13.5 a MAX_FRAME_SIZE of 100 (or 0) was applied, and every
+# later frame with a larger payload was refused.
+fn test_h2_settings_validated() {
+    var c = sandhi_h2_conn_new(0);
+    var pl = alloc(16);
+    sandhi_h2_settings_pair_encode(pl, 0, SANDHI_H2_SETTINGS_MAX_FRAME_SIZE, 100);
+    assert(sandhi_h2_conn_apply_settings_payload(c, pl, 6) < 0, "h2 settings: MAX_FRAME_SIZE 100 is refused");
+    assert_eq(sandhi_h2_conn_peer_max_frame(c), 16384, "h2 settings: and the frame size stays 16,384");
+    sandhi_h2_settings_pair_encode(pl, 0, SANDHI_H2_SETTINGS_INITIAL_WINDOW_SIZE, 0x80000000);
+    assert(sandhi_h2_conn_apply_settings_payload(c, pl, 6) < 0, "h2 settings: a window over 2^31-1 is refused");
+    sandhi_h2_settings_pair_encode(pl, 0, SANDHI_H2_SETTINGS_HEADER_TABLE_SIZE, 0);
+    sandhi_h2_conn_apply_settings_payload(c, pl, 6);
+    assert_eq(sandhi_hpack_table_max_size(sandhi_h2_conn_dec_table(c)), 4096,
+      "h2 settings: HEADER_TABLE_SIZE leaves the decode table at sandhi's own 4,096");
+    return 0;
+}
+
+# A decoded field is the caller's copy: evicting its table entry (whose block is
+# freed, and here reused) leaves it intact. Since 1.13.6 the table frees an
+# evicted entry's block, so an indexed field can no longer be handed out as the
+# table's own pointer, as it was through 1.13.5 (when nothing was ever freed).
+fn test_hpack_decode_outputs_owned() {
+    var t = sandhi_hpack_table_new(200);
+    sandhi_hpack_table_add(t, "x-tag", "alpha");
+    var blk = alloc(2);
+    store8(blk, 0xBE);                   # index 62: x-tag: alpha
+    var off = alloc(8);
+    var no = alloc(8);
+    var vo = alloc(8);
+    store64(off, 0);
+    var a = arena_allocator(4096);
+    assert_eq(sandhi_hpack_decode_field_a(a, t, blk, 1, off, no, vo), 0, "hpack own: index 62 decodes");
+    var big = alloc(200);
+    memset(big, 122, 150);
+    store8(big + 150, 0);
+    sandhi_hpack_table_add(t, "x-big", big);   # evicts x-tag (200 is the cap)
+    var i = 0;
+    while (i < 8) { memset(fl_alloc(10), 90, 10); i = i + 1; }
+    assert_eq(_t_hp_is(load64(no), "x-tag"), 1, "hpack own: the decoded name outlives its evicted entry");
+    assert_eq(_t_hp_is(load64(vo), "alpha"), 1, "hpack own: and so does the value");
+    return 0;
+}
+
+# A canary allocator: each block is followed by 8 bytes of 0xC5, so a write past
+# a block's end shows. `_t_cy_big` is the largest block asked for.
+var _t_cy_list = 0;
+var _t_cy_big = 0;
+
+fn _t_cy_alloc(state, size): i64 {
+    var p = alloc(size + 8);
+    if (p == 0) { return 0; }
+    memset(p + size, 197, 8);
+    vec_push(_t_cy_list, p);
+    vec_push(_t_cy_list, size);
+    if (size > _t_cy_big) { _t_cy_big = size; }
+    return p;
+}
+
+fn _t_cy_realloc(state, old, osz, nsz): i64 { return _t_cy_alloc(state, nsz); }
+fn _t_cy_free(state, p): i64 { return 0; }
+fn _t_cy_reset(state): i64 { return 0; }
+
+fn _t_cy_overruns(): i64 {
+    var bad = 0;
+    var i = 0;
+    while (i < vec_len(_t_cy_list)) {
+        var p = vec_get(_t_cy_list, i);
+        var n = vec_get(_t_cy_list, i + 1);
+        var j = 0;
+        while (j < 8) {
+            if (load8(p + n + j) != 197) { bad = bad + 1; j = 8; }
+            j = j + 1;
+        }
+        i = i + 2;
+    }
+    return bad;
+}
+
+# Frame reads stay inside their buffers, and refuse a frame longer than sandhi
+# advertises. Through 1.13.5 the 9-byte header buffer and an exactly-sized payload
+# buffer each took a NUL one past their end, and a 20,000-octet frame (sandhi
+# never raises MAX_FRAME_SIZE from 16,384) was read whole.
+fn test_h2_recv_frame_bounds() {
+    if (_t_hp_setup(39879) != 0) { assert_eq(1, 1, "h2 frame read: loopback unavailable — skipped"); return 0; }
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    _t_cy_list = vec_new();
+    _t_cy_big = 0;
+    var cy = allocator_new(&_t_cy_alloc, &_t_cy_realloc, &_t_cy_free, &_t_cy_reset, 0);
+    var sc = _t_h2s_conn(_t_h2s_sfd);
+    var fr = alloc(20016);
+    memset(fr, 0, 20016);
+    sandhi_h2_hdr_encode(fr, 0, 8, SANDHI_H2_FRAME_PING, 0, 0);
+    sandhi_conn_send_all(sc, fr, 17);
+    sandhi_h2_hdr_encode(fr, 0, 16, SANDHI_H2_FRAME_DATA, 0, 1);
+    sandhi_conn_send_all(sc, fr, 25);
+    var res = alloc(16);
+    assert_eq(sandhi_h2_conn_recv_frame_a(cy, h2c, res), 17, "h2 frame read: an 8-octet frame");
+    assert_eq(sandhi_h2_conn_recv_frame_a(cy, h2c, res), 25, "h2 frame read: a 16-octet frame");
+    assert_eq(_t_cy_overruns(), 0, "h2 frame read: no byte written past a buffer");
+    sandhi_h2_hdr_encode(fr, 0, 20000, SANDHI_H2_FRAME_DATA, 0, 1);
+    sandhi_conn_send_all(sc, fr, 20009);
+    assert(sandhi_h2_conn_recv_frame_a(cy, h2c, res) < 0, "h2 frame read: a 20,000-octet frame is refused");
+    assert(_t_cy_big < 20000, "h2 frame read: before its payload is allocated");
+    _t_hp_done();
+    return 0;
+}
+
+# Each frame is one write (one packet on a SOCK_SEQPACKET pair, which keeps write
+# boundaries). Through 1.13.5 the header and payload were two writes, and with
+# Nagle on a request's second write waited for the delayed ACK of its first.
+fn test_h2_frame_one_write() {
+    var fds[16];
+    if (sys_socketpair(1, 5, 0, &fds) != 0) { assert_eq(1, 1, "h2 one write: SOCK_SEQPACKET unavailable — skipped"); return 0; }
+    var cfd = load32(&fds);
+    var sfd = load32(&fds + 4);
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(cfd));
+    var a = arena_allocator(65536);
+    sandhi_h2_conn_send_frame_a(a, h2c, SANDHI_H2_FRAME_PING, 0, 0, "12345678", 8);
+    var body = _t_hp_pattern_a(default_alloc(), 3000, 1);
+    sandhi_h2_conn_send_frame_a(a, h2c, SANDHI_H2_FRAME_DATA, 0, 1, body, 3000);
+    _sandhi_conn_set_timeout_ms(sfd, 1000, _SANDHI_SO_RCVTIMEO);
+    var sc = _t_h2s_conn(sfd);
+    var buf = alloc(65536);
+    assert_eq(sandhi_conn_recv(sc, buf, 65536), 17, "h2 one write: a PING is one 17-octet write");
+    assert_eq(sandhi_conn_recv(sc, buf, 65536), 3009, "h2 one write: a 3,000-octet DATA frame is one write");
+    sock_close(cfd);
+    sock_close(sfd);
+    return 0;
+}
+
+# Twenty exchanges on a pair with no TCP_NODELAY from the test: the h2 conn sets
+# its own. Through 1.13.5 each took about 80 ms over loopback (measured at 1.13.3).
+fn test_h2_exchange_latency() {
+    if (_t_hp_setup(39880) != 0) { assert_eq(1, 1, "h2 latency: loopback or threads unavailable — skipped"); return 0; }
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    _t_hp_sizes = alloc(20 * 8);
+    var k = 0;
+    while (k < 20) { store64(_t_hp_sizes + k * 8, 2); k = k + 1; }
+    var peer = thread_create(&_t_hp_peer_bodies, 20);
+    var a = arena_allocator(2400000);
+    var ok = 0;
+    var t0 = clock_now_ms();
+    k = 0;
+    while (k < 20) {
+        var r = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/n", 0, 0, 0);
+        if (sandhi_http_status(r) == 200) { ok = ok + 1; }
+        reset_via(a);
+        k = k + 1;
+    }
+    var el = clock_now_ms() - t0;
+    thread_join(peer);
+    _t_hp_done();
+    _t_hp_sizes = 0;
+    assert_eq(ok, 20, "h2 latency: twenty exchanges answer");
+    assert(el < 600, "h2 latency: in under 600 ms (about 1,600 through 1.13.5)");
+    return 0;
+}
+
+# Exchanges on a reset arena keep nothing on the global heap. Measured at 1.13.3:
+# ten GETs grew it by 42,992 B (frame I/O on the global heap, and every request
+# field inserted into the encoder table). Then 120 answers that each add a fresh
+# 230-octet header to the decode table, so it evicts as it goes: past the first 40
+# (the table's vecs reach their size), neither the global heap nor the freelist
+# arena the table's entries live in may grow.
+var _t_hp_churn = 0;
+
+# Decimal `n` at `buf + off` without allocating (unlike `_t_h2s_put_int`); the end.
+fn _t_hp_put_int(buf, off, n): i64 {
+    var digits = 1;
+    var v = n;
+    while (v >= 10) { v = v / 10; digits = digits + 1; }
+    var i = digits - 1;
+    v = n;
+    while (i >= 0) { store8(buf + off + i, 48 + v % 10); v = v / 10; i = i - 1; }
+    return off + digits;
+}
+
+fn _t_hp_peer_churn(arg) {
+    var k = 0;
+    while (k < arg) {
+        var sid = _t_hp_read_request();
+        if (sid < 0) { break; }
+        var hlen = 1;
+        var hb = alloc_via(_t_hp_pa, 256);
+        store8(hb, 0x88);
+        if (_t_hp_churn == 1) {
+            store8(hb + 1, 0x40);
+            store8(hb + 2, 3);
+            memcpy(hb + 3, "x-n", 3);
+            store8(hb + 6, 127);         # value length 227 = 127 + 100 (7-bit prefix)
+            store8(hb + 7, 100);
+            memset(hb + 8, 118, 227);
+            _t_hp_put_int(hb, 8, k);     # a fresh value each time
+            hlen = 8 + 227;
+        }
+        if (_t_hp_respond(sid, hb, hlen, 0, 0) < 0) { break; }
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn test_h2_exchange_heap_flat() {
+    if (_t_hp_setup(39881) != 0) { assert_eq(1, 1, "h2 heap: loopback or threads unavailable — skipped"); return 0; }
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    _t_hp_churn = 0;
+    var peer = thread_create(&_t_hp_peer_churn, 11);
+    var a = arena_allocator(2400000);
+    sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/w", 0, 0, 0);
+    reset_via(a);
+    var b = alloc_used();
+    var k = 0;
+    while (k < 10) {
+        sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/x", 0, 0, 0);
+        reset_via(a);
+        k = k + 1;
+    }
+    assert_eq(alloc_used() - b, 0, "h2 heap: ten exchanges on a reset arena keep nothing on the global heap");
+    thread_join(peer);
+    _t_hp_done();
+
+    if (_t_hp_setup(39882) != 0) { return 0; }
+    h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    _t_hp_churn = 1;
+    peer = thread_create(&_t_hp_peer_churn, 160);
+    var ok = 0;
+    k = 0;
+    while (k < 40) {
+        if (sandhi_http_status(sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/c", 0, 0, 0)) == 200) { ok = ok + 1; }
+        reset_via(a);
+        k = k + 1;
+    }
+    b = alloc_used();
+    var fl0 = _fl_arena_pos;
+    while (k < 160) {
+        if (sandhi_http_status(sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/c", 0, 0, 0)) == 200) { ok = ok + 1; }
+        reset_via(a);
+        k = k + 1;
+    }
+    assert_eq(ok, 160, "h2 heap: 160 answers adding a fresh header each all decode");
+    assert_eq(alloc_used() - b, 0, "h2 heap: the last 120 keep nothing on the global heap");
+    assert_eq(_fl_arena_pos - fl0, 0, "h2 heap: and the decode table reuses its evicted entries' blocks");
+    assert(sandhi_hpack_table_size(sandhi_h2_conn_dec_table(h2c)) <= 4096, "h2 heap: within the table's 4,096");
+    thread_join(peer);
+    _t_hp_done();
+    return 0;
+}
+
 # ================================================================
 # Runner
 # ================================================================
@@ -3062,6 +4084,29 @@ fn main() {
     test_session_cache_install_needs_ctx();
     test_session_cache_lock_first_use();
     test_session_cache_threads();
+
+    test_group("alloc/1136/session_cache_key_no_global_heap");
+    test_session_cache_key_no_global_heap();
+
+    test_group("alloc/1136/redirect_hop_cred_digest");
+    test_redirect_hop_headers();
+    test_redirect_chain_cred_digest();
+
+    test_group("alloc/1136/h2_completeness");
+    test_h2_settings_validated();
+    test_hpack_decode_outputs_owned();
+    test_h2_frame_one_write();
+    test_h2_recv_frame_bounds();
+    test_h2_preface_disables_push();
+    test_h2_flow_control_recv();
+    test_h2_request_body_and_headers();
+    test_h2_max_header_list();
+    test_h2_decode_table_survives_arena_reset();
+    test_h2_peer_header_table_size();
+    test_h2_headers_padding_and_push();
+    test_h2_failed_exchange_retired();
+    test_h2_exchange_latency();
+    test_h2_exchange_heap_flat();
 
     test_group("alloc/132/conn_0rtt_status_accessor");
     test_alloc_132_conn_0rtt_status_accessor();

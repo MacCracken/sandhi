@@ -82,6 +82,9 @@ const _SANDHI_H2_ERR_BAD_LENGTH = 0 - 2;
 const _SANDHI_H2_ERR_BAD_STREAM = 0 - 3;
 const _SANDHI_H2_ERR_BAD_TYPE   = 0 - 4;
 const _SANDHI_H2_ERR_MALFORMED  = 0 - 5;
+const _SANDHI_H2_ERR_TIMEOUT    = 0 - 6;
+const _SANDHI_H2_ERR_HDR_LIST   = 0 - 7;
+const _SANDHI_H2_ERR_FLOW       = 0 - 8;
 
 # ================================================================
 # Frame header struct (32 bytes — 8-byte stride per field)

@@ -11,11 +11,17 @@
 #   - SETTINGS (ACK): record that our SETTINGS were ACK'd.
 #   - PING (non-ACK): echo back with the ACK flag.
 #   - GOAWAY: surface as SANDHI_ERR_REMOTE; stream is dead.
-#   - PRIORITY / WINDOW_UPDATE: silently accepted (we don't enforce
-#     flow control today — peer's default window keeps responses
-#     bounded). A real window manager is a wait-for-consumer-ask
-#     roadmap item (h2 spec-completeness), for if a consumer hits a
-#     flow-controlled stall.
+#   - WINDOW_UPDATE on stream 0: grows the conn's send window.
+#   - PUSH_PROMISE: refused as SANDHI_ERR_PROTOCOL. sandhi's SETTINGS turn
+#     push off, and a promise's header block would have to be decoded to
+#     keep HPACK in step.
+#   - PRIORITY: silently accepted.
+#
+# Flow control (1.13.6): DATA on any stream counts against the
+# connection's receive window, and DATA on our stream against the
+# stream's; each is returned with WINDOW_UPDATE once half the default
+# window is outstanding. Through 1.13.5 none was ever returned, so a pooled
+# conn stalled for good once its responses added up to 65,535 octets.
 #
 # Stream-level frames on our stream:
 #   - HEADERS: append payload to header block; on END_HEADERS,
@@ -27,8 +33,9 @@
 #
 # Frames on other stream-ids are ignored — sandhi's first cut is
 # single-stream-per-connection so anything else is concurrent
-# stream chatter we can drop. Bite 6 (multiplex via pool) tracks
-# per-stream state.
+# stream chatter we can drop (their DATA still counts against the
+# connection window). Bite 6 (multiplex via pool) tracks per-stream
+# state.
 #
 # Bite 5c of 0.8.0.
 
@@ -114,8 +121,9 @@ fn _h2_decode_response_headers(h2c, hblock, hblock_len, headers_out): i64 {
 # Connection-level frame handlers
 # ================================================================
 
-# Returns 0 on success, negative on send-fail.
-fn _h2_handle_settings(h2c, hdr, payload): i64 {
+# Returns 0 on success, negative on send-fail. Scratch and the ACK frame
+# come from `a` (1.13.6; through 1.13.5 they went on the global heap).
+fn _h2_handle_settings_a(a, h2c, hdr, payload): i64 {
     var flags = sandhi_h2_hdr_flags(hdr);
     if ((flags & SANDHI_H2_FLAG_ACK) != 0) {
         # Empty ACK from peer — our SETTINGS got through. Nothing
@@ -123,12 +131,63 @@ fn _h2_handle_settings(h2c, hdr, payload): i64 {
         # accessor isn't currently surfaced.
         return 0;
     }
-    var ar = sandhi_h2_conn_apply_settings_payload(h2c, payload, sandhi_h2_hdr_length(hdr));
+    var ar = sandhi_h2_conn_apply_settings_payload_a(a, h2c, payload, sandhi_h2_hdr_length(hdr));
     if (ar < 0) { return ar; }
-    return sandhi_h2_conn_send_settings_ack(h2c);
+    return sandhi_h2_conn_send_settings_ack_a(a, h2c);
 }
 
-fn _h2_handle_ping(h2c, hdr, payload): i64 {
+fn _h2_handle_settings(h2c, hdr, payload): i64 {
+    return _h2_handle_settings_a(default_alloc(), h2c, hdr, payload);
+}
+
+# Grow the conn's send window by a WINDOW_UPDATE on stream 0. 0, or
+# `_SANDHI_H2_ERR_FLOW` for a zero increment or one past 2^31-1 (§6.9).
+fn _h2_conn_window_grant(h2c, inc): i64 {
+    var w = load64(h2c + SANDHI_H2_CONN_OFF_SEND_WINDOW);
+    if (inc <= 0 || w + inc > _SANDHI_H2_MAX_WINDOW) { return _SANDHI_H2_ERR_FLOW; }
+    store64(h2c + SANDHI_H2_CONN_OFF_SEND_WINDOW, w + inc);
+    return 0;
+}
+
+# Send a WINDOW_UPDATE returning `inc` octets on `sid` (0: the connection).
+fn _h2_send_window_update_a(a, h2c, sid, inc): i64 {
+    var pl = alloc_via(a, 4);
+    if (pl == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
+    sandhi_h2_window_update_encode(pl, 0, inc);
+    return sandhi_h2_conn_send_frame_a(a, h2c, SANDHI_H2_FRAME_WINDOW_UPDATE, 0, sid, pl, 4);
+}
+
+# Count `flen` DATA octets against the connection's receive window, and
+# return them to the peer once half the default window is outstanding.
+fn _h2_conn_data_received_a(a, h2c, flen): i64 {
+    var u = load64(h2c + SANDHI_H2_CONN_OFF_RECV_UNACKED) + flen;
+    if (u >= _SANDHI_H2_WINDOW_RETURN_AT) {
+        var r = _h2_send_window_update_a(a, h2c, 0, u);
+        if (r < 0) { return r; }
+        u = 0;
+    }
+    store64(h2c + SANDHI_H2_CONN_OFF_RECV_UNACKED, u);
+    return 0;
+}
+
+# The header-block fragment of a HEADERS frame: the payload past a PADDED
+# pad-length byte and a PRIORITY block, without the padding (§6.2). Writes
+# the fragment's offset to `off_out` and returns its length, or -1.
+fn _h2_headers_fragment(fflags, payload, flen, off_out): i64 {
+    var off = 0;
+    var pad = 0;
+    if ((fflags & SANDHI_H2_FLAG_PADDED) != 0) {
+        if (flen < 1) { return 0 - 1; }
+        pad = load8(payload);
+        off = 1;
+    }
+    if ((fflags & SANDHI_H2_FLAG_PRIORITY) != 0) { off = off + 5; }
+    if (off + pad > flen) { return 0 - 1; }
+    store64(off_out, off);
+    return flen - off - pad;
+}
+
+fn _h2_handle_ping_a(a, h2c, hdr, payload): i64 {
     var flags = sandhi_h2_hdr_flags(hdr);
     if ((flags & SANDHI_H2_FLAG_ACK) != 0) { return 0; }
     # 1.9.13 — validate the declared length before echoing it.
@@ -141,8 +200,12 @@ fn _h2_handle_ping(h2c, hdr, payload): i64 {
     # refused. Small read, but it is an out-of-bounds read a remote peer chooses
     # the size of, and refusing is also what the spec requires.
     if (sandhi_h2_hdr_length(hdr) != 8) { return _SANDHI_H2_ERR_MALFORMED; }
-    return sandhi_h2_conn_send_frame(h2c, SANDHI_H2_FRAME_PING,
+    return sandhi_h2_conn_send_frame_a(a, h2c, SANDHI_H2_FRAME_PING,
       SANDHI_H2_FLAG_ACK, 0, payload, 8);
+}
+
+fn _h2_handle_ping(h2c, hdr, payload): i64 {
+    return _h2_handle_ping_a(default_alloc(), h2c, hdr, payload);
 }
 
 # ================================================================
@@ -176,13 +239,18 @@ fn sandhi_h2_response_recv_a(a, h2c, stream_id): i64 {
     var headers_complete = 0;
     var stream_complete = 0;
     var fail_kind = SANDHI_OK;
+    var stream_unacked = 0;
+    var frag_off = alloc_via(a, 8);
+    if (frag_off == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
 
     while (stream_complete == 0 && fail_kind == SANDHI_OK) {
         var result = alloc_via(a, 16);
         if (result == 0) { fail_kind = SANDHI_ERR_INTERNAL; }
-        var n = sandhi_h2_conn_recv_frame(h2c, result);
-        if (n < 0) { fail_kind = SANDHI_ERR_PROTOCOL; }
-        else {
+        var n = 0;
+        if (result != 0) { n = sandhi_h2_conn_recv_frame_a(a, h2c, result); }
+        if (n == _SANDHI_H2_ERR_TIMEOUT) { fail_kind = SANDHI_ERR_TIMEOUT; }
+        elif (n < 0) { fail_kind = SANDHI_ERR_PROTOCOL; }
+        elif (result != 0) {
             var hdr = load64(result + 0);
             var payload = load64(result + 8);
             var ftype = sandhi_h2_hdr_type(hdr);
@@ -191,23 +259,31 @@ fn sandhi_h2_response_recv_a(a, h2c, stream_id): i64 {
             var flen = sandhi_h2_hdr_length(hdr);
 
             if (ftype == SANDHI_H2_FRAME_SETTINGS && fsid == 0) {
-                if (_h2_handle_settings(h2c, hdr, payload) < 0) {
+                if (_h2_handle_settings_a(a, h2c, hdr, payload) < 0) {
                     fail_kind = SANDHI_ERR_CONNECT;
                 }
             } elif (ftype == SANDHI_H2_FRAME_PING && fsid == 0) {
-                if (_h2_handle_ping(h2c, hdr, payload) < 0) {
+                if (_h2_handle_ping_a(a, h2c, hdr, payload) < 0) {
                     fail_kind = SANDHI_ERR_CONNECT;
                 }
             } elif (ftype == SANDHI_H2_FRAME_GOAWAY && fsid == 0) {
                 store64(h2c + SANDHI_H2_CONN_OFF_GOAWAY, 1);
                 fail_kind = SANDHI_ERR_REMOTE;
+            } elif (ftype == SANDHI_H2_FRAME_WINDOW_UPDATE && fsid == 0) {
+                if (flen != 4) { fail_kind = SANDHI_ERR_PROTOCOL; }
+                elif (_h2_conn_window_grant(h2c, sandhi_h2_window_update_decode(payload, flen, 0)) < 0) {
+                    fail_kind = SANDHI_ERR_PROTOCOL;
+                }
+            } elif (ftype == SANDHI_H2_FRAME_PUSH_PROMISE) {
+                fail_kind = SANDHI_ERR_PROTOCOL;
             } elif (ftype == SANDHI_H2_FRAME_RST_STREAM && fsid == stream_id) {
                 fail_kind = SANDHI_ERR_REMOTE;
             } elif (ftype == SANDHI_H2_FRAME_HEADERS && fsid == stream_id) {
-                if (hblock_len + flen > _SANDHI_H2_HBLOCK_CAP) {
+                var flen2 = _h2_headers_fragment(fflags, payload, flen, frag_off);
+                if (flen2 < 0 || hblock_len + flen2 > _SANDHI_H2_HBLOCK_CAP) {
                     fail_kind = SANDHI_ERR_PROTOCOL;
                 } else {
-                    hblock_len = _h2_buf_append(hblock, hblock_len, payload, flen);
+                    hblock_len = _h2_buf_append(hblock, hblock_len, payload + load64(frag_off), flen2);
                     if ((fflags & SANDHI_H2_FLAG_END_HEADERS) != 0) {
                         headers_complete = 1;
                     }
@@ -224,7 +300,10 @@ fn sandhi_h2_response_recv_a(a, h2c, stream_id): i64 {
                         headers_complete = 1;
                     }
                 }
+            } elif (ftype == SANDHI_H2_FRAME_DATA && fsid != stream_id) {
+                if (_h2_conn_data_received_a(a, h2c, flen) < 0) { fail_kind = SANDHI_ERR_PROTOCOL; }
             } elif (ftype == SANDHI_H2_FRAME_DATA && fsid == stream_id) {
+                if (_h2_conn_data_received_a(a, h2c, flen) < 0) { fail_kind = SANDHI_ERR_PROTOCOL; }
                 # PADDED flag means the first byte is a pad-length
                 # and that many trailing bytes are pad. RFC 7540 §6.1.
                 var data_off = 0;
@@ -247,12 +326,21 @@ fn sandhi_h2_response_recv_a(a, h2c, stream_id): i64 {
                         body_len = _h2_buf_append(body, body_len, payload + data_off, data_len);
                         if ((fflags & SANDHI_H2_FLAG_END_STREAM) != 0) {
                             stream_complete = 1;
+                        } else {
+                            # The stream's window, returned likewise while it stays open.
+                            stream_unacked = stream_unacked + flen;
+                            if (stream_unacked >= _SANDHI_H2_WINDOW_RETURN_AT) {
+                                if (_h2_send_window_update_a(a, h2c, stream_id, stream_unacked) < 0) {
+                                    fail_kind = SANDHI_ERR_PROTOCOL;
+                                }
+                                stream_unacked = 0;
+                            }
                         }
                     }
                 }
             }
-            # PRIORITY / WINDOW_UPDATE / other-stream frames: silently
-            # ignored. Bite 6 changes that for multiplex.
+            # PRIORITY / stream WINDOW_UPDATE / other-stream frames:
+            # silently ignored. Bite 6 changes that for multiplex.
         }
     }
 

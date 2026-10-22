@@ -6,10 +6,9 @@ alloc
 sync
 atomic
 hashmap
-str
+string
 vec
 chrono
 syscalls
 result
-string
 sigil

@@ -4,6 +4,263 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.13.6] — 2026-10-22
+
+**Completes the 1.13.x line: HTTP/2 flow control and spec completeness, h2 connections
+that are retired and closed when an exchange fails, HTTP/2 exchanges that keep nothing on
+the global heap, per-hop credential digests on redirects, a session cache that builds its
+keys in place, and fuzz harnesses that draw from the LCG's high bits.** Every remaining
+1.13.x roadmap item ships here, at the maintainer's request (the line's one item per patch
+does not apply). No pin change (6.7.16), no new public verb. Seventh patch on the 1.13.x
+line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+**Visible to a consumer:**
+- **A pooled HTTP/2 connection no longer stalls after about 64 KiB of responses.** Live
+  against `one.one.one.one`, five `_auto` GETs of its 56,614-byte page through one pool:
+  on 1.13.5 the first answered, the second stalled for its full 8 s `read_ms` and
+  failed, and the next three failed at once on the stuck connection (9.1 s in all). Now
+  all five arrive, in 660 ms.
+- **Request bodies over 16 KB, header blocks over 8 KB, and redirects that change
+  credentials now work on h2.** Through 1.13.5 the first two were refused, and a
+  redirect's new host had its TLS session keyed under the old host's credentials.
+- **The `_auto` path applies each request's own `read_ms`, `write_ms` and `total_ms` to
+  an h2 exchange,** where it used whatever the connection's opener set. An h2 timeout
+  now fails as `SANDHI_ERR_TIMEOUT` (it was `SANDHI_ERR_PROTOCOL`).
+- **An h2 connection whose exchange fails is closed and leaves the pool.** That covers a
+  timeout, a protocol error and a GOAWAY.
+- **`SANDHI_H2_CONN_STRUCT_SIZE` grows 88 → 144:** seven new slots (`SANDHI_H2_CONN_OFF_*`
+  at +88 … +136).
+- **HPACK tables own their entries.** `sandhi_hpack_lookup`'s dynamic strings are valid
+  until the table's next add or eviction, and `sandhi_hpack_decode_field_a` always hands
+  out copies in its allocator. `sandhi_hpack_table_add_a` no longer uses its allocator.
+- **Other changed answers:**
+  - `sandhi_h2_conn_apply_settings_payload` refuses a `MAX_FRAME_SIZE` outside
+    16,384 … 2^24−1 and an `INITIAL_WINDOW_SIZE` over 2^31−1.
+  - A received frame over 16,384 octets is refused.
+  - A host over 255 bytes is never cached in the session cache.
+- **The `tls` profile's `.deps` drops `str`, and the full bundle's gains `freelist`.**
+
+### Fixed
+
+**HTTP/2 flow control** (roadmap item (b)):
+- **sandhi never sent `WINDOW_UPDATE`, and ignored the peer's.** A connection stalled for
+  good once its responses added up to the peer's 65,535-octet connection window, and one
+  response over the stream window stalled alone.
+  - **Measured live** (above), and by the new row: of three answers on one connection
+    (56,000, 56,000 and 200,000 B), 1.13.5 received only the first.
+  - **The fix, receiving:** DATA on any stream counts against the connection's receive
+    window, and DATA on our stream against the stream's. Each is returned with
+    `WINDOW_UPDATE` once 32,768 octets are outstanding. The connection's count lives in the
+    connection, so it carries across exchanges.
+  - **The fix, sending:** request bodies are sent as DATA frames of at most the peer's
+    `MAX_FRAME_SIZE` (item (a); through 1.13.5 a body over one frame was refused), each
+    within the peer's connection and stream windows. The sender waits for `WINDOW_UPDATE`
+    when they are spent. Meanwhile it applies `SETTINGS`, where a new `INITIAL_WINDOW_SIZE`
+    moves the stream window by the difference (§6.9.2), and answers `PING`.
+  - **An early answer:** a peer that answers before the body is all sent stops the
+    sender. The answer is read, and the stream is closed with `RST_STREAM` (`NO_ERROR`).
+  - **The peer's `WINDOW_UPDATE` on stream 0** grows the send window in every read loop.
+    A zero increment, or one past 2^31−1, fails the exchange (§6.9).
+- **The `_auto` path's h2 exchange ran on its opener's timeouts.** It now applies the
+  request's own `read_ms` / `write_ms`, and a `total_ms` deadline bounds every frame read.
+  The row's stalled answer failed after 2,043 ms on 1.13.5 (the opener's 2,000) and after
+  308 ms now (the request's 300). The manual `sandhi_h2_request_a` keeps the socket's
+  timeouts.
+
+**HTTP/2 headers and settings:**
+- **(d) The request's header block had a fixed 8 KB buffer, and a larger block was
+  refused.** The buffer is now sized per request, and a block longer than the peer's
+  `MAX_FRAME_SIZE` goes out as HEADERS + CONTINUATION (§6.10). The roadmap named a
+  caller-overridable cap; sizing per request makes a knob unnecessary, so no public verb
+  was added. Row: a 40,000-octet header arrives whole, as HEADERS + 2 CONTINUATION frames.
+- **(c) The peer's `SETTINGS_MAX_HEADER_LIST_SIZE` was ignored.** A larger header list is
+  now refused before anything is sent (`SANDHI_ERR_PROTOCOL`, with a message), and the
+  connection carries on. On 1.13.5 the row's oversized request went out.
+- **The peer's `SETTINGS_HEADER_TABLE_SIZE` was applied to sandhi's decode table.** The
+  setting bounds the peer's decoder, so it caps sandhi's encoder. A peer advertising 0
+  (or anything small) made sandhi evict entries the peer's encoder then referenced. Row:
+  on 1.13.5, an answer naming index 62 after such a SETTINGS failed to decode.
+- **A HEADERS frame's padding and priority fields were decoded as header block.** They
+  are stripped now (§6.2). On 1.13.5 a padded HEADERS with a priority block failed.
+- **Push was on.** The preface's SETTINGS were empty, which leaves `ENABLE_PUSH` at 1, and
+  a `PUSH_PROMISE`'s header block was skipped, which would have put HPACK out of step. The
+  SETTINGS now carry `ENABLE_PUSH = 0`, and a `PUSH_PROMISE` fails the exchange.
+- **SETTINGS values the spec makes a connection error were applied.** A `MAX_FRAME_SIZE`
+  of 100 (or 0) is now refused (through 1.13.5 it was applied, and then every frame with a
+  larger payload was refused), as is an `INITIAL_WINDOW_SIZE` over 2^31−1.
+
+**HTTP/2 connection lifecycle:**
+- **A failed exchange left its connection pooled mid-stream** (found at 1.13.3). An
+  exchange that fails after its request reached the wire now retires the connection: it
+  is marked dead and detached under its lock, and closed after the lock. A peer's
+  `RST_STREAM` ends only its stream, so that connection stays. An exchange that finds its
+  connection retired fails without writing.
+  - On 1.13.5 the row's timed-out connection stayed in the pool with its socket open.
+- **A connection dropped for GOAWAY was never closed** (found at 1.13.3).
+  - **In an exchange:** the GOAWAY retires the connection there.
+  - **Outside one:** `sandhi_http_pool_take_h2` closes a GOAWAY'd or retired connection
+    once no exchange holds it.
+  - **`sandhi_http_pool_put_h2`** closes a connection it replaces. Two threads promoting
+    one route at once each put one, and the first was left open.
+  - On 1.13.5 neither the GOAWAY'd connection nor the pool-flagged one was closed.
+- **Each frame went out as two writes, with no `TCP_NODELAY`** (measured at 1.13.3).
+  - **The fix:** a frame is now built in one buffer and sent as one write (one TLS record),
+    and `sandhi_h2_conn_new_a` sets `TCP_NODELAY` on the connection's socket (AGNOS
+    declines it).
+  - **Measured by the rows:** on a SOCK_SEQPACKET pair, a PING arrived as 9 + 8 octets
+    on 1.13.5 and as one 17-octet write now. Twenty exchanges took 1,558 ms on 1.13.5 and
+    1 ms now.
+- **Frame reads wrote a NUL one byte past their buffers** (found at 1.13.3).
+  `sandhi_conn_recv_all` terminates at `buf[len]`, and the 9-octet header buffer and the
+  payload buffer were allocated exactly. Each is one byte longer now. A canary allocator
+  saw 4 overruns in two frames on 1.13.5, and 0 now.
+- **A frame longer than sandhi advertises was read whole.** sandhi never raises
+  `MAX_FRAME_SIZE` from 16,384, and a longer frame is now refused before its payload is
+  allocated (§4.2). On 1.13.5 a 20,000-octet frame was read and allocated in full.
+
+**HTTP/2 memory** (found at 1.13.3):
+- **The connection's decode table kept pointers into the request's arena.**
+  `sandhi_hpack_decode_field_a` decoded into the caller's allocator and added those
+  pointers to the long-lived table, rebuilding its vecs there too. After a per-request
+  arena was reset, the table pointed into reused memory, and the next answer that named a
+  dynamic entry read it.
+  - **Found while fixing the heap growth below,** and worse than the roadmap's encoder-side
+    finding. On 1.13.5 the row's second exchange after a reset faulted (SIGSEGV).
+  - **The fix:** each table keeps its own copy of every entry, one `fl_alloc` block freed
+    when the entry is evicted. Entries are held oldest first, so an add appends and an
+    eviction removes from the front, and neither rebuilds the vecs. A decoded field is
+    always a copy in the caller's allocator.
+- **Exchanges grew the global heap, arena or not.** The frame I/O, the SETTINGS / PING
+  handlers and the `:authority` builder for a non-default port ran on the global heap, and
+  every request field was inserted into the encoder table, rebuilding both vecs.
+  - **The fix:** frame I/O and the handlers take the exchange's allocator. The request
+    side never indexes: every field is a literal without indexing (§6.2.2), so the encoder
+    table stays empty and holds no request pointer.
+  - **Measured by the row** (the peer in its own arena):
+    - ten exchanges on a reset arena: 19,568 B on 1.13.5, 0 now;
+    - 120 answers that each add a fresh header to the decode table: 1,436,160 B on 1.13.5,
+      0 now, and the freelist arena does not grow either.
+
+**Elsewhere:**
+- **http/client, h2/dispatch: a redirect hop's TLS session was keyed under the first
+  host's credentials.** The cred digest was computed once per dispatch, and a hop to
+  another authority strips the credentials.
+  - **The fix:** both redirect drivers now compute each hop's digest from the headers
+    that hop sends, through one helper (`_sandhi_http_hop_headers_a`).
+  - **Measured on 1.13.5:** after a cross-authority 302 on loopback, both drivers left
+    the digest of `Authorization: Bearer t`.
+  - **A comment fix with it:** the 1.1 driver's comment said a chain returning to the
+    original authority gets the credentials back. The code strips them for the rest of
+    the chain (the safer reading), and the comment now says so.
+- **tls_policy/session_cache: every lookup, install and store kept its key on the global
+  heap** (found at 1.13.5). The key is now built in a 290-byte stack buffer and copied to
+  the heap only for a new entry. Measured on 1.13.5: 16,000 B per 100 calls on each path.
+  Now 0.
+
+### Changed
+
+- **fuzz:** the seven older harnesses (`dns`, `headers`, `hpack`, `json`, `response`,
+  `sse`, `url`) draw from the LCG's high bits, as `server_request.fcyr` does. Their
+  structure, sizes and assertions are unchanged.
+  - **Why it mattered:** each took `% k` of the raw state, so every "random" buffer was
+    a rotation of one 256-byte cycle (a 4,096-byte buffer was exactly 16 copies).
+  - **What the new draws reach:** a 4,096-byte buffer now has 3,965 distinct adjacent
+    pairs (256 before). The headers corpus now contains CRLF, and json reaches all 8
+    structural picks (2 before).
+  - **No findings:** the new corpora found nothing, and 9/9 pass.
+  - **Two planted parser faults the old draws missed, now caught:** an SSE spin on a CRLF
+    after a non-empty line, and a NUL inside a CRLF-terminated header line.
+  - **Two small fixes:** `hpack.fcyr` now includes the trace module (every build warned
+    about undefined functions), and `sse.fcyr`'s fill comment no longer names a bias
+    toward `a` that the code does not have.
+- **docs:** `docs/guides/http2-manual.md` replaces the 64 KiB stall caveat with how the
+  h2 path now behaves and its two remaining limits. `docs/guides/connection-pool.md` says
+  a failed h2 connection is closed.
+- **tests:**
+  - `tests/h2.tcyr`'s simple-GET row expects a literal without indexing for `:authority`
+    (`0x01`; it was `0x41`).
+  - The 1.13.3 struct-size row expects 144.
+  - `_t_h2s_pair` gains a no-`TCP_NODELAY` form.
+- **Roadmap:**
+  - **The 1.13.x line is complete,** and its section is gone.
+  - **Four items found during it join the end of 1.14.x:**
+    - GOAWAY fails the exchange in flight even when the peer would still finish it.
+    - The h2 response caps (16 KB header block, 1 MiB body) are fixed.
+    - The session cache keeps a 16-byte entry and its key on the global heap for every
+      eviction.
+    - Three harnesses rarely reach their parsers' interesting paths: dns's random section
+      never passes the transaction-ID check; json's rarely matches a key; hpack's rarely
+      reaches a Huffman-coded name.
+
+### Verification
+
+- **New rows, 71 assertions,** in `alloc/1136/*`:
+  - `session_cache_key_no_global_heap` (9): zero heap growth on hits, misses, installs
+    and same-key stores; a new key outlives the caller's buffer; 256- and 255-byte hosts.
+  - `redirect_hop_cred_digest` (10): the hop helper, and loopback 302 chains through both
+    drivers.
+  - `h2_completeness` (52), with a scriptable loopback peer. It grants a spent window back
+    only after the client has stopped at it, and grants the two windows unevenly, so
+    neither can stand in for the other. Its rows:
+    - settings validation; HPACK decode copies; one write per frame; frame-read bounds
+      (canary allocator); preface `ENABLE_PUSH`;
+    - flow control both ways; CONTINUATION; the header-list limit; the decode table
+      across an arena reset; the peer's `HEADER_TABLE_SIZE`;
+    - padded / priority HEADERS and `PUSH_PROMISE`;
+    - retirement on timeout and on GOAWAY, and the pool-flagged close;
+    - latency; heap growth.
+- **Before the fix:** every new row failed on 1.13.5's code for the reason it targets,
+  as measured above. Two are new-design guards with no 1.13.5 failure: the HPACK decode
+  copies (1.13.5 never freed an entry) and the session-key copy.
+- **Mutations, 24, each caught:**
+  - **Flow control:**
+    - no connection `WINDOW_UPDATE`; no stream `WINDOW_UPDATE`;
+    - the body sender ignoring the connection window (3 frames past it); ignoring the
+      stream window (6).
+  - **Headers:** no CONTINUATION split; no header-list check; the peer's
+    `HEADER_TABLE_SIZE` back on the decoder; no settings validation.
+  - **HPACK:** decode outputs not copied; table entries not copied.
+  - **Lifecycle:**
+    - no retirement; no request timeouts;
+    - the take dropping without closing; GOAWAY not retired by the exchange.
+  - **Frames:** no `TCP_NODELAY`; two writes per frame; an exact payload buffer; no
+    read-size limit.
+  - **Padding and push:** padding not stripped; `PUSH_PROMISE` ignored; `ENABLE_PUSH`
+    not sent.
+  - **Elsewhere:** the session key not copied; the redirect digest not recomputed; the
+    `_auto` driver not wired to the hop helper.
+- **The first drafts were redone before they were kept:**
+  - **Window violations:** the peer granted a window the moment it was spent, with both
+    windows equal, so a client ignoring either was not caught.
+  - **GOAWAY:** the retirement row called the pool's take before checking the close, so
+    the take's close hid a missing one. The row now waits for EOF first.
+  - **Test-fixture faults:**
+    - the test peer ended a request at a HEADERS frame's END_STREAM before its
+      CONTINUATION frames;
+    - the peer allocated on the global heap the heap row measured;
+    - in before-runs, the peer's own decode table hit the very arena bug under test.
+- **Live, against `one.one.one.one`** (a scratch probe, not kept): five pooled `_auto` GETs
+  over native TLS and h2, as above.
+- **Stability:** the alloc suite passed 6 runs of 6.
+- **3,287 assertions** (1,066 / 1,691 / 466 / 63 / 1), 9/9 fuzz. `fmt` is clean, and lint's
+  one warning is the long table line in `src/http/h2/huffman.cyr`.
+- **Windows under wine:** all four suites pass (1,053 / 1,691 / 465 / 63). Only the
+  SOCK_SEQPACKET row skips; the threaded h2 rows run.
+- **aarch64 under qemu:** all four suites pass (1,066 / 1,691 / 466 / 63).
+- **The full Linux gate, on 6.7.16:**
+  - Builds: the `CYRIUS_DCE=1` smoke, native (1,220,368 B) and libssl (819,832 B), and the
+    aarch64, Windows and AGNOS cross-builds; the Windows smoke runs under wine.
+  - Live gates: all seven pass.
+  - CI scripts: the whole-surface link check (922 fns: 26 new, all private, and one
+    renamed; control refused) and the programs sweep (35 programs) pass. The security scans pass.
+  - `cyrius deps --verify`: 82 verified.
+  - dist: all five bundles regenerated and idempotent; the sidecars change as listed
+    above.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.13.5] — 2026-10-22
 
 **The TLS session cache is safe under concurrent opens: a mutex guards it, and the TLS open

@@ -8,12 +8,12 @@ alloc
 sync
 atomic
 hashmap
-str
+string
 vec
 chrono
 syscalls
 result
-string
+str
 thread_local
 fnptr
 async

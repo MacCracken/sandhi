@@ -6,11 +6,11 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-22** at 1.13.5: the session-cache lock shipped, and the
-> cache's per-call key allocation, found during it, joined the 1.13.x line ahead of the
-> fuzz-PRNG item, which stays last. The 1.11.x and
-> 1.12.x lines are complete and their sections are gone (the 1.12.x traits item was
-> re-scoped to the transport seam: CHANGELOG [1.12.3]). History is in the CHANGELOG.
+> completed work on **2026-10-22** at 1.13.6, which shipped every remaining 1.13.x item
+> at once (the maintainer's call), so that line's section is gone. Four items found
+> during it join the end of 1.14.x. The 1.11.x and 1.12.x lines are complete too (the
+> 1.12.x traits item was re-scoped to the transport seam: CHANGELOG [1.12.3]). History
+> is in the CHANGELOG.
 
 ## Context (post-fold)
 
@@ -26,8 +26,8 @@ is currently **cyrius 6.7.16** (since 1.13.4; the full trail is in `state.md`).
   within a line ship in the order listed, one item per patch (single focus per
   patch). The lines run in order; a line opens when the previous one has shipped.
 - **Maintenance lands on the open line.** Pin bumps and consumer-filed fixes ship
-  as patches on whichever line is open (1.13.x since 1.13.0) and do not wait for a
-  line of their own.
+  as patches on whichever line is open (1.14.x next; 1.13.x closed at 1.13.6) and do
+  not wait for a line of their own.
 - A consumer-filed defect or real-workload friction (sit, bote, …) takes the next
   patch on whatever line is open; it does not wait for its "own" line.
 - Every new public verb still ships permanently into stdlib's `lib/sandhi.cyr`, so
@@ -35,95 +35,6 @@ is currently **cyrius 6.7.16** (since 1.13.4; the full trail is in `state.md`).
   (CLAUDE.md, small and earned surface), not the full incumbent feature set.
 - Per the no-silent-scope-outs rule, every deferral is a named entry here or in
   [`proposals/`](proposals/README.md), not a buried mention.
-
-## 1.13.x — Client concurrency and HTTP/2 completeness
-
-Shipped so far: 1.13.0, the per-pool mutex (a pool may be shared across threads);
-1.13.1, the h2 ALPN offer and the `_auto` dispatch's 0-RTT opt-in and credential
-digest in the request context; 1.13.2, pin → cyrius 6.7.15 and the server's framing
-reads in place (sit's filing); 1.13.3, one h2 connection shared by threads (a
-per-connection lock around one exchange); 1.13.4, pin → cyrius 6.7.16 and the HPACK /
-Huffman tables built once under concurrent first use; 1.13.5, a lock on the TLS session
-cache.
-
-- **Per-hop cred-digest recompute on cross-authority redirect-follow**
-  (`src/http/client.cyr`). The 1.3.3 session-cache cred-digest is computed once per
-  top-level dispatch (stored in the 1.6.9 request context), so an A→B redirect
-  reuses A's digest for the B handshake. Fold the recompute into
-  `_sandhi_http_follow_a`'s hop loop, and `_sandhi_http_auto_follow_a`'s (since
-  1.13.1 its hops copy the digest from the dispatch's seed context).
-- **h2 spec-completeness**, one patch each (drained from `src/http/h2/` comments at
-  1.4.3):
-  - (a) request-body DATA-frame fragmentation when `body_len > peer_max_frame`
-    (rejected with `_SANDHI_H2_ERR_BAD_LENGTH` today; `request.cyr`);
-  - (b) flow control (`response.cyr`, `request.cyr`): sandhi never sends
-    `WINDOW_UPDATE` and ignores the peer's. **A pooled h2 conn stalls once its
-    responses add up to the peer's 65,535-byte connection window**, and the h2 path has
-    no read or total timeout of its own (only the opening request's `read_ms`, 0 by
-    default). Measured at 1.13.1 against one.one.one.one: two `_auto` GETs of a 56 KB
-    page through one pool, the second never returned; with `read_ms` 3,000 on the
-    opener it fails with `SANDHI_ERR_PROTOCOL` after about 3 s. Send `WINDOW_UPDATE` as
-    response data is consumed, and apply the request's own timeouts on the h2 path;
-    `docs/guides/http2-manual.md` carries the caveat until then;
-  - (c) peer-SETTINGS `MAX_HEADER_LIST_SIZE` enforcement (not applied to conn
-    state; `conn.cyr`). `ENABLE_PUSH` is moot client-side;
-  - (d) a caller-overridable HEADERS-frame buffer cap (fixed 8 KB; `request.cyr`).
-- **h2 exchanges grow the global heap, arena or not** (`src/http/h2/request.cyr`,
-  `response.cyr`, `hpack.cyr`; measured at 1.13.3). Ten `sandhi_h2_request_a` GETs on a
-  per-request arena, reset after each, grew the no-free global heap by 42,992 B: about
-  4.3 KB an exchange, for the life of a pooled conn.
-  - **Frame I/O:** `sandhi_h2_request_send_a`, `sandhi_h2_response_recv_a` and the
-    SETTINGS / PING handlers call the bare `sandhi_h2_conn_send_frame` /
-    `_recv_frame`, so every frame header, decoded header struct and payload lands on
-    the global heap.
-  - **HPACK adds:** the encoder inserts through the bare `sandhi_hpack_table_add`, and
-    every add rebuilds both vecs (at least 304 B) and abandons the old ones.
-  - **The encoder table holds per-request pointers.** The lowercased name and the
-    `:path` / `:authority` values come from the request's arena, so after its reset the
-    table's eviction runs `strlen` over reused memory. That only corrupts the encoder's
-    size accounting today, because the encoder never references its dynamic entries.
-  - Thread `a` through the frame I/O, and give the conn's tables copies on the conn's
-    own allocator (or stop indexing on the request side).
-- **h2 frame reads write a NUL one byte past their buffer** (`src/http/h2/conn.cyr`;
-  found at 1.13.3 by reading). `sandhi_h2_conn_recv_frame_a` allocates exactly 9 bytes
-  for the header and exactly `plen` for the payload, and `sandhi_conn_recv_all`
-  NUL-terminates at `buf[len]` ("buf must have room for max+1"). Allocations are
-  8-aligned, so the byte lands in padding unless the length is a multiple of 8, and then
-  on the next byte: free space, except when the allocation ends its arena. Allocate one
-  more byte, or read with a non-terminating loop.
-- **A failed h2 exchange leaves its conn pooled mid-stream** (`src/http/h2/response.cyr`,
-  `pool_glue.cyr`; found at 1.13.3 by reading, not reproduced). After a timeout or
-  protocol error, that stream's remaining frames stay in the socket and the conn stays
-  in the pool. The next exchange skips them as other-stream frames, including any
-  HEADERS whose HPACK block then goes undecoded, so the decode table drifts from the
-  peer's and later responses can decode wrong header names. Since 1.13.3 the next
-  exchange may be another thread's. Retire a conn whose exchange failed (the GOAWAY
-  flag already makes `take_h2` evict it).
-- **An h2 conn evicted for GOAWAY is never closed** (`src/http/h2/pool_glue.cyr`; found
-  at 1.13.3 by reading). `sandhi_http_pool_take_h2` drops it from the map, and
-  `_close_h2_conns` walks only the map, so its descriptor stays open for the life of
-  the process. Close it once no exchange holds it (the conn's lock says when).
-- **Each h2 frame goes out as two writes** (`src/http/h2/conn.cyr`; measured at 1.13.3).
-  `sandhi_h2_conn_send_frame_a` sends the 9-byte header and the payload separately, and
-  sandhi sets no `TCP_NODELAY`, so Nagle holds the second write until the delayed ACK of
-  the first. Over loopback an exchange took about 80 ms; the 1.13.3 row sets
-  `TCP_NODELAY` on its test pair to run at full speed. Over TLS each write is its own
-  record, so the same applies. Send each frame as one write, or set `TCP_NODELAY` on
-  client conns (`sock_set_nodelay`, cyrius 6.7.9).
-- **Each session-cache lookup and store keeps its key on the global heap**
-  (`src/tls_policy/session_cache.cyr`; measured at 1.13.5). `_sandhi_session_cache_key_a`
-  builds the `host|hook|cred` key with `default_alloc()` on every call, and only a store of
-  a new key keeps it (in the map). 160 B a call, so with the cache on each TLS open, one
-  install and one store, keeps about 320 B for the life of the process (since 1.3.1). Build
-  the key in a per-call buffer and copy it to the heap only for a new entry.
-- **The older fuzz harnesses draw correlated bytes** (`fuzz/dns`, `headers`, `hpack`,
-  `json`, `response`, `sse`, `url`; found at 1.13.2). Each takes `% k` of the raw LCG
-  state, whose low bits have short periods. `_fz_fill`'s `s % 256` has period 256, and a
-  new seed only rotates the same cycle, so every "random" buffer is a rotation of one
-  256-byte sequence (a 4,096-byte buffer is it 16 times). Draw from the high bits, as
-  `fuzz/server_request.fcyr` does (and why: its low-bit draft missed a mutation). It
-  changes every corpus, so it is its own patch: re-run each harness's parser on the new
-  corpus and treat any finding as a finding.
 
 ## 1.14.x — Proposals: RPC and TLS surface
 
@@ -138,6 +49,31 @@ cache.
   buffers + `_sandhi_alpn_*`): a caller-supplied advertise list, per request (it
   builds on the 1.13 request-context slot, not a process-wide list).
   [Proposal](proposals/2026-06-23-tls-alpn-extensions.md).
+- **Graceful GOAWAY on h2** (`src/http/h2/response.cyr`, `dispatch.cyr`; found at
+  1.13.6). A GOAWAY fails the exchange in flight as `SANDHI_ERR_REMOTE`, even when its
+  last-stream-id says the peer will still finish that stream. Read on to the stream's
+  end when it is covered, and retire the conn after.
+- **The h2 response caps are fixed** (`src/http/h2/response.cyr`; found at 1.13.6). A
+  response header block over 16 KB (`_SANDHI_H2_HBLOCK_CAP`), or a body over 1 MiB
+  (`_SANDHI_H2_BODY_CAP`), fails as `SANDHI_ERR_PROTOCOL`, where the HTTP/1.1 path takes
+  `max_response_bytes`. Honour the request's `max_response_bytes` on h2, and size the
+  header block by what arrives.
+- **The session cache keeps an evicted entry's memory** (`src/tls_policy/session_cache.cyr`;
+  found at 1.13.6). The cache's entries and keys live on the global heap, where
+  `free_via` is a no-op, so once the cache is full each new host keeps a 16-byte entry
+  and its key (about 50 B) for the life of the process. Bounded by the eviction rate, not
+  the cache size. A freelist (`fl_alloc` / `fl_free`) owns them instead, as the HPACK
+  tables do since 1.13.6.
+- **Three fuzz harnesses rarely reach their parsers' interesting paths** (`fuzz/dns`,
+  `json`, `hpack`; found at 1.13.6 while moving their draws to the high bits).
+  - `dns.fcyr`'s random section never passes the parser's transaction-ID check (0 of its
+    buffers carry 0x1234).
+  - `json.fcyr`'s random section rarely produces a key the extractor matches.
+  - `hpack.fcyr` reaches a Huffman-coded literal name about 3 times a run, because its
+    streams stop at their first error. At 100 times the volume the new draws reach 110
+    that pass the length check, and the old draws 0.
+  Seed each with the shapes it needs (a valid ID, a known key, valid field prefixes)
+  ahead of the random tail.
 
 ## 1.15.x — Proposals: client egress
 

@@ -10,7 +10,7 @@
 #   sandhi_h2_request  — HEADERS/DATA send (src/http/h2/request.cyr, Bite 5b)
 #   sandhi_h2_response — per-stream receive + decode (src/http/h2/response.cyr, Bite 5c)
 #
-# h2 connection struct (88 bytes):
+# h2 connection struct (144 bytes):
 #   +0    conn                  (sandhi_conn ptr — owned by us once attached)
 #   +8    hpack_enc_table       (sandhi_hpack_table — outbound dynamic)
 #   +16   hpack_dec_table       (sandhi_hpack_table — inbound dynamic)
@@ -22,6 +22,13 @@
 #   +64   peer_init_window      (int — peer's INITIAL_WINDOW_SIZE, default 65535)
 #   +72   goaway_received       (int — 1 if peer sent GOAWAY)
 #   +80   mutex                 (lib/sync.cyr mutex — one exchange at a time, 1.13.3)
+#   +88   peer_max_header_list  (int — peer's MAX_HEADER_LIST_SIZE, 0 = unlimited; 1.13.6)
+#   +96   send_window           (int — what the peer's connection window still admits)
+#   +104  recv_unacked          (int — DATA octets read and still owed to the peer as WINDOW_UPDATE)
+#   +112  dead                  (int — 1 once retired: a failed exchange or a GOAWAY)
+#   +120  pending               (16-byte frame result read ahead for the next recv, or 0)
+#   +128  exch_read_ms          (int — this exchange's read timeout, set under the lock)
+#   +136  exch_deadline         (int — this exchange's deadline in clock_now_ms(), 0 = none)
 #
 # Bite 5a of 0.8.0.
 #
@@ -44,14 +51,26 @@ enum SandhiH2ConnOff {
     SANDHI_H2_CONN_OFF_PEER_WINDOW   = 64;
     SANDHI_H2_CONN_OFF_GOAWAY        = 72;
     SANDHI_H2_CONN_OFF_MUTEX         = 80;
+    SANDHI_H2_CONN_OFF_PEER_HDR_LIST = 88;
+    SANDHI_H2_CONN_OFF_SEND_WINDOW   = 96;
+    SANDHI_H2_CONN_OFF_RECV_UNACKED  = 104;
+    SANDHI_H2_CONN_OFF_DEAD          = 112;
+    SANDHI_H2_CONN_OFF_PENDING       = 120;
+    SANDHI_H2_CONN_OFF_EXCH_READ_MS  = 128;
+    SANDHI_H2_CONN_OFF_EXCH_DEADLINE = 136;
 }
 
-var SANDHI_H2_CONN_STRUCT_SIZE = 88;
+var SANDHI_H2_CONN_STRUCT_SIZE = 144;
 
 # Spec defaults — RFC 7540 §6.5.2.
 const _SANDHI_H2_DEFAULT_PEER_FRAME   = 16384;
 const _SANDHI_H2_DEFAULT_PEER_STREAMS = 0;       # 0 = unlimited
 const _SANDHI_H2_DEFAULT_PEER_WINDOW  = 65535;
+# RFC 7540 §6.9.1: no flow-control window may exceed 2^31 - 1.
+const _SANDHI_H2_MAX_WINDOW = 0x7fffffff;
+# Return received DATA to the peer once this much is outstanding: half
+# the default window, so the peer is never stopped by a full window.
+const _SANDHI_H2_WINDOW_RETURN_AT = 32768;
 
 # Connection preface — first 24 octets the client MUST send. RFC 7540
 # §3.5. Spelled out so it stays a single literal.
@@ -74,6 +93,11 @@ var _SANDHI_H2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 # 1.13.2 the two table pointers were stored unchecked, so an allocation failure
 # partway through left a live conn whose first header encode or decode
 # dereferenced a null table.
+#
+# 1.13.6 — sets TCP_NODELAY on the conn's socket. h2 frames are small and
+# already batched by the framing layer; with Nagle on, a request's second
+# write waited for the delayed ACK of its first (about 80 ms an exchange over
+# loopback). AGNOS has no TCP options and declines it.
 fn sandhi_h2_conn_new_a(a, sandhi_conn_ptr): i64 {
     var c = alloc_via(a, SANDHI_H2_CONN_STRUCT_SIZE);
     if (c == 0) { return 0; }
@@ -94,6 +118,14 @@ fn sandhi_h2_conn_new_a(a, sandhi_conn_ptr): i64 {
     store64(c + SANDHI_H2_CONN_OFF_PEER_STREAMS, _SANDHI_H2_DEFAULT_PEER_STREAMS);
     store64(c + SANDHI_H2_CONN_OFF_PEER_WINDOW,  _SANDHI_H2_DEFAULT_PEER_WINDOW);
     store64(c + SANDHI_H2_CONN_OFF_GOAWAY, 0);
+    store64(c + SANDHI_H2_CONN_OFF_PEER_HDR_LIST, 0);
+    store64(c + SANDHI_H2_CONN_OFF_SEND_WINDOW, _SANDHI_H2_DEFAULT_PEER_WINDOW);
+    store64(c + SANDHI_H2_CONN_OFF_RECV_UNACKED, 0);
+    store64(c + SANDHI_H2_CONN_OFF_DEAD, 0);
+    store64(c + SANDHI_H2_CONN_OFF_PENDING, 0);
+    store64(c + SANDHI_H2_CONN_OFF_EXCH_READ_MS, 0);
+    store64(c + SANDHI_H2_CONN_OFF_EXCH_DEADLINE, 0);
+    if (sandhi_conn_ptr != 0) { sock_set_nodelay(sandhi_conn_fd(sandhi_conn_ptr), 1); }
     return c;
 }
 
@@ -123,6 +155,43 @@ fn _sandhi_h2_conn_unlock(c): i64 {
     return 0;
 }
 
+# 1 when the conn is done: an exchange retired it, or the peer sent GOAWAY.
+# The pool's take drops such a conn. The flags only ever go 0 → 1, so the
+# take may read them under the pool's lock alone.
+fn _sandhi_h2_conn_retired(c): bool {
+    if (load64(c + SANDHI_H2_CONN_OFF_DEAD) != 0) { return true; }
+    if (load64(c + SANDHI_H2_CONN_OFF_GOAWAY) != 0) { return true; }
+    return false;
+}
+
+# 1 when the conn can carry another exchange: it is attached (a pool close
+# detaches it) and not retired. Read under the conn's lock.
+fn _sandhi_h2_conn_usable(c): bool {
+    if (load64(c + SANDHI_H2_CONN_OFF_CONN) == 0) { return false; }
+    if (_sandhi_h2_conn_retired(c) == 1) { return false; }
+    return true;
+}
+
+# Retire the conn under its lock (the caller holds it): mark it dead and
+# detach its sandhi_conn, which is returned for the caller to close after the
+# unlock. A thread that took the conn earlier then fails its exchange without
+# writing, as after `sandhi_http_pool_close_h2_conns` (1.13.3).
+fn _sandhi_h2_conn_detach_locked(c): i64 {
+    var u = load64(c + SANDHI_H2_CONN_OFF_CONN);
+    store64(c + SANDHI_H2_CONN_OFF_DEAD, 1);
+    store64(c + SANDHI_H2_CONN_OFF_CONN, 0);
+    return u;
+}
+
+# Retire and close a conn no exchange is using, waiting for one in flight.
+fn _sandhi_h2_conn_retire(c): i64 {
+    _sandhi_h2_conn_lock(c);
+    var u = _sandhi_h2_conn_detach_locked(c);
+    _sandhi_h2_conn_unlock(c);
+    if (u != 0) { sandhi_conn_close(u); }
+    return 0;
+}
+
 # Allocate the next odd stream-id for client-originated streams.
 # Returns the allocated id; advances the counter for next call. RFC
 # 7540 §5.1.1: client uses odd ids; ids monotonically increase. Not
@@ -137,33 +206,33 @@ fn sandhi_h2_conn_next_stream_id(c): i64 {
 # Frame send/recv plumbing
 # ================================================================
 #
-# Send: build header into a 9-byte buf, fire as one `send_all`, then
-# fire payload (if any) as a second `send_all`. Two syscalls per
-# frame is fine — frames are infrequent compared to inner-byte work.
+# Send: build the 9-byte header and the payload into one buffer and
+# fire it as one `send_all` (one TLS record; 1.13.6 — through 1.13.5 the
+# header and payload were two writes, and Nagle held the second until the
+# delayed ACK of the first).
 #
 # Recv: read 9 bytes into a header buf, decode to learn payload
 # length, read the payload, return both.
 
-# Send a single h2 frame, allocating the 9-byte header buf from `a`.
-# Per-frame allocation; an arena reset between requests reclaims
-# every header buf accumulated within the request.
+# Send a single h2 frame, building it in one buffer from `a`. Per-frame
+# allocation; an arena reset between requests reclaims every frame
+# accumulated within the request.
 fn sandhi_h2_conn_send_frame_a(a, c, type, flags, stream_id, payload, payload_len): i64 {
     if (payload_len < 0) { return _SANDHI_H2_ERR_BAD_LENGTH; }
     if (payload_len > sandhi_h2_conn_peer_max_frame(c)) {
         return _SANDHI_H2_ERR_BAD_LENGTH;
     }
-    var hdr = alloc_via(a, SANDHI_H2_FRAME_HEADER_SIZE);
-    if (hdr == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
-    var n = sandhi_h2_hdr_encode(hdr, 0, payload_len, type, flags, stream_id);
-    if (n < 0) { return n; }
     var conn = sandhi_h2_conn_underlying(c);
-    if (sandhi_conn_send_all(conn, hdr, SANDHI_H2_FRAME_HEADER_SIZE) < 0) {
+    if (conn == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
+    var plen = payload_len;
+    if (payload == 0) { plen = 0; }
+    var fbuf = alloc_via(a, SANDHI_H2_FRAME_HEADER_SIZE + plen);
+    if (fbuf == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
+    var n = sandhi_h2_hdr_encode(fbuf, 0, payload_len, type, flags, stream_id);
+    if (n < 0) { return n; }
+    if (plen > 0) { memcpy(fbuf + SANDHI_H2_FRAME_HEADER_SIZE, payload, plen); }
+    if (sandhi_conn_send_all(conn, fbuf, SANDHI_H2_FRAME_HEADER_SIZE + plen) < 0) {
         return _SANDHI_H2_ERR_TRUNCATED;
-    }
-    if (payload_len > 0 && payload != 0) {
-        if (sandhi_conn_send_all(conn, payload, payload_len) < 0) {
-            return _SANDHI_H2_ERR_TRUNCATED;
-        }
     }
     return 0;
 }
@@ -183,26 +252,75 @@ fn sandhi_h2_conn_send_frame(c, type, flags, stream_id, payload, payload_len): i
 # Receive one h2 frame into `a`. The hdr struct (via hdr_decode_a),
 # the 9-byte hbuf, and the variable-length payload buf all flow
 # through `a`; the result_out cells are caller-allocated.
+#
+# 1.13.6:
+#   - A frame read ahead (`SANDHI_H2_CONN_OFF_PENDING`, set by the request
+#     sender when the peer answers before the body is sent) is returned
+#     first.
+#   - Each buffer is allocated one byte longer: `sandhi_conn_recv_all`
+#     NUL-terminates at `buf[len]`, and the exact-size buffers took that byte
+#     one past their end.
+#   - A frame longer than the 16,384 octets sandhi advertises (it never
+#     raises SETTINGS_MAX_FRAME_SIZE) is refused (RFC 7540 §4.2) before its
+#     payload is allocated.
+#   - A read timeout answers `_SANDHI_H2_ERR_TIMEOUT`, and this exchange's
+#     read timeout and deadline (set under the conn's lock) bound each read.
 fn sandhi_h2_conn_recv_frame_a(a, c, result_out): i64 {
+    var pend = load64(c + SANDHI_H2_CONN_OFF_PENDING);
+    if (pend != 0) {
+        store64(c + SANDHI_H2_CONN_OFF_PENDING, 0);
+        store64(result_out + 0, load64(pend));
+        store64(result_out + 8, load64(pend + 8));
+        return SANDHI_H2_FRAME_HEADER_SIZE + sandhi_h2_hdr_length(load64(pend));
+    }
     var conn = sandhi_h2_conn_underlying(c);
-    var hbuf = alloc_via(a, SANDHI_H2_FRAME_HEADER_SIZE);
+    if (conn == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
+    if (_h2_conn_arm_read(c, conn) != 0) { return _SANDHI_H2_ERR_TIMEOUT; }
+    var hbuf = alloc_via(a, SANDHI_H2_FRAME_HEADER_SIZE + 1);
     if (hbuf == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
     var nread = sandhi_conn_recv_all(conn, hbuf, SANDHI_H2_FRAME_HEADER_SIZE);
+    if (nread == 0 - _SANDHI_EAGAIN) { return _SANDHI_H2_ERR_TIMEOUT; }
     if (nread != SANDHI_H2_FRAME_HEADER_SIZE) { return _SANDHI_H2_ERR_TRUNCATED; }
     var hdr = sandhi_h2_hdr_decode_a(a, hbuf, SANDHI_H2_FRAME_HEADER_SIZE, 0);
     if (hdr == 0) { return _SANDHI_H2_ERR_MALFORMED; }
     var plen = sandhi_h2_hdr_length(hdr);
+    if (plen > _SANDHI_H2_DEFAULT_PEER_FRAME) { return _SANDHI_H2_ERR_BAD_LENGTH; }
     var payload = 0;
     if (plen > 0) {
-        payload = alloc_via(a, plen);
+        payload = alloc_via(a, plen + 1);
         if (payload == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
-        if (sandhi_conn_recv_all(conn, payload, plen) != plen) {
-            return _SANDHI_H2_ERR_TRUNCATED;
-        }
+        if (_h2_conn_arm_read(c, conn) != 0) { return _SANDHI_H2_ERR_TIMEOUT; }
+        var pread = sandhi_conn_recv_all(conn, payload, plen);
+        if (pread == 0 - _SANDHI_EAGAIN) { return _SANDHI_H2_ERR_TIMEOUT; }
+        if (pread != plen) { return _SANDHI_H2_ERR_TRUNCATED; }
     }
     store64(result_out + 0, hdr);
     store64(result_out + 8, payload);
     return SANDHI_H2_FRAME_HEADER_SIZE + plen;
+}
+
+# Bound the next read by this exchange's deadline: its read timeout, or the
+# time left if that is sooner. 0, or -1 once the deadline has passed. No-op
+# without a deadline (the socket keeps the timeouts the exchange set once).
+fn _h2_conn_arm_read(c, conn): i64 {
+    var dl = load64(c + SANDHI_H2_CONN_OFF_EXCH_DEADLINE);
+    if (dl == 0) { return 0; }
+    var left = dl - clock_now_ms();
+    if (left <= 0) { return 0 - 1; }
+    var rms = load64(c + SANDHI_H2_CONN_OFF_EXCH_READ_MS);
+    if (rms <= 0 || rms > left) { rms = left; }
+    _h2_sock_timeout_ms(sandhi_conn_fd(conn), rms, _SANDHI_SO_RCVTIMEO);
+    return 0;
+}
+
+# Set a socket timeout in ms; 0 clears it (blocks without limit).
+fn _h2_sock_timeout_ms(fd, ms, opt): i64 {
+    var m = ms;
+    if (m < 0) { m = 0; }
+    var sec = m / 1000;
+    var usec = (m - sec * 1000) * 1000;
+    if (opt == _SANDHI_SO_SNDTIMEO) { return sock_set_send_timeout(fd, sec, usec); }
+    return sock_set_recv_timeout(fd, sec, usec);
 }
 
 fn sandhi_h2_conn_recv_frame(c, result_out): i64 {
@@ -219,16 +337,24 @@ fn sandhi_h2_conn_recv_frame(c, result_out): i64 {
 #   3. Server sends its SETTINGS frame.
 #   4. Both sides ACK each other's SETTINGS with an empty SETTINGS+ACK.
 #
-# We send our preface + an empty SETTINGS, then wait for the server's
-# SETTINGS, ACK it. The server will subsequently ACK ours (which we
-# observe in the regular frame loop, not synchronously here).
+# We send our preface + a SETTINGS with ENABLE_PUSH = 0, then wait for
+# the server's SETTINGS, ACK it. The server will subsequently ACK ours
+# (which we observe in the regular frame loop, not synchronously here).
+#
+# 1.13.6 — ENABLE_PUSH = 0. Through 1.13.5 the SETTINGS were empty, which
+# leaves push on by default (RFC 7540 §6.5.2), and the response reader
+# skipped a PUSH_PROMISE's header block, so a pushing server would have put
+# the HPACK decoder out of step. A PUSH_PROMISE now fails the exchange.
 
 fn sandhi_h2_conn_send_preface_and_settings_a(a, c): i64 {
     var conn = sandhi_h2_conn_underlying(c);
     if (sandhi_conn_send_all(conn, _SANDHI_H2_PREFACE, 24) < 0) {
         return _SANDHI_H2_ERR_TRUNCATED;
     }
-    return sandhi_h2_conn_send_frame_a(a, c, SANDHI_H2_FRAME_SETTINGS, 0, 0, 0, 0);
+    var pl = alloc_via(a, 6);
+    if (pl == 0) { return _SANDHI_H2_ERR_TRUNCATED; }
+    sandhi_h2_settings_pair_encode(pl, 0, SANDHI_H2_SETTINGS_ENABLE_PUSH, 0);
+    return sandhi_h2_conn_send_frame_a(a, c, SANDHI_H2_FRAME_SETTINGS, 0, 0, pl, 6);
 }
 
 fn sandhi_h2_conn_send_preface_and_settings(c): i64 {
@@ -236,21 +362,36 @@ fn sandhi_h2_conn_send_preface_and_settings(c): i64 {
 }
 
 # Apply a single peer-SETTINGS pair. Updates h2 conn state per §6.5.2.
+# Returns 0, or `_SANDHI_H2_ERR_MALFORMED` / `_FLOW` for a value the spec
+# makes a connection error.
+#
+# 1.13.6:
+#   - MAX_FRAME_SIZE outside 16,384 .. 2^24-1 and INITIAL_WINDOW_SIZE over
+#     2^31-1 are refused (§6.5.2). A MAX_FRAME_SIZE of 0 used to be applied,
+#     and every later frame with a payload was refused.
+#   - HEADER_TABLE_SIZE bounds the peer's DECODER, so it caps sandhi's
+#     encoder table. Through 1.13.5 it was applied to sandhi's decode table:
+#     a peer advertising a small table (or 0) made sandhi evict the entries
+#     the peer's encoder then referenced.
+#   - MAX_HEADER_LIST_SIZE is kept; the request sender refuses a header list
+#     larger than it.
+# ENABLE_PUSH is moot: sandhi is a client and never asks for push.
 fn _h2_conn_apply_setting(c, id, value): i64 {
     if (id == SANDHI_H2_SETTINGS_MAX_FRAME_SIZE) {
+        if (value < _SANDHI_H2_DEFAULT_PEER_FRAME || value > SANDHI_H2_MAX_FRAME_SIZE) {
+            return _SANDHI_H2_ERR_MALFORMED;
+        }
         store64(c + SANDHI_H2_CONN_OFF_PEER_FRAME, value);
     } elif (id == SANDHI_H2_SETTINGS_MAX_CONCURRENT_STREAMS) {
         store64(c + SANDHI_H2_CONN_OFF_PEER_STREAMS, value);
     } elif (id == SANDHI_H2_SETTINGS_INITIAL_WINDOW_SIZE) {
+        if (value > _SANDHI_H2_MAX_WINDOW) { return _SANDHI_H2_ERR_FLOW; }
         store64(c + SANDHI_H2_CONN_OFF_PEER_WINDOW, value);
     } elif (id == SANDHI_H2_SETTINGS_HEADER_TABLE_SIZE) {
-        sandhi_hpack_table_set_max_size(sandhi_h2_conn_dec_table(c), value);
+        sandhi_hpack_table_set_max_size(sandhi_h2_conn_enc_table(c), value);
+    } elif (id == SANDHI_H2_SETTINGS_MAX_HEADER_LIST_SIZE) {
+        store64(c + SANDHI_H2_CONN_OFF_PEER_HDR_LIST, value);
     }
-    # ENABLE_PUSH + MAX_HEADER_LIST_SIZE: not applied to conn state.
-    # sandhi is a client and never asks for push, so ignoring
-    # ENABLE_PUSH is correct; MAX_HEADER_LIST_SIZE is advisory.
-    # Enforcement is a wait-for-consumer-ask roadmap item (h2
-    # spec-completeness) — layer in when a peer/consumer requires it.
     return 0;
 }
 
@@ -264,7 +405,8 @@ fn sandhi_h2_conn_apply_settings_payload_a(a, c, payload, payload_len): i64 {
     while (off < payload_len) {
         var n = sandhi_h2_settings_pair_decode(payload, payload_len, off, id_cell, v_cell);
         if (n < 0) { return n; }
-        _h2_conn_apply_setting(c, load64(id_cell), load64(v_cell));
+        var sr = _h2_conn_apply_setting(c, load64(id_cell), load64(v_cell));
+        if (sr < 0) { return sr; }
         off = n;
     }
     store64(c + SANDHI_H2_CONN_OFF_PEER_SEEN, 1);

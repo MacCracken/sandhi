@@ -8,15 +8,22 @@ include "src/version_str.cyr"
 include "src/error.cyr"
 include "src/rpc/json.cyr"
 
+var _fz_s = 1;
+
+# One draw from the LCG's high bits; its low bits are short-period (`s % 256` repeats every 256).
+fn _fz_next() {
+    _fz_s = (_fz_s * 1103515245 + 12345) & 0x7fffffff;
+    return (_fz_s >> 16) & 0x7fff;
+}
+
 fn _fz_fill(n, seed) {
     var b = alloc(n + 1);
     var i = 0;
-    var s = seed;
+    _fz_s = seed;
     while (i < n) {
-        s = (s * 1103515245 + 12345) & 0x7fffffff;
-        var c = s % 256;
+        var c = _fz_next() % 256;
         # bias toward JSON structure bytes
-        if ((i % 4) == 0) { var p = s % 8; if (p == 0) { c = 123; } if (p == 1) { c = 125; } if (p == 2) { c = 34; } if (p == 3) { c = 58; } if (p == 4) { c = 44; } if (p == 5) { c = 91; } if (p == 6) { c = 93; } }
+        if ((i % 4) == 0) { var p = _fz_next() % 8; if (p == 0) { c = 123; } if (p == 1) { c = 125; } if (p == 2) { c = 34; } if (p == 3) { c = 58; } if (p == 4) { c = 44; } if (p == 5) { c = 91; } if (p == 6) { c = 93; } }
         store8(b + i, c);
         i = i + 1;
     }

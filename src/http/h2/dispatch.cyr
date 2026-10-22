@@ -34,6 +34,13 @@
 # entire response struct/body all flow through `a` — so a per-request
 # arena reset reclaims the whole exchange.
 fn sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len): i64 {
+    return _sandhi_h2_exchange_a(a, h2c, method, url, user_headers, body, body_len, 0);
+}
+
+# The exchange. `tm` is 0 to keep the socket's timeouts (the manual verb),
+# or a 24-byte {read_ms, write_ms, total_ms} of the request's own, applied
+# for this exchange under the conn's lock (the `_auto` path, 1.13.6).
+fn _sandhi_h2_exchange_a(a, h2c, method, url, user_headers, body, body_len, tm): i64 {
     var u = sandhi_url_parse_a(a, url);
     if (u == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PARSE); }
 
@@ -50,11 +57,13 @@ fn sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len): i64 {
     if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { default_port = 443; }
     var authority = host;
     if (port != default_port) {
-        var sb = str_builder_new();
-        str_builder_add_cstr(sb, host);
-        str_builder_add_cstr(sb, ":");
-        str_builder_add_int(sb, port);
-        authority = _sandhi_json_dup_a(a, str_data(str_builder_build(sb)));
+        # Built in `a` (1.13.6; through 1.13.5 the builder went on the global heap).
+        var sb = str_builder_new_a(a);
+        if (sb == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
+        str_builder_add_cstr_a(a, sb, host);
+        str_builder_add_cstr_a(a, sb, ":");
+        str_builder_add_int_a(a, sb, port);
+        authority = str_data(str_builder_build_a(a, sb));
     }
 
     # Path: encode like the 1.1 client — path + "?query" if present.
@@ -78,18 +87,85 @@ fn sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len): i64 {
     # the response reads are all the conn's, and the response reader drops
     # frames for other streams, so one thread consumed and discarded another's
     # answer. The lock covers the send and the read of its response.
+    #
+    # 1.13.6 — a conn whose exchange failed after the request reached the wire
+    # is retired: marked dead, detached, and closed after the lock. Its stream
+    # may have frames still in the socket, which the next exchange would skip
+    # (a HEADERS block among them, so its HPACK decoder would drift from the
+    # peer's); through 1.13.5 it stayed pooled. A peer's RST_STREAM ends only
+    # the stream, so that conn stays. An exchange that finds its conn retired
+    # (or detached by a pool close) fails without writing.
     _sandhi_h2_conn_lock(h2c);
-    var stream_id = sandhi_h2_request_send_a(a, h2c, method, scheme, full_path,
-      authority, user_headers,
-      body, body_len);
+    if (_sandhi_h2_conn_usable(h2c) == 0) {
+        _sandhi_h2_conn_unlock(h2c);
+        return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL);
+    }
+    if (tm != 0) { _h2_exchange_arm(h2c, tm); }
+    var st = alloc_via(a, 8);
+    var stream_id = _SANDHI_H2_ERR_MALFORMED;
+    if (st != 0) {
+        stream_id = _sandhi_h2_request_send_ex_a(a, h2c, method, scheme, full_path,
+          authority, user_headers, body, body_len, st);
+    }
     var r = 0;
+    var retire = 0;
     if (stream_id < 0) {
-        r = _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL);
+        r = _sandhi_resp_err_a(a, _h2_send_err_kind(stream_id));
+        if (stream_id == _SANDHI_H2_ERR_HDR_LIST) {
+            r = _sandhi_resp_err_msg_a(a, SANDHI_ERR_PROTOCOL,
+              "h2: the header list exceeds the peer's SETTINGS_MAX_HEADER_LIST_SIZE");
+        }
+        if (st != 0 && load64(st) != 0) { retire = 1; }
     } else {
         r = sandhi_h2_response_recv_a(a, h2c, stream_id);
+        var ek = sandhi_http_err_kind(r);
+        if (ek != SANDHI_OK) {
+            if (ek != SANDHI_ERR_REMOTE || sandhi_h2_conn_goaway_received(h2c) == 1) { retire = 1; }
+        } elif (load64(st) == 1) {
+            # The peer answered before the body was all sent: end our side
+            # (RFC 7540 §8.1, RST_STREAM with NO_ERROR).
+            var rp = alloc_via(a, 4);
+            if (rp == 0) { retire = 1; }
+            else {
+                sandhi_h2_rst_stream_encode(rp, 0, 0);
+                if (sandhi_h2_conn_send_frame_a(a, h2c, SANDHI_H2_FRAME_RST_STREAM, 0, stream_id, rp, 4) < 0) {
+                    retire = 1;
+                }
+            }
+        }
     }
+    store64(h2c + SANDHI_H2_CONN_OFF_PENDING, 0);
+    store64(h2c + SANDHI_H2_CONN_OFF_EXCH_READ_MS, 0);
+    store64(h2c + SANDHI_H2_CONN_OFF_EXCH_DEADLINE, 0);
+    var doomed = 0;
+    if (retire == 1) { doomed = _sandhi_h2_conn_detach_locked(h2c); }
     _sandhi_h2_conn_unlock(h2c);
+    if (doomed != 0) { sandhi_conn_close(doomed); }
     return r;
+}
+
+# Apply a request's own timeouts to the conn for one exchange (the caller
+# holds the conn's lock): the socket's read and write timeouts, and the
+# read timeout + deadline every frame read is bounded by. 0 = none, as on
+# the HTTP/1.1 path.
+fn _h2_exchange_arm(h2c, tm): i64 {
+    var conn = sandhi_h2_conn_underlying(h2c);
+    var fd = sandhi_conn_fd(conn);
+    var read_ms = load64(tm);
+    var total_ms = load64(tm + 16);
+    _h2_sock_timeout_ms(fd, read_ms, _SANDHI_SO_RCVTIMEO);
+    _h2_sock_timeout_ms(fd, load64(tm + 8), _SANDHI_SO_SNDTIMEO);
+    store64(h2c + SANDHI_H2_CONN_OFF_EXCH_READ_MS, read_ms);
+    var dl = 0;
+    if (total_ms > 0) { dl = clock_now_ms() + total_ms; }
+    store64(h2c + SANDHI_H2_CONN_OFF_EXCH_DEADLINE, dl);
+    return 0;
+}
+
+# The response error kind for a request-send sentinel.
+fn _h2_send_err_kind(code): i64 {
+    if (code == _SANDHI_H2_ERR_TIMEOUT) { return SANDHI_ERR_TIMEOUT; }
+    return SANDHI_ERR_PROTOCOL;
 }
 
 fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len): i64 {
@@ -183,11 +259,11 @@ fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool, seed): i64 {
             sandhi_conn_close(conn);
             return 0;
         }
-        if (sandhi_h2_conn_send_preface_and_settings(h2c) < 0) {
+        if (sandhi_h2_conn_send_preface_and_settings_a(a, h2c) < 0) {
             sandhi_conn_close(conn);
             return 0;
         }
-        if (sandhi_h2_conn_recv_peer_settings(h2c) < 0) {
+        if (sandhi_h2_conn_recv_peer_settings_a(a, h2c) < 0) {
             sandhi_conn_close(conn);
             return 0;
         }
@@ -252,9 +328,16 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts, 
             # `has_policy` definition, so a policy on a plaintext URL stays the
             # no-op it has always been and plaintext pooling is unaffected.
             if (policy == 0 || tls == 0) {
+                # 1.13.6 — the h2 path applies this request's own timeouts;
+                # through 1.13.5 it ran on whatever the conn's opener set.
+                var tm = alloc_via(a, 24);
+                if (tm == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
+                store64(tm, sandhi_http_options_get_read_ms(opts));
+                store64(tm + 8, sandhi_http_options_get_write_ms(opts));
+                store64(tm + 16, sandhi_http_options_get_total_ms(opts));
                 var h2c = sandhi_http_pool_take_h2(pool, host, port, tls);
                 if (h2c != 0) {
-                    return sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len);
+                    return _sandhi_h2_exchange_a(a, h2c, method, url, user_headers, body, body_len, tm);
                 }
                 # Try ALPN promotion only when the pool has nothing for
                 # this route in either map. If the 1.1 slot already has
@@ -265,7 +348,7 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts, 
                 if (tls == 1 && _sandhi_pool_has_idle(pool, host, port, 1) == 0) {
                     var promoted = _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool, seed);
                     if (promoted != 0) {
-                        return sandhi_h2_request_a(a, promoted, method, url, user_headers, body, body_len);
+                        return _sandhi_h2_exchange_a(a, promoted, method, url, user_headers, body, body_len, tm);
                     }
                 }
             }
@@ -279,10 +362,10 @@ fn _sandhi_http_auto_once_a(a, method, url, user_headers, body, body_len, opts, 
     # 1.9.12 P1 — a real request context, so the TLS policy reaches enforcement.
     #
     # The 0-RTT and cred-digest slots are copied from `seed`, built once per
-    # dispatch by `sandhi_http_request_auto_a` (so the digest is computed from
-    # the original headers, not recomputed per redirect hop). 1.13.1: through
-    # 1.13.0 they came from two module globals that entry point set and
-    # restored around this call.
+    # dispatch by `sandhi_http_request_auto_a`; the redirect driver recomputes
+    # the seed's digest for each hop (1.13.6). 1.13.1: through 1.13.0 they came
+    # from two module globals that entry point set and restored around this
+    # call.
     var ctx = _sandhi_reqctx_new_seeded_a(a, seed);
     if (ctx == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
     store64(ctx + SANDHI_REQCTX_OFF_TLS_POLICY, policy);
@@ -317,9 +400,7 @@ fn _sandhi_http_auto_follow_a(a, method, url, user_headers, body, body_len, opts
             return r;
         }
 
-        if (_sandhi_url_same_authority(u, next) == 0) {
-            h = _sandhi_strip_sensitive_headers_a(a, h);
-        }
+        h = _sandhi_http_hop_headers_a(a, seed, u, next, h);
 
         if (sandhi_http_status(r) == 303) { m = "GET"; b = 0; bl = 0; }
         u = next;

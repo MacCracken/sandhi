@@ -17,6 +17,7 @@ result
 sigil
 io
 fnptr
+freelist
 fmt
 thread_local
 async

@@ -207,9 +207,19 @@ fn sandhi_hpack_static_value(idx): i64 {
 # Indexing: dynamic entries get indices starting at 62 (after the
 # 61-entry static table). Newest entry is index 62.
 #
+# Storage (1.13.6): the table keeps its own copy of every entry, one
+# `fl_alloc` block holding "name\0value\0", freed when the entry is
+# evicted; entries are held oldest first, so an add appends and an
+# eviction removes from the front, and neither rebuilds the vecs. The
+# vecs grow on the global heap only up to the table's largest entry
+# count. Through 1.13.5 the table held the caller's pointers (a decoded
+# field's, in the request's arena), and every add rebuilt both vecs
+# through the caller's allocator: after a per-request arena was reset,
+# the conn's decode table pointed into reused memory.
+#
 # Struct layout (32 bytes):
-#   +0   names    (vec<cstr>: most-recent at vec[0])
-#   +8   values   (vec<cstr>: parallel)
+#   +0   names    (vec<cstr>: oldest at vec[0]; each entry's block)
+#   +8   values   (vec<cstr>: parallel; inside the same blocks)
 #   +16  cur_size (int: bytes used)
 #   +24  max_size (int: cap)
 
@@ -224,10 +234,9 @@ var SANDHI_HPACK_TABLE_STRUCT_SIZE = 32;
 var SANDHI_HPACK_ENTRY_OVERHEAD    = 32;
 
 # Build a dynamic table from `a`. The struct + parallel name/value
-# vecs all flow through `a`. Note: subsequent `_table_add` calls also
-# allocate (rebuilt name/value vecs on every insert at the head); use
-# the `_table_add_a` variant to keep that churn in `a` too. Returns
-# 0 on OOM.
+# vecs flow through `a`, which must outlive the table (an h2 conn's
+# tables live as long as the conn). Entries are the table's own copies
+# (see Storage above). Returns 0 on OOM.
 fn sandhi_hpack_table_new_a(a, max_size): i64 {
     var t = alloc_via(a, SANDHI_HPACK_TABLE_STRUCT_SIZE);
     if (t == 0) { return 0; }
@@ -269,31 +278,38 @@ fn _hpack_entry_size(name, value): i64 {
     return strlen(name) + strlen(value) + SANDHI_HPACK_ENTRY_OVERHEAD;
 }
 
-# Drop oldest entries until cur_size + need ≤ max_size. Used by
-# add() before insertion and by set_max_size() on shrink.
+# Drop oldest entries until cur_size + need ≤ max_size, freeing each
+# entry's block. Used by add() before insertion and by set_max_size()
+# on shrink.
 fn _hpack_table_evict_until_fits(t, need): i64 {
     var names = load64(t + SANDHI_HPACK_TBL_OFF_NAMES);
     var values = load64(t + SANDHI_HPACK_TBL_OFF_VALUES);
     var cur = load64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE);
     var max = load64(t + SANDHI_HPACK_TBL_OFF_MAX_SIZE);
     while (cur + need > max && vec_len(names) > 0) {
-        var last_idx = vec_len(names) - 1;
-        var n = vec_get(names, last_idx);
-        var v = vec_get(values, last_idx);
+        var n = vec_get(names, 0);
+        var v = vec_get(values, 0);
         cur = cur - _hpack_entry_size(n, v);
-        vec_remove(names, last_idx);
-        vec_remove(values, last_idx);
+        vec_remove(names, 0);
+        vec_remove(values, 0);
+        fl_free(n);
     }
     store64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE, cur);
     return 0;
 }
 
-# Insert (name, value) at the head (newest), allocating the rebuilt
-# parallel vecs from `a`. Evicts as needed. If the entry is larger
-# than max_size, the table is emptied and the entry dropped
-# (RFC 7541 §4.4). Returns 0 on success — silently ignores OOM on
-# the rebuilt vecs since dropping the insert is the same observable
-# behavior as the §4.4 over-budget drop.
+# Insert a copy of (name, value) as the newest entry. Evicts as needed.
+# If the entry is larger than max_size, the table is emptied and the
+# entry dropped (RFC 7541 §4.4). Returns 0. An allocation failure drops
+# the insert and leaves the table as the eviction left it, the same
+# observable outcome as the §4.4 drop.
+#
+# `a` is unused since 1.13.6 (the table owns its storage, see above); the
+# parameter stays for the call sites.
+#
+# 1.9.13 — never install a half-built table. The rebuild that guard
+# protected is gone: an add now appends one block to each vec, and a
+# failed push takes nothing with it.
 fn sandhi_hpack_table_add_a(a, t, name, value): i64 {
     if (t == 0) { return 0; }
     var sz = _hpack_entry_size(name, value);
@@ -303,51 +319,25 @@ fn sandhi_hpack_table_add_a(a, t, name, value): i64 {
         return 0;
     }
     _hpack_table_evict_until_fits(t, sz);
+    var nlen = strlen(name);
+    var vlen = strlen(value);
+    var blk = fl_alloc(nlen + vlen + 2);
+    if (blk == 0) { return 0; }
+    memcpy(blk, name, nlen);
+    store8(blk + nlen, 0);
+    memcpy(blk + nlen + 1, value, vlen);
+    store8(blk + nlen + 1 + vlen, 0);
     var names = load64(t + SANDHI_HPACK_TBL_OFF_NAMES);
     var values = load64(t + SANDHI_HPACK_TBL_OFF_VALUES);
-    var new_names = vec_new_a(a);
-    var new_values = vec_new_a(a);
-    if (new_names == 0 || new_values == 0) { return 0; }
-    vec_push_a(a, new_names, name);
-    vec_push_a(a, new_values, value);
-    var i = 0;
-    var n = vec_len(names);
-    while (i < n) {
-        vec_push_a(a, new_names, vec_get(names, i));
-        vec_push_a(a, new_values, vec_get(values, i));
-        i = i + 1;
+    if (vec_push_a(default_alloc(), names, blk) != 0) {
+        fl_free(blk);
+        return 0;
     }
-    # 1.9.13 — install the rebuilt table only if it is actually intact.
-    #
-    # Every `vec_push_a` above ignores its return. `vec_new_a` preallocates
-    # cap 16, so for a table of <= 15 entries the rebuild never allocates and
-    # nothing can go wrong; past that the loop crosses a growth boundary, and an
-    # allocator that cannot fund it makes `vec_push_a` answer -1 and DROP the
-    # value. The short vectors were then installed anyway and CUR_SIZE was
-    # incremented by `sz` as though the add had succeeded.
-    #
-    # Measured on the pre-fix tree, 20-entry table rebuilt through a 304-byte
-    # arena: the table silently lost 4 entries (20 -> 16) while CUR_SIZE went to
-    # 788 against an actual 603. Both consequences matter — the peer's encoder
-    # still believes the dropped entries are present, so its subsequent indexed
-    # references resolve to the WRONG entry or past the end (a reader in the
-    # probe hit `vec: index out of bounds`), and the eviction math now runs
-    # against a fictional budget.
-    #
-    # Note the two vectors do NOT go out of step with each other: they are built
-    # in lockstep with same-size back-to-back allocations, so an allocator that
-    # fails one fails the other. Verified by sweeping every arena size in
-    # 32..2048 — no size produces differing lengths. The corruption is that both
-    # are truncated together while the size counter is not.
-    #
-    # The expected post-state is the new entry plus every surviving old one.
-    # Anything shorter means a push was dropped: leave the table exactly as it
-    # was (not adding an entry is already a legal outcome of the eviction path
-    # above) rather than install a truncated one with inflated accounting.
-    var want = n + 1;
-    if (vec_len(new_names) != want || vec_len(new_values) != want) { return 0; }
-    store64(t + SANDHI_HPACK_TBL_OFF_NAMES, new_names);
-    store64(t + SANDHI_HPACK_TBL_OFF_VALUES, new_values);
+    if (vec_push_a(default_alloc(), values, blk + nlen + 1) != 0) {
+        vec_pop(names);
+        fl_free(blk);
+        return 0;
+    }
     store64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE,
       load64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE) + sz);
     return 0;
@@ -366,8 +356,10 @@ fn sandhi_hpack_table_set_max_size(t, max_size): i64 {
     return 0;
 }
 
-# Index lookup. Static = 1..61; dynamic = 62..(61+count).
-# Returns (name, value) cstrs via out cells; -1 on bad index.
+# Index lookup. Static = 1..61; dynamic = 62..(61+count), 62 newest.
+# Returns (name, value) cstrs via out cells; -1 on bad index. A dynamic
+# entry's strings are the table's: valid until the next add or eviction
+# on it (1.13.6; `sandhi_hpack_decode_field_a` hands out copies).
 fn sandhi_hpack_lookup(t, idx, name_out, value_out): i64 {
     var static_count = sandhi_hpack_static_size();
     # No static table (out of memory): no index can be placed.
@@ -378,13 +370,14 @@ fn sandhi_hpack_lookup(t, idx, name_out, value_out): i64 {
         store64(value_out, sandhi_hpack_static_value(idx));
         return 0;
     }
-    var dyn_idx = idx - static_count - 1;  # 62 → 0
+    var dyn_idx = idx - static_count - 1;  # 62 → 0, the newest
     if (t == 0) { return _SANDHI_HPACK_ERR_BAD_INDEX; }
     var names = load64(t + SANDHI_HPACK_TBL_OFF_NAMES);
     var values = load64(t + SANDHI_HPACK_TBL_OFF_VALUES);
-    if (dyn_idx >= vec_len(names)) { return _SANDHI_HPACK_ERR_BAD_INDEX; }
-    store64(name_out,  vec_get(names, dyn_idx));
-    store64(value_out, vec_get(values, dyn_idx));
+    var n = vec_len(names);
+    if (dyn_idx >= n) { return _SANDHI_HPACK_ERR_BAD_INDEX; }
+    store64(name_out,  vec_get(names, n - 1 - dyn_idx));
+    store64(value_out, vec_get(values, n - 1 - dyn_idx));
     return 0;
 }
 
@@ -565,6 +558,14 @@ fn sandhi_hpack_encode_literal_no_index(out, off, name, value): i64 {
     return p;
 }
 
+# §6.2.2 Literal without Indexing, indexed name — 0000xxxx (4-bit prefix
+# on the name index) + the literal `value`. Leaves every table alone. The
+# request encoder's form since 1.13.6.
+fn _hpack_encode_literal_no_index_name(out, off, name_idx, value): i64 {
+    var p = _hpack_int_encode(out, off, 0x00, 4, name_idx);
+    return _hpack_string_encode(out, p, value);
+}
+
 # §6.2.3 Literal Never Indexed — 0001xxxx (4-bit prefix).
 fn sandhi_hpack_encode_literal_never(out, off, name, value): i64 {
     var p = _hpack_int_encode(out, off, 0x10, 4, 0);
@@ -594,11 +595,26 @@ fn sandhi_hpack_encode_table_size_update(out, off, new_max_size): i64 {
 
 const _SANDHI_HPACK_TBL_UPDATE = 1;  # not zero so caller can distinguish
 
+# Copy a dynamic-table string out to `a`, so a decoded field never points
+# into the table (its entries are freed on eviction). Static strings are
+# literals and stay as they are. 0, or a negative sentinel on OOM.
+fn _hpack_own_a(a, idx, cell): i64 {
+    if (idx <= sandhi_hpack_static_size()) { return 0; }
+    var src = load64(cell);
+    var n = strlen(src);
+    var cp = alloc_via(a, n + 1);
+    if (cp == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
+    memcpy(cp, src, n + 1);
+    store64(cell, cp);
+    return 0;
+}
+
 # Decode one HPACK header field into `a`. Every transient cell + the
-# decoded name + value cstrs live in `a`. The dynamic-table side-effect
-# (incremental-indexing inserts via `_table_add_a`) also routes through
-# `a` so per-request callers can wire up an arena that owns both the
-# decoded headers AND the dynamic-table churn from this hop.
+# decoded name + value cstrs live in `a`. An incremental-indexing
+# insert copies the field into the table's own storage (1.13.6; through
+# 1.13.5 it inserted these `a` pointers, and rebuilt the table's vecs
+# in `a`, so a per-request arena reset left the conn's table pointing
+# into reused memory).
 fn sandhi_hpack_decode_field_a(a, t, buf, blen, off_cell, name_out, value_out): i64 {
     var off = load64(off_cell);
     if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
@@ -612,7 +628,10 @@ fn sandhi_hpack_decode_field_a(a, t, buf, blen, off_cell, name_out, value_out): 
         if (ir < 0) { return ir; }
         var idx = load64(idx_cell);
         if (idx == 0) { return _SANDHI_HPACK_ERR_MALFORMED; }
-        return sandhi_hpack_lookup(t, idx, name_out, value_out);
+        var lr0 = sandhi_hpack_lookup(t, idx, name_out, value_out);
+        if (lr0 < 0) { return lr0; }
+        if (_hpack_own_a(a, idx, name_out) < 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
+        return _hpack_own_a(a, idx, value_out);
     }
 
     if ((first & 0xC0) == 0x40) {
@@ -635,6 +654,7 @@ fn sandhi_hpack_decode_field_a(a, t, buf, blen, off_cell, name_out, value_out): 
             if (v_unused == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
             var lr = sandhi_hpack_lookup(t, name_idx, name_held, v_unused);
             if (lr < 0) { return lr; }
+            if (_hpack_own_a(a, name_idx, name_held) < 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
             name = load64(name_held);
         }
         var val_cell = alloc_via(a, 8);
@@ -679,6 +699,7 @@ fn sandhi_hpack_decode_field_a(a, t, buf, blen, off_cell, name_out, value_out): 
         if (v_unused == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
         var lr = sandhi_hpack_lookup(t, name_idx, name_held, v_unused);
         if (lr < 0) { return lr; }
+        if (_hpack_own_a(a, name_idx, name_held) < 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
         name = load64(name_held);
     }
     var val_cell = alloc_via(a, 8);

@@ -12,13 +12,20 @@ include "src/obs/prof.cyr"
 include "src/http/headers.cyr"
 include "src/http/response.cyr"
 
+var _fz_s = 1;
+
+# One draw from the LCG's high bits; its low bits are short-period (`s % 256` repeats every 256).
+fn _fz_next() {
+    _fz_s = (_fz_s * 1103515245 + 12345) & 0x7fffffff;
+    return (_fz_s >> 16) & 0x7fff;
+}
+
 fn _fz_fill(n, seed) {
     var b = alloc(n + 1);
     var i = 0;
-    var s = seed;
+    _fz_s = seed;
     while (i < n) {
-        s = (s * 1103515245 + 12345) & 0x7fffffff;
-        store8(b + i, s % 256);
+        store8(b + i, _fz_next() % 256);
         i = i + 1;
     }
     store8(b + n, 0);
