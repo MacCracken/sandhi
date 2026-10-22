@@ -41,10 +41,9 @@
 
 const _SANDHI_HPACK_HUFFMAN_INTERNAL = 0 - 1;
 
-# Decode tree nodes are part of the lazily-initialized process-wide
-# table; they must outlive any per-request arena. The `_a` variant
-# exists for symmetry but `_hpack_huffman_init` always pins the tree
-# to `default_alloc()` — see the comment at `_hpack_huffman_init`.
+# Decode tree nodes are part of the lazily-built process-wide table;
+# they must outlive any per-request arena, so `_hpack_huffman_get`
+# always builds the tree from `default_alloc()`.
 fn _hpack_huffman_node_new_a(a): i64 {
     var n = alloc_via(a, 24);
     if (n == 0) { return 0; }
@@ -77,16 +76,17 @@ var _hpack_huffman_blob = "00001ff80d007fffd8170fffffe21c0fffffe31c0fffffe41c0ff
 # for encode, 0.9.8)
 # ================================================================
 #
-# Encode-side table: array of 257 × 16-byte entries indexed by
-# symbol (0..256). Each entry holds:
-#   +0  code  (i64) — the variable-bit code, right-aligned in u64
-#   +8  bits  (i64) — code length in bits (5..30)
-# Allocated lazily inside `_hpack_huffman_init` from the same blob
-# that builds the decode tree.
+# Both tables live in one block, built once on first use
+# (`_hpack_huffman_get`):
+#   +0                the decode tree's root node
+#   +8 + sym * 16     the encode table, 257 entries indexed by symbol
+#                     (0..256): +0 the variable-bit code, right-aligned
+#                     in u64; +8 its length in bits (5..30)
 
-var _hpack_huffman_inited = 0;
-var _hpack_huffman_root = 0;
-var _hpack_huffman_codes = 0;
+# The Huffman tables' block size, in bytes.
+const _SANDHI_HPACK_HUFFMAN_TBL_SIZE = 8 + 257 * 16;
+# The Huffman tables, published by `_hpack_huffman_get`.
+var _hpack_huffman_tbl = 0;
 
 fn _hpack_hex_digit(c): i64 {
     if (c >= 48 && c <= 57)  { return c - 48; }   # 0-9
@@ -105,11 +105,10 @@ fn _hpack_parse_hex(blob, off, n): i64 {
     return v;
 }
 
-# Insert (code, length, sym) into the tree. Always allocates new
-# internal nodes from `default_alloc()` since they belong to the
-# process-wide tree (see `_hpack_huffman_init`).
-fn _hpack_huffman_add(code, length, sym): i64 {
-    var node = _hpack_huffman_root;
+# Insert (code, length, sym) into the tree under `root`, allocating
+# missing nodes from `a`. Returns 0, or -1 when a node allocation fails.
+fn _hpack_huffman_add_a(a, root, code, length, sym): i64 {
+    var node = root;
     var bit = length - 1;
     while (bit >= 0) {
         var b = (code >> bit) & 1;
@@ -117,7 +116,8 @@ fn _hpack_huffman_add(code, length, sym): i64 {
         if (b == 0) { next = load64(node + 0); }
         else        { next = load64(node + 8); }
         if (next == 0) {
-            next = _hpack_huffman_node_new_a(default_alloc());
+            next = _hpack_huffman_node_new_a(a);
+            if (next == 0) { return 0 - 1; }
             if (b == 0) { store64(node + 0, next); }
             else        { store64(node + 8, next); }
         }
@@ -128,37 +128,56 @@ fn _hpack_huffman_add(code, length, sym): i64 {
     return 0;
 }
 
-# Build the Huffman decode tree + symbol→code table. Always allocates
-# from `default_alloc()` regardless of which `_a` variant called us:
-# the tree + table are process-wide singletons consulted from every
-# h2 conn, so an arena-reset in one request would invalidate the
-# tables for every other in-flight request. There is intentionally
-# no `_init_a` variant.
-fn _hpack_huffman_init(): i64 {
-    if (_hpack_huffman_inited == 1) { return 0; }
-    var ga = default_alloc();
-    _hpack_huffman_root = _hpack_huffman_node_new_a(ga);
-    _hpack_huffman_codes = alloc_via(ga, 257 * 16);
+# Build the decode tree + symbol→code table from `a`. Returns the
+# filled block, or 0 when any allocation fails.
+fn _hpack_huffman_build_a(a): i64 {
+    var t = alloc_via(a, _SANDHI_HPACK_HUFFMAN_TBL_SIZE);
+    if (t == 0) { return 0; }
+    var root = _hpack_huffman_node_new_a(a);
+    if (root == 0) { return 0; }
+    store64(t, root);
     var i = 0;
     while (i < 257) {
         var off = i * 10;
         var code   = _hpack_parse_hex(_hpack_huffman_blob, off, 8);
         var length = _hpack_parse_hex(_hpack_huffman_blob, off + 8, 2);
-        _hpack_huffman_add(code, length, i);
-        store64(_hpack_huffman_codes + i * 16,     code);
-        store64(_hpack_huffman_codes + i * 16 + 8, length);
+        if (_hpack_huffman_add_a(a, root, code, length, i) != 0) { return 0; }
+        store64(t + 8 + i * 16,     code);
+        store64(t + 8 + i * 16 + 8, length);
         i = i + 1;
     }
-    _hpack_huffman_inited = 1;
-    return 0;
+    return t;
 }
 
-fn _hpack_huffman_code_of(symbol): i64 {
-    return load64(_hpack_huffman_codes + symbol * 16);
+# The Huffman tables, or 0 on OOM. Built on first use from
+# `default_alloc()` whichever `_a` verb asks: the tree + table are
+# process-wide singletons consulted from every h2 conn, so an
+# arena-reset in one request would invalidate them for every other
+# in-flight request.
+#
+# 1.13.4 — built in a local and published by one store after a fence, as
+# `_sandhi_alpn_wire_get` does. Through 1.13.3 the build wrote straight
+# into the globals and set a "built" flag last, so two threads making
+# their first h2 request together both built into whichever root and
+# table were published last, and the first to finish set the flag while
+# the other was still filling. Two threads building at once now each
+# fill their own block; one of them is never used.
+fn _hpack_huffman_get(): i64 {
+    var t = _hpack_huffman_tbl;
+    if (t != 0) { return t; }
+    t = _hpack_huffman_build_a(default_alloc());
+    if (t == 0) { return 0; }
+    atomic_fence();
+    _hpack_huffman_tbl = t;
+    return t;
 }
 
-fn _hpack_huffman_bits_of(symbol): i64 {
-    return load64(_hpack_huffman_codes + symbol * 16 + 8);
+fn _hpack_huffman_code_of(t, symbol): i64 {
+    return load64(t + 8 + symbol * 16);
+}
+
+fn _hpack_huffman_bits_of(t, symbol): i64 {
+    return load64(t + 8 + symbol * 16 + 8);
 }
 
 # ================================================================
@@ -175,14 +194,16 @@ fn _hpack_huffman_bits_of(symbol): i64 {
 # the only escaping allocation; arena callers can reset_via(a) once
 # the cstr is consumed.
 fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes): i64 {
-    _hpack_huffman_init();
+    var t = _hpack_huffman_get();
+    if (t == 0) { return 0; }
+    var root = load64(t);
     if (nbytes < 0) { return 0; }
     var out_cap = nbytes * 8 + 1;     # max ratio: shortest code is 5 bits
     if (out_cap < 1) { out_cap = 1; }
     var out = alloc_via(a, out_cap);
     if (out == 0) { return 0; }
     var out_len = 0;
-    var node = _hpack_huffman_root;
+    var node = root;
     var partial_bits = 0;
     var partial_all_ones = 1;
     var byte_idx = 0;
@@ -202,7 +223,7 @@ fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes): i64 {
             if (sym == 256) { return 0; }   # EOS in payload — error
             store8(out + out_len, sym);
             out_len = out_len + 1;
-            node = _hpack_huffman_root;
+            node = root;
             partial_bits = 0;
             partial_all_ones = 1;
         }
@@ -216,7 +237,7 @@ fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes): i64 {
     # Padding check: if not at root, partial path must be ≤ 7 bits
     # AND all bits must be 1 (MSBs of EOS code 0x3FFFFFFF). Otherwise
     # malformed per RFC 7541 §5.2.
-    if (node != _hpack_huffman_root) {
+    if (node != root) {
         if (partial_bits > 7) { return 0; }
         if (partial_all_ones != 1) { return 0; }
     }
@@ -237,17 +258,19 @@ fn sandhi_hpack_huffman_decode(buf, start, nbytes): i64 {
 # compare against raw size and pick the shorter representation —
 # Huffman only wins on text-shaped strings (cookie blobs, JSON
 # payloads, ASCII URLs); short binary tokens often round-trip larger
-# under Huffman, in which case we keep the raw form.
+# under Huffman, in which case we keep the raw form. Returns -1 when
+# the table cannot be built (out of memory).
 
 fn sandhi_hpack_huffman_encoded_len(s): i64 {
-    _hpack_huffman_init();
+    var t = _hpack_huffman_get();
+    if (t == 0) { return 0 - 1; }
     if (s == 0) { return 0; }
     var n = strlen(s);
     var bits = 0;
     var i = 0;
     while (i < n) {
         var ch = load8(s + i) & 0xFF;
-        bits = bits + _hpack_huffman_bits_of(ch);
+        bits = bits + _hpack_huffman_bits_of(t, ch);
         i = i + 1;
     }
     return (bits + 7) >> 3;
@@ -256,7 +279,8 @@ fn sandhi_hpack_huffman_encoded_len(s): i64 {
 # Encode `s` into `out` starting at offset `off`. Caller has already
 # emitted the H=1 length prefix and sized `out` with room for at
 # least `sandhi_hpack_huffman_encoded_len(s)` bytes after `off`.
-# Returns the new write offset.
+# Returns the new write offset (`off` itself, writing nothing, when the
+# table cannot be built; `encoded_len` answered -1 for it then).
 #
 # Bit packing is MSB-first per §5.2. The accumulator holds up to
 # ~37 bits at once (max code length 30 + up to 7 leftover bits) —
@@ -265,7 +289,8 @@ fn sandhi_hpack_huffman_encoded_len(s): i64 {
 # EOS code (all 1s up to 7 bits), which is the canonical pad pattern
 # the decoder accepts.
 fn sandhi_hpack_huffman_encode(out, off, s): i64 {
-    _hpack_huffman_init();
+    var t = _hpack_huffman_get();
+    if (t == 0) { return off; }
     if (s == 0) { return off; }
     var n = strlen(s);
     var p = off;
@@ -274,8 +299,8 @@ fn sandhi_hpack_huffman_encode(out, off, s): i64 {
     var i = 0;
     while (i < n) {
         var ch = load8(s + i) & 0xFF;
-        var code = _hpack_huffman_code_of(ch);
-        var clen = _hpack_huffman_bits_of(ch);
+        var code = _hpack_huffman_code_of(t, ch);
+        var clen = _hpack_huffman_bits_of(t, ch);
         acc = (acc << clen) | code;
         nbits = nbits + clen;
         while (nbits >= 8) {

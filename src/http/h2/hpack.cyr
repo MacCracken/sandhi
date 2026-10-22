@@ -40,131 +40,158 @@ var SANDHI_HPACK_DEFAULT_TABLE_SIZE = 4096;
 # Static table — RFC 7541 Appendix A
 # ================================================================
 #
-# Stored as two parallel vecs (names + values) of cstrs. Built once
-# on first use; module-scope cache means no per-call alloc cost.
-# Indices in HPACK are 1-based: hpack_static_name(1) → ":authority".
+# One block of 61 (name, value) cstr pairs, built once on first use
+# (`_hpack_static_get`). Indices in HPACK are 1-based:
+# hpack_static_name(1) → ":authority".
+#
+# Block layout: +0 the number of entries filled; entry i's name at
+# +8 + i*16 and its value at +16 + i*16.
 
-var _hpack_static_inited = 0;
-var _hpack_static_names  = 0;
-var _hpack_static_values = 0;
+# The static table's block size, in bytes.
+const _SANDHI_HPACK_STATIC_TBL_SIZE = 8 + 61 * 16;
+# The static table, published by `_hpack_static_get`.
+var _hpack_static_tbl = 0;
 
-fn _hpack_static_pair(n, v): i64 {
-    vec_push(_hpack_static_names, n);
-    vec_push(_hpack_static_values, v);
+fn _hpack_static_pair(t, n, v): i64 {
+    var i = load64(t);
+    store64(t + 8 + i * 16, n);
+    store64(t + 16 + i * 16, v);
+    store64(t, i + 1);
     return 0;
 }
 
 # Split into 4 chunks so each function stays under the Cyrius
 # fixup-table cap. Each chunk handles ~15 entries.
-fn _hpack_static_init_a(): i64 {
-    _hpack_static_pair(":authority", "");
-    _hpack_static_pair(":method", "GET");
-    _hpack_static_pair(":method", "POST");
-    _hpack_static_pair(":path", "/");
-    _hpack_static_pair(":path", "/index.html");
-    _hpack_static_pair(":scheme", "http");
-    _hpack_static_pair(":scheme", "https");
-    _hpack_static_pair(":status", "200");
-    _hpack_static_pair(":status", "204");
-    _hpack_static_pair(":status", "206");
-    _hpack_static_pair(":status", "304");
-    _hpack_static_pair(":status", "400");
-    _hpack_static_pair(":status", "404");
-    _hpack_static_pair(":status", "500");
-    _hpack_static_pair("accept-charset", "");
+fn _hpack_static_fill_1(t): i64 {
+    _hpack_static_pair(t, ":authority", "");
+    _hpack_static_pair(t, ":method", "GET");
+    _hpack_static_pair(t, ":method", "POST");
+    _hpack_static_pair(t, ":path", "/");
+    _hpack_static_pair(t, ":path", "/index.html");
+    _hpack_static_pair(t, ":scheme", "http");
+    _hpack_static_pair(t, ":scheme", "https");
+    _hpack_static_pair(t, ":status", "200");
+    _hpack_static_pair(t, ":status", "204");
+    _hpack_static_pair(t, ":status", "206");
+    _hpack_static_pair(t, ":status", "304");
+    _hpack_static_pair(t, ":status", "400");
+    _hpack_static_pair(t, ":status", "404");
+    _hpack_static_pair(t, ":status", "500");
+    _hpack_static_pair(t, "accept-charset", "");
     return 0;
 }
 
-fn _hpack_static_init_b(): i64 {
-    _hpack_static_pair("accept-encoding", "gzip, deflate");
-    _hpack_static_pair("accept-language", "");
-    _hpack_static_pair("accept-ranges", "");
-    _hpack_static_pair("accept", "");
-    _hpack_static_pair("access-control-allow-origin", "");
-    _hpack_static_pair("age", "");
-    _hpack_static_pair("allow", "");
-    _hpack_static_pair("authorization", "");
-    _hpack_static_pair("cache-control", "");
-    _hpack_static_pair("content-disposition", "");
-    _hpack_static_pair("content-encoding", "");
-    _hpack_static_pair("content-language", "");
-    _hpack_static_pair("content-length", "");
-    _hpack_static_pair("content-location", "");
-    _hpack_static_pair("content-range", "");
+fn _hpack_static_fill_2(t): i64 {
+    _hpack_static_pair(t, "accept-encoding", "gzip, deflate");
+    _hpack_static_pair(t, "accept-language", "");
+    _hpack_static_pair(t, "accept-ranges", "");
+    _hpack_static_pair(t, "accept", "");
+    _hpack_static_pair(t, "access-control-allow-origin", "");
+    _hpack_static_pair(t, "age", "");
+    _hpack_static_pair(t, "allow", "");
+    _hpack_static_pair(t, "authorization", "");
+    _hpack_static_pair(t, "cache-control", "");
+    _hpack_static_pair(t, "content-disposition", "");
+    _hpack_static_pair(t, "content-encoding", "");
+    _hpack_static_pair(t, "content-language", "");
+    _hpack_static_pair(t, "content-length", "");
+    _hpack_static_pair(t, "content-location", "");
+    _hpack_static_pair(t, "content-range", "");
     return 0;
 }
 
-fn _hpack_static_init_c(): i64 {
-    _hpack_static_pair("content-type", "");
-    _hpack_static_pair("cookie", "");
-    _hpack_static_pair("date", "");
-    _hpack_static_pair("etag", "");
-    _hpack_static_pair("expect", "");
-    _hpack_static_pair("expires", "");
-    _hpack_static_pair("from", "");
-    _hpack_static_pair("host", "");
-    _hpack_static_pair("if-match", "");
-    _hpack_static_pair("if-modified-since", "");
-    _hpack_static_pair("if-none-match", "");
-    _hpack_static_pair("if-range", "");
-    _hpack_static_pair("if-unmodified-since", "");
-    _hpack_static_pair("last-modified", "");
-    _hpack_static_pair("link", "");
+fn _hpack_static_fill_3(t): i64 {
+    _hpack_static_pair(t, "content-type", "");
+    _hpack_static_pair(t, "cookie", "");
+    _hpack_static_pair(t, "date", "");
+    _hpack_static_pair(t, "etag", "");
+    _hpack_static_pair(t, "expect", "");
+    _hpack_static_pair(t, "expires", "");
+    _hpack_static_pair(t, "from", "");
+    _hpack_static_pair(t, "host", "");
+    _hpack_static_pair(t, "if-match", "");
+    _hpack_static_pair(t, "if-modified-since", "");
+    _hpack_static_pair(t, "if-none-match", "");
+    _hpack_static_pair(t, "if-range", "");
+    _hpack_static_pair(t, "if-unmodified-since", "");
+    _hpack_static_pair(t, "last-modified", "");
+    _hpack_static_pair(t, "link", "");
     return 0;
 }
 
-fn _hpack_static_init_d(): i64 {
-    _hpack_static_pair("location", "");
-    _hpack_static_pair("max-forwards", "");
-    _hpack_static_pair("proxy-authenticate", "");
-    _hpack_static_pair("proxy-authorization", "");
-    _hpack_static_pair("range", "");
-    _hpack_static_pair("referer", "");
-    _hpack_static_pair("refresh", "");
-    _hpack_static_pair("retry-after", "");
-    _hpack_static_pair("server", "");
-    _hpack_static_pair("set-cookie", "");
-    _hpack_static_pair("strict-transport-security", "");
-    _hpack_static_pair("transfer-encoding", "");
-    _hpack_static_pair("user-agent", "");
-    _hpack_static_pair("vary", "");
-    _hpack_static_pair("via", "");
-    _hpack_static_pair("www-authenticate", "");
+fn _hpack_static_fill_4(t): i64 {
+    _hpack_static_pair(t, "location", "");
+    _hpack_static_pair(t, "max-forwards", "");
+    _hpack_static_pair(t, "proxy-authenticate", "");
+    _hpack_static_pair(t, "proxy-authorization", "");
+    _hpack_static_pair(t, "range", "");
+    _hpack_static_pair(t, "referer", "");
+    _hpack_static_pair(t, "refresh", "");
+    _hpack_static_pair(t, "retry-after", "");
+    _hpack_static_pair(t, "server", "");
+    _hpack_static_pair(t, "set-cookie", "");
+    _hpack_static_pair(t, "strict-transport-security", "");
+    _hpack_static_pair(t, "transfer-encoding", "");
+    _hpack_static_pair(t, "user-agent", "");
+    _hpack_static_pair(t, "vary", "");
+    _hpack_static_pair(t, "via", "");
+    _hpack_static_pair(t, "www-authenticate", "");
     return 0;
 }
 
-# Build the 61-entry static table. Always allocates from
-# `default_alloc()` — the parallel name + value vecs are process-wide
-# singletons consulted by every HPACK encode/decode and must outlive
-# any per-request arena.
-fn _hpack_static_init(): i64 {
-    if (_hpack_static_inited == 1) { return 0; }
-    var ga = default_alloc();
-    _hpack_static_names  = vec_new_a(ga);
-    _hpack_static_values = vec_new_a(ga);
-    _hpack_static_init_a();
-    _hpack_static_init_b();
-    _hpack_static_init_c();
-    _hpack_static_init_d();
-    _hpack_static_inited = 1;
-    return 0;
+# Build the 61-entry static table from `a`. Returns the filled block,
+# or 0 when its allocation fails.
+fn _hpack_static_build_a(a): i64 {
+    var t = alloc_via(a, _SANDHI_HPACK_STATIC_TBL_SIZE);
+    if (t == 0) { return 0; }
+    store64(t, 0);
+    _hpack_static_fill_1(t);
+    _hpack_static_fill_2(t);
+    _hpack_static_fill_3(t);
+    _hpack_static_fill_4(t);
+    return t;
 }
 
+# The static table, or 0 on OOM. Built on first use from
+# `default_alloc()`: it is a process-wide singleton consulted by every
+# HPACK encode/decode and must outlive any per-request arena.
+#
+# 1.13.4 — built in a local and published by one store after a fence, as
+# `_sandhi_alpn_wire_get` does. Through 1.13.3 the build wrote straight
+# into two global vecs and set a "built" flag last, so two threads making
+# their first h2 request together both built: the second replaced the
+# vecs mid-fill, both pushed into its pair, and static-index lookups
+# answered wrong names for the life of the process. Two threads building
+# at once now each fill their own block; one of them is never used.
+fn _hpack_static_get(): i64 {
+    var t = _hpack_static_tbl;
+    if (t != 0) { return t; }
+    t = _hpack_static_build_a(default_alloc());
+    if (t == 0) { return 0; }
+    atomic_fence();
+    _hpack_static_tbl = t;
+    return t;
+}
+
+# 61, or 0 when the table cannot be built (out of memory).
 fn sandhi_hpack_static_size(): i64 {
-    _hpack_static_init();
-    return vec_len(_hpack_static_names);
+    var t = _hpack_static_get();
+    if (t == 0) { return 0; }
+    return load64(t);
 }
 
 fn sandhi_hpack_static_name(idx): i64 {
-    _hpack_static_init();
-    if (idx < 1 || idx > vec_len(_hpack_static_names)) { return 0; }
-    return vec_get(_hpack_static_names, idx - 1);
+    var t = _hpack_static_get();
+    if (t == 0) { return 0; }
+    if (idx < 1 || idx > load64(t)) { return 0; }
+    return load64(t + 8 + (idx - 1) * 16);
 }
 
 fn sandhi_hpack_static_value(idx): i64 {
-    _hpack_static_init();
-    if (idx < 1 || idx > vec_len(_hpack_static_values)) { return 0; }
-    return vec_get(_hpack_static_values, idx - 1);
+    var t = _hpack_static_get();
+    if (t == 0) { return 0; }
+    if (idx < 1 || idx > load64(t)) { return 0; }
+    return load64(t + 16 + (idx - 1) * 16);
 }
 
 # ================================================================
@@ -343,6 +370,8 @@ fn sandhi_hpack_table_set_max_size(t, max_size): i64 {
 # Returns (name, value) cstrs via out cells; -1 on bad index.
 fn sandhi_hpack_lookup(t, idx, name_out, value_out): i64 {
     var static_count = sandhi_hpack_static_size();
+    # No static table (out of memory): no index can be placed.
+    if (static_count == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     if (idx < 1) { return _SANDHI_HPACK_ERR_BAD_INDEX; }
     if (idx <= static_count) {
         store64(name_out,  sandhi_hpack_static_name(idx));
@@ -436,7 +465,7 @@ fn _hpack_int_decode(buf, blen, off_cell, prefix_bits, value_out): i64 {
 fn _hpack_string_encode(out, off, s): i64 {
     var raw_len = strlen(s);
     var huff_len = sandhi_hpack_huffman_encoded_len(s);
-    if (huff_len < raw_len) {
+    if (huff_len >= 0 && huff_len < raw_len) {
         var ph = _hpack_int_encode(out, off, 0x80, 7, huff_len);  # H=1
         return sandhi_hpack_huffman_encode(out, ph, s);
     }

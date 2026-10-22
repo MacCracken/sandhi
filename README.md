@@ -21,8 +21,8 @@ at 1.0.0 / Cyrius v5.7.0 ([ADR 0002](docs/adr/0002-clean-break-fold-at-cyrius-v5
 Patches land here first; `dist/sandhi.cyr` is regenerated each release and a
 small cyrius slot re-folds it.
 
-Current: **1.13.3**, pinned to **Cyrius 6.7.15**. **3,194 test assertions green**
-(1,066 sandhi + 1,691 h2 + 373 alloc + 63 rpc + 1 raw-include) on Linux and macOS, plus a `cyrius fuzz`
+Current: **1.13.4**, pinned to **Cyrius 6.7.16**. **3,204 test assertions green**
+(1,066 sandhi + 1,691 h2 + 383 alloc + 63 rpc + 1 raw-include) on Linux and macOS, plus a `cyrius fuzz`
 harness suite (9 parser-robustness harnesses) gating in CI. Builds clean for x86_64,
 aarch64, and the **AGNOS** target.
 
@@ -157,7 +157,7 @@ cyrius deps                                                 # resolve stdlib dep
 cyrius build programs/smoke.cyr build/sandhi-smoke          # smoke link proof (native, no flag)
 cyrius test  tests/sandhi.tcyr                              # core (1,066 assertions)
 cyrius test  tests/h2.tcyr                                  # h2-specific (1,691 assertions)
-cyrius test  tests/alloc.tcyr                               # allocator / arena (373 assertions)
+cyrius test  tests/alloc.tcyr                               # allocator / arena (383 assertions)
 cyrius test  tests/rpc.tcyr                                 # RPC dialects (63 assertions)
 cyrius fuzz                                                 # parser-robustness harnesses (fuzz/*.fcyr)
 cyrius lint  $(find src -name '*.cyr')                      # static checks (warn-as-fail in CI; recurses into src/http/h2/)

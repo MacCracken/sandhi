@@ -4,6 +4,133 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.13.4] — 2026-10-22
+
+**Pin → cyrius 6.7.16. The HPACK static and Huffman tables are built once, even when
+threads make their first h2 request together.** Through 1.13.3 two threads' first use could
+build both tables into each other, and every later h2 request in the process decoded through
+the damage. No new public verb. Fifth patch on the 1.13.x line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`. 6.7.16 vendors sandhi 1.13.3.
+
+**Visible to a consumer:**
+- **Threads may start h2 traffic at the same moment,** on one pool or on separate ones (the
+  1.13.3 guide's advice for parallel h2). The two tables are process-wide, so separate pools
+  did not keep threads apart from this race.
+- **When the global heap is exhausted, HPACK now fails instead of faulting.**
+  `sandhi_hpack_huffman_encoded_len` answers -1 if its table cannot be built, and
+  `sandhi_hpack_huffman_encode` then writes nothing; `sandhi_hpack_static_size` answers 0, and
+  `sandhi_hpack_lookup` fails. Through 1.13.3 either build dereferenced a null pointer.
+
+### Fixed
+
+- **h2/hpack, h2/huffman: two threads' first use built the process-wide tables into each
+  other.** Found at 1.13.1 by reading (roadmap 1.13.x). `_hpack_static_init` and
+  `_hpack_huffman_init` wrote straight into the globals and set a "built" flag last:
+  - **The static table:** the build stored a new pair of vecs, then pushed 61 entries. A
+    second thread's build replaced the vecs mid-fill and both threads pushed into its pair, so
+    the table held entries from both, out of order.
+  - **The Huffman tables:** both builds inserted into whichever root and code table were
+    published last, and the first thread to finish set the flag while the other was still
+    filling. A reader could then find codes of length 0 and a tree missing branches.
+  - **Either way the damage lasted the life of the process:** every later h2 request, on any
+    connection, encoded and decoded through it.
+  - **Measured by the new row, before the fix:** four threads released together into first
+    use saw a wrong table in 586 – 596 of 600 thread-rounds (three runs). Counted separately,
+    the Huffman tables were wrong in 600 and the static table in 592. With two threads, 285 of
+    300. The Huffman tables left published after the rounds were wrong in every run.
+  - **The fix:** each table is one block, built in locals and published by one store after a
+    fence (`_hpack_static_get`, `_hpack_huffman_get`), as 1.13.1 did for the ALPN lists. Two
+    threads building at once each fill their own block, and one of them is never used.
+    - The static table is now a flat block of 61 (name, value) pairs: 984 B, where the two
+      vecs it replaces grew to 1,840.
+    - The Huffman tree's root shares one block with the encode table.
+- **h2/hpack, h2/huffman: an allocation failure in either build dereferenced a null
+  pointer.** Found while making the builds publish once. The two vecs, the tree's root, the
+  code table and every tree node were used unchecked.
+  - **The fix:** both builders (`_hpack_static_build_a`, `_hpack_huffman_build_a`) answer 0
+    at any failure and publish nothing, and the readers fail as listed above.
+    `_hpack_string_encode` writes a raw string when the Huffman length is -1.
+  - **Reachable only through an exhausted global heap:** the getters always build from
+    `default_alloc()`. The builders take an allocator so the suite can fail them.
+
+### Changed
+
+- **Pin → cyrius 6.7.16** (from 6.7.15). `lib/` re-resolved from empty: **82 files**, the
+  same set as at 6.7.15.
+  - **Deps:** sigil 3.13.12 → **3.13.13**; sakshi **2.5.10** and bayan **1.9.0** unchanged.
+    `cyrius.lock` re-resolved (82 rows, 18 of them with a new hash).
+  - **The pin needed no source change.** Before the fix, on 6.7.16, all four suites passed,
+    both DCE smoke builds linked, and lint, `fmt` and `vet` were clean.
+  - **6.7.16 refolds sandhi 1.13.3.**
+  - **Toolchain changes in what sandhi composes:**
+    - The native TLS servers refuse more malformed ClientHellos: a 1.2 hello whose
+      compression methods or extension list does not parse (`decode_error`), a 1.3 hello
+      with a partial extension entry, a repeated extension, or a compression other than
+      null.
+    - Windows: closing a negative descriptor answers -9, and so does every descriptor call
+      on an fd above 2 with a low bit set, the socket wrappers included.
+    - sigil 3.13.13's run-capture verbs skip a redirect whose fd already is the target.
+    - The frontend refuses more shapes (enum members and struct fields need their separator,
+      `.field` on a narrow global, among others). sandhi's sources hit none of them.
+  - **Inherited, not fixed:** 6.7.16 records **CYRIUS-2026-0037** (P3). The native TLS 1.3
+    server checks each ClientHello key share against the supported groups by a linear scan,
+    so one 16 KB hello can cost about 24 ms of CPU. sandhi's TLS server accepts through that
+    server (`tls_accept_alloc_in`), so a sandhi TLS server is exposed until a cyrius release
+    fixes it. 6.7.16 schedules its security audit for 6.7.17.
+- **docs:** `docs/architecture/001-hpack-huffman-blob.md` names the new builders and how the
+  tables are published.
+- **tests:** the 1.13.3 shared-connection row's comment no longer says its lone first
+  exchange keeps the threads off this race.
+- **Roadmap:** the HPACK / Huffman item leaves 1.13.x. The session cache's lock is next.
+
+### Verification
+
+- **New rows, 10 assertions,** in `alloc/1134/hpack_tables_first_use`:
+  - **First use under threads:** 150 rounds, each clearing both tables and releasing four
+    threads together. Two build, one of them after a delay that varies by round, so some
+    rounds build twice at once. The other two spin on the table pointers and check each table
+    the moment it is published. Every thread checks all 61 static entries through the public
+    verbs and a Huffman round trip of bytes 1 – 255. The row also checks a single-threaded
+    reference first and the tables left published last.
+  - **Fail-closed:** under every allocation-failure point from 0 to 519, each builder answers
+    0 or a whole table. A whole static block holds all 61 entries. A whole Huffman block has
+    every code and length matching a reference, and its tree walks every code to its symbol.
+- **Before the fix:** the threaded row failed on 1.13.3's tables, as measured above. The
+  fail-closed row has no 1.13.3 counterpart: the old builds took no allocator.
+- **Mutations, each caught:**
+  - the static table published before it is filled: 149 – 150 of 600 thread-rounds (its
+    watcher, every round);
+  - the Huffman tables published before they are filled: 450 of 600;
+  - a failed tree insert ignored: 512 partial tables;
+  - the node allocation unchecked, and the root unchecked: each faults in the fail-closed
+    row.
+  - Dropping the fence cannot be observed on x86; it stays for aarch64.
+- **The row's first draft was too weak, and was redone before it was kept.** It released all
+  four threads straight into the build. Every thread built, none read a table mid-fill, and
+  the two publish mutations were caught only 8 and 1 times in 600. The watcher threads fixed
+  that.
+- **Stability:** the row passed 6 runs of 6.
+- **3,204 assertions** (1,066 / 1,691 / 383 / 63 / 1), 9/9 fuzz. `fmt` is clean, and lint's
+  one warning is the long table line in `src/http/h2/huffman.cyr` (now line 72).
+- **Windows under wine:** all four suites pass (1,053 / 1,691 / 383 / 63). The threaded row
+  runs there.
+- **aarch64 under qemu:** all four suites pass (1,066 / 1,691 / 383 / 63). qemu runs the guest
+  on the host's memory ordering, so this does not exercise aarch64's weaker one.
+- **The full Linux gate, on 6.7.16:**
+  - Builds: the `CYRIUS_DCE=1` smoke, native (1,216,144 B) and libssl (819,696 B), and the
+    aarch64, Windows and AGNOS cross-builds; the Windows smoke runs under wine.
+  - Live gates: all seven pass.
+  - CI scripts: the whole-surface link check (890 fns: nine private fns replace seven;
+    control refused) and the programs sweep (35 programs) pass. The security scans pass.
+  - `cyrius deps --verify`: 82 verified.
+  - dist: all five bundles regenerated and idempotent. The change reaches only `sandhi.cyr`
+    (the profiles do not include the h2 modules). `rpc` and `discovery` take the version
+    stamp and `SANDHI_VERSION`, `tls` and `server` the stamp. All five `.deps` sidecars are
+    unchanged.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.13.3] — 2026-10-21
 
 **One HTTP/2 connection may be used by several threads at once: each h2 connection owns

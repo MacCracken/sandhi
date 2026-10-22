@@ -2241,9 +2241,8 @@ fn test_h2_conn_shared_by_threads() {
         assert_eq(1, 1, "h2 shared: no thread — skipped");
         return 0;
     }
-    # One exchange alone first: proves the fixture, and builds the process-wide
-    # HPACK tables before two threads can race their first use (a separate
-    # roadmap item).
+    # One exchange alone first: proves the fixture. (Through 1.13.3 it also kept
+    # the threads off the HPACK tables' first-use race, fixed at 1.13.4.)
     var wa = arena_allocator(1200000);
     var w = sandhi_h2_request_a(wa, _t_h2s_h2c, "GET", "http://h2.test/warm", 0, 0, 0);
     assert_eq(sandhi_http_status(w), 200, "h2 shared: a lone exchange answers 200");
@@ -2361,6 +2360,211 @@ fn test_h2_pool_close_clears_conn() {
     }
     sock_close(_t_h2s_cfd);
     sock_close(_t_h2s_sfd);
+    return 0;
+}
+
+# 1.13.4 — the process-wide HPACK static and Huffman tables are built on first
+# use. Through 1.13.3 the builds wrote straight into the globals and set a
+# "built" flag last, so threads making their first h2 request together built
+# into each other's tables. Each round clears both tables and releases four
+# threads together: two build (`_t_hpt_worker`), and two watch the table
+# pointers so they check each table the moment it is published. Every thread
+# checks all 61 static entries and a Huffman round trip of every byte value.
+# Mutation: publishing either table before it is filled fails the row.
+var _t_hpt_ready = 0;
+var _t_hpt_go = 0;
+var _t_hpt_step = 0;
+var _t_hpt_bad = 0;
+var _t_hpt_ref_names = 0;
+var _t_hpt_ref_values = 0;
+var _t_hpt_bytes = 0;
+
+fn _t_hpt_threads(): i64 { return 4; }
+fn _t_hpt_rounds(): i64 { return 150; }
+# The decoder sizes its output at 8 bytes per input byte.
+fn _t_hpt_arena(): i64 { return 16384; }
+
+# Forget both tables, so the next use builds them.
+fn _t_hpt_reset(): i64 {
+    _hpack_static_tbl = 0;
+    _hpack_huffman_tbl = 0;
+    return 0;
+}
+
+# Every static entry, by the public verbs. 0, or the number that differ.
+fn _t_hpt_static_bad(): i64 {
+    var bad = 0;
+    if (sandhi_hpack_static_size() != 61) { bad = bad + 1; }
+    var i = 1;
+    while (i <= 61) {
+        var n = sandhi_hpack_static_name(i);
+        var v = sandhi_hpack_static_value(i);
+        if (n == 0 || v == 0) { bad = bad + 1; }
+        elif (streq(n, load64(_t_hpt_ref_names + i * 8)) != 1
+          || streq(v, load64(_t_hpt_ref_values + i * 8)) != 1) {
+            bad = bad + 1;
+        }
+        i = i + 1;
+    }
+    return bad;
+}
+
+# Bytes 1..255 through the encoder and back through the decoder. 0, or 1.
+fn _t_hpt_huffman_bad(a): i64 {
+    var n = sandhi_hpack_huffman_encoded_len(_t_hpt_bytes);
+    if (n <= 0) { return 1; }
+    var out = alloc_via(a, n + 8);
+    if (out == 0) { return 1; }
+    if (sandhi_hpack_huffman_encode(out, 0, _t_hpt_bytes) != n) { return 1; }
+    var back = sandhi_hpack_huffman_decode_a(a, out, 0, n);
+    if (back == 0) { return 1; }
+    if (streq(back, _t_hpt_bytes) != 1) { return 1; }
+    if (sandhi_hpack_huffman_encoded_len("www.example.com") != 12) { return 1; }
+    return 0;
+}
+
+# Spin until the table at `slot` is published; bounded, so a build that never
+# publishes cannot hang the row.
+fn _t_hpt_watch(slot): i64 {
+    var n = 0;
+    while (atomic_load(slot) == 0 && n < 100000000) { n = n + 1; }
+    return 0;
+}
+
+# Threads 0 and 1 build, 1 after a delay that varies by round, so some rounds
+# build both at once and others not. Thread 2 watches the static table, 3 the
+# Huffman tables. Even threads check the static table first.
+fn _t_hpt_worker(arg) {
+    var a = arena_allocator(_t_hpt_arena());
+    var spin = 0;
+    if (arg == 1) { spin = _t_hpt_step; }
+    atomic_fetch_add(&_t_hpt_ready, 1);
+    while (atomic_load(&_t_hpt_go) == 0) { }
+    if (arg == 2) { _t_hpt_watch(&_hpack_static_tbl); }
+    if (arg == 3) { _t_hpt_watch(&_hpack_huffman_tbl); }
+    while (spin > 0) { spin = spin - 1; }
+    var bad = 0;
+    if ((arg & 1) == 0) {
+        bad = _t_hpt_static_bad();
+        bad = bad + _t_hpt_huffman_bad(a);
+    } else {
+        bad = _t_hpt_huffman_bad(a);
+        bad = bad + _t_hpt_static_bad();
+    }
+    if (bad != 0) { atomic_fetch_add(&_t_hpt_bad, 1); }
+    return 0;
+}
+
+fn test_hpack_tables_first_use_threads() {
+    if (THREADS_CONCURRENT != 1) { assert_eq(1, 1, "hpack tables: no concurrent threads — skipped"); return 0; }
+    # The reference: both tables as one thread builds them.
+    _t_hpt_reset();
+    _t_hpt_ref_names = alloc(62 * 8);
+    _t_hpt_ref_values = alloc(62 * 8);
+    var i = 1;
+    while (i <= 61) {
+        store64(_t_hpt_ref_names + i * 8, sandhi_hpack_static_name(i));
+        store64(_t_hpt_ref_values + i * 8, sandhi_hpack_static_value(i));
+        i = i + 1;
+    }
+    _t_hpt_bytes = alloc(256);
+    i = 0;
+    while (i < 255) { store8(_t_hpt_bytes + i, i + 1); i = i + 1; }
+    store8(_t_hpt_bytes + 255, 0);
+    assert_eq(_t_hpt_static_bad(), 0, "hpack tables: one thread builds the static table whole");
+    assert_eq(_t_hpt_huffman_bad(arena_allocator(_t_hpt_arena())), 0, "hpack tables: and the Huffman tables");
+
+    var nt = _t_hpt_threads();
+    var th = alloc(nt * 8);
+    var spawned = 1;
+    _t_hpt_bad = 0;
+    var r = 0;
+    while (r < _t_hpt_rounds()) {
+        _t_hpt_reset();
+        _t_hpt_step = (r % 10) * 400;
+        atomic_store(&_t_hpt_ready, 0);
+        atomic_store(&_t_hpt_go, 0);
+        var t = 0;
+        while (t < nt) {
+            store64(th + t * 8, thread_create(&_t_hpt_worker, t));
+            if (load64(th + t * 8) == 0) { spawned = 0; }
+            t = t + 1;
+        }
+        if (spawned == 1) {
+            while (atomic_load(&_t_hpt_ready) < nt) { }
+        }
+        atomic_store(&_t_hpt_go, 1);
+        t = 0;
+        while (t < nt) {
+            if (load64(th + t * 8) != 0) { thread_join(load64(th + t * 8)); }
+            t = t + 1;
+        }
+        if (spawned == 0) { r = _t_hpt_rounds(); }
+        r = r + 1;
+    }
+    if (spawned == 0) { assert_eq(1, 1, "hpack tables: no thread — skipped"); return 0; }
+    assert_eq(_t_hpt_bad, 0, "hpack tables: 4 threads x 150 rounds of first use all saw both tables whole");
+    assert_eq(_t_hpt_static_bad(), 0, "hpack tables: the static table left published is whole");
+    assert_eq(_t_hpt_huffman_bad(arena_allocator(_t_hpt_arena())), 0, "hpack tables: and the Huffman tables");
+    return 0;
+}
+
+# A Huffman block is whole when every symbol's code and length match the
+# reference's and its tree walks each code to that symbol's leaf.
+fn _t_hpt_huffman_whole(t, ref): i64 {
+    var root = load64(t);
+    if (root == 0) { return 0; }
+    var sym = 0;
+    while (sym < 257) {
+        var code = load64(t + 8 + sym * 16);
+        var bits = load64(t + 8 + sym * 16 + 8);
+        if (code != load64(ref + 8 + sym * 16) || bits != load64(ref + 8 + sym * 16 + 8)) { return 0; }
+        var node = root;
+        var b = bits - 1;
+        while (b >= 0) {
+            if (((code >> b) & 1) == 0) { node = load64(node + 0); } else { node = load64(node + 8); }
+            if (node == 0) { return 0; }
+            b = b - 1;
+        }
+        if (load64(node + 16) != sym) { return 0; }
+        sym = sym + 1;
+    }
+    return 1;
+}
+
+# Both builders fail closed: under every allocation-failure point each answers
+# 0 or a whole table, never a partial one. Through 1.13.3 a failed allocation
+# in either build was stored unchecked and the next store through it faulted.
+fn test_hpack_tables_build_fails_closed() {
+    var ref = _hpack_huffman_build_a(default_alloc());
+    assert_neq(ref, 0, "huffman build: builds from the global heap");
+    var partial_s = 0;
+    var whole_s = 0;
+    var partial_h = 0;
+    var whole_h = 0;
+    var k = 0;
+    while (k < 520) {
+        if (k < 4) {
+            var s = _hpack_static_build_a(fail_after_n_allocs(k));
+            if (s != 0) {
+                if (load64(s) == 61 && streq(load64(s + 8), ":authority") == 1
+                  && streq(load64(s + 8 + 60 * 16), "www-authenticate") == 1) {
+                    whole_s = whole_s + 1;
+                } else {
+                    partial_s = partial_s + 1;
+                }
+            }
+        }
+        var h = _hpack_huffman_build_a(fail_after_n_allocs(k));
+        if (h != 0) {
+            if (_t_hpt_huffman_whole(h, ref) == 1) { whole_h = whole_h + 1; } else { partial_h = partial_h + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(partial_s, 0, "static build: no allocation failure leaves a partial table");
+    assert(whole_s > 0, "static build: built once allocations stop failing");
+    assert_eq(partial_h, 0, "huffman build: no allocation failure leaves a partial table");
+    assert(whole_h > 0, "huffman build: built once allocations stop failing");
     return 0;
 }
 
@@ -2618,6 +2822,10 @@ fn main() {
     test_h2_conn_new_fails_closed();
     test_h2_pool_close_clears_conn();
     test_h2_conn_shared_by_threads();
+
+    test_group("alloc/1134/hpack_tables_first_use");
+    test_hpack_tables_build_fails_closed();
+    test_hpack_tables_first_use_threads();
 
     test_group("alloc/132/conn_0rtt_status_accessor");
     test_alloc_132_conn_0rtt_status_accessor();

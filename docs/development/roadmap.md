@@ -6,9 +6,8 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-21** at 1.13.3: the shared-h2-conn item shipped, and five
-> h2 gaps found during it joined the 1.13.x line ahead of the fuzz-PRNG item (found at
-> 1.13.2), which stays last. The 1.11.x and
+> completed work on **2026-10-22** at 1.13.4: the HPACK / Huffman first-use item shipped
+> with the pin → 6.7.16, and nothing new joined the line. The 1.11.x and
 > 1.12.x lines are complete and their sections are gone (the 1.12.x traits item was
 > re-scoped to the transport seam: CHANGELOG [1.12.3]). History is in the CHANGELOG.
 
@@ -19,7 +18,7 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.7.15** (since 1.13.2; the full trail is in `state.md`).
+is currently **cyrius 6.7.16** (since 1.13.4; the full trail is in `state.md`).
 
 **How the lines work.**
 - Each line is a minor release (1.11.0, 1.12.0, …) followed by its patches; items
@@ -42,17 +41,9 @@ Shipped so far: 1.13.0, the per-pool mutex (a pool may be shared across threads)
 1.13.1, the h2 ALPN offer and the `_auto` dispatch's 0-RTT opt-in and credential
 digest in the request context; 1.13.2, pin → cyrius 6.7.15 and the server's framing
 reads in place (sit's filing); 1.13.3, one h2 connection shared by threads (a
-per-connection lock around one exchange).
+per-connection lock around one exchange); 1.13.4, pin → cyrius 6.7.16 and the HPACK /
+Huffman tables built once under concurrent first use.
 
-- **HPACK and Huffman tables built twice at once** (`src/http/h2/hpack.cyr`,
-  `huffman.cyr`; found at 1.13.1 by reading, not reproduced). `_hpack_static_init` and
-  `_hpack_huffman_init` build process-wide tables on first use, writing straight into
-  the globals and setting the "built" flag last. Two threads making their first h2
-  request at the same moment (even on separate pools, the guide's advice) both build:
-  the second replaces the table with an empty one mid-fill and both then push into it,
-  which can leave entries from both interleaved, so static-index lookups return wrong
-  names for the life of the process. Build into locals and publish once, as 1.13.1 did
-  for the ALPN lists.
 - **TLS session cache under concurrent opens** (`src/tls_policy/session_cache.cyr`;
   found at 1.13.1). Once `sandhi_session_cache_enable(1)` is on, every TLS open looks
   up, stores and evicts in one process-wide map with no lock. Only the libssl backend

@@ -10,7 +10,7 @@ future protocol modules that carry large lookup tables.
 
 ## What the module actually ships
 
-`src/http/h2/huffman.cyr:64`:
+`src/http/h2/huffman.cyr`:
 
     var _hpack_huffman_blob = "00001ff80d007fffd817..." (2570 chars)
 
@@ -21,15 +21,18 @@ Format per entry (10 hex chars × 257 entries):
 - 2 hex chars for the code's bit length (3–30).
 - The symbol is implicit from the entry's index (0..256).
 
-At first call into the decoder, `_hpack_huffman_init()` walks the
-blob, parses each entry with `_hpack_parse_hex`, and inserts it
-into a binary tree via `_hpack_huffman_add` (see
-`src/http/h2/huffman.cyr:93`). Tree nodes are 24 bytes
+At first use of the decoder or encoder, `_hpack_huffman_get()` has
+`_hpack_huffman_build_a` walk the blob, parse each entry with
+`_hpack_parse_hex`, and insert it into a binary tree via
+`_hpack_huffman_add_a`. Tree nodes are 24 bytes
 `{left_ptr, right_ptr, symbol_or_minus_1}`; internal nodes carry
 `symbol = _SANDHI_HPACK_HUFFMAN_INTERNAL = -1`, leaves carry
-`0..256`. `_hpack_huffman_inited` gates re-init.
+`0..256`. The tree's root and the symbol→code encode table share one
+block, published by a single store after a fence once it is complete
+(1.13.4; through 1.13.3 the build wrote straight into globals behind a
+"built" flag, and two threads' first uses raced).
 
-Decode (`_hpack_huffman_decode`) walks the tree bit-by-bit. On a
+Decode (`sandhi_hpack_huffman_decode_a`) walks the tree bit-by-bit. On a
 leaf, it emits the symbol (or rejects if EOS). Padding rule per
 §5.2: after consuming all input bits, if not at root, the partial
 path must be ≤ 7 bits and all-1s (the MSBs of the EOS code); any
@@ -51,15 +54,14 @@ decode tree is built once per process.
 
 The related constraint (per-*function* fixup allowance, distinct
 from the per-program cap) is what split the HPACK static table
-init into `_hpack_static_init_a/b/c/d` at `src/http/h2/hpack.cyr`
+fill into `_hpack_static_fill_1` .. `_4` at `src/http/h2/hpack.cyr`
 — each function under the allowance, four functions under the
 program-level cap. Same shape, at a different granularity.
 
 ## Tradeoffs this pattern makes
 
-- **Accepts**: a runtime parse cost at first use (hex-digit walks,
-  `_hpack_parse_hex` at `src/http/h2/huffman.cyr:80`, tree node
-  allocations). For HPACK Huffman this is ~257 tree inserts ×
+- **Accepts**: a runtime parse cost at first use (hex-digit walks in
+  `_hpack_parse_hex`, tree node allocations). For HPACK Huffman this is ~257 tree inserts ×
   ~15 bits average depth ≈ 4000 tree walks + ~300 allocs. Sub-ms
   in practice.
 - **Accepts**: the table is encoded as a literal string, which
@@ -70,8 +72,8 @@ program-level cap. Same shape, at a different granularity.
 - **Gains**: one fixup instead of N. Critical when N is ≥ ~100
   and the file is already near the per-program cap.
 - **Gains**: the table encoding is legible — one line per 16
-  symbols in the source (see the comment block at
-  `src/http/h2/huffman.cyr:60`), inspectable by anyone who can
+  symbols in the source (see the comment block above the blob in
+  `src/http/h2/huffman.cyr`), inspectable by anyone who can
   read RFC 7541 Appendix B.
 
 ## When to reach for this pattern
@@ -95,7 +97,7 @@ Not needed when:
 - `src/http/h2/huffman.cyr` — the module this note describes.
 - [`docs/development/proposals/archive/2026-04-24-cyrius-fixup-table-cap.md`](../development/proposals/archive/2026-04-24-cyrius-fixup-table-cap.md)
   — the upstream investigation question about the fixup cap.
-- `src/http/h2/hpack.cyr` — `_hpack_static_init_a/b/c/d`, the
+- `src/http/h2/hpack.cyr` — `_hpack_static_fill_1` .. `_4`, the
   per-*function*-allowance variant of the same shape (four
   functions each under the allowance).
 - 0.8.0 Bite 2b (CHANGELOG entry) — when this pattern first
