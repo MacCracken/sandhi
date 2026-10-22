@@ -73,7 +73,7 @@ fn main() {
     _sse(many, mw);
 
     # --- raw / biased random of many sizes ---
-    var sizes[6];
+    var sizes[48];
     store64(&sizes + 0, 1); store64(&sizes + 8, 16); store64(&sizes + 16, 128);
     store64(&sizes + 24, 1024); store64(&sizes + 32, 8192); store64(&sizes + 40, 32768);
     var zi = 0;

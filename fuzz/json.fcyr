@@ -53,7 +53,7 @@ fn main() {
     _probe("[1,2,3,[4,[5,[6]]]]", 19);
 
     # --- deep nesting (recursion / stack-overflow probe) ---
-    var depths[4];
+    var depths[32];
     store64(&depths + 0, 64);
     store64(&depths + 8, 512);
     store64(&depths + 16, 4096);
@@ -87,7 +87,7 @@ fn main() {
     _probe(big, 9000);
 
     # --- raw / biased random of many sizes ---
-    var sizes[6];
+    var sizes[48];
     store64(&sizes + 0, 1); store64(&sizes + 8, 16); store64(&sizes + 16, 128);
     store64(&sizes + 24, 1024); store64(&sizes + 32, 8192); store64(&sizes + 40, 32768);
     var zi = 0;

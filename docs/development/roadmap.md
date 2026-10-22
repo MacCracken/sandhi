@@ -6,8 +6,8 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-15** at 1.13.1: the ALPN-flag item shipped, and two
-> gaps found during it joined the 1.13.x line. The 1.11.x and
+> completed work on **2026-10-21** at 1.13.2: sit's `content_length` item shipped, and
+> the fuzz-PRNG gap found during it joined the end of the 1.13.x line. The 1.11.x and
 > 1.12.x lines are complete and their sections are gone (the 1.12.x traits item was
 > re-scoped to the transport seam: CHANGELOG [1.12.3]). History is in the CHANGELOG.
 
@@ -18,7 +18,7 @@ sandhi folded into Cyrius stdlib at **v5.7.0 / sandhi 1.0.0**
 **post-fold maintenance**: patches land here first, `dist/sandhi.cyr` is
 regenerated, and a small cyrius-side slot refreshes `lib/sandhi.cyr`. The public
 surface is no longer frozen (ADR 0005's freeze applied only 0.9.2 → 1.0.0). Pin
-is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
+is currently **cyrius 6.7.15** (since 1.13.2; the full trail is in `state.md`).
 
 **How the lines work.**
 - Each line is a minor release (1.11.0, 1.12.0, …) followed by its patches; items
@@ -39,20 +39,9 @@ is currently **cyrius 6.7.12** (since 1.10.10; the full trail is in `state.md`).
 
 Shipped so far: 1.13.0, the per-pool mutex (a pool may be shared across threads);
 1.13.1, the h2 ALPN offer and the `_auto` dispatch's 0-RTT opt-in and credential
-digest in the request context.
+digest in the request context; 1.13.2, pin → cyrius 6.7.15 and the server's framing
+reads in place (sit's filing).
 
-- **`sandhi_server_content_length` keeps its header value on the global heap**
-  (`src/server/mod.cyr`; filed by sit, 2026-10-20, checked at 1.13.1). It reads the
-  header through `sandhi_server_find_header`, which is
-  `find_header_a(default_alloc(), …)`, so the value's copy is a global-heap
-  allocation nothing frees. Both recv loops (`_sandhi_server_recv_request_dl` and
-  `_sandhi_server_tls_recv_request`) call it on every request with a body, so a
-  long-running server keeps about 8 B per such request, for its life. sit's
-  `sit serve` parses `Content-Length` itself over its request arena
-  (`_serve_content_length`, differential-fuzzed against this verb) but cannot reach
-  the accept loop's call. Give it an `_a` form the loops pass their per-request arena
-  to, or scan the value in place without copying it (it is a run of digits and
-  whitespace). Either keeps the 1.9.12 overflow rule (`0 - 1` for a value too large).
 - **One HTTP/2 connection used by several threads at once** (`src/http/h2/conn.cyr`,
   `request.cyr`, `response.cyr`; found at 1.13.0). The pool hands the same h2
   connection to every caller for a route (that is the multiplexing), and the `_auto`
@@ -98,6 +87,14 @@ digest in the request context.
   - (c) peer-SETTINGS `MAX_HEADER_LIST_SIZE` enforcement (not applied to conn
     state; `conn.cyr`). `ENABLE_PUSH` is moot client-side;
   - (d) a caller-overridable HEADERS-frame buffer cap (fixed 8 KB; `request.cyr`).
+- **The older fuzz harnesses draw correlated bytes** (`fuzz/dns`, `headers`, `hpack`,
+  `json`, `response`, `sse`, `url`; found at 1.13.2). Each takes `% k` of the raw LCG
+  state, whose low bits have short periods. `_fz_fill`'s `s % 256` has period 256, and a
+  new seed only rotates the same cycle, so every "random" buffer is a rotation of one
+  256-byte sequence (a 4,096-byte buffer is it 16 times). Draw from the high bits, as
+  `fuzz/server_request.fcyr` does (and why: its low-bit draft missed a mutation). It
+  changes every corpus, so it is its own patch: re-run each harness's parser on the new
+  corpus and treat any finding as a finding.
 
 ## 1.14.x — Proposals: RPC and TLS surface
 
@@ -217,11 +214,12 @@ move a sandhi pin.
   cap (architecture/001).
 - **`tests/sandhi.tcyr` cap-drift.** If a patch pushes `sandhi.tcyr` against the
   per-program fixup cap (architecture/001), carve out another `tests/<name>.tcyr` in
-  the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 1,012
-  assertions on Linux at 1.13.0.
+  the same patch (as the 1.2.8 sandhi → rpc split did). The suite is 1,066
+  assertions on Linux at 1.13.2.
 - **Fuzz-corpus expansion.** Add harnesses as new parse surfaces land; each
   proposal above that parses wire input (batch responses, merge-patch documents,
-  `Set-Cookie`, the CONNECT response) brings its own `fuzz/*.fcyr`. Other
+  `Set-Cookie`, the CONNECT response) brings its own `fuzz/*.fcyr`. The server's
+  request-header readers got theirs at 1.13.2 (`fuzz/server_request.fcyr`). Other
   candidates: Huffman-decode direct, the h2 frame header, the WebDriver / Appium /
   MCP envelope extract.
 - **Native client vs `openssl s_server -tls1_2` on the Ed25519 fixture —

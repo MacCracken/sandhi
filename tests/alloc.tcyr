@@ -1442,7 +1442,7 @@ fn test_alloc_128_h2_response_headers_alloc_oom() {
 # 1.2.8 guard, subsequent vec_push_a on null would SIGSEGV.
 fn test_alloc_128_sse_parse_oom() {
     var failer = fail_after_n_allocs(0);
-    var rem[1];
+    var rem[8];
     store64(&rem, 0);
     # SSE input that would normally produce events. Under OOM,
     # the events vec can't be allocated → return 0 (no events).

@@ -4,6 +4,145 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.13.2] — 2026-10-21
+
+**Pin → cyrius 6.7.15. A server's request framing no longer allocates on the global heap.**
+Closes sit's 2026-10-20 filing (roadmap 1.13.x). Through 1.13.1 every request with a body
+kept 16 B of the no-free global heap, for the life of the process. No public surface
+change. Third patch on the 1.13.x line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`. **sit filed it, so note: moving sit's pin to
+cyrius 6.7.15 is not enough.** 6.7.15 vendors sandhi 1.13.1. The fix arrives with the first
+cyrius release that vendors 1.13.2.
+
+**Visible to a consumer:**
+- **A long-running server's heap stays flat on requests with a body.** All five serve entry
+  points benefit, plain and TLS.
+- **`sandhi_server_content_length` allocates nothing**, so a handler can call it per
+  request. `sandhi_server_find_header` still copies onto the global heap (its contract), and
+  `docs/guides/server.md` now points per-request callers to `_find_header_a`.
+
+### Fixed
+
+- **server: the framing reads copied header values onto the global heap.** Filed by sit,
+  whose `sit serve` parses `Content-Length` over its own request arena but cannot reach the
+  accept loop's call. Three verbs read their value through `sandhi_server_find_header`,
+  which is `find_header_a(default_alloc(), …)`, and nothing freed the copy:
+  - `sandhi_server_content_length`, called by both recv loops (`_recv_request_dl`,
+    `_tls_recv_request`) on every request with a body;
+  - `sandhi_server_request_has_cl_te_conflict` and `_has_unsupported_te`, which every serve
+    path runs on every request (`run_opts`, the async handler, the pool worker, the TLS
+    serve).
+  - **Measured by the new rows:** 8 B per `content_length` call, 16 B per CL+TE check
+    with both headers present, 8 B per TE check. A request with a `Content-Length` body
+    kept **16 B**: 8 in the recv loop and 8 for the CL+TE guard's copy. The filing
+    estimated 8 B because it counted only the first.
+  - **The fix:** a private `_hsv_header_span` finds the value in place (offset and length),
+    and the three verbs read it through `_hsv_span_at`, which answers 0 past the end. That 0
+    is the NUL the copy ended on, so an embedded NUL still ends the value, and each verb
+    answers exactly what it answered over the copy. `sandhi_server_find_header_a` copies
+    through the same span. The roadmap also offered an `_a` form. In place needs no new
+    verb, and the loops would have nothing better to pass it.
+  - **A related gap closed with it:** when the global heap was exhausted, a failed copy read
+    as an absent header. The CL+TE guard then answered "no conflict" and the TE guard "no
+    Transfer-Encoding", so a smuggling-shaped request could reach the handler. No
+    allocation now means no such path.
+  - **For sit:** `_serve_content_length` agrees with this verb byte for byte. The new fuzz
+    harness checks the in-place reads against the 1.13.1 copies, so sit's differential fuzz
+    keeps agreeing. Once a cyrius release vendors 1.13.2, sit can call the verb directly.
+- **fuzz, tests: every fuzz harness wrote past a local table.** `var sizes[6]` is 6
+  **bytes** (CLAUDE.md, Cyrius conventions), and the harnesses stored six 8-byte words into
+  it. That was nine tables across all seven `fuzz/*.fcyr`, among them `hpack.fcyr`'s
+  `pats` and `json.fcyr`'s `depths`, plus `tests/alloc.tcyr`'s `rem[1]`.
+  - **They tested what they claimed.** Instrumented copies read every table back intact, so
+    the writes landed on dead stack.
+  - **The fix:** each table is sized in bytes now. A sweep of `src/`, `tests/` and
+    `programs/` for a constant offset past a local array's size found no other.
+
+### Added
+
+- **fuzz: `fuzz/server_request.fcyr`**, a differential harness over the server's
+  request-header readers. It keeps the 1.13.1 copy-based forms as `_ref_*` and requires
+  `content_length`, `has_cl_te_conflict`, `has_unsupported_te` and `find_header_a` (for
+  three names) to agree with them.
+  - **Inputs:** framing names in mixed case and near misses; values drawn from digits, SP,
+    HTAB, CR, NUL, commas and the letters of `chunked`, plus `chunked` / `CHUNKED` /
+    `gzip, Chunked` / `chunke`; lines with and without CRLF. 20,000 structured requests,
+    each read whole and cut at a random `blen`, plus 2,000 raw buffers and the boundaries:
+    about 42,000 inputs in 0.4 s.
+  - **Mutations, each caught:** dropping the span's bound (exit 10), treating an embedded
+    NUL as malformed (11), dropping the CL+TE case fold (12), skipping the trailing-CR trim
+    (15), and a copy one byte short for one name (15).
+  - **Two first-draft holes, both fixed before it was kept.** Taking `% k` of the raw LCG
+    state, as the older harnesses do, missed the NUL mutation: the low bits have short
+    periods, so the draws were too correlated to produce "digits, then NUL". It draws from
+    the high bits now. A lowercase-only `chunked` literal missed the case-fold mutation;
+    the literal now varies.
+
+### Changed
+
+- **Pin → cyrius 6.7.15** (from 6.7.12). `lib/` re-resolved from empty: **82 files**
+  (75 at 6.7.12). The seven new ones are a `lib/unicode/` subtree (casefold, categories,
+  normalize) that bayan now includes.
+  - **Deps:** bayan 1.6.0 → **1.9.0**; sigil **3.13.12** and sakshi **2.5.10** unchanged.
+    `cyrius.lock` re-resolved (82 rows).
+  - **The pin needed no source change.** The whole local gate passed on 6.7.15 before the
+    fix landed, and `distlib --all` regenerated nothing.
+  - **6.7.13 re-vendored sandhi 1.13.1**; 6.7.14 and 6.7.15 carry the same.
+  - **Toolchain changes in what sandhi composes:**
+    - The native TLS 1.2 client checks the ServerHello more strictly (6.7.14): it refuses
+      an extension it did not offer, and an ALPN answer must name a protocol it offered.
+      The 1.2 server refuses a ClientHello whose extension block overruns (6.7.15).
+    - `sock_send_a` / `sock_recv_a` and `ok_via` / `err_via` are now declared `: Result`.
+    - `Str_eq` / `_cat` / `_contains` / `_starts_with` / `_ends_with` now take `Str`
+      arguments.
+    - `lib/regression.cyr` no longer writes a predictable `/tmp` capture file
+      (CYRIUS-2026-0036).
+    - sandhi calls none of the retyped fns, and every live gate passes on the stricter
+      handshakes.
+- **docs:** `docs/guides/server.md` says which header reader copies onto the global heap
+  and which reads in place. The README snapshot had stood at 1.10.8 / 6.6.18; it now gives
+  the current version, pin and counts.
+- **Roadmap:**
+  - **The `content_length` item leaves 1.13.x.**
+  - **One item joins the end of the line:** the seven older fuzz harnesses draw their
+    random bytes as `s % 256` of the raw LCG state. That byte has period 256, and a new
+    seed only rotates the same cycle, so every "random" buffer is a rotation of one
+    256-byte sequence.
+
+### Verification
+
+- **New rows, 18 assertions,** in `server/framing/no_global_heap`:
+  - **zero global-heap growth:** 100 calls of each of the three verbs, and one
+    `_recv_request_dl` over a loopback pair reading a request with a body;
+  - **parity with the copies:** a value the buffer ends on; one cut by `blen`; SP / HTAB
+    padding; an empty value; an embedded NUL; an empty `Transfer-Encoding`; `chunked` in a
+    mixed-case list; a TE value cut at `blen`; TE without CL.
+- **Before the fix:** the four zero-growth rows failed, with 800, 1,600 and 800 B over the
+  100 calls and 8 B in the recv loop. The parity rows passed on both the old and new code.
+- **Mutations, each caught:**
+  - restoring the copy in `content_length`: 2 rows;
+  - restoring it in the CL+TE check: 1 row;
+  - restoring it in the TE check: 1 row;
+  - dropping the span's bound: 7 rows.
+- **3,177 assertions** (1,066 / 1,691 / 356 / 63 / 1), 9/9 fuzz. `fmt` is clean, and lint's
+  one warning is the pre-existing long table line in `src/http/h2/huffman.cyr`.
+- **Windows under wine:** all four suites pass (1,053 / 1,691 / 356 / 63), every new row
+  included.
+- **aarch64 under qemu:** all four suites pass (1,066 / 1,691 / 356 / 63).
+- **The full Linux gate, on 6.7.15 before the fix and again after it:**
+  - Builds: the `CYRIUS_DCE=1` smoke, native (1,211,808 B) and libssl (819,728 B), and the
+    aarch64, Windows and AGNOS cross-builds; the Windows smoke runs under wine.
+  - Live gates: all seven pass.
+  - CI scripts: the whole-surface link check (886 fns, three of them new and private;
+    control refused) and the programs sweep (35 programs) pass.
+  - `cyrius deps --verify`: 82 verified.
+  - dist: all five bundles regenerated and idempotent. The change reaches `sandhi.cyr` and
+    `sandhi-server.cyr`; the other three take only the version stamp. All five `.deps`
+    sidecars are unchanged.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.13.1] — 2026-10-15
 
 **The h2 ALPN offer, and the `_auto` dispatch's 0-RTT opt-in and credential digest, live

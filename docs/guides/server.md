@@ -80,7 +80,10 @@ var clen   = sandhi_server_content_length(req_buf, req_len);
 ```
 
 `sandhi_server_find_header` is case-insensitive, returns a value cstr trimmed of
-leading SP and trailing CR (or 0 if absent).
+leading SP and trailing CR (or 0 if absent). It copies the value onto the global
+heap, which nothing frees, so a long-running server's handler passes its request
+arena to `sandhi_server_find_header_a(a, req_buf, req_len, name)` instead.
+`sandhi_server_content_length` reads the value in place and allocates nothing.
 
 ### Reading the request body
 

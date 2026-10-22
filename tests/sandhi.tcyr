@@ -5202,6 +5202,92 @@ fn test_server_content_length_overflow_refused() {
     return 0;
 }
 
+# 1.13.2 — reading a request's framing headers costs the global heap nothing.
+# Filed by sit (2026-10-20): `sandhi_server_content_length` copied the value
+# through `sandhi_server_find_header`, onto the no-free global bump, and both recv
+# loops call it on every request with a body. The CL+TE and unsupported-TE guards,
+# which every serve loop runs on every request, copied the same way. All three read
+# the value in place now. Mutation: building any one of them on
+# `sandhi_server_find_header` again fails its zero-growth row.
+fn test_server_framing_no_global_heap() {
+    var req = "POST /x HTTP/1.1\r\nHost: a\r\nContent-Length: 11\r\n\r\nhello world";
+    var te = "POST /x HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n";
+    var rl = strlen(req);
+    var tl = strlen(te);
+    var before = alloc_used();
+    var i = 0;
+    while (i < 100) { sandhi_server_content_length(req, rl); i = i + 1; }
+    assert_eq(alloc_used() - before, 0, "server framing: 100 Content-Length reads grow the global heap by 0");
+    before = alloc_used();
+    i = 0;
+    while (i < 100) { sandhi_server_request_has_cl_te_conflict(te, tl); i = i + 1; }
+    assert_eq(alloc_used() - before, 0, "server framing: 100 CL+TE checks grow the global heap by 0");
+    before = alloc_used();
+    i = 0;
+    while (i < 100) { sandhi_server_request_has_unsupported_te(te, tl); i = i + 1; }
+    assert_eq(alloc_used() - before, 0, "server framing: 100 unsupported-TE checks grow the global heap by 0");
+    assert_eq(sandhi_server_content_length(req, rl), 11, "server framing: the value is read in place");
+    assert_eq(sandhi_server_request_has_cl_te_conflict(te, tl), 1, "server framing: CL+TE still refused");
+    assert_eq(sandhi_server_request_has_unsupported_te(te, tl), 1, "server framing: TE still refused");
+    return 0;
+}
+
+# The in-place reads answer what the copies did. A byte past the value reads as
+# the NUL the copy ended on, so an embedded NUL still ends the value (sit's
+# `_serve_content_length` is differential-fuzzed against this verb and stops there
+# too), and a value the buffer ends inside is read only up to `blen`.
+fn test_server_framing_in_place_parity() {
+    var cut = "POST / HTTP/1.1\r\nContent-Length: 42";
+    assert_eq(sandhi_server_content_length(cut, strlen(cut)), 42, "in place: a value the buffer ends on");
+    assert_eq(sandhi_server_content_length(cut, strlen(cut) - 1), 4, "in place: nothing read past blen");
+    var tabs = "POST / HTTP/1.1\r\nContent-Length:\t 42 \t\r\n\r\n";
+    assert_eq(sandhi_server_content_length(tabs, strlen(tabs)), 42, "in place: SP / HTAB around the digits");
+    var empty = "POST / HTTP/1.1\r\nContent-Length: \r\n\r\n";
+    assert_eq(sandhi_server_content_length(empty, strlen(empty)), 0, "in place: an empty value is 0");
+
+    var src = "POST / HTTP/1.1\r\nContent-Length: 42?x\r\n\r\n";
+    var sl = strlen(src);
+    var nul = alloc(sl + 1);
+    memcpy(nul, src, sl + 1);
+    var q = 0;
+    while (load8(nul + q) != 63) { q = q + 1; }
+    store8(nul + q, 0);
+    assert_eq(sandhi_server_content_length(nul, sl), 42, "in place: an embedded NUL ends the value, as it ended the copy");
+
+    var te_empty = "POST / HTTP/1.1\r\nTransfer-Encoding:\r\n\r\n";
+    assert_eq(sandhi_server_request_has_unsupported_te(te_empty, strlen(te_empty)), 1,
+      "in place: an empty Transfer-Encoding is still present");
+    var mixed = "POST / HTTP/1.1\r\nContent-Length: 5\r\nTransfer-Encoding: gzip, CHUNKED\r\n\r\n";
+    assert_eq(sandhi_server_request_has_cl_te_conflict(mixed, strlen(mixed)), 1,
+      "in place: chunked found case-insensitively in a list");
+    var te_cut = "POST / HTTP/1.1\r\nContent-Length: 5\r\nTransfer-Encoding: chunked";
+    assert_eq(sandhi_server_request_has_cl_te_conflict(te_cut, strlen(te_cut)), 1,
+      "in place: a TE value the buffer ends on");
+    assert_eq(sandhi_server_request_has_cl_te_conflict(te_cut, strlen(te_cut) - 1), 0,
+      "in place: \"chunke\" at blen is not chunked");
+    var no_cl = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+    assert_eq(sandhi_server_request_has_cl_te_conflict(no_cl, strlen(no_cl)), 0,
+      "in place: TE without CL is not a CL+TE conflict");
+    return 0;
+}
+
+# The recv loop's own Content-Length read, over a loopback pair.
+fn test_server_recv_body_no_global_heap() {
+    var sfd = _t_budget_pair(39837);
+    if (sfd < 0) { assert_eq(1, 1, "recv body heap: loopback unavailable — skipped"); return 0; }
+    var req = "POST /x HTTP/1.1\r\nHost: a\r\nContent-Length: 11\r\n\r\nhello world";
+    sock_send_all(_t_drip_fd, req, strlen(req));
+    var buf = alloc(4096);
+    var before = alloc_used();
+    var n = _sandhi_server_recv_request_dl(sfd, buf, 4000, clock_now_ms() + 2000);
+    var grew = alloc_used() - before;
+    sock_close(sfd);
+    sock_close(_t_drip_fd);
+    assert_eq(n, strlen(req), "recv body heap: the whole request with its body");
+    assert_eq(grew, 0, "recv body heap: framing the body grows the global heap by 0");
+    return 0;
+}
+
 fn test_stream_chunk_parse_size() {
     var sb = _sandhi_sb_new(256);
     var s = "a\r\n0123456789";
@@ -6165,6 +6251,11 @@ fn main() {
 
     test_group("server/framing/sentinels");
     test_server_recv_sentinels();
+
+    test_group("server/framing/no_global_heap");
+    test_server_framing_no_global_heap();
+    test_server_framing_in_place_parity();
+    test_server_recv_body_no_global_heap();
 
     test_group("server/reject_arena/flat");
     test_server_reject_arena_is_flat();

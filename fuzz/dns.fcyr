@@ -105,7 +105,7 @@ fn main() {
     _sandhi_resolve_parse_response_aaaa(ping, 40, id);
 
     # --- raw random of many sizes, both parsers, with sprinkled 0xC0 pointers ---
-    var sizes[6];
+    var sizes[48];
     store64(&sizes + 0, 12); store64(&sizes + 8, 13); store64(&sizes + 16, 32);
     store64(&sizes + 24, 128); store64(&sizes + 32, 512); store64(&sizes + 40, 4096);
     var zi = 0;

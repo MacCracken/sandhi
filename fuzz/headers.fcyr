@@ -99,7 +99,7 @@ fn main() {
     }
 
     # --- raw random buffers of many sizes ---
-    var sizes[6];
+    var sizes[48];
     store64(&sizes + 0, 1);
     store64(&sizes + 8, 15);
     store64(&sizes + 16, 256);

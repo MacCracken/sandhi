@@ -81,7 +81,7 @@ fn main() {
     t = _chunked(out, body, bw); sandhi_http_response_parse(out, t);
 
     # --- random chunk region + random whole responses ---
-    var sizes[5];
+    var sizes[40];
     store64(&sizes + 0, 4); store64(&sizes + 8, 32); store64(&sizes + 16, 256);
     store64(&sizes + 24, 4096); store64(&sizes + 32, 16384);
     var zi = 0;

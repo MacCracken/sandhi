@@ -64,7 +64,7 @@ fn main() {
     sandhi_url_parse(crhost);
 
     # --- long / adversarial random buffers of many sizes ---
-    var sizes[8];
+    var sizes[64];
     store64(&sizes + 0,  0);
     store64(&sizes + 8,  1);
     store64(&sizes + 16, 7);

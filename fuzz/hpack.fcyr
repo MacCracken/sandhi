@@ -58,7 +58,7 @@ fn main() {
 
     # --- adversarial first-byte patterns, each padded with 0xff…0x7f to force a
     #     multi-byte integer continuation (varint bomb probe) ---
-    var pats[8];
+    var pats[64];
     store64(&pats + 0,  0x80);   # indexed, index 0 (illegal)
     store64(&pats + 8,  0xff);   # indexed, 7-bit prefix all-ones → continuation
     store64(&pats + 16, 0x40);   # literal w/ incremental indexing, new name
@@ -93,7 +93,7 @@ fn main() {
     _fz_decode_stream(tr, 4);
 
     # --- random buffers of many sizes (malformed streams / HPACK bombs) ---
-    var sizes[6];
+    var sizes[48];
     store64(&sizes + 0, 1); store64(&sizes + 8, 8); store64(&sizes + 16, 64);
     store64(&sizes + 24, 512); store64(&sizes + 32, 4096); store64(&sizes + 40, 16384);
     var zi = 0;
