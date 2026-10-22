@@ -72,11 +72,24 @@ fn sandhi_h2_request_a(a, h2c, method, url, user_headers, body, body_len): i64 {
         full_path = fp;
     }
 
+    # 1.13.3 — one exchange at a time on the conn. The pool hands every caller
+    # for a route this same conn, and through 1.13.2 two threads' exchanges
+    # interleaved: the stream-id counter, both HPACK tables, the frame writes and
+    # the response reads are all the conn's, and the response reader drops
+    # frames for other streams, so one thread consumed and discarded another's
+    # answer. The lock covers the send and the read of its response.
+    _sandhi_h2_conn_lock(h2c);
     var stream_id = sandhi_h2_request_send_a(a, h2c, method, scheme, full_path,
       authority, user_headers,
       body, body_len);
-    if (stream_id < 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL); }
-    return sandhi_h2_response_recv_a(a, h2c, stream_id);
+    var r = 0;
+    if (stream_id < 0) {
+        r = _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL);
+    } else {
+        r = sandhi_h2_response_recv_a(a, h2c, stream_id);
+    }
+    _sandhi_h2_conn_unlock(h2c);
+    return r;
 }
 
 fn sandhi_h2_request(h2c, method, url, user_headers, body, body_len): i64 {
@@ -166,6 +179,10 @@ fn _sandhi_http_try_h2_promote_a(a, url, opts, host, port, pool, seed): i64 {
         # h2 conn lives in the pool — long-lived, uses pool's allocator
         # via sandhi_h2_conn_new (h2 allocator is conn-bound).
         var h2c = sandhi_h2_conn_new(conn);
+        if (h2c == 0) {
+            sandhi_conn_close(conn);
+            return 0;
+        }
         if (sandhi_h2_conn_send_preface_and_settings(h2c) < 0) {
             sandhi_conn_close(conn);
             return 0;

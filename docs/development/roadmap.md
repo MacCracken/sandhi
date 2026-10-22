@@ -6,8 +6,9 @@
 > [`proposals/`](proposals/README.md); bugs + consumer-coordination in
 > [`issues/`](issues/README.md). When an item ships it moves out of this file
 > (into the CHANGELOG), so everything here is still to-do. Last swept clean of
-> completed work on **2026-10-21** at 1.13.2: sit's `content_length` item shipped, and
-> the fuzz-PRNG gap found during it joined the end of the 1.13.x line. The 1.11.x and
+> completed work on **2026-10-21** at 1.13.3: the shared-h2-conn item shipped, and five
+> h2 gaps found during it joined the 1.13.x line ahead of the fuzz-PRNG item (found at
+> 1.13.2), which stays last. The 1.11.x and
 > 1.12.x lines are complete and their sections are gone (the 1.12.x traits item was
 > re-scoped to the transport seam: CHANGELOG [1.12.3]). History is in the CHANGELOG.
 
@@ -40,17 +41,9 @@ is currently **cyrius 6.7.15** (since 1.13.2; the full trail is in `state.md`).
 Shipped so far: 1.13.0, the per-pool mutex (a pool may be shared across threads);
 1.13.1, the h2 ALPN offer and the `_auto` dispatch's 0-RTT opt-in and credential
 digest in the request context; 1.13.2, pin → cyrius 6.7.15 and the server's framing
-reads in place (sit's filing).
+reads in place (sit's filing); 1.13.3, one h2 connection shared by threads (a
+per-connection lock around one exchange).
 
-- **One HTTP/2 connection used by several threads at once** (`src/http/h2/conn.cyr`,
-  `request.cyr`, `response.cyr`; found at 1.13.0). The pool hands the same h2
-  connection to every caller for a route (that is the multiplexing), and the `_auto`
-  dispatch runs `sandhi_h2_request_a` on it. Nothing serialises two threads doing so:
-  `next_stream_id`, the frame writes and the response read share the connection's
-  state. Serialise per connection (a lock around one request's write-and-read, the
-  simple first step), or demultiplex responses by stream id for real concurrency.
-  Until then `docs/guides/connection-pool.md` tells a multi-threaded client to keep h2
-  traffic to one thread or to give each thread its own pool.
 - **HPACK and Huffman tables built twice at once** (`src/http/h2/hpack.cyr`,
   `huffman.cyr`; found at 1.13.1 by reading, not reproduced). `_hpack_static_init` and
   `_hpack_huffman_init` build process-wide tables on first use, writing straight into
@@ -87,6 +80,48 @@ reads in place (sit's filing).
   - (c) peer-SETTINGS `MAX_HEADER_LIST_SIZE` enforcement (not applied to conn
     state; `conn.cyr`). `ENABLE_PUSH` is moot client-side;
   - (d) a caller-overridable HEADERS-frame buffer cap (fixed 8 KB; `request.cyr`).
+- **h2 exchanges grow the global heap, arena or not** (`src/http/h2/request.cyr`,
+  `response.cyr`, `hpack.cyr`; measured at 1.13.3). Ten `sandhi_h2_request_a` GETs on a
+  per-request arena, reset after each, grew the no-free global heap by 42,992 B: about
+  4.3 KB an exchange, for the life of a pooled conn.
+  - **Frame I/O:** `sandhi_h2_request_send_a`, `sandhi_h2_response_recv_a` and the
+    SETTINGS / PING handlers call the bare `sandhi_h2_conn_send_frame` /
+    `_recv_frame`, so every frame header, decoded header struct and payload lands on
+    the global heap.
+  - **HPACK adds:** the encoder inserts through the bare `sandhi_hpack_table_add`, and
+    every add rebuilds both vecs (at least 304 B) and abandons the old ones.
+  - **The encoder table holds per-request pointers.** The lowercased name and the
+    `:path` / `:authority` values come from the request's arena, so after its reset the
+    table's eviction runs `strlen` over reused memory. That only corrupts the encoder's
+    size accounting today, because the encoder never references its dynamic entries.
+  - Thread `a` through the frame I/O, and give the conn's tables copies on the conn's
+    own allocator (or stop indexing on the request side).
+- **h2 frame reads write a NUL one byte past their buffer** (`src/http/h2/conn.cyr`;
+  found at 1.13.3 by reading). `sandhi_h2_conn_recv_frame_a` allocates exactly 9 bytes
+  for the header and exactly `plen` for the payload, and `sandhi_conn_recv_all`
+  NUL-terminates at `buf[len]` ("buf must have room for max+1"). Allocations are
+  8-aligned, so the byte lands in padding unless the length is a multiple of 8, and then
+  on the next byte: free space, except when the allocation ends its arena. Allocate one
+  more byte, or read with a non-terminating loop.
+- **A failed h2 exchange leaves its conn pooled mid-stream** (`src/http/h2/response.cyr`,
+  `pool_glue.cyr`; found at 1.13.3 by reading, not reproduced). After a timeout or
+  protocol error, that stream's remaining frames stay in the socket and the conn stays
+  in the pool. The next exchange skips them as other-stream frames, including any
+  HEADERS whose HPACK block then goes undecoded, so the decode table drifts from the
+  peer's and later responses can decode wrong header names. Since 1.13.3 the next
+  exchange may be another thread's. Retire a conn whose exchange failed (the GOAWAY
+  flag already makes `take_h2` evict it).
+- **An h2 conn evicted for GOAWAY is never closed** (`src/http/h2/pool_glue.cyr`; found
+  at 1.13.3 by reading). `sandhi_http_pool_take_h2` drops it from the map, and
+  `_close_h2_conns` walks only the map, so its descriptor stays open for the life of
+  the process. Close it once no exchange holds it (the conn's lock says when).
+- **Each h2 frame goes out as two writes** (`src/http/h2/conn.cyr`; measured at 1.13.3).
+  `sandhi_h2_conn_send_frame_a` sends the 9-byte header and the payload separately, and
+  sandhi sets no `TCP_NODELAY`, so Nagle holds the second write until the delayed ACK of
+  the first. Over loopback an exchange took about 80 ms; the 1.13.3 row sets
+  `TCP_NODELAY` on its test pair to run at full speed. Over TLS each write is its own
+  record, so the same applies. Send each frame as one write, or set `TCP_NODELAY` on
+  client conns (`sock_set_nodelay`, cyrius 6.7.9).
 - **The older fuzz harnesses draw correlated bytes** (`fuzz/dns`, `headers`, `hpack`,
   `json`, `response`, `sse`, `url`; found at 1.13.2). Each takes `% k` of the raw LCG
   state, whose low bits have short periods. `_fz_fill`'s `s % 256` has period 256, and a

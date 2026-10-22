@@ -204,8 +204,14 @@ var SANDHI_HPACK_ENTRY_OVERHEAD    = 32;
 fn sandhi_hpack_table_new_a(a, max_size): i64 {
     var t = alloc_via(a, SANDHI_HPACK_TABLE_STRUCT_SIZE);
     if (t == 0) { return 0; }
-    store64(t + SANDHI_HPACK_TBL_OFF_NAMES, vec_new_a(a));
-    store64(t + SANDHI_HPACK_TBL_OFF_VALUES, vec_new_a(a));
+    # 1.13.3 — both vecs must land, or there is no table (they were stored
+    # unchecked, and the first entry added pushed onto a null vec).
+    var names = vec_new_a(a);
+    if (names == 0) { return 0; }
+    var values = vec_new_a(a);
+    if (values == 0) { return 0; }
+    store64(t + SANDHI_HPACK_TBL_OFF_NAMES, names);
+    store64(t + SANDHI_HPACK_TBL_OFF_VALUES, values);
     store64(t + SANDHI_HPACK_TBL_OFF_CUR_SIZE, 0);
     var ms = max_size;
     if (ms <= 0) { ms = SANDHI_HPACK_DEFAULT_TABLE_SIZE; }

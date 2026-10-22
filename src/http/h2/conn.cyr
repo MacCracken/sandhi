@@ -10,7 +10,7 @@
 #   sandhi_h2_request  — HEADERS/DATA send (src/http/h2/request.cyr, Bite 5b)
 #   sandhi_h2_response — per-stream receive + decode (src/http/h2/response.cyr, Bite 5c)
 #
-# h2 connection struct (80 bytes):
+# h2 connection struct (88 bytes):
 #   +0    conn                  (sandhi_conn ptr — owned by us once attached)
 #   +8    hpack_enc_table       (sandhi_hpack_table — outbound dynamic)
 #   +16   hpack_dec_table       (sandhi_hpack_table — inbound dynamic)
@@ -21,8 +21,16 @@
 #   +56   peer_max_streams      (int — peer's MAX_CONCURRENT_STREAMS, 0 = unlimited)
 #   +64   peer_init_window      (int — peer's INITIAL_WINDOW_SIZE, default 65535)
 #   +72   goaway_received       (int — 1 if peer sent GOAWAY)
+#   +80   mutex                 (lib/sync.cyr mutex — one exchange at a time, 1.13.3)
 #
 # Bite 5a of 0.8.0.
+#
+# Shared by threads since 1.13.3: the pool hands every caller for a route the
+# same h2 conn, so `sandhi_h2_request_a` holds the conn's mutex around one
+# request's send and its response read. The stream-id counter, both HPACK
+# tables and the socket are touched only under it. A caller composing the
+# lower-level verbs (`sandhi_h2_request_send_a` + `sandhi_h2_response_recv_a`)
+# on a shared conn serialises the pair itself.
 
 enum SandhiH2ConnOff {
     SANDHI_H2_CONN_OFF_CONN          = 0;
@@ -35,9 +43,10 @@ enum SandhiH2ConnOff {
     SANDHI_H2_CONN_OFF_PEER_STREAMS  = 56;
     SANDHI_H2_CONN_OFF_PEER_WINDOW   = 64;
     SANDHI_H2_CONN_OFF_GOAWAY        = 72;
+    SANDHI_H2_CONN_OFF_MUTEX         = 80;
 }
 
-var SANDHI_H2_CONN_STRUCT_SIZE = 80;
+var SANDHI_H2_CONN_STRUCT_SIZE = 88;
 
 # Spec defaults — RFC 7540 §6.5.2.
 const _SANDHI_H2_DEFAULT_PEER_FRAME   = 16384;
@@ -60,12 +69,24 @@ var _SANDHI_H2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 # subsequent table_add operations on the enc/dec tables route through
 # `a` via sandhi_hpack_table_add_a (Batch 2) so the dynamic-table
 # growth stays in the same allocator. Returns 0 on OOM.
+#
+# 1.13.3 — both tables and the mutex must land, or there is no conn. Through
+# 1.13.2 the two table pointers were stored unchecked, so an allocation failure
+# partway through left a live conn whose first header encode or decode
+# dereferenced a null table.
 fn sandhi_h2_conn_new_a(a, sandhi_conn_ptr): i64 {
     var c = alloc_via(a, SANDHI_H2_CONN_STRUCT_SIZE);
     if (c == 0) { return 0; }
+    var enc = sandhi_hpack_table_new_a(a, 0);
+    if (enc == 0) { return 0; }
+    var dec = sandhi_hpack_table_new_a(a, 0);
+    if (dec == 0) { return 0; }
+    var mx = mutex_new();
+    if (mx == 0) { return 0; }
     store64(c + SANDHI_H2_CONN_OFF_CONN, sandhi_conn_ptr);
-    store64(c + SANDHI_H2_CONN_OFF_HPACK_ENC, sandhi_hpack_table_new_a(a, 0));
-    store64(c + SANDHI_H2_CONN_OFF_HPACK_DEC, sandhi_hpack_table_new_a(a, 0));
+    store64(c + SANDHI_H2_CONN_OFF_HPACK_ENC, enc);
+    store64(c + SANDHI_H2_CONN_OFF_HPACK_DEC, dec);
+    store64(c + SANDHI_H2_CONN_OFF_MUTEX, mx);
     store64(c + SANDHI_H2_CONN_OFF_NEXT_SID, 1);
     store64(c + SANDHI_H2_CONN_OFF_OUR_ACKED, 0);
     store64(c + SANDHI_H2_CONN_OFF_PEER_SEEN, 0);
@@ -88,9 +109,24 @@ fn sandhi_h2_conn_peer_max_streams(c): i64 { return load64(c + SANDHI_H2_CONN_OF
 fn sandhi_h2_conn_peer_init_window(c): i64 { return load64(c + SANDHI_H2_CONN_OFF_PEER_WINDOW); }
 fn sandhi_h2_conn_goaway_received(c): i64 { return load64(c + SANDHI_H2_CONN_OFF_GOAWAY); }
 
+# Take / release the conn's lock (1.13.3). A conn without one (a struct built by
+# hand to the pre-1.13.3 layout) is used unlocked, as before.
+fn _sandhi_h2_conn_lock(c): i64 {
+    var m = load64(c + SANDHI_H2_CONN_OFF_MUTEX);
+    if (m != 0) { mutex_lock(m); }
+    return 0;
+}
+
+fn _sandhi_h2_conn_unlock(c): i64 {
+    var m = load64(c + SANDHI_H2_CONN_OFF_MUTEX);
+    if (m != 0) { mutex_unlock(m); }
+    return 0;
+}
+
 # Allocate the next odd stream-id for client-originated streams.
 # Returns the allocated id; advances the counter for next call. RFC
-# 7540 §5.1.1: client uses odd ids; ids monotonically increase.
+# 7540 §5.1.1: client uses odd ids; ids monotonically increase. Not
+# atomic: on a shared conn it runs under the conn's lock (1.13.3).
 fn sandhi_h2_conn_next_stream_id(c): i64 {
     var id = load64(c + SANDHI_H2_CONN_OFF_NEXT_SID);
     store64(c + SANDHI_H2_CONN_OFF_NEXT_SID, id + 2);

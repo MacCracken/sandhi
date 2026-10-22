@@ -4,6 +4,26 @@
 
 ## Version
 
+**1.13.3** — 2026-10-21. **One HTTP/2 connection may be used by several threads at once.**
+Fourth patch on 1.13.x. No pin change (6.7.15), no new public verb.
+- **What changed:** each h2 connection owns a `lib/sync.cyr` mutex
+  (`SANDHI_H2_CONN_STRUCT_SIZE` 80 → 88), held by `sandhi_h2_request_a` from the send through
+  the response read. `sandhi_http_pool_close_h2_conns` detaches each conn under its lock and
+  clears its conn slot. The h2 and HPACK-table constructors fail closed.
+- **Why it mattered:** four threads sharing a pooled h2 connection each failed their first
+  exchange. After a close, a thread still holding the conn wrote its next request into
+  whatever connection reused the descriptor (shown on Linux and Windows).
+- **Found, not fixed (roadmap 1.13.x, five new items):**
+  - h2 exchanges grow the global heap, about 4.3 KB each, arena or not;
+  - frame reads write a NUL one byte past their buffer;
+  - a failed exchange leaves its conn pooled mid-stream;
+  - a conn evicted for GOAWAY is never closed;
+  - each frame is two writes with no `TCP_NODELAY` (about 80 ms an exchange over loopback).
+- **Counts:** **3,194 assertions** (1,066 / 1,691 / 373 / 63 / 1), 9/9 fuzz; all four suites
+  also pass under wine (the shared-conn row included: Windows threads are real) and as
+  aarch64 under qemu.
+- Not yet re-vendored into a cyrius release.
+
 **1.13.2** — 2026-10-21. **Pin → cyrius 6.7.15; a server's request framing no longer
 allocates on the global heap.** Closes sit's 2026-10-20 filing. Third patch on 1.13.x. No
 public surface change.
@@ -759,14 +779,14 @@ All milestone surfaces are live: M1 server (incl. server-side TLS, 1.6.8), M2 HT
 | `src/main.cyr` | 88 | public API declarations — docstring refreshed at 0.7.1; version bumped 0.7.2 |
 | `src/version_str.cyr` | 13 | auto-generated from `VERSION` by `scripts/version-bump.sh` — the single source of truth for `SANDHI_VERSION` at runtime. Never edited by hand; CI's drift check re-runs the script and fails on any diff |
 | `src/http/retry.cyr` | 192 | **0.7.2 new** — retry-with-backoff wrappers for idempotent methods (GET/HEAD/PUT/DELETE). Exponential 2× capped at max_backoff_ms. 0.9.3: AWS-style full-jitter sleep replaces fixed-exponential (thundering-herd guard). 0.9.5: `_sandhi_http_retry` routes through `sandhi_http_request_auto` so retries inherit h2 selection when the pool has an h2 conn for the route. 1.2.1: `_a` variant `_sandhi_http_retry_a` threads allocator through every attempt via `sandhi_http_request_auto_a`. |
-| `src/http/h2/dispatch.cyr` | 407 | **0.8.1 new** — `sandhi_http_request_auto` (per-method `_get_auto` / `_head_auto` / `_post_auto` / `_put_auto` / `_patch_auto` / `_delete_auto`). Pool h2-take → 1.1 single-shot fallback. 0.9.5: redirect-following hoisted to this layer — new `_sandhi_http_auto_once` (per-hop dispatch) + `_sandhi_http_auto_follow` (mirrors 1.1 follow's security semantics; each hop re-evaluates h2 selection). 0.9.6: ALPN-driven h2 auto-promotion — `_sandhi_http_try_h2_promote` opens advertising `h2,http/1.1`, runs preface + SETTINGS on h2-pick and caches via `sandhi_http_pool_put_h2`, donates conn to 1.1 pool slot on http/1.1-pick. First release where live h2 fires end-to-end via the auto path. 1.2.1: `_a` variants for the entire family (`_try_h2_promote_a`, `_auto_once_a`, `_auto_follow_a`, `sandhi_http_request_auto_a`) thread allocator through h2 take / promote / 1.1 fallback uniformly. 1.3.2: `sandhi_http_request_auto_a` save+restores the module-level `_sandhi_allow_0rtt` flag from `sandhi_http_options_get_allow_0rtt(opts)` for the duration of the dispatch — the 1.1 fallback's `_do_impl_a` eligibility check reads the flag. h2 path doesn't enable 0-RTT yet (CONNECTION preface vs. early-data ordering pinned for a later milestone). 1.3.3: same save+restore shape extended to `_sandhi_cred_digest` from `_sandhi_compute_cred_digest(user_headers)`, so the conn-finalize sees the right cred-digest for the cache-key isolation. **1.10.7**: the promote open and the auto dispatch take their own request contexts. **1.13.1**: `sandhi_http_request_auto_a` no longer save/restores the 0-RTT and cred-digest globals; it builds a seed context that `_auto_follow_a` / `_auto_once_a` / `_try_h2_promote_a` take as a trailing `seed`, and the promotion's open sets its context's ALPN_H2 slot instead of the module flag. |
+| `src/http/h2/dispatch.cyr` | 424 | **0.8.1 new** — `sandhi_http_request_auto` (per-method `_get_auto` / `_head_auto` / `_post_auto` / `_put_auto` / `_patch_auto` / `_delete_auto`). Pool h2-take → 1.1 single-shot fallback. 0.9.5: redirect-following hoisted to this layer — new `_sandhi_http_auto_once` (per-hop dispatch) + `_sandhi_http_auto_follow` (mirrors 1.1 follow's security semantics; each hop re-evaluates h2 selection). 0.9.6: ALPN-driven h2 auto-promotion — `_sandhi_http_try_h2_promote` opens advertising `h2,http/1.1`, runs preface + SETTINGS on h2-pick and caches via `sandhi_http_pool_put_h2`, donates conn to 1.1 pool slot on http/1.1-pick. First release where live h2 fires end-to-end via the auto path. 1.2.1: `_a` variants for the entire family (`_try_h2_promote_a`, `_auto_once_a`, `_auto_follow_a`, `sandhi_http_request_auto_a`) thread allocator through h2 take / promote / 1.1 fallback uniformly. 1.3.2: `sandhi_http_request_auto_a` save+restores the module-level `_sandhi_allow_0rtt` flag from `sandhi_http_options_get_allow_0rtt(opts)` for the duration of the dispatch — the 1.1 fallback's `_do_impl_a` eligibility check reads the flag. h2 path doesn't enable 0-RTT yet (CONNECTION preface vs. early-data ordering pinned for a later milestone). 1.3.3: same save+restore shape extended to `_sandhi_cred_digest` from `_sandhi_compute_cred_digest(user_headers)`, so the conn-finalize sees the right cred-digest for the cache-key isolation. **1.10.7**: the promote open and the auto dispatch take their own request contexts. **1.13.1**: `sandhi_http_request_auto_a` no longer save/restores the 0-RTT and cred-digest globals; it builds a seed context that `_auto_follow_a` / `_auto_once_a` / `_try_h2_promote_a` take as a trailing `seed`, and the promotion's open sets its context's ALPN_H2 slot instead of the module flag. **1.13.3**: `sandhi_h2_request_a` holds the conn's lock from the send through the response read; the promotion checks `sandhi_h2_conn_new`'s result. |
 | `src/http/h2/huffman.cyr` | 296 | **0.8.x** — RFC 7541 Huffman decode tree + encode table, built from the Appendix B blob. Line 73 is that 2,570-char table as a **single literal** (one fixup, [architecture/001](../architecture/001-hpack-huffman-blob.md)) and is allowlisted in CI's lint step |
-| `src/http/h2/hpack.cyr` | 662 | **0.8.x** — HPACK header compression: static table, dynamic table with eviction, integer + string primitives |
+| `src/http/h2/hpack.cyr` | 667 | **0.8.x** — HPACK header compression: static table, dynamic table with eviction, integer + string primitives **1.13.3**: `sandhi_hpack_table_new_a` fails closed when either vec does not land. |
 | `src/http/h2/frame.cyr` | 291 | **0.8.x** — HTTP/2 frame wire format (RFC 7540 §6): header parse/serialize, SETTINGS, WINDOW_UPDATE, GOAWAY, RST_STREAM |
-| `src/http/h2/conn.cyr` | 277 | **0.8.x** — per-call reentrant h2 connection lifecycle: preface, settings exchange, stream-id allocation, flow-control accounting |
+| `src/http/h2/conn.cyr` | 313 | **0.8.x** — per-call reentrant h2 connection lifecycle: preface, settings exchange, stream-id allocation, flow-control accounting **1.13.3**: a `lib/sync.cyr` mutex at +80 (`SANDHI_H2_CONN_STRUCT_SIZE` 80 → 88) with `_sandhi_h2_conn_lock` / `_unlock`; the constructor fails closed on the tables and the mutex. |
 | `src/http/h2/request.cyr` | 296 | **0.8.x** — h2 request encode (`:method` / `:scheme` / `:authority` / `:path` pseudo-headers, forbidden-header drop) |
 | `src/http/h2/response.cyr` | 280 | **0.8.x** — h2 response decode: status extraction, header-block decode, pseudo-header strip |
-| `src/http/h2/pool_glue.cyr` | 72 | **0.8.x** — h2-aware pool take/put: route isolation and GOAWAY eviction |
+| `src/http/h2/pool_glue.cyr` | 91 | **0.8.x** — h2-aware pool take/put: route isolation and GOAWAY eviction **1.13.3**: `close_h2_conns` detaches each conn under its lock and clears its conn slot before closing the socket. |
 | `src/obs/trace.cyr` | 54 | **0.7.2 new** — opt-in sakshi-span wrapper. Default off; `sandhi_trace_enable(1)` turns on emission. Boundary spans: `sandhi.http` / `sandhi.dns.v4` / `sandhi.dns.v6` / `sandhi.rpc`. |
 | `src/obs/prof.cyr` | 141 | **1.2.5 new** — per-request per-phase timing instrumentation + recv-buffer cap/used tracking. Default off; runtime toggle via `sandhi_prof_enable(1)`. 5 phase boundaries (URL_PARSE_END / DNS_END / CONN_OPEN_END / REQ_BUILD_END / EXCHANGE_END) captured inside `_sandhi_http_do_impl_a`. 8 public verbs + `SANDHI_PROF_PHASE_*` enum. ~500 ns/request when enabled; zero overhead disabled. |
 | `src/error.cyr` | 33 | unified error kinds (PARSE / CONNECT / TLS / TIMEOUT / REMOTE / PROTOCOL / AUTH / DISCOVERY / INTERNAL) |
@@ -817,11 +837,11 @@ Build outputs:
 
 ## Tests
 
-**3,177 assertions green** across five suites (CI runs all five; measured on the **6.7.15** pin at 1.13.2; 3,159 at 1.13.1):
+**3,194 assertions green** across five suites (CI runs all five; measured on the **6.7.15** pin at 1.13.3; 3,177 at 1.13.2):
 
 - `tests/sandhi.tcyr` — **1,066** on Linux (1,048 at 1.13.1; +18 in `server/framing/no_global_heap`). On Windows (CI's `windows` job since 1.11.3; measured under wine) **1,053**, all passing; as aarch64 under qemu (since 1.12.3) **1,066**, all passing. On Windows the fd-leak checks and the AF_UNIX closed-peer rows skip, and the Windows errno rows run. Coverage: headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint (incl. the 1.6.0 native trust/mTLS enforcement-available + pin-available flips) / SSE / streaming (incl. the 1.6.5 split-inter-chunk-CRLF decoder fix — leading-CRLF parse + split-across-append round-trip, both fail pre-fix) / **download** (1.6.4: result accessors, fd-sink temp-file round-trip + write-error signal, redirect-target resolver across 302/200/follow-off/hops-exhausted/no-Location/downgrade-sentinel) / **server SIGPIPE guard** (1.6.6: `_sandhi_server_ignore_sigpipe()` returns 0 + idempotent) / **server routing** (1.6.7: `route_match` exact/`:name`-capture/segment-count/non-absolute, `_param_int` numeric+non-numeric→-1+oob, router add/cap-full, `router_dispatch` 200/404/405 + query-strip — 28 assertions) / **server TLS** (1.6.8: options `_tls`/`_get_tls` + `_backlog` decouple/floor, `SandhiConn` plain accessors + `conn_write`/`send_*_c` over a /dev/null conn, conn-aware `dispatch_c`/`router_handler_c` 200/404/405 — 22 assertions) / **client dispatch thread-safety** (1.6.9: the `_sandhi_reqctx_*` per-call request context — ctx==0 module-global fallback + per-call isolation, proving a context's open-error / cred-digest don't leak into a sibling context or the module global — 14 assertions) / **mDNS QU receive** (1.6.12: the `discovery/local/qu_unicast` loopback dispatch gate — an unconnected RX receives a unicast reply with a connected TX coexisting on the same port via `SO_REUSEPORT` — 1 assertion).
 - `tests/h2.tcyr` — **1,691** — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
-- `tests/alloc.tcyr` — **356** (+3 at 1.13.1, `alloc/1131/auto_dispatch_leaves_globals`) — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0). (1.6.1: the conn-timeout test now asserts `_sandhi_conn_set_timeout_ms_a` is arena-independent — it composes the stdlib `sock_set_*_timeout` setters — rather than the retired arena-allocates-timeval behaviour; net −1 vs 343.)
+- `tests/alloc.tcyr` — **373** (+17 at 1.13.3, `alloc/1133/h2_conn_shared_by_threads`, which runs on Linux, Windows and aarch64; +3 at 1.13.1, `alloc/1131/auto_dispatch_leaves_globals`) — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0). (1.6.1: the conn-timeout test now asserts `_sandhi_conn_set_timeout_ms_a` is arena-independent — it composes the stdlib `sock_set_*_timeout` setters — rather than the retired arena-allocates-timeval behaviour; net −1 vs 343.)
 - `tests/sandhi_raw_include.tcyr` — **1** (1.10.8) — `include "dist/sandhi.cyr"` plus the assert framework and nothing else; CI builds it with `--no-deps` so the `[deps] stdlib` auto-prepend cannot mask a missing requires block.
 - `tests/rpc.tcyr` — **63** — JSON builder/extractor, RPC dispatch err-envelope, WebDriver URL helpers, MCP envelope, **+ the 1.6.3 endpoint-keyed TLS-policy registry** (set/get/replace, longest-prefix + host-boundary guard, scheme-agnostic resolve, clear/clear-all/nested-survives-sibling-clear, 16-endpoint cap + replace-at-cap).
 
@@ -884,9 +904,11 @@ list this replaced predated every adoption below.
 
 **1.13.x is open** (1.13.0 the per-pool mutex; 1.13.1 the h2 ALPN offer and the `_auto`
 dispatch's 0-RTT / credential digest in the request context; 1.13.2 pin → 6.7.15 and sit's
-server-framing fix). Next on it: serialising one HTTP/2 connection used by several threads
-(found at 1.13.0), then the HPACK / Huffman first-use build race and the session cache's
-lock (found at 1.13.1). The pooled-h2 stall measured at 1.13.1 is item (b) of the h2
+server-framing fix; 1.13.3 one h2 connection shared by threads). Next on it: the HPACK /
+Huffman first-use build race and the session cache's lock (found at 1.13.1). Five h2 gaps
+found at 1.13.3 (the global-heap growth per exchange, the one-byte NUL, the failed exchange
+left pooled, the GOAWAY'd conn never closed, the two-write frames) follow the h2
+spec-completeness group. The pooled-h2 stall measured at 1.13.1 is item (b) of the h2
 spec-completeness group. The fuzz harnesses' correlated draws (found at 1.13.2) close the
 line. No issue or upstream dependency is open. Since 1.10.11 the roadmap is organized by release line
 ([`roadmap.md`](roadmap.md)):

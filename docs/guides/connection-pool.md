@@ -110,14 +110,17 @@ Connections are closed (an evicted one, a stale one, or all of them in
 `sandhi_http_pool_close`) after the lock is released, so a slow TLS close never holds up
 another thread.
 
-⚠ **HTTP/2 is the exception.** The pool keeps one HTTP/2 connection per route and hands
-the *same* connection to every caller (`sandhi_http_pool_take_h2` does not remove it):
-that is how h2 multiplexes. Running two requests on one HTTP/2 connection from two
-threads at once is **not** safe yet: its stream ids, writes and response reads are not
-serialised. A multi-threaded client that uses the h2-capable `_auto` dispatch with a
-shared pool should keep h2 traffic to one thread, or give each thread its own pool, until
-that lands (roadmap 1.13.x). A pooled h2 conn also stalls after about 64 KiB of
-responses, on one thread or many: see `http2-manual.md`'s limitations.
+**HTTP/2 works differently.** The pool keeps one HTTP/2 connection per route and hands
+the *same* connection to every caller (`sandhi_http_pool_take_h2` does not remove it).
+Since 1.13.3 that connection may be used by several threads at once: each h2 connection
+owns a mutex, and `sandhi_h2_request_a` (which the `_auto` dispatch uses) holds it for
+one request's send and its response. Requests on one h2 connection therefore run one at
+a time, not in parallel: threads that need parallel h2 requests to one route give each
+thread its own pool. `sandhi_http_pool_close_h2_conns` waits for a request in flight on
+each connection, and a thread still holding a closed connection gets
+`SANDHI_ERR_PROTOCOL` rather than writing to a reused descriptor. A pooled h2 conn also
+stalls after about 64 KiB of responses, on one thread or many: see `http2-manual.md`'s
+limitations.
 
 One pool per thread still works everywhere and avoids any contention, if that suits the
 program better.

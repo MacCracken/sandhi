@@ -4,6 +4,150 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.13.3] — 2026-10-21
+
+**One HTTP/2 connection may be used by several threads at once: each h2 connection owns
+a mutex, held for one exchange.** Through 1.13.2 two threads on the same pooled h2
+connection broke each other's requests, every time. No pin change (6.7.15), no new public
+verb. Fourth patch on the 1.13.x line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr`.
+
+**Visible to a consumer:**
+- **A multi-threaded client may share a pool across its h2 traffic.** The pool hands every
+  caller for a route the same h2 connection, and the `_auto` dispatch (with the `_retry`
+  verbs, which go through it) now runs one exchange at a time on it. Requests on one h2
+  connection are serialised, not parallel: a thread that needs parallel h2 requests to one
+  route gives each thread its own pool. `docs/guides/connection-pool.md` no longer tells a
+  threaded client to keep h2 on one thread.
+- **`SANDHI_H2_CONN_STRUCT_SIZE` grows 80 → 88** (`SANDHI_H2_CONN_OFF_MUTEX` at +80). A
+  struct built by hand to the old layout is used unlocked, as the pool's 1.13.0 lock does.
+- **`sandhi_h2_conn_new` / `_new_a` and `sandhi_hpack_table_new_a` return 0 more often:**
+  on any allocation failure, not only the first.
+
+### Fixed
+
+- **h2: two threads on one h2 connection interleaved their exchanges.** Found at 1.13.0
+  (roadmap 1.13.x). The stream-id counter, both HPACK tables, the frame writes and the
+  response reads all belong to the connection, and `sandhi_h2_response_recv_a` drops frames
+  for other streams. So one thread read and discarded the other's answer, frames
+  interleaved on the wire, and the counter and tables were updated from two threads.
+  - **Measured by the new row, before the fix:** four threads sharing one connection each
+    failed their first exchange. The peer saw 5 of 161 requests, and none of the 160
+    threaded exchanges came back right.
+  - **The fix:** a `lib/sync.cyr` mutex in the h2 connection struct (`_sandhi_h2_conn_lock`
+    / `_unlock`). `sandhi_h2_request_a` holds it from the request's send through its
+    response read, so the manual verb and every `_auto` path are covered. The roadmap's
+    other shape, demultiplexing responses by stream id, would let one connection's
+    requests run in parallel. It needs per-stream state the response reader does not have,
+    so the lock is the first step the roadmap named.
+  - **The lower-level verbs stay unlocked.** A caller composing `sandhi_h2_request_send_a`
+    and `sandhi_h2_response_recv_a` on a shared connection keeps the pair on one thread;
+    `docs/guides/http2-manual.md` says so.
+- **h2: closing the pool's h2 connections raced the threads still using them.**
+  `sandhi_http_pool_close_h2_conns` closed each socket with no regard for an exchange in
+  flight, and a thread that had taken the connection earlier went on using a closed
+  descriptor. Once the number was reused, that thread's next request, with whatever
+  credentials its headers carried, **went to the connection that reused it**. The new row
+  shows this before the fix.
+  - **The fix:** each connection is detached under its own lock, so the close waits for an
+    exchange in flight, and its conn slot is cleared. A later exchange on the stale pointer
+    fails as `SANDHI_ERR_PROTOCOL` without writing anything. The close itself runs after
+    the lock, as the pool's do.
+- **h2, hpack: the constructors left partial objects on an allocation failure.**
+  `sandhi_h2_conn_new_a` stored its two HPACK table pointers unchecked, and
+  `sandhi_hpack_table_new_a` its two vecs. An allocation failure partway through returned a
+  live conn whose first header encode or decode dereferenced a null table or vec. This is
+  the roadmap standing watch's unguarded-allocation class: the struct allocation one line
+  above was checked.
+  - **The fix:** both constructors fail closed, as the pool's has since 1.9.13. The new
+    mutex is checked the same way.
+  - **The h2 promotion now checks the constructor's result.** Before, it passed it straight
+    to the preface send. An allocation failure there now closes the TLS connection and
+    falls back to HTTP/1.1, as a failed preface does.
+
+### Changed
+
+- **docs:** `docs/guides/connection-pool.md`'s Threading section describes the serialised
+  h2 connection and the close. `docs/guides/http2-manual.md` gains "Sharing one h2
+  connection between threads".
+- **tests:** the `_t_threads_concurrent` comment in `tests/sandhi.tcyr` listed Windows and
+  x86 macOS as serial thread backends. Both have real threads (`THREADS_CONCURRENT = 1`), so
+  the comment now names only agnos and cx.
+- **Roadmap:**
+  - **The shared-h2-connection item leaves 1.13.x.**
+  - **Five items found during it join the line,** ahead of the fuzz-PRNG item, which stays
+    last:
+    - **h2 exchanges grow the global heap, arena or not.** Measured: 42,992 B over ten
+      GETs on a reset arena, about 4.3 KB an exchange. The frame I/O and the encoder's
+      HPACK adds go through bare (global-heap) verbs. The encoder table also keeps
+      pointers into each request's arena.
+    - **Frame reads write a NUL one byte past their buffer:** `sandhi_conn_recv_all`
+      terminates at `buf[len]` and the buffers are allocated exactly `len`.
+    - **A failed exchange leaves its conn pooled mid-stream,** so the next exchange,
+      possibly another thread's, skips that stream's frames and its HPACK decoder drifts.
+      Found by reading.
+    - **A conn evicted for GOAWAY is never closed.** Found by reading.
+    - **Each h2 frame goes out as two writes with no `TCP_NODELAY`,** so Nagle and delayed
+      ACK cost about 80 ms an exchange over loopback (measured).
+
+### Verification
+
+- **New rows, 17 assertions,** in `alloc/1133/h2_conn_shared_by_threads`:
+  - **The shared connection:** a loopback pair, and a peer thread that decodes each
+    request's HPACK block with its own table and answers on that stream with the request's
+    `:path` as the body. After one lone exchange (which also builds the process-wide HPACK
+    tables before threads can race them, a separate roadmap item), four threads each send
+    40 GETs of their own paths on one h2 connection. Every answer must be the thread's own,
+    the peer must see all 161 requests, and stream ids must reach the wire strictly
+    increasing.
+  - **The struct:** 88 bytes, with a mutex.
+  - **Fail-closed:** under every allocation-failure point from 0 to 23, neither
+    constructor returns a partial object, and both eventually build.
+  - **The close:** the conn slot is cleared, and a request on the stale pointer fails as
+    `SANDHI_ERR_PROTOCOL`. The row reopens a pair so the closed descriptor's number is
+    reused, and checks that the new connection received nothing (skipped where the number
+    is not reused).
+- **Before the fix,** seven assertions failed:
+  - the four threads each failed their first exchange, and the peer saw 5 of 161 requests;
+  - 4 partial tables and 10 partial conns;
+  - the stale request wrote into the connection that reused the descriptor.
+  The struct-size row was the eighth failure. The mutex-slot assertion passed only because
+  it read past the old 80-byte struct.
+- **Mutations, each caught:**
+  - no lock in `sandhi_h2_request_a`: 3 rows;
+  - the lock released before the response read: 3 rows;
+  - the close not clearing the conn slot: 2 rows, on Linux and under wine;
+  - no `dec` table check: 1 row;
+  - no vec check in the table constructor: 2 rows.
+  Dropping the `enc` check is equivalent under the failing allocator, which then fails the
+  `dec` allocation too; the check stays as a guard.
+- **Stability:** the row passed 6 runs of 6, plus 3 stress runs at 8 threads × 200
+  exchanges.
+- **The test pair sets `TCP_NODELAY`.** Without it the 161 exchanges took about 13 s on
+  Nagle and delayed ACK, and with it the whole suite runs in 1.8 s. The send path's two
+  writes per frame are a roadmap item, not something this row should wait on.
+- **Windows (wine) found one defect in the first draft.** Windows reuses socket handle
+  values, so the close row's write-check ran there, and it read with `sys_read`. A file read
+  on a Winsock handle ignores `SO_RCVTIMEO`, so it blocked forever. It reads through
+  `sandhi_conn_recv` now, and the close mutation fails under wine as on Linux.
+- **3,194 assertions** (1,066 / 1,691 / 373 / 63 / 1), 9/9 fuzz. `fmt` is clean, and lint's
+  one warning is the pre-existing long table line in `src/http/h2/huffman.cyr`.
+- **Windows under wine:** all four suites pass (1,053 / 1,691 / 373 / 63). Windows has real
+  threads, so the shared-connection row runs there.
+- **aarch64 under qemu:** all four suites pass (1,066 / 1,691 / 373 / 63).
+- **The full Linux gate:**
+  - Builds: the `CYRIUS_DCE=1` smoke, native and libssl, and the aarch64, Windows and
+    AGNOS cross-builds; the Windows smoke runs under wine.
+  - Live gates: all seven pass.
+  - CI scripts: the whole-surface link check (888 fns, two of them new and private;
+    control refused) and the programs sweep (35 programs) pass.
+  - dist: all five bundles regenerated and idempotent. The change reaches only
+    `sandhi.cyr` (the profiles do not include the h2 modules); the other four take the
+    version stamp. All five `.deps` sidecars are unchanged.
+- Not yet re-vendored into a cyrius release.
+
 ## [1.13.2] — 2026-10-21
 
 **Pin → cyrius 6.7.15. A server's request framing no longer allocates on the global heap.**

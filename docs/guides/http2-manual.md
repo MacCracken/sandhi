@@ -67,6 +67,15 @@ through `sandhi_http_request_auto`.
 Convenience verbs: `sandhi_http_get_auto`, `_head_auto`, `_post_auto`, `_put_auto`,
 `_patch_auto`, `_delete_auto` — all mirror the 1.1 signatures.
 
+## Sharing one h2 connection between threads
+
+`sandhi_h2_request` / `_request_a` lock the h2 connection for one request's send and
+its response read (since 1.13.3), so threads may share one connection: their requests
+run one after another. A caller that composes the lower-level verbs itself
+(`sandhi_h2_request_send_a`, then `sandhi_h2_response_recv_a`) on a shared connection
+must keep the pair together on one thread: the response reader drops frames for other
+streams, so a second thread's send between them loses one of the two answers.
+
 ## Limitations of the h2 path
 
 - ⚠ **A pooled h2 conn stalls after about 64 KiB of responses.** sandhi never sends

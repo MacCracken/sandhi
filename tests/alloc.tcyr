@@ -2085,6 +2085,285 @@ fn test_alloc_146_options_layout_intact() {
     return 0;
 }
 
+# 1.13.3 — one h2 connection shared by threads. The pool hands every caller for a
+# route the same h2 conn, and nothing serialised two threads' exchanges on it: the
+# stream-id counter, both HPACK tables, the frame writes and the response reads are
+# all the connection's. A loopback pair, and a peer thread that decodes each
+# request's header block with its own HPACK table and answers on that stream with
+# `:status 200` and the request's `:path` as the body; each client thread checks it
+# got its own path back. Mutation: dropping the lock in `sandhi_h2_request_a`
+# fails the row.
+var _t_h2s_cfd = 0;
+var _t_h2s_sfd = 0;
+var _t_h2s_h2c = 0;
+var _t_h2s_ok = 0;
+var _t_h2s_bad = 0;
+var _t_h2s_served = 0;
+var _t_h2s_order_bad = 0;
+var _t_h2s_want = 0;
+
+fn _t_h2s_threads(): i64 { return 4; }
+fn _t_h2s_iters(): i64 { return 40; }
+
+# A plain client conn over `fd`, as the conn-open path builds one.
+fn _t_h2s_conn(fd): i64 {
+    var c = alloc(SANDHI_CONN_STRUCT_SIZE);
+    store64(c + SANDHI_CONN_OFF_KIND, SANDHI_CONN_PLAIN);
+    store64(c + SANDHI_CONN_OFF_FD, fd);
+    store64(c + SANDHI_CONN_OFF_TLS_CTX, 0);
+    store64(c + SANDHI_CONN_OFF_ALPN_DATA, 0);
+    store64(c + SANDHI_CONN_OFF_0RTT_STATUS, 0);
+    return c;
+}
+
+# A loopback pair into `_t_h2s_cfd` / `_t_h2s_sfd`, each end with a 2 s read
+# timeout so a lost frame fails a row instead of hanging it, and TCP_NODELAY: an
+# h2 frame goes out as two writes, and without it each exchange waits ~80 ms on
+# Nagle and delayed ACK (a roadmap item). 0, or -1 to skip.
+fn _t_h2s_pair(port): i64 {
+    var lr_tag, lfd = tcp_socket();
+    if (is_err_result(lr_tag) == 1) { return 0 - 1; }
+    sock_reuse(lfd);
+    if (is_err_result(sock_bind(lfd, INADDR_LOOPBACK(), port)) == 1) { sock_close(lfd); return 0 - 1; }
+    if (is_err_result(sock_listen(lfd, 4)) == 1) { sock_close(lfd); return 0 - 1; }
+    var cr_tag, cfd = tcp_socket();
+    if (is_err_result(cr_tag) == 1) { sock_close(lfd); return 0 - 1; }
+    if (is_err_result(sock_connect(cfd, INADDR_LOOPBACK(), port)) == 1) {
+        sock_close(cfd); sock_close(lfd); return 0 - 1;
+    }
+    var ar_tag, sfd = sock_accept(lfd);
+    sock_close(lfd);
+    if (is_err_result(ar_tag) == 1) { sock_close(cfd); return 0 - 1; }
+    _sandhi_conn_set_timeout_ms(cfd, 2000, _SANDHI_SO_RCVTIMEO);
+    _sandhi_conn_set_timeout_ms(sfd, 2000, _SANDHI_SO_RCVTIMEO);
+    sock_set_nodelay(cfd, 1);
+    sock_set_nodelay(sfd, 1);
+    _t_h2s_cfd = cfd;
+    _t_h2s_sfd = sfd;
+    return 0;
+}
+
+fn _t_h2s_put_int(buf, off, n): i64 {
+    var d = alloc(24);
+    var k = 0;
+    var v = n;
+    if (v == 0) { store8(d, 48); k = 1; }
+    while (v > 0) { store8(d + k, 48 + v % 10); v = v / 10; k = k + 1; }
+    var o = off;
+    while (k > 0) { k = k - 1; store8(buf + o, load8(d + k)); o = o + 1; }
+    store8(buf + o, 0);
+    return o;
+}
+
+# The peer: answer `_t_h2s_want` requests, then close its end.
+fn _t_h2s_peer(arg) {
+    var p = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_sfd));
+    var res = alloc(16);
+    var off = alloc(8);
+    var no = alloc(8);
+    var vo = alloc(8);
+    var st = alloc(8);
+    store8(st, 0x88);                    # :status 200 (static index 8)
+    var last_sid = 0;
+    while (_t_h2s_served < _t_h2s_want) {
+        if (sandhi_h2_conn_recv_frame(p, res) < 0) { break; }
+        var hdr = load64(res);
+        if (sandhi_h2_hdr_type(hdr) == SANDHI_H2_FRAME_HEADERS) {
+            var sid = sandhi_h2_hdr_stream_id(hdr);
+            if (sid <= last_sid) { _t_h2s_order_bad = _t_h2s_order_bad + 1; }
+            last_sid = sid;
+            var blk = load64(res + 8);
+            var blen = sandhi_h2_hdr_length(hdr);
+            var path = "?";
+            store64(off, 0);
+            while (load64(off) < blen) {
+                var r = sandhi_hpack_decode_field_a(default_alloc(), sandhi_h2_conn_dec_table(p),
+                  blk, blen, off, no, vo);
+                if (r < 0) { break; }
+                if (r != _SANDHI_HPACK_TBL_UPDATE) {
+                    if (streq(load64(no), ":path") == 1) { path = load64(vo); }
+                }
+            }
+            sandhi_h2_conn_send_frame(p, SANDHI_H2_FRAME_HEADERS, SANDHI_H2_FLAG_END_HEADERS, sid, st, 1);
+            sandhi_h2_conn_send_frame(p, SANDHI_H2_FRAME_DATA, SANDHI_H2_FLAG_END_STREAM, sid, path, strlen(path));
+            _t_h2s_served = _t_h2s_served + 1;
+        }
+    }
+    sock_close(_t_h2s_sfd);
+    return 0;
+}
+
+# One client thread: `_t_h2s_iters()` GETs of "/t<t>/<j>" on the shared conn,
+# stopping at the first wrong answer.
+fn _t_h2s_client(arg) {
+    var t = arg;
+    var a = arena_allocator(1200000);    # one response's 1 MiB body buffer + scratch
+    var path = alloc(64);
+    var url = alloc(96);
+    var ok = 0;
+    var bad = 0;
+    var j = 0;
+    while (j < _t_h2s_iters()) {
+        store8(path, 47); store8(path + 1, 116);   # "/t"
+        var o = _t_h2s_put_int(path, 2, t);
+        store8(path + o, 47);
+        _t_h2s_put_int(path, o + 1, j);
+        memcpy(url, "http://h2.test", 14);
+        memcpy(url + 14, path, strlen(path) + 1);
+        var r = sandhi_h2_request_a(a, _t_h2s_h2c, "GET", url, 0, 0, 0);
+        if (sandhi_http_status(r) == 200 && streq(sandhi_http_body(r), path) == 1) {
+            ok = ok + 1;
+        } else {
+            bad = bad + 1;
+            j = _t_h2s_iters();
+        }
+        reset_via(a);
+        j = j + 1;
+    }
+    store64(_t_h2s_ok + t * 8, ok);
+    store64(_t_h2s_bad + t * 8, bad);
+    return 0;
+}
+
+fn test_h2_conn_shared_by_threads() {
+    if (THREADS_CONCURRENT != 1) { assert_eq(1, 1, "h2 shared: no concurrent threads — skipped"); return 0; }
+    if (_t_h2s_pair(39851) != 0) { assert_eq(1, 1, "h2 shared: loopback unavailable — skipped"); return 0; }
+    var nt = _t_h2s_threads();
+    _t_h2s_want = 1 + nt * _t_h2s_iters();
+    _t_h2s_served = 0;
+    _t_h2s_order_bad = 0;
+    _t_h2s_h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    _t_h2s_ok = alloc(nt * 8);
+    _t_h2s_bad = alloc(nt * 8);
+    var peer = thread_create(&_t_h2s_peer, 0);
+    if (peer == 0) {
+        sock_close(_t_h2s_cfd); sock_close(_t_h2s_sfd);
+        assert_eq(1, 1, "h2 shared: no thread — skipped");
+        return 0;
+    }
+    # One exchange alone first: proves the fixture, and builds the process-wide
+    # HPACK tables before two threads can race their first use (a separate
+    # roadmap item).
+    var wa = arena_allocator(1200000);
+    var w = sandhi_h2_request_a(wa, _t_h2s_h2c, "GET", "http://h2.test/warm", 0, 0, 0);
+    assert_eq(sandhi_http_status(w), 200, "h2 shared: a lone exchange answers 200");
+    assert_eq(streq(sandhi_http_body(w), "/warm"), 1, "h2 shared: with its own path as the body");
+
+    var th = alloc(nt * 8);
+    var t = 0;
+    while (t < nt) {
+        store64(_t_h2s_ok + t * 8, 0);
+        store64(_t_h2s_bad + t * 8, 0);
+        store64(th + t * 8, thread_create(&_t_h2s_client, t));
+        t = t + 1;
+    }
+    t = 0;
+    while (t < nt) {
+        if (load64(th + t * 8) != 0) { thread_join(load64(th + t * 8)); }
+        t = t + 1;
+    }
+    thread_join(peer);
+    sock_close(_t_h2s_cfd);
+    var ok = 0;
+    var bad = 0;
+    t = 0;
+    while (t < nt) {
+        ok = ok + load64(_t_h2s_ok + t * 8);
+        bad = bad + load64(_t_h2s_bad + t * 8);
+        t = t + 1;
+    }
+    assert_eq(bad, 0, "h2 shared: no thread got another's answer, or none");
+    assert_eq(ok, nt * _t_h2s_iters(), "h2 shared: 4 threads x 40 exchanges on one conn all answered");
+    assert_eq(_t_h2s_served, _t_h2s_want, "h2 shared: the peer saw every request");
+    assert_eq(_t_h2s_order_bad, 0, "h2 shared: stream ids reached the wire strictly increasing");
+    return 0;
+}
+
+# The h2 conn carries its lock. `SANDHI_H2_CONN_STRUCT_SIZE` 80 → 88.
+fn test_h2_conn_has_mutex() {
+    var a = arena_allocator(8192);
+    var c = sandhi_h2_conn_new_a(a, 0);
+    assert_neq(c, 0, "h2 conn: built");
+    assert_eq(SANDHI_H2_CONN_STRUCT_SIZE, 88, "h2 conn: struct 88 bytes");
+    assert_neq(load64(c + SANDHI_H2_CONN_OFF_MUTEX), 0, "h2 conn: owns a mutex");
+    return 0;
+}
+
+# The constructors fail closed at every allocation: a conn (or an HPACK table) is
+# either 0 or complete, never a live handle holding a null table or vec. Through
+# 1.13.2 the two tables, and each table's two vecs, were stored unchecked.
+fn _t_h2s_table_complete(t): i64 {
+    if (t == 0) { return 0; }
+    if (load64(t + SANDHI_HPACK_TBL_OFF_NAMES) == 0) { return 0; }
+    if (load64(t + SANDHI_HPACK_TBL_OFF_VALUES) == 0) { return 0; }
+    return 1;
+}
+
+fn test_h2_conn_new_fails_closed() {
+    var partial_t = 0;
+    var whole_t = 0;
+    var partial_c = 0;
+    var whole_c = 0;
+    var k = 0;
+    while (k < 24) {
+        var t = sandhi_hpack_table_new_a(fail_after_n_allocs(k), 0);
+        if (t != 0) {
+            if (_t_h2s_table_complete(t) == 1) { whole_t = whole_t + 1; } else { partial_t = partial_t + 1; }
+        }
+        var c = sandhi_h2_conn_new_a(fail_after_n_allocs(k), 0);
+        if (c != 0) {
+            if (_t_h2s_table_complete(sandhi_h2_conn_enc_table(c)) == 1
+              && _t_h2s_table_complete(sandhi_h2_conn_dec_table(c)) == 1) {
+                whole_c = whole_c + 1;
+            } else {
+                partial_c = partial_c + 1;
+            }
+        }
+        k = k + 1;
+    }
+    assert_eq(partial_t, 0, "hpack table: no allocation failure leaves a partial table");
+    assert_eq(partial_c, 0, "h2 conn: no allocation failure leaves a partial conn");
+    assert(whole_t > 0, "hpack table: built once allocations stop failing");
+    assert(whole_c > 0, "h2 conn: built once allocations stop failing");
+    return 0;
+}
+
+# A close cannot land mid-exchange, and a stale pointer cannot write into whatever
+# socket reuses the fd. `sandhi_http_pool_close_h2_conns` closes each conn under
+# its lock and clears its conn slot; a request on the stale h2 conn then fails
+# without writing. The row reopens a pair so the closed fd's number is reused, and
+# checks the new connection received nothing (POSIX hands out the lowest free fd;
+# where the number is not reused the write-check skips).
+fn test_h2_pool_close_clears_conn() {
+    if (_t_h2s_pair(39852) != 0) { assert_eq(1, 1, "h2 close: loopback unavailable — skipped"); return 0; }
+    var old_cfd = _t_h2s_cfd;
+    var old_sfd = _t_h2s_sfd;
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(old_cfd));
+    var pool = sandhi_http_pool_new(0, 0);
+    sandhi_http_pool_put_h2(pool, "h2.test", 80, 0, h2c);
+    sandhi_http_pool_close_h2_conns(pool);
+    sock_close(old_sfd);
+    assert_eq(sandhi_h2_conn_underlying(h2c), 0, "h2 close: the conn slot is cleared");
+    if (_t_h2s_pair(39853) != 0) { assert_eq(1, 1, "h2 close: second pair unavailable — skipped"); return 0; }
+    var a = arena_allocator(1200000);
+    var r = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/stale", 0, 0, 0);
+    assert_eq(sandhi_http_status(r), 0, "h2 close: a request on the stale conn gets no status");
+    assert_eq(sandhi_http_err_kind(r), SANDHI_ERR_PROTOCOL, "h2 close: and fails as PROTOCOL");
+    if (_t_h2s_cfd == old_cfd) {
+        # Through the conn's transport, not sys_read: a Winsock handle is not a file
+        # handle, and a file read on it ignores SO_RCVTIMEO and blocks.
+        _sandhi_conn_set_timeout_ms(_t_h2s_sfd, 200, _SANDHI_SO_RCVTIMEO);
+        var buf = alloc(65);
+        var n = sandhi_conn_recv(_t_h2s_conn(_t_h2s_sfd), buf, 64);
+        assert(n <= 0, "h2 close: nothing reached the connection that reused the fd");
+    } else {
+        assert_eq(1, 1, "h2 close: fd not reused here — write check skipped");
+    }
+    sock_close(_t_h2s_cfd);
+    sock_close(_t_h2s_sfd);
+    return 0;
+}
+
 # ================================================================
 # Runner
 # ================================================================
@@ -2333,6 +2612,12 @@ fn main() {
 
     test_group("alloc/1131/auto_dispatch_leaves_globals");
     test_auto_dispatch_leaves_globals();
+
+    test_group("alloc/1133/h2_conn_shared_by_threads");
+    test_h2_conn_has_mutex();
+    test_h2_conn_new_fails_closed();
+    test_h2_pool_close_clears_conn();
+    test_h2_conn_shared_by_threads();
 
     test_group("alloc/132/conn_0rtt_status_accessor");
     test_alloc_132_conn_0rtt_status_accessor();

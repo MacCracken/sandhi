@@ -2806,11 +2806,11 @@ fn test_reqctx_new_seeded() {
     return 0;
 }
 
-# 1 when `thread_create` starts a second thread. On a serial backend (x86 macOS,
-# Windows, agnos, cx) a thread body runs to completion inside `thread_create`, so a
-# row whose peer must make progress WHILE the caller waits cannot run there: the
-# peer would finish, or block forever, before the caller starts. Guarded by the
-# stdlib's capability, never by target name.
+# 1 when `thread_create` starts a second thread. On a serial backend (agnos, cx;
+# Windows and both macOS arches have real threads) a thread body runs to completion
+# inside `thread_create`, so a row whose peer must make progress WHILE the caller
+# waits cannot run there: the peer would finish, or block forever, before the caller
+# starts. Guarded by the stdlib's capability, never by target name.
 fn _t_threads_concurrent(): i64 {
     if (THREADS_CONCURRENT == 1) { return 1; }
     return 0;
