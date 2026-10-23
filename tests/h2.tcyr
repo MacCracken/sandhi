@@ -240,6 +240,41 @@ fn test_hpack_dynamic_size_update_decode() {
     return 0;
 }
 
+# 1.13.7 (CYRIUS-2026-0044) — a peer's Dynamic-Table-Size-Update may not
+# exceed the size the decoder's endpoint advertised (4096: sandhi sends no
+# SETTINGS_HEADER_TABLE_SIZE). Larger is a decoding error, and the table keeps
+# its size; up to the limit is applied, including back up after a shrink.
+# Through 1.13.6 the audit's 2^28 update was applied, and nothing was evicted.
+fn _t_hpack_size_update_rc(t, v) {
+    var buf = alloc(16);
+    var p = sandhi_hpack_encode_table_size_update(buf, 0, v);
+    var off = alloc(8); store64(off, 0);
+    var no = alloc(8); var vo = alloc(8);
+    return sandhi_hpack_decode_field(t, buf, p, off, no, vo);
+}
+
+fn test_hpack_size_update_capped_at_advertised() {
+    var t = sandhi_hpack_table_new(0);
+    assert_eq(_t_hpack_size_update_rc(t, 0x10000000), _SANDHI_HPACK_ERR_MALFORMED,
+      "size update: 2^28 refused");
+    assert_eq(sandhi_hpack_table_max_size(t), 4096, "size update: 2^28 left the table at 4096");
+    assert_eq(_t_hpack_size_update_rc(t, 4097), _SANDHI_HPACK_ERR_MALFORMED,
+      "size update: one past the advertised 4096 refused");
+    assert_eq(_t_hpack_size_update_rc(t, 0), _SANDHI_HPACK_TBL_UPDATE, "size update: 0 applied");
+    assert_eq(sandhi_hpack_table_max_size(t), 0, "size update: the table is at 0");
+    assert_eq(_t_hpack_size_update_rc(t, 4096), _SANDHI_HPACK_TBL_UPDATE,
+      "size update: back up to the advertised 4096 applied");
+    assert_eq(sandhi_hpack_table_max_size(t), 4096, "size update: the table is at 4096 again");
+    # The limit is what the table was built with.
+    var t2 = sandhi_hpack_table_new(8192);
+    assert_eq(_t_hpack_size_update_rc(t2, 8192), _SANDHI_HPACK_TBL_UPDATE, "size update: 8192 on an 8192 table");
+    assert_eq(_t_hpack_size_update_rc(t2, 8193), _SANDHI_HPACK_ERR_MALFORMED, "size update: 8193 on an 8192 table");
+    # An encoder table follows the peer's SETTINGS, uncapped.
+    sandhi_hpack_table_set_max_size(t, 65536);
+    assert_eq(sandhi_hpack_table_max_size(t), 65536, "set_max_size: the primitive stays uncapped");
+    return 0;
+}
+
 fn test_hpack_huffman_decode_www_example() {
     # RFC 7541 C.4.1 — "www.example.com" Huffman-encoded as 12 bytes:
     #   f1 e3 c2 e5 f2 3a 6b a0 ab 90 f4 ff
@@ -892,6 +927,7 @@ fn main() {
 
     test_group("h2/hpack/size_update");
     test_hpack_dynamic_size_update_decode();
+    test_hpack_size_update_capped_at_advertised();
 
     test_group("h2/hpack/huffman_encode_www");
     test_hpack_huffman_encode_www_example();

@@ -217,20 +217,24 @@ fn sandhi_hpack_static_value(idx): i64 {
 # through the caller's allocator: after a per-request arena was reset,
 # the conn's decode table pointed into reused memory.
 #
-# Struct layout (32 bytes):
+# Struct layout (40 bytes):
 #   +0   names    (vec<cstr>: oldest at vec[0]; each entry's block)
 #   +8   values   (vec<cstr>: parallel; inside the same blocks)
 #   +16  cur_size (int: bytes used)
 #   +24  max_size (int: cap)
+#   +32  limit    (int: the size the table was built with — for a decode
+#                  table, the SETTINGS_HEADER_TABLE_SIZE its endpoint
+#                  advertised; a peer's size update may not exceed it)
 
 enum SandhiHpackTableOff {
     SANDHI_HPACK_TBL_OFF_NAMES    = 0;
     SANDHI_HPACK_TBL_OFF_VALUES   = 8;
     SANDHI_HPACK_TBL_OFF_CUR_SIZE = 16;
     SANDHI_HPACK_TBL_OFF_MAX_SIZE = 24;
+    SANDHI_HPACK_TBL_OFF_LIMIT    = 32;
 }
 
-var SANDHI_HPACK_TABLE_STRUCT_SIZE = 32;
+var SANDHI_HPACK_TABLE_STRUCT_SIZE = 40;
 var SANDHI_HPACK_ENTRY_OVERHEAD    = 32;
 
 # Build a dynamic table from `a`. The struct + parallel name/value
@@ -252,6 +256,7 @@ fn sandhi_hpack_table_new_a(a, max_size): i64 {
     var ms = max_size;
     if (ms <= 0) { ms = SANDHI_HPACK_DEFAULT_TABLE_SIZE; }
     store64(t + SANDHI_HPACK_TBL_OFF_MAX_SIZE, ms);
+    store64(t + SANDHI_HPACK_TBL_OFF_LIMIT, ms);
     return t;
 }
 
@@ -349,6 +354,8 @@ fn sandhi_hpack_table_add(t, name, value): i64 {
 
 # Update max_size; shrink immediately if needed (peer sent a
 # Dynamic-Table-Size-Update or a SETTINGS_HEADER_TABLE_SIZE change).
+# Uncapped: the encoder table follows the peer's SETTINGS, whatever they
+# are. The decoder bounds a peer's size update itself (§6.3 below).
 fn sandhi_hpack_table_set_max_size(t, max_size): i64 {
     if (t == 0) { return 0; }
     store64(t + SANDHI_HPACK_TBL_OFF_MAX_SIZE, max_size);
@@ -674,6 +681,14 @@ fn sandhi_hpack_decode_field_a(a, t, buf, blen, off_cell, name_out, value_out): 
         if (sz_cell == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
         var ir = _hpack_int_decode(buf, blen, off_cell, 5, sz_cell);
         if (ir < 0) { return ir; }
+        # 1.13.7 (CYRIUS-2026-0044) — RFC 7541 §6.3 / §4.2: a size above
+        # the one this decoder's endpoint advertised (sandhi sends no
+        # SETTINGS_HEADER_TABLE_SIZE, so the 4096 default) is a decoding
+        # error, an HTTP/2 COMPRESSION_ERROR. Through 1.13.6 any size was
+        # applied, so a server grew the client's decode table without bound.
+        if (t != 0 && load64(sz_cell) > load64(t + SANDHI_HPACK_TBL_OFF_LIMIT)) {
+            return _SANDHI_HPACK_ERR_MALFORMED;
+        }
         sandhi_hpack_table_set_max_size(t, load64(sz_cell));
         store64(name_out, 0);
         store64(value_out, load64(sz_cell));
