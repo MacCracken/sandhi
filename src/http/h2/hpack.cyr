@@ -528,7 +528,13 @@ fn _hpack_string_decode_a(a, buf, blen, off_cell, out_cell): i64 {
     if (out == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     var i = 0;
     while (i < slen) {
-        store8(out + i, s[soff + i]);
+        # 1.13.7 — a NUL is MALFORMED (RFC 9113 §8.2.1: never valid in a
+        # field name or value; the cstr answered cannot hold one). Through
+        # 1.13.6 the string was kept cut at it. The Huffman decoder refuses
+        # a decoded NUL the same way.
+        var c = s[soff + i];
+        if (c == 0) { return _SANDHI_HPACK_ERR_MALFORMED; }
+        store8(out + i, c);
         i = i + 1;
     }
     store8(out + slen, 0);
