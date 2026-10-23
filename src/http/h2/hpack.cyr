@@ -392,6 +392,13 @@ fn sandhi_hpack_lookup(t, idx, name_out, value_out): i64 {
 # Integer encoding (RFC 7541 §5.1)
 # ================================================================
 #
+# 1.13.7 (cyrius 6.7.18's D1) — the decoders read the peer's block
+# through a fn-local `[u8]` slice over (buf, blen): every `s[i]` is
+# bounds-checked in every build, so a read past the block (or before it)
+# stops the process with `slice bounds violation` (exit 134) instead of
+# answering bytes that are not the peer's. Through 1.13.6 they were raw
+# `load8(buf + off)`s, checked only by each fn's own arithmetic.
+#
 # encode: writes prefix byte + continuation bytes into `out` starting
 # at offset `off`. Returns new offset. `prefix_bits` is N (4-7);
 # `prefix_high` is the high (8-N) bits already set in out[off] —
@@ -430,10 +437,12 @@ const _SANDHI_HPACK_INT_MAX = 0xFFFFFFFF;
 # continuation bytes were allowed, and the sum wrapped into a negative
 # value the caller took as a length, index or table size.
 fn _hpack_int_decode(buf, blen, off_cell, prefix_bits, value_out): i64 {
+    var s: [u8] = 0;
+    slice_set(&s, buf, blen);
     var off = load64(off_cell);
     if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     var max_prefix = (1 << prefix_bits) - 1;
-    var first = load8(buf + off) & max_prefix;
+    var first = s[off] & max_prefix;
     off = off + 1;
     if (first < max_prefix) {
         store64(value_out, first);
@@ -445,7 +454,7 @@ fn _hpack_int_decode(buf, blen, off_cell, prefix_bits, value_out): i64 {
     loop {
         if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
         if (m > 28) { return _SANDHI_HPACK_ERR_INT_OVERFLOW; }
-        var b = load8(buf + off);
+        var b = s[off];
         off = off + 1;
         i = i + ((b & 0x7F) << m);
         if (i > _SANDHI_HPACK_INT_MAX) { return _SANDHI_HPACK_ERR_INT_OVERFLOW; }
@@ -492,9 +501,11 @@ fn _hpack_string_encode(out, off, s): i64 {
 # returned cstr (or Huffman-decoded cstr) live in `a`; arena reset
 # after the caller has copied/consumed the string reclaims everything.
 fn _hpack_string_decode_a(a, buf, blen, off_cell, out_cell): i64 {
+    var s: [u8] = 0;
+    slice_set(&s, buf, blen);
     var off = load64(off_cell);
     if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
-    var huffman = (load8(buf + off) & 0x80) >> 7;
+    var huffman = (s[off] & 0x80) >> 7;
     var len_cell = alloc_via(a, 8);
     if (len_cell == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     store64(len_cell, 0);
@@ -513,16 +524,16 @@ fn _hpack_string_decode_a(a, buf, blen, off_cell, out_cell): i64 {
         store64(out_cell, dec);
         return 0;
     }
-    var s = alloc_via(a, slen + 1);
-    if (s == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
+    var out = alloc_via(a, slen + 1);
+    if (out == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     var i = 0;
     while (i < slen) {
-        store8(s + i, load8(buf + soff + i));
+        store8(out + i, s[soff + i]);
         i = i + 1;
     }
-    store8(s + slen, 0);
+    store8(out + slen, 0);
     store64(off_cell, soff + slen);
-    store64(out_cell, s);
+    store64(out_cell, out);
     return 0;
 }
 
@@ -633,9 +644,11 @@ fn _hpack_own_a(a, idx, cell): i64 {
 # in `a`, so a per-request arena reset left the conn's table pointing
 # into reused memory).
 fn sandhi_hpack_decode_field_a(a, t, buf, blen, off_cell, name_out, value_out): i64 {
+    var s: [u8] = 0;
+    slice_set(&s, buf, blen);
     var off = load64(off_cell);
     if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
-    var first = load8(buf + off);
+    var first = s[off];
 
     if ((first & 0x80) != 0) {
         # 1xxxxxxx — Indexed Header Field.

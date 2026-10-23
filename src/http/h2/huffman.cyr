@@ -193,6 +193,12 @@ fn _hpack_huffman_bits_of(t, symbol): i64 {
 # from `a`. Returns 0 on malformed input or OOM. The decoded cstr is
 # the only escaping allocation; arena callers can reset_via(a) once
 # the cstr is consumed.
+#
+# 1.13.7 (cyrius 6.7.18's D1) — the input is read through a fn-local
+# `[u8]` slice over (buf + start, nbytes) and the output written through
+# one over its allocation: every access is bounds-checked in every build
+# (out of range: `slice bounds violation`, exit 134). Through 1.13.6 both
+# were raw `load8` / `store8`s.
 fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes): i64 {
     var t = _hpack_huffman_get();
     if (t == 0) { return 0; }
@@ -202,6 +208,10 @@ fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes): i64 {
     if (out_cap < 1) { out_cap = 1; }
     var out = alloc_via(a, out_cap);
     if (out == 0) { return 0; }
+    var s: [u8] = 0;
+    slice_set(&s, buf + start, nbytes);
+    var o: [u8] = 0;
+    slice_set(&o, out, out_cap);
     var out_len = 0;
     var node = root;
     var partial_bits = 0;
@@ -210,7 +220,7 @@ fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes): i64 {
     var bit_idx = 0;
     var bits_left = nbytes * 8;
     while (bits_left > 0) {
-        var byte = load8(buf + start + byte_idx);
+        var byte = s[byte_idx];
         var b = (byte >> (7 - bit_idx)) & 1;
         var next = 0;
         if (b == 0) { next = load64(node + 0); partial_all_ones = 0; }
@@ -221,7 +231,7 @@ fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes): i64 {
         var sym = load64(node + 16);
         if (sym != _SANDHI_HPACK_HUFFMAN_INTERNAL) {
             if (sym == 256) { return 0; }   # EOS in payload — error
-            store8(out + out_len, sym);
+            o[out_len] = sym;
             out_len = out_len + 1;
             node = root;
             partial_bits = 0;
@@ -241,7 +251,7 @@ fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes): i64 {
         if (partial_bits > 7) { return 0; }
         if (partial_all_ones != 1) { return 0; }
     }
-    store8(out + out_len, 0);
+    o[out_len] = 0;
     return out;
 }
 

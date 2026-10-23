@@ -161,4 +161,5 @@ stdlib = [
     "ws",
     "sakshi",
     "sigil",
+    "slice",
 ]

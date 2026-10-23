@@ -304,6 +304,66 @@ fn test_hpack_int_decode_bounded() {
     return 0;
 }
 
+# 1.13.7 — the HPACK decoders read the block through a checked slice, so a
+# read outside it stops the process (`slice bounds violation`, exit 134)
+# instead of answering a byte that is not the peer's. Each probe runs in a
+# forked child (stderr closed) and starts one byte before the block, where the
+# decoders' own length checks do not look; through 1.13.6 each read that byte
+# and returned (the child exited 0).
+var _t_ovr_a = 0;
+
+fn _t_ovr_block() {
+    var b = alloc(8);
+    store8(b, 0x82); store8(b + 1, 0x82); store8(b + 2, 0x82);
+    return b + 1;                        # one byte of block; b[0] is not the peer's
+}
+
+fn _t_ovr_int(arg) {
+    var off = alloc(8); store64(off, 0 - 1);
+    var vc = alloc(8);
+    return _hpack_int_decode(_t_ovr_block(), 1, off, 7, vc);
+}
+
+fn _t_ovr_string(arg) {
+    var off = alloc(8); store64(off, 0 - 1);
+    var oc = alloc(8);
+    return _hpack_string_decode_a(_t_ovr_a, _t_ovr_block(), 1, off, oc);
+}
+
+fn _t_ovr_field(arg) {
+    var off = alloc(8); store64(off, 0 - 1);
+    var no = alloc(8); var vo = alloc(8);
+    return sandhi_hpack_decode_field_a(_t_ovr_a, 0, _t_ovr_block(), 1, off, no, vo);
+}
+
+# Run `fp(arg)` in a forked child with stderr closed. Its exit status; 1000 +
+# the signal when one killed it; -1 when fork is unavailable (Windows).
+fn _t_child_exit(fp, arg) {
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+    if (pid == 0) {
+        sys_close(2);
+        fncall1(fp, arg);
+        sys_exit(0);
+    }
+    var st[8];
+    store64(&st, 0);
+    sys_waitpid(pid, &st, 0);
+    var status = load64(&st) & 0xFFFFFFFF;
+    if ((status & 127) != 0) { return 1000 + (status & 127); }
+    return (status >> 8) & 255;
+}
+
+fn test_hpack_overread_caught() {
+    _t_ovr_a = arena_allocator(65536);
+    var e = _t_child_exit(&_t_ovr_int, 0);
+    if (e < 0) { assert_eq(1, 1, "hpack over-read: fork unavailable — skipped"); return 0; }
+    assert_eq(e, 134, "hpack over-read: _hpack_int_decode stops at a read before the block");
+    assert_eq(_t_child_exit(&_t_ovr_string, 0), 134, "hpack over-read: _hpack_string_decode_a stops");
+    assert_eq(_t_child_exit(&_t_ovr_field, 0), 134, "hpack over-read: sandhi_hpack_decode_field_a stops");
+    return 0;
+}
+
 fn test_hpack_huffman_decode_www_example() {
     # RFC 7541 C.4.1 — "www.example.com" Huffman-encoded as 12 bytes:
     #   f1 e3 c2 e5 f2 3a 6b a0 ab 90 f4 ff
@@ -958,6 +1018,7 @@ fn main() {
     test_hpack_dynamic_size_update_decode();
     test_hpack_size_update_capped_at_advertised();
     test_hpack_int_decode_bounded();
+    test_hpack_overread_caught();
 
     test_group("h2/hpack/huffman_encode_www");
     test_hpack_huffman_encode_www_example();
