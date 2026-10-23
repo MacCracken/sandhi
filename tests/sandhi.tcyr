@@ -4047,6 +4047,43 @@ fn test_resolve_label_encode_single() {
     return 0;
 }
 
+# 1.13.7 — the DNS answer readers read the packet through a checked slice, so
+# a read outside it stops the process (`slice bounds violation`, exit 134)
+# instead of answering a byte that is not the server's. Each probe runs in a
+# forked child (stderr closed) and starts one byte before the packet, where
+# the readers' own length checks do not look; through 1.13.6 each read that
+# byte and returned (the child exited 0).
+fn _t_dns_ovr_pkt() {
+    var b = alloc(8);
+    store8(b, 3); store8(b + 1, 0); store8(b + 2, 0);
+    return b + 1;                        # the packet: one root label
+}
+
+fn _t_dns_ovr_skip(arg) {
+    return _sandhi_resolve_skip_name(_t_dns_ovr_pkt(), 2, 0 - 1);
+}
+
+fn _t_dns_ovr_label(arg) {
+    var off = alloc(8); store64(off, 0 - 1);
+    var lbuf = alloc(64); var lc = alloc(8); var hc = alloc(8);
+    store64(hc, 0);
+    return _sandhi_resolve_read_label(_t_dns_ovr_pkt(), 2, off, lbuf, lc, hc);
+}
+
+fn test_resolve_overread_caught() {
+    var e = _t_child_exit(&_t_dns_ovr_skip, 0);
+    if (e < 0) { assert_eq(1, 1, "dns over-read: fork unavailable — skipped"); return 0; }
+    assert_eq(e, 134, "dns over-read: _sandhi_resolve_skip_name stops at a read before the packet");
+    assert_eq(_t_child_exit(&_t_dns_ovr_label, 0), 134, "dns over-read: _sandhi_resolve_read_label stops");
+    # The one 16-bit field reader: in range it answers big-endian.
+    var b = alloc(4);
+    store8(b, 0x12); store8(b + 1, 0x34);
+    var sl: [u8] = 0;
+    slice_set(&sl, b, 2);
+    assert_eq(_sandhi_resolve_be16(&sl, 0), 0x1234, "dns: the 16-bit field reader is big-endian");
+    return 0;
+}
+
 fn test_resolve_parse_response_synthetic() {
     # Hand-built minimal DNS response: Header + Question + 1 A answer.
     # ID: 0x1234, QR=1 RD=1 RA=1, QDCOUNT=1, ANCOUNT=1, NSCOUNT=0, ARCOUNT=0
@@ -6383,6 +6420,7 @@ fn main() {
 
     test_group("net/resolve/parse_synthetic");
     test_resolve_parse_response_synthetic();
+    test_resolve_overread_caught();
     test_resolve_cname_chain_followed();
     test_resolve_cname_direct_answer_still_wins();
     test_resolve_cname_unrelated_a_still_rejected();

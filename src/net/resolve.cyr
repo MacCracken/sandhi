@@ -287,6 +287,22 @@ fn _sandhi_resolve_build_query(id, host, out): i64 {
 # ================================================================
 # DNS wire-format: response parse
 # ================================================================
+#
+# 1.13.7 (cyrius 6.7.18's D1) — the response parsers read the packet
+# through fn-local `[u8]` slices over (buf, blen), and its 16-bit
+# big-endian fields through `_sandhi_resolve_be16`: every read is
+# bounds-checked in every build, so one outside the packet stops the
+# process (`slice bounds violation`, exit 134) instead of answering bytes
+# that are not the server's. Through 1.13.6 they were raw
+# `load8(buf + off)`s, checked only by each fn's own arithmetic.
+
+# The big-endian 16-bit field at `off` of the `[u8]` slice at `sp`, both
+# bytes read through the slice. The parsers' one reader of multi-byte fields.
+fn _sandhi_resolve_be16(sp, off): i64 {
+    var s: [u8] = 0;
+    slice_set(&s, slice_ptr(sp), slice_len(sp));
+    return (s[off] << 8) | s[off + 1];
+}
 
 # Skip a name at offset `off` in the response. Handles both plain
 # length-labeled names and pointer compression (0xC0xx). Returns
@@ -299,11 +315,13 @@ fn _sandhi_resolve_build_query(id, host, out): i64 {
 # must use `_sandhi_resolve_name_eq` which does follow pointers with
 # an explicit hop-budget guard.
 fn _sandhi_resolve_skip_name(buf, blen, off): i64 {
+    var s: [u8] = 0;
+    slice_set(&s, buf, blen);
     var p = off;
     var safety = 0;
     while (safety < 256) {
         if (p >= blen) { return 0 - 1; }
-        var c = load8(buf + p);
+        var c = s[p];
         if (c == 0) { return p + 1; }
         if ((c & 0xC0) == 0xC0) {
             # Two-byte compression pointer — name continues elsewhere.
@@ -327,10 +345,14 @@ fn _sandhi_resolve_skip_name(buf, blen, off): i64 {
 # the same cell to successive reads of one name so the budget is
 # shared.
 fn _sandhi_resolve_read_label(buf, blen, off_cell, label_buf, label_len_cell, hops_cell): i64 {
+    var s: [u8] = 0;
+    slice_set(&s, buf, blen);
+    var lb: [u8] = 0;
+    slice_set(&lb, label_buf, 63);
     var p = load64(off_cell);
     loop {
         if (p >= blen) { return 0 - 1; }
-        var c = load8(buf + p);
+        var c = s[p];
         if (c == 0) {
             store64(label_len_cell, 0);
             store64(off_cell, p + 1);
@@ -342,7 +364,7 @@ fn _sandhi_resolve_read_label(buf, blen, off_cell, label_buf, label_len_cell, ho
             var hops = load64(hops_cell);
             if (hops >= _SANDHI_RESOLVE_MAX_PTR_HOPS) { return 0 - 1; }
             store64(hops_cell, hops + 1);
-            var target = ((c & 0x3F) << 8) | load8(buf + p + 1);
+            var target = _sandhi_resolve_be16(&s, p) & 0x3FFF;
             if (target >= p) { return 0 - 1; }  # RFC 1035: pointers must go backward
             if (target >= blen) { return 0 - 1; }
             p = target;
@@ -351,7 +373,7 @@ fn _sandhi_resolve_read_label(buf, blen, off_cell, label_buf, label_len_cell, ho
             if (p + 1 + c > blen) { return 0 - 1; }
             var i = 0;
             while (i < c) {
-                store8(label_buf + i, load8(buf + p + 1 + i));
+                lb[i] = s[p + 1 + i];
                 i = i + 1;
             }
             store64(label_len_cell, c);
@@ -432,6 +454,8 @@ fn _sandhi_resolve_name_eq(buf, blen, off_a, off_b): bool {
 # is only ever considered for a name we are already asking about.
 fn _sandhi_resolve_find_rr_a(a, buf, blen, ancount, ans_start, name_off, want_type,
   rdata_cell, rdlen_cell, cname_cell): i64 {
+    var s: [u8] = 0;
+    slice_set(&s, buf, blen);
     var found_cname = 0;
     var off = ans_start;
     var i = 0;
@@ -440,8 +464,8 @@ fn _sandhi_resolve_find_rr_a(a, buf, blen, ancount, ans_start, name_off, want_ty
         off = _sandhi_resolve_skip_name(buf, blen, off);
         if (off < 0) { return 0 - 1; }
         if (off + 10 > blen) { return 0 - 1; }
-        var rtype = (load8(buf + off + 0) << 8) | load8(buf + off + 1);
-        var rdlength = (load8(buf + off + 8) << 8) | load8(buf + off + 9);
+        var rtype = _sandhi_resolve_be16(&s, off);
+        var rdlength = _sandhi_resolve_be16(&s, off + 8);
         off = off + 10;
         # Bound the RDATA before anyone reads it (the pre-CNAME parsers
         # only bounded the fixed 4/16-byte cases).
@@ -490,18 +514,20 @@ fn _sandhi_resolve_find_rr_a(a, buf, blen, ancount, ans_start, name_off, want_ty
 # Parse an A-record response, allocating the name-eq scratch from `a`.
 fn _sandhi_resolve_parse_response_a(a, buf, blen, expected_id): i64 {
     if (blen < 12) { return 0 - 1; }
+    var s: [u8] = 0;
+    slice_set(&s, buf, blen);
     # TXID echo check.
-    var got_id = (load8(buf + 0) << 8) | load8(buf + 1);
+    var got_id = _sandhi_resolve_be16(&s, 0);
     if (got_id != expected_id) { return 0 - 1; }
     # Answer count.
-    var ancount = (load8(buf + 6) << 8) | load8(buf + 7);
+    var ancount = _sandhi_resolve_be16(&s, 6);
     if (ancount == 0) { return 0 - 1; }
     # Response code (low 4 bits of byte 3).
-    var rcode = load8(buf + 3) & 0x0F;
+    var rcode = s[3] & 0x0F;
     if (rcode != 0) { return 0 - 1; }
     # QDCOUNT — skip the question. Also remember where qname starts
     # so we can compare answer names against it.
-    var qdcount = (load8(buf + 4) << 8) | load8(buf + 5);
+    var qdcount = _sandhi_resolve_be16(&s, 4);
     if (qdcount != 1) { return 0 - 1; }  # we only ever send 1 question
     var qname_off = 12;
     var off = _sandhi_resolve_skip_name(buf, blen, qname_off);
@@ -523,10 +549,10 @@ fn _sandhi_resolve_parse_response_a(a, buf, blen, expected_id): i64 {
         if (r == 1) {
             if (load64(rdlen_cell) != 4) { return 0 - 1; }
             var rd = load64(rdata_cell);
-            var a0 = load8(buf + rd + 0);
-            var a1 = load8(buf + rd + 1);
-            var a2 = load8(buf + rd + 2);
-            var a3 = load8(buf + rd + 3);
+            var a0 = s[rd + 0];
+            var a1 = s[rd + 1];
+            var a2 = s[rd + 2];
+            var a3 = s[rd + 3];
             return a0 | (a1 << 8) | (a2 << 16) | (a3 << 24);
         }
         if (r != 2) { return 0 - 1; }   # no A, no CNAME to follow
@@ -576,13 +602,15 @@ fn _sandhi_resolve_build_query_aaaa(id, host, out): i64 {
 # returned to the caller (and the name-eq scratch) flow through `a`.
 fn _sandhi_resolve_parse_response_aaaa_a(a, buf, blen, expected_id): i64 {
     if (blen < 12) { return 0; }
-    var got_id = (load8(buf + 0) << 8) | load8(buf + 1);
+    var s: [u8] = 0;
+    slice_set(&s, buf, blen);
+    var got_id = _sandhi_resolve_be16(&s, 0);
     if (got_id != expected_id) { return 0; }
-    var ancount = (load8(buf + 6) << 8) | load8(buf + 7);
+    var ancount = _sandhi_resolve_be16(&s, 6);
     if (ancount == 0) { return 0; }
-    var rcode = load8(buf + 3) & 0x0F;
+    var rcode = s[3] & 0x0F;
     if (rcode != 0) { return 0; }
-    var qdcount = (load8(buf + 4) << 8) | load8(buf + 5);
+    var qdcount = _sandhi_resolve_be16(&s, 4);
     if (qdcount != 1) { return 0; }
     var qname_off = 12;
     var off = _sandhi_resolve_skip_name(buf, blen, qname_off);
@@ -607,7 +635,7 @@ fn _sandhi_resolve_parse_response_aaaa_a(a, buf, blen, expected_id): i64 {
             var out = alloc_via(a, 16);
             if (out == 0) { return 0; }
             var i = 0;
-            while (i < 16) { store8(out + i, load8(buf + rd + i)); i = i + 1; }
+            while (i < 16) { store8(out + i, s[rd + i]); i = i + 1; }
             return out;
         }
         if (r != 2) { return 0; }
