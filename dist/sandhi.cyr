@@ -6853,7 +6853,8 @@ fn _hpack_huffman_bits_of(t, symbol): i64 {
 # all-1s, no edge for taken bit).
 
 # Huffman-decode a wire-encoded string into a fresh cstr allocated
-# from `a`. Returns 0 on malformed input or OOM. The decoded cstr is
+# from `a`. Returns 0 on malformed input or OOM, and (1.13.7) when the
+# string decodes to a NUL, which the cstr cannot hold. The decoded cstr is
 # the only escaping allocation; arena callers can reset_via(a) once
 # the cstr is consumed.
 #
@@ -6894,6 +6895,7 @@ fn sandhi_hpack_huffman_decode_a(a, buf, start, nbytes): i64 {
         var sym = load64(node + 16);
         if (sym != _SANDHI_HPACK_HUFFMAN_INTERNAL) {
             if (sym == 256) { return 0; }   # EOS in payload — error
+            if (sym == 0) { return 0; }     # NUL: not representable in the cstr (1.13.7)
             o[out_len] = sym;
             out_len = out_len + 1;
             node = root;
@@ -7524,7 +7526,13 @@ fn _hpack_string_decode_a(a, buf, blen, off_cell, out_cell): i64 {
     if (out == 0) { return _SANDHI_HPACK_ERR_TRUNCATED; }
     var i = 0;
     while (i < slen) {
-        store8(out + i, s[soff + i]);
+        # 1.13.7 — a NUL is MALFORMED (RFC 9113 §8.2.1: never valid in a
+        # field name or value; the cstr answered cannot hold one). Through
+        # 1.13.6 the string was kept cut at it. The Huffman decoder refuses
+        # a decoded NUL the same way.
+        var c = s[soff + i];
+        if (c == 0) { return _SANDHI_HPACK_ERR_MALFORMED; }
+        store8(out + i, c);
         i = i + 1;
     }
     store8(out + slen, 0);

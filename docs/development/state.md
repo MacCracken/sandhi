@@ -10,7 +10,8 @@
   the 4096 it advertises, and an h2 response's decoded header list is bounded at 65,536
   octets (a 16 KiB block decoded into 135 MB on 1.13.6).
 - **Also fixed:** HPACK integers past 2^32 − 1 overflow instead of wrapping negative; a
-  header field holding a NUL is dropped instead of kept cut at the NUL.
+  header field holding a NUL is dropped instead of kept cut at the NUL; an HPACK string
+  holding one is refused (RFC 9113 §8.2.1), so the h2 exchange fails.
 - **Bounds-checked reads:** the header, HPACK and DNS parsers read a peer's bytes through
   fn-local `[u8]` slices (cyrius 6.7.18's D1); `slice` joins `[deps].stdlib` and three
   bundles' `.deps`.
@@ -18,7 +19,7 @@
   that print a digest and name a failing case; CI runs every harness under
   `cyrius fuzz --poison=ab`.
 - **Struct:** `SANDHI_HPACK_TABLE_STRUCT_SIZE` 32 → 40.
-- **Counts:** **3,325 assertions** (1,077 / 1,711 / 473 / 63 / 1), 9/9 fuzz plain and
+- **Counts:** **3,330 assertions** (1,077 / 1,716 / 473 / 63 / 1), 9/9 fuzz plain and
   under `--poison=ab`.
 - Not yet re-vendored into a cyrius release (cyrius 6.7.18 will).
 
@@ -923,10 +924,10 @@ Build outputs:
 
 ## Tests
 
-**3,325 assertions green** across five suites (CI runs all five; measured on the **6.7.16** pin at 1.13.7 on Linux; 3,287 at 1.13.6):
+**3,330 assertions green** across five suites (CI runs all five; measured on the **6.7.16** pin at 1.13.7 on Linux; 3,287 at 1.13.6):
 
 - `tests/sandhi.tcyr` — **1,077** on Linux (+11 at 1.13.7: the headers and DNS over-read rows, the NUL-field row; 1,048 at 1.13.1; +18 in `server/framing/no_global_heap`). On Windows (CI's `windows` job since 1.11.3; measured under wine) **1,053**, all passing; as aarch64 under qemu (since 1.12.3) **1,066**, all passing. On Windows the fd-leak checks and the AF_UNIX closed-peer rows skip, and the Windows errno rows run. Coverage: headers / URL / response / client + redirect security (cred-strip cross-authority, https→http refusal, 303→GET) / DNS / discovery (incl. the 1.5.5 mDNS QM wire checks + a loopback live receive round-trip) / TLS policy + fingerprint (incl. the 1.6.0 native trust/mTLS enforcement-available + pin-available flips) / SSE / streaming (incl. the 1.6.5 split-inter-chunk-CRLF decoder fix — leading-CRLF parse + split-across-append round-trip, both fail pre-fix) / **download** (1.6.4: result accessors, fd-sink temp-file round-trip + write-error signal, redirect-target resolver across 302/200/follow-off/hops-exhausted/no-Location/downgrade-sentinel) / **server SIGPIPE guard** (1.6.6: `_sandhi_server_ignore_sigpipe()` returns 0 + idempotent) / **server routing** (1.6.7: `route_match` exact/`:name`-capture/segment-count/non-absolute, `_param_int` numeric+non-numeric→-1+oob, router add/cap-full, `router_dispatch` 200/404/405 + query-strip — 28 assertions) / **server TLS** (1.6.8: options `_tls`/`_get_tls` + `_backlog` decouple/floor, `SandhiConn` plain accessors + `conn_write`/`send_*_c` over a /dev/null conn, conn-aware `dispatch_c`/`router_handler_c` 200/404/405 — 22 assertions) / **client dispatch thread-safety** (1.6.9: the `_sandhi_reqctx_*` per-call request context — ctx==0 module-global fallback + per-call isolation, proving a context's open-error / cred-digest don't leak into a sibling context or the module global — 14 assertions) / **mDNS QU receive** (1.6.12: the `discovery/local/qu_unicast` loopback dispatch gate — an unconnected RX receives a unicast reply with a connected TX coexisting on the same port via `SO_REUSEPORT` — 1 assertion).
-- `tests/h2.tcyr` — **1,711** (+20 at 1.13.7: the size-update cap, the integer bound, the HPACK over-read row) — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
+- `tests/h2.tcyr` — **1,716** (+25 at 1.13.7: the size-update cap, the integer bound, the HPACK over-read row, the HPACK NUL row) — HPACK static + Huffman (RFC 7541 C.4.1) / frame wire format / conn lifecycle / request-encode + roundtrip / response-decode / pool routing.
 - `tests/alloc.tcyr` — **473** (+7 at 1.13.7, `test_h2_response_hpack_bounded`; +71 at 1.13.6, `alloc/1136/*`: the session key, the redirect digest, and 52 in `h2_completeness` over a scriptable loopback peer; on Windows 465, the SOCK_SEQPACKET row skipping; +12 at 1.13.5, `alloc/1135/session_cache_threads`, threaded on Linux, Windows and aarch64; +10 at 1.13.4, `alloc/1134/hpack_tables_first_use`, threaded on Linux, Windows and aarch64; +17 at 1.13.3, `alloc/1133/h2_conn_shared_by_threads`, which runs on Linux, Windows and aarch64; +3 at 1.13.1, `alloc/1131/auto_dispatch_leaves_globals`) — per-request-arena round-trips + reset + OOM (`fail_after_n_allocs`) for every `_a` verb; session-cache eviction (1.4.0). (1.6.1: the conn-timeout test now asserts `_sandhi_conn_set_timeout_ms_a` is arena-independent — it composes the stdlib `sock_set_*_timeout` setters — rather than the retired arena-allocates-timeval behaviour; net −1 vs 343.)
 - `tests/sandhi_raw_include.tcyr` — **1** (1.10.8) — `include "dist/sandhi.cyr"` plus the assert framework and nothing else; CI builds it with `--no-deps` so the `[deps] stdlib` auto-prepend cannot mask a missing requires block.
 - `tests/rpc.tcyr` — **63** — JSON builder/extractor, RPC dispatch err-envelope, WebDriver URL helpers, MCP envelope, **+ the 1.6.3 endpoint-keyed TLS-policy registry** (set/get/replace, longest-prefix + host-boundary guard, scheme-agnostic resolve, clear/clear-all/nested-survives-sibling-clear, 16-endpoint cap + replace-at-cap).

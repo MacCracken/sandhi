@@ -10,9 +10,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Dynamic-Table-Size-Update and an h2 response's decoded header list
 (CYRIUS-2026-0044), the network-facing parsers read through bounds-checked slices, and
 the header / HPACK / DNS fuzz harnesses become a seeded mutation corpus that names its
-failing case.** Two further defects the harnesses and the work met are fixed: HPACK
-integers wrapped negative past nine continuation bytes, and a header field holding a NUL
-was kept cut at the NUL. No pin change (6.7.16), no new public verb. Eighth patch on the
+failing case.** Three further defects the harnesses and the work met are fixed: HPACK
+integers wrapped negative past nine continuation bytes, a header field holding a NUL
+was kept cut at the NUL, and so was an HPACK string holding one. No pin change (6.7.16), no new public verb. Eighth patch on the
 1.13.x line.
 
 Post-fold, none of this reaches a consumer until a cyrius release re-vendors
@@ -30,6 +30,9 @@ Post-fold, none of this reaches a consumer until a cyrius release re-vendors
 - **An HPACK integer past 2^32 − 1** is `_SANDHI_HPACK_ERR_INT_OVERFLOW`.
 - **A header field (HTTP/1 response, stream, download, pool) whose name or value holds a
   NUL is dropped,** as one holding CR / LF already was.
+- **An h2 response whose HPACK-coded field name or value holds a NUL fails the exchange**
+  as `SANDHI_ERR_PROTOCOL` (RFC 9113 §8.2.1: such a field is malformed). Through 1.13.6
+  the field was kept cut at the NUL.
 - **A read outside a peer's buffer in the header, HPACK or DNS parsers stops the process**
   (`slice bounds violation`, exit 134) instead of answering bytes that are not the peer's.
   None is known to be reachable; the fuzz corpus below found none.
@@ -74,6 +77,14 @@ Post-fold, none of this reaches a consumer until a cyrius release re-vendors
   checks the line's raw range (`_sandhi_hdr_range_has_nul`) and drops the field (RFC 9110
   §5.5). Found by the reworked `fuzz/headers.fcyr` (case 152). Row:
   `test_headers_parse_drops_nul_fields` (5 FAIL on 1.13.6).
+- **hpack: a string holding a NUL was kept cut at the NUL** — the h2 sibling of the
+  headers fix above. A literal name `content-length\0x` decoded as `content-length`, and
+  a Huffman-coded NUL as an empty name. HPACK answers cstrs, which cannot hold a NUL, and
+  RFC 9113 §8.2.1 makes such a field malformed, so `_hpack_string_decode_a` refuses a raw
+  NUL (`_SANDHI_HPACK_ERR_MALFORMED`) and `sandhi_hpack_huffman_decode_a` a decoded one
+  (0, so `_SANDHI_HPACK_ERR_HUFFMAN`); the field is refused rather than dropped, since a
+  dropped incremental-indexing field would leave the decode table out of step with the
+  peer's encoder. Row: `test_hpack_nul_field_refused` (4 FAIL on the code before it).
 
 ### Changed
 
@@ -120,8 +131,8 @@ Post-fold, none of this reaches a consumer until a cyrius release re-vendors
 
 ### Verification
 
-- **Suites:** `sandhi` 1,077 · `h2` 1,711 · `alloc` 473 · `rpc` 63 · raw include 1 —
-  3,325 assertions, all passing on Linux (3,287 at 1.13.6).
+- **Suites:** `sandhi` 1,077 · `h2` 1,716 · `alloc` 473 · `rpc` 63 · raw include 1 —
+  3,330 assertions, all passing on Linux (3,287 at 1.13.6).
 - **Fuzz:** 9/9 plain and under `--poison=ab`.
 - **CI's other gates, run locally:** lint (src strict), fmt, vet, the dist drift check
   (`cyrius distlib --all` twice — idempotent), `programs-compile-check.sh` (35 programs),
