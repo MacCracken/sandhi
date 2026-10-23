@@ -43,6 +43,9 @@
 # Bite 7's options surface.
 const _SANDHI_H2_HBLOCK_CAP = 16384;
 const _SANDHI_H2_BODY_CAP   = 1048576;  # 1 MB
+# The largest decoded response header list, sized as RFC 7540 §6.5.2 sizes
+# SETTINGS_MAX_HEADER_LIST_SIZE (each field's name + value octets + 32).
+const _SANDHI_H2_HDR_LIST_CAP = 65536;
 
 # ================================================================
 # Helpers
@@ -82,8 +85,17 @@ fn _h2_buf_append(dst, dst_off, src, n): i64 {
 
 # Decode the accumulated HEADERS block into `headers_out`, allocating
 # every transient cell + decoded name/value cstr from `a`. Returns
-# status (0 on bad/missing); the HPACK decode dynamic-table side
-# effects also route through `a` (see hpack.cyr's decode_field_a).
+# status (0 on bad/missing), or `_SANDHI_H2_ERR_HDR_LIST` when the
+# decoded list outgrows `_SANDHI_H2_HDR_LIST_CAP`; the HPACK decode
+# dynamic-table side effects also route through `a` (see hpack.cyr's
+# decode_field_a).
+#
+# 1.13.7 (CYRIUS-2026-0044) — the decoded list is bounded. Each indexed
+# reference copies a table entry of up to 4 KiB, so through 1.13.6 a
+# 16 KiB block of one-byte references decoded into 135 MB of headers (526 MB
+# with the decode table grown past 4096), kept for the life of the process
+# on the default allocator. Counting stops the decode at the field that
+# crosses the cap.
 fn _h2_decode_response_headers_a(a, h2c, hblock, hblock_len, headers_out): i64 {
     var dec = sandhi_h2_conn_dec_table(h2c);
     var off = alloc_via(a, 8);
@@ -92,6 +104,7 @@ fn _h2_decode_response_headers_a(a, h2c, hblock, hblock_len, headers_out): i64 {
     if (off == 0 || no == 0 || vo == 0) { return 0; }
     store64(off, 0);
     var status = 0;
+    var list_size = 0;
     while (load64(off) < hblock_len) {
         var r = sandhi_hpack_decode_field_a(a, dec, hblock, hblock_len, off, no, vo);
         if (r < 0) { return 0; }
@@ -101,6 +114,8 @@ fn _h2_decode_response_headers_a(a, h2c, hblock, hblock_len, headers_out): i64 {
         } else {
             var name = load64(no);
             var value = load64(vo);
+            list_size = list_size + strlen(name) + strlen(value) + 32;
+            if (list_size > _SANDHI_H2_HDR_LIST_CAP) { return _SANDHI_H2_ERR_HDR_LIST; }
             if (_h2_is_pseudo(name) == 1) {
                 if (streq(name, ":status") == 1) {
                     status = _h2_parse_status(value);
@@ -353,7 +368,11 @@ fn sandhi_h2_response_recv_a(a, h2c, stream_id): i64 {
     # `vec_push_a(a, h=null, ...)` → SIGSEGV. Bail with INTERNAL.
     if (headers == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_INTERNAL); }
     var status = _h2_decode_response_headers_a(a, h2c, hblock, hblock_len, headers);
-    if (status == 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL); }
+    if (status == _SANDHI_H2_ERR_HDR_LIST) {
+        return _sandhi_resp_err_msg_a(a, SANDHI_ERR_PROTOCOL,
+          "h2: the response header list exceeds 65536 octets");
+    }
+    if (status <= 0) { return _sandhi_resp_err_a(a, SANDHI_ERR_PROTOCOL); }
 
     # Null-terminate body for cstr-style consumers. Unconditional since
     # 1.9.12 — the buffer is `_SANDHI_H2_BODY_CAP + 1` bytes, so index

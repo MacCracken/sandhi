@@ -3510,6 +3510,80 @@ fn test_h2_failed_exchange_retired() {
     return 0;
 }
 
+# 1.13.7 (CYRIUS-2026-0044) — a server's HPACK cannot amplify a response. The
+# peer fills the client's 4096 decode table with one 4,033-octet entry, answers
+# with 15 references to it (60 KB decoded: under the bound), then with a 16 KiB
+# block of 16,383 one-byte references. Through 1.13.6 that block decoded into
+# 16,383 headers, 135 MB on the default allocator; past 65,536 octets of header
+# list it now fails the exchange. `arg` 1 answers instead with a size update to
+# 2^28 ahead of :status, which through 1.13.6 was applied.
+fn _t_hp_peer_amplify(arg) {
+    var sid = _t_hp_read_request();
+    if (sid < 0) { return 0; }
+    var hb = alloc_via(_t_hp_pa, 16400);
+    if (arg == 1) {
+        var n = sandhi_hpack_encode_table_size_update(hb, 0, 0x10000000);
+        store8(hb + n, 0x88);
+        _t_hp_respond(sid, hb, n + 1, 0, 0);
+        return 0;
+    }
+    store8(hb, 0x88);                    # :status 200
+    store8(hb + 1, 0x40);                # literal with incremental indexing, new name
+    store8(hb + 2, 1);                   # name: 1 octet, raw
+    store8(hb + 3, 120);                 # "x"
+    store8(hb + 4, 0x7f);                # value: 127 + 3,873 = 4,000 octets, raw
+    store8(hb + 5, (3873 & 0x7f) | 0x80);
+    store8(hb + 6, 3873 >> 7);
+    memset(hb + 7, 97, 4000);
+    _t_hp_respond(sid, hb, 4007, 0, 0);
+    sid = _t_hp_read_request();
+    if (sid < 0) { return 0; }
+    hb = alloc_via(_t_hp_pa, 16400);
+    store8(hb, 0x88);
+    memset(hb + 1, 0xBE, 15);            # index 62: the entry
+    _t_hp_respond(sid, hb, 16, 0, 0);
+    sid = _t_hp_read_request();
+    if (sid < 0) { return 0; }
+    hb = alloc_via(_t_hp_pa, 16400);
+    store8(hb, 0x88);
+    memset(hb + 1, 0xBE, 16383);
+    _t_hp_respond(sid, hb, 16384, 0, 0);
+    return 0;
+}
+
+fn test_h2_response_hpack_bounded() {
+    if (_t_hp_setup(39884) != 0) { assert_eq(1, 1, "h2 hpack bound: loopback or threads unavailable — skipped"); return 0; }
+    var h2c = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    var peer = thread_create(&_t_hp_peer_amplify, 0);
+    var a = arena_allocator(4000000);
+    var r1 = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/1", 0, 0, 0);
+    assert_eq(sandhi_http_status(r1), 200, "h2 hpack bound: the entry's response decodes");
+    var r2 = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/2", 0, 0, 0);
+    assert_eq(sandhi_http_status(r2), 200, "h2 hpack bound: 15 references (60 KB) decode");
+    var h2 = sandhi_http_headers(r2);
+    var n2 = 0;
+    if (h2 != 0) { n2 = sandhi_headers_count(h2); }
+    assert_eq(n2, 15, "h2 hpack bound: into 15 headers");
+    var r3 = sandhi_h2_request_a(a, h2c, "GET", "http://h2.test/3", 0, 0, 0);
+    assert_eq(sandhi_http_err_kind(r3), SANDHI_ERR_PROTOCOL, "h2 hpack bound: 16,383 references fail the exchange");
+    assert_eq(_t_hp_is(sandhi_http_err_message(r3), "h2: the response header list exceeds 65536 octets"), true,
+      "h2 hpack bound: and say why");
+    thread_join(peer);
+    _t_hp_done();
+
+    if (_t_hp_setup(39885) != 0) { return 0; }
+    var h2b = sandhi_h2_conn_new(_t_h2s_conn(_t_h2s_cfd));
+    var peer2 = thread_create(&_t_hp_peer_amplify, 1);
+    var a2 = arena_allocator(2400000);
+    var r4 = sandhi_h2_request_a(a2, h2b, "GET", "http://h2.test/4", 0, 0, 0);
+    assert_eq(sandhi_http_err_kind(r4), SANDHI_ERR_PROTOCOL, "h2 hpack bound: a size update to 2^28 fails the exchange");
+    assert_eq(sandhi_hpack_table_max_size(sandhi_h2_conn_dec_table(h2b)), 4096,
+      "h2 hpack bound: and leaves the decode table at 4096");
+    thread_join(peer2);
+    _t_hp_done();
+    return 0;
+}
+
 # A HEADERS frame's padding and priority fields are not part of its header block
 # (RFC 7540 §6.2). Through 1.13.5 the whole payload was decoded as the block.
 fn _t_hp_peer_padded(arg) {
@@ -4104,6 +4178,7 @@ fn main() {
     test_h2_decode_table_survives_arena_reset();
     test_h2_peer_header_table_size();
     test_h2_headers_padding_and_push();
+    test_h2_response_hpack_bounded();
     test_h2_failed_exchange_retired();
     test_h2_exchange_latency();
     test_h2_exchange_heap_flat();
