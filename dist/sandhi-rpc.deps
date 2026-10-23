@@ -6,6 +6,7 @@ sakshi
 string
 chrono
 alloc
+slice
 vec
 str
 sync

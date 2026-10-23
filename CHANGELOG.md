@@ -4,6 +4,136 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.13.7] — 2026-10-23
+
+**Security patch for cyrius 6.7.18's audit: the HPACK decoder bounds a peer's
+Dynamic-Table-Size-Update and an h2 response's decoded header list
+(CYRIUS-2026-0044), the network-facing parsers read through bounds-checked slices, and
+the header / HPACK / DNS fuzz harnesses become a seeded mutation corpus that names its
+failing case.** Two further defects the harnesses and the work met are fixed: HPACK
+integers wrapped negative past nine continuation bytes, and a header field holding a NUL
+was kept cut at the NUL. No pin change (6.7.16), no new public verb. Eighth patch on the
+1.13.x line.
+
+Post-fold, none of this reaches a consumer until a cyrius release re-vendors
+`lib/sandhi.cyr` from this `dist/sandhi.cyr` (cyrius 6.7.18).
+
+**Visible to a consumer:**
+- **An h2 response that sends a Dynamic-Table-Size-Update above 4096** (the size sandhi's
+  decoder advertises: it sends no `SETTINGS_HEADER_TABLE_SIZE`) **fails the exchange** as
+  `SANDHI_ERR_PROTOCOL` and retires the connection (RFC 7541 §6.3 / §4.2: a
+  COMPRESSION_ERROR). Through 1.13.6 it was applied.
+- **An h2 response whose decoded header list passes 65,536 octets** (each field's name +
+  value + 32, RFC 7540 §6.5.2's sizing) fails the same way, with the message `h2: the
+  response header list exceeds 65536 octets`. sandhi does not advertise
+  `SETTINGS_MAX_HEADER_LIST_SIZE`; the bound is local.
+- **An HPACK integer past 2^32 − 1** is `_SANDHI_HPACK_ERR_INT_OVERFLOW`.
+- **A header field (HTTP/1 response, stream, download, pool) whose name or value holds a
+  NUL is dropped,** as one holding CR / LF already was.
+- **A read outside a peer's buffer in the header, HPACK or DNS parsers stops the process**
+  (`slice bounds violation`, exit 134) instead of answering bytes that are not the peer's.
+  None is known to be reachable; the fuzz corpus below found none.
+- **`SANDHI_HPACK_TABLE_STRUCT_SIZE` grows 32 → 40** (`SANDHI_HPACK_TBL_OFF_LIMIT` at +32).
+- **The full, `rpc` and `discovery` bundles' `.deps` gain `slice`,** and their Requires
+  blocks `include "lib/slice.cyr"`; `[deps].stdlib` lists `slice`.
+
+### Security
+
+- **CYRIUS-2026-0044 (P2) — the HPACK decoder accepted an unbounded
+  Dynamic-Table-Size-Update, and an h2 response's decoded header list had no bound.** A
+  malicious HTTP/2 server (or an on-path attacker on a hand-driven cleartext h2c conn)
+  could set the client's decode table to any size (2^28 measured) and grow it across
+  responses, and a 16 KiB HEADERS block of one-byte references to a 4 KiB table entry
+  decoded into 16,383 headers: 135 MB kept on the default allocator by the bare `_auto`
+  verbs (526 MB with the table grown).
+  - **hpack:** each table records the size it was built with (`+32 limit`); the §6.3
+    branch of `sandhi_hpack_decode_field_a` refuses a size above it with
+    `_SANDHI_HPACK_ERR_MALFORMED`. `sandhi_hpack_table_set_max_size` stays uncapped: the
+    encoder table follows the peer's `SETTINGS_HEADER_TABLE_SIZE`.
+  - **h2 response:** `_h2_decode_response_headers_a` counts the decoded list and answers
+    `_SANDHI_H2_ERR_HDR_LIST` at the field that crosses `_SANDHI_H2_HDR_LIST_CAP`
+    (65,536); `sandhi_h2_response_recv_a` fails the exchange with the message above.
+  - **Rows:** `h2/hpack/size_update` (`test_hpack_size_update_capped_at_advertised`: 2^28
+    and 4097 refused on a 4096 table, 0 then 4096 applied, 8193 refused on an 8192 table,
+    the primitive uncapped; 4 FAIL on 1.13.6) and `alloc`'s
+    `test_h2_response_hpack_bounded` (a loopback peer fills the decode table, answers 15
+    references — decoded — then 16,383 — refused, with the message — and on a second conn
+    a size update to 2^28 — refused, the table left at 4096; 3 FAIL on 1.13.6).
+
+### Fixed
+
+- **hpack: integers wrapped negative.** `_hpack_int_decode` allowed nine continuation
+  bytes, so a string length of `0x7f` + `ff ff ff ff ff ff ff ff 7f` decoded as
+  −9,223,372,036,854,775,682. A value past 2^32 − 1 (`_SANDHI_HPACK_INT_MAX`; every HPACK
+  integer sandhi reads is an index, a length or a table size) is now
+  `_SANDHI_HPACK_ERR_INT_OVERFLOW`, checked as each byte lands, at most five continuation
+  bytes. Row: `test_hpack_int_decode_bounded` (3 FAIL on 1.13.6).
+- **headers: a field holding a NUL was kept cut at the NUL.** `Content-Length\0x: 5` was
+  read as `Content-Length: 5`, `X-A: a\0b` as `X-A: a`, and `\0X: v` as a field with an
+  empty name. The CR / LF guard reads cstrs, so it could never see a NUL; the parser now
+  checks the line's raw range (`_sandhi_hdr_range_has_nul`) and drops the field (RFC 9110
+  §5.5). Found by the reworked `fuzz/headers.fcyr` (case 152). Row:
+  `test_headers_parse_drops_nul_fields` (5 FAIL on 1.13.6).
+
+### Changed
+
+- **The network-facing parsers read through bounds-checked slices** (cyrius 6.7.18's
+  decision D1): each wraps the peer's `(buf, len)` in a fn-local `[u8]` slice and reads
+  `s[i]`, checked in every build.
+  - **HPACK:** `_hpack_int_decode`, `_hpack_string_decode_a`, `sandhi_hpack_decode_field_a`,
+    and `sandhi_hpack_huffman_decode_a` (whose output is written through a slice too).
+  - **headers:** `sandhi_headers_parse_a` and `_sandhi_hdr_trim_copy_a`; names and values
+    are copied by `_sandhi_hdr_copy_checked`, which reads the range's first and last byte
+    through the slice before `memcpy` runs.
+  - **DNS:** `_sandhi_resolve_parse_response_a` / `_aaaa_a`, `_sandhi_resolve_skip_name`,
+    `_sandhi_resolve_read_label` (the label copied into its 63-byte buffer through a slice)
+    and `_sandhi_resolve_find_rr_a`; every 16-bit big-endian field through the one checked
+    reader `_sandhi_resolve_be16`.
+  - **Rows, one per family:** `test_hpack_overread_caught` (3 probes),
+    `test_headers_overread_caught` and `test_resolve_overread_caught` (2) run each reader
+    in a forked child from one byte before the buffer — where the readers' own length
+    checks do not look — and require exit 134. On 1.13.6 each read that byte and exited 0
+    (6 FAIL). Windows has no fork; the rows skip there.
+- **fuzz: `hpack`, `headers` and `dns` are a seeded mutation corpus** (20,000 / 10,000 /
+  20,000 cases) driven by the new `fuzz/fz_driver.cyr`:
+  - **Inputs:** valid seeds (RFC 7541 Appendix C blocks; generated header blocks; A / AAAA
+    responses with CNAME chains and compression pointers) and structured edges — HPACK
+    lengths at 0 / past the block / 2^31 / 2^63 − 1, size updates past 4096, indices 0 /
+    2^31; header lines without a colon, obs-fold, bare CR / LF, NUL, 9,000-byte values,
+    1,000 lines, repeats; DNS ANCOUNT and RDLENGTH at 0 / the end / past it / 65,535,
+    labels 63 / 64 / 255, self / forward / out-of-packet pointers, a 40-pointer chain,
+    CNAME chains of 9 and 10 hops — then byte-level truncation, flips, repeated and
+    swapped segments.
+  - **Each case** parses an exact-size copy through the `_a` entry points with a fresh
+    arena (and decode table), folds every answer into a digest the harness prints, and
+    checks invariants (the decode table within 4096; no success without progress; no
+    empty, `:`, CR or LF field name). The DNS harness first checks that unmutated builds
+    resolve exactly when their chain is within the 8-CNAME / 32-pointer budgets.
+  - **A failure is named:** the cases run in one forked child that records its case in a
+    shared page, so a fault, an over-read (exit 134) or a broken invariant prints
+    `FAIL case <k> seed <s>`, and `FZ_CASE=<k>` replays that case alone.
+  - **On the 1.13.6 source** hpack fails at case 31 (the size update past 4096) and
+    headers at case 152 (the NUL field); dns passes.
+- **CI runs every harness under `cyrius fuzz --poison=ab`** (a new step after the plain
+  run): the poisoning allocators trap an overwrite, and an over-read that changes a
+  harness's output makes the 0xA5 and 0x5A legs diverge. 9/9 pass (about 30 s).
+
+### Verification
+
+- **Suites:** `sandhi` 1,077 · `h2` 1,711 · `alloc` 473 · `rpc` 63 · raw include 1 —
+  3,325 assertions, all passing on Linux (3,287 at 1.13.6).
+- **Fuzz:** 9/9 plain and under `--poison=ab`.
+- **CI's other gates, run locally:** lint (src strict), fmt, vet, the dist drift check
+  (`cyrius distlib --all` twice — idempotent), `programs-compile-check.sh` (35 programs),
+  `surface-link-check.sh` (925 fns).
+- **The audit's repros, built against this `dist/sandhi.cyr`:** its probe
+  (`hpack_tbl.cyr`) prints `ok: capped` (rc −4, the table left at 4096, no `VULN` line).
+  Its end-to-end probe: mode 0's resp2 (16,383 references) fails as `SANDHI_ERR_PROTOCOL`
+  with 0 headers and 1.2 MB allocated (135 MB on 1.13.6); modes 1 and 2 refuse the size
+  update, and the decode table stays at 4096 with nothing added (268,435,456 and 31
+  entries on 1.13.6).
+- **Every new row failed on 1.13.6's code** for the reason it targets (counts above).
+
 ## [1.13.6] — 2026-10-22
 
 **Completes the 1.13.x line: HTTP/2 flow control and spec completeness, h2 connections

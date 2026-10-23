@@ -64,16 +64,10 @@ is currently **cyrius 6.7.16** (since 1.13.4; the full trail is in `state.md`).
   and its key (about 50 B) for the life of the process. Bounded by the eviction rate, not
   the cache size. A freelist (`fl_alloc` / `fl_free`) owns them instead, as the HPACK
   tables do since 1.13.6.
-- **Three fuzz harnesses rarely reach their parsers' interesting paths** (`fuzz/dns`,
-  `json`, `hpack`; found at 1.13.6 while moving their draws to the high bits).
-  - `dns.fcyr`'s random section never passes the parser's transaction-ID check (0 of its
-    buffers carry 0x1234).
-  - `json.fcyr`'s random section rarely produces a key the extractor matches.
-  - `hpack.fcyr` reaches a Huffman-coded literal name about 3 times a run, because its
-    streams stop at their first error. At 100 times the volume the new draws reach 110
-    that pass the length check, and the old draws 0.
-  Seed each with the shapes it needs (a valid ID, a known key, valid field prefixes)
-  ahead of the random tail.
+- **`fuzz/json.fcyr` rarely reaches its parser's interesting paths** (found at 1.13.6
+  while moving the draws to the high bits): its random section rarely produces a key the
+  extractor matches. Seed it with the shapes it needs (a known key) ahead of the random
+  tail. (`dns` and `hpack`, filed with it, became seeded mutation corpora at 1.13.7.)
 
 ## 1.15.x — Proposals: client egress
 
