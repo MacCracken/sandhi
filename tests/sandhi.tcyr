@@ -256,6 +256,46 @@ fn test_headers_parse_skips_malformed() {
     return 0;
 }
 
+# 1.13.7 — the header-block reader reads through a checked slice, so a read
+# outside the block stops the process (`slice bounds violation`, exit 134)
+# instead of copying a byte that is not the peer's. The probe runs in a forked
+# child (stderr closed): a value range that starts one byte before the block.
+# Through 1.13.6 `_sandhi_hdr_trim_copy_a` read and copied that byte, and the
+# child exited 0.
+fn _t_hdr_ovr_trim(arg) {
+    var b = alloc(8);
+    memcpy(b, "Xab", 3);
+    return _sandhi_hdr_trim_copy_a(default_alloc(), b + 1, 0 - 1, 2);
+}
+
+# Run `fp(arg)` in a forked child with stderr closed. Its exit status; 1000 +
+# the signal when one killed it; -1 when fork is unavailable (Windows).
+fn _t_child_exit(fp, arg) {
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+    if (pid == 0) {
+        sys_close(2);
+        fncall1(fp, arg);
+        sys_exit(0);
+    }
+    var st[8];
+    store64(&st, 0);
+    sys_waitpid(pid, &st, 0);
+    var status = load64(&st) & 0xFFFFFFFF;
+    if ((status & 127) != 0) { return 1000 + (status & 127); }
+    return (status >> 8) & 255;
+}
+
+fn test_headers_overread_caught() {
+    var e = _t_child_exit(&_t_hdr_ovr_trim, 0);
+    if (e < 0) { assert_eq(1, 1, "headers over-read: fork unavailable — skipped"); return 0; }
+    assert_eq(e, 134, "headers over-read: a value range before the block stops the reader");
+    # In range, the same reader answers the trimmed value.
+    var v = _sandhi_hdr_trim_copy_a(default_alloc(), "  ab  ", 0, 6);
+    assert_streq(v, "ab", "headers: an in-range value is trimmed and copied");
+    return 0;
+}
+
 fn test_url_http_basic() {
     var u = sandhi_url_parse("http://example.com/foo");
     assert_neq(u, 0, "url: parses http");
@@ -5955,6 +5995,7 @@ fn main() {
 
     test_group("http/headers/parse_malformed");
     test_headers_parse_skips_malformed();
+    test_headers_overread_caught();
 
     test_group("http/url/http_basic");
     test_url_http_basic();

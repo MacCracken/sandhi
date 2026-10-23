@@ -57,17 +57,34 @@ fn _sandhi_hdr_ieq(a, b): bool {
     return false;
 }
 
-# Trim ASCII SP / HTAB from both ends of a cstr range and copy into
-# `a`. Returns 0 on OOM.
+# Copy `n` bytes from offset `off` of the `[u8]` slice at `sp` to `dst`.
+# The range's first and last byte are read through the slice before
+# memcpy runs, so a copy reaching outside it stops the process (`slice
+# bounds violation`, exit 134) instead of copying bytes that are not the
+# peer's. Returns `n` (0 for an empty range). 1.13.7.
+fn _sandhi_hdr_copy_checked(sp, off, n, dst): i64 {
+    if (n <= 0) { return 0; }
+    var s: [u8] = 0;
+    slice_set(&s, slice_ptr(sp), slice_len(sp));
+    if (s[off] > 255 || s[off + n - 1] > 255) { return 0; }
+    memcpy(dst, slice_ptr(sp) + off, n);
+    return n;
+}
+
+# Trim ASCII SP / HTAB from both ends of the range [start, end) of `ptr`
+# and copy it into `a`. Returns 0 on OOM. 1.13.7 — read through a slice
+# over [0, end), as `sandhi_headers_parse_a` reads.
 fn _sandhi_hdr_trim_copy_a(a, ptr, start, end): i64 {
+    var b: [u8] = 0;
+    slice_set(&b, ptr, end);
     var s = start;
     var e = end;
-    while (s < e && (load8(ptr + s) == 32 || load8(ptr + s) == 9)) { s = s + 1; }
-    while (e > s && (load8(ptr + e - 1) == 32 || load8(ptr + e - 1) == 9)) { e = e - 1; }
+    while (s < e && (b[s] == 32 || b[s] == 9)) { s = s + 1; }
+    while (e > s && (b[e - 1] == 32 || b[e - 1] == 9)) { e = e - 1; }
     var n = e - s;
     var out = alloc_via(a, n + 1);
     if (out == 0) { return 0; }
-    memcpy(out, ptr + s, n);
+    _sandhi_hdr_copy_checked(&b, s, n, out);
     store8(out + n, 0);
     return out;
 }
@@ -296,42 +313,48 @@ fn sandhi_headers_serialize(h, sb): i64 {
 fn sandhi_headers_parse_a(a, buf, blen): i64 {
     var h = sandhi_headers_new_a(a);
     if (h == 0) { return 0; }
+    # 1.13.7 (cyrius 6.7.18's D1) — the block is read through a fn-local
+    # `[u8]` slice over (buf, blen), bounds-checked in every build: a read
+    # outside it stops the process (`slice bounds violation`, exit 134).
+    # Through 1.13.6 these were raw `load8(buf + i)`s.
+    var s: [u8] = 0;
+    slice_set(&s, buf, blen);
     var i = 0;
     while (i < blen) {
         # End-of-headers marker — empty line.
-        if (i + 1 < blen && load8(buf + i) == 13 && load8(buf + i + 1) == 10) {
+        if (i + 1 < blen && s[i] == 13 && s[i + 1] == 10) {
             return h;
         }
-        if (load8(buf + i) == 10) { return h; }
+        if (s[i] == 10) { return h; }
 
         # Find end of line (next LF).
         var line_start = i;
         var line_end = i;
-        while (line_end < blen && load8(buf + line_end) != 10) {
+        while (line_end < blen && s[line_end] != 10) {
             line_end = line_end + 1;
         }
         # Strip trailing CR.
         var trim_end = line_end;
-        if (trim_end > line_start && load8(buf + trim_end - 1) == 13) {
+        if (trim_end > line_start && s[trim_end - 1] == 13) {
             trim_end = trim_end - 1;
         }
 
         # Find colon. If absent, skip the line.
         var colon = line_start;
-        while (colon < trim_end && load8(buf + colon) != 58) {
+        while (colon < trim_end && s[colon] != 58) {
             colon = colon + 1;
         }
         if (colon < trim_end) {
             # Name: [line_start, colon) — trim trailing whitespace.
             var name_end = colon;
-            while (name_end > line_start && (load8(buf + name_end - 1) == 32 || load8(buf + name_end - 1) == 9)) {
+            while (name_end > line_start && (s[name_end - 1] == 32 || s[name_end - 1] == 9)) {
                 name_end = name_end - 1;
             }
             var name_len = name_end - line_start;
             if (name_len > 0) {
                 var name = alloc_via(a, name_len + 1);
                 if (name == 0) { return h; }
-                memcpy(name, buf + line_start, name_len);
+                _sandhi_hdr_copy_checked(&s, line_start, name_len, name);
                 store8(name + name_len, 0);
 
                 # Value: [colon+1, trim_end) — trim leading + trailing whitespace.
