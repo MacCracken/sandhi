@@ -71,6 +71,18 @@ fn _sandhi_hdr_copy_checked(sp, off, n, dst): i64 {
     return n;
 }
 
+# 1 when the range [start, end) of the `[u8]` slice at `sp` holds a NUL.
+fn _sandhi_hdr_range_has_nul(sp, start, end): bool {
+    var s: [u8] = 0;
+    slice_set(&s, slice_ptr(sp), slice_len(sp));
+    var i = start;
+    while (i < end) {
+        if (s[i] == 0) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
 # Trim ASCII SP / HTAB from both ends of the range [start, end) of `ptr`
 # and copy it into `a`. Returns 0 on OOM. 1.13.7 — read through a slice
 # over [0, end), as `sandhi_headers_parse_a` reads.
@@ -351,6 +363,12 @@ fn sandhi_headers_parse_a(a, buf, blen): i64 {
                 name_end = name_end - 1;
             }
             var name_len = name_end - line_start;
+            # 1.13.7 — a field whose name or value holds a NUL is dropped, as
+            # one holding CR / LF is (`_sandhi_hdr_add_owned_a`). Through
+            # 1.13.6 it was kept cut at the NUL: `Content-Length\0x: 5` was
+            # read as Content-Length, and `\0X: v` as a field with an empty
+            # name (RFC 9110 §5.5: NUL is never valid in a field).
+            if (_sandhi_hdr_range_has_nul(&s, line_start, trim_end) == 1) { name_len = 0; }
             if (name_len > 0) {
                 var name = alloc_via(a, name_len + 1);
                 if (name == 0) { return h; }

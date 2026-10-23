@@ -296,6 +296,29 @@ fn test_headers_overread_caught() {
     return 0;
 }
 
+# 1.13.7 — a header field whose name or value holds a NUL is dropped, as one
+# holding CR / LF is. Through 1.13.6 it was kept cut at the NUL: the first
+# block read as Content-Length: 5, the second as `X-A: a`, the third as a
+# field with an empty name.
+fn test_headers_parse_drops_nul_fields() {
+    var b1 = alloc(64);
+    memcpy(b1, "Content-Length\0x: 5\r\nX-A: b\r\n\r\n", 31);
+    var h1 = sandhi_headers_parse(b1, 31);
+    assert_eq(sandhi_headers_count(h1), 1, "parse nul: a NUL in the name drops the field");
+    assert_eq(sandhi_headers_get(h1, "Content-Length"), 0, "parse nul: it is not Content-Length");
+    assert_streq(sandhi_headers_get(h1, "X-A"), "b", "parse nul: the next field survives");
+    var b2 = alloc(64);
+    memcpy(b2, "X-A: a\0b\r\nY: c\r\n\r\n", 18);
+    var h2 = sandhi_headers_parse(b2, 18);
+    assert_eq(sandhi_headers_count(h2), 1, "parse nul: a NUL in the value drops the field");
+    assert_eq(sandhi_headers_get(h2, "X-A"), 0, "parse nul: X-A is not kept cut at the NUL");
+    var b3 = alloc(64);
+    memcpy(b3, "\0X: v\r\n\r\n", 9);
+    var h3 = sandhi_headers_parse(b3, 9);
+    assert_eq(sandhi_headers_count(h3), 0, "parse nul: a name led by NUL is dropped, not kept empty");
+    return 0;
+}
+
 fn test_url_http_basic() {
     var u = sandhi_url_parse("http://example.com/foo");
     assert_neq(u, 0, "url: parses http");
@@ -6033,6 +6056,7 @@ fn main() {
     test_group("http/headers/parse_malformed");
     test_headers_parse_skips_malformed();
     test_headers_overread_caught();
+    test_headers_parse_drops_nul_fields();
 
     test_group("http/url/http_basic");
     test_url_http_basic();
