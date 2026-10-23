@@ -420,6 +420,15 @@ fn _hpack_int_encode(out, off, prefix_high, prefix_bits, value): i64 {
     return p + 1;
 }
 
+# The largest integer the decoder answers. Every HPACK integer sandhi
+# reads is an index, a string length or a table size: 32-bit quantities.
+const _SANDHI_HPACK_INT_MAX = 0xFFFFFFFF;
+
+# 1.13.7 — a value past `_SANDHI_HPACK_INT_MAX` is an INT_OVERFLOW (RFC
+# 7541 §5.1: an integer past the implementation's limit is a decoding
+# error), checked as each continuation byte lands. Through 1.13.6 nine
+# continuation bytes were allowed, and the sum wrapped into a negative
+# value the caller took as a length, index or table size.
 fn _hpack_int_decode(buf, blen, off_cell, prefix_bits, value_out): i64 {
     var off = load64(off_cell);
     if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
@@ -435,10 +444,11 @@ fn _hpack_int_decode(buf, blen, off_cell, prefix_bits, value_out): i64 {
     var m = 0;
     loop {
         if (off >= blen) { return _SANDHI_HPACK_ERR_TRUNCATED; }
-        if (m > 56) { return _SANDHI_HPACK_ERR_INT_OVERFLOW; }
+        if (m > 28) { return _SANDHI_HPACK_ERR_INT_OVERFLOW; }
         var b = load8(buf + off);
         off = off + 1;
         i = i + ((b & 0x7F) << m);
+        if (i > _SANDHI_HPACK_INT_MAX) { return _SANDHI_HPACK_ERR_INT_OVERFLOW; }
         if ((b & 0x80) == 0) { break; }
         m = m + 7;
     }

@@ -275,6 +275,35 @@ fn test_hpack_size_update_capped_at_advertised() {
     return 0;
 }
 
+# 1.13.7 — an HPACK integer past 2^32 - 1 is an INT_OVERFLOW. Through 1.13.6
+# nine continuation bytes were accepted and the sum wrapped negative: a string
+# length of 127 + 0x7f..ff7f decoded as -9223372036854775682.
+fn _t_hpack_int_rc(bytes, n, prefix, vc) {
+    var off = alloc(8); store64(off, 0);
+    store64(vc, 0);
+    return _hpack_int_decode(bytes, n, off, prefix, vc);
+}
+
+fn test_hpack_int_decode_bounded() {
+    var b = alloc(16);
+    var vc = alloc(8);
+    store8(b, 0x7f);
+    var k = 1;
+    while (k < 9) { store8(b + k, 0xff); k = k + 1; }
+    store8(b + 9, 0x7f);
+    assert_eq(_t_hpack_int_rc(b, 10, 7, vc), _SANDHI_HPACK_ERR_INT_OVERFLOW, "hpack int: a 2^63-wide integer overflows");
+    assert_eq(load64(vc) >= 0, true, "hpack int: and never answers a negative value");
+    var n = _hpack_int_encode(b, 0, 0, 7, 0xFFFFFFFF);
+    assert_eq(_t_hpack_int_rc(b, n, 7, vc), 0, "hpack int: 2^32 - 1 decodes");
+    assert_eq(load64(vc), 0xFFFFFFFF, "hpack int: to 2^32 - 1");
+    n = _hpack_int_encode(b, 0, 0, 7, 0x100000000);
+    assert_eq(_t_hpack_int_rc(b, n, 7, vc), _SANDHI_HPACK_ERR_INT_OVERFLOW, "hpack int: 2^32 overflows");
+    n = _hpack_int_encode(b, 0, 0, 5, 0x80000000);
+    assert_eq(_t_hpack_int_rc(b, n, 5, vc), 0, "hpack int: 2^31 decodes");
+    assert_eq(load64(vc), 0x80000000, "hpack int: to 2^31");
+    return 0;
+}
+
 fn test_hpack_huffman_decode_www_example() {
     # RFC 7541 C.4.1 — "www.example.com" Huffman-encoded as 12 bytes:
     #   f1 e3 c2 e5 f2 3a 6b a0 ab 90 f4 ff
@@ -928,6 +957,7 @@ fn main() {
     test_group("h2/hpack/size_update");
     test_hpack_dynamic_size_update_decode();
     test_hpack_size_update_capped_at_advertised();
+    test_hpack_int_decode_bounded();
 
     test_group("h2/hpack/huffman_encode_www");
     test_hpack_huffman_encode_www_example();
